@@ -94,6 +94,30 @@ func GetCodeBuddyModels() []*ModelInfo {
 	now := int64(1748044800) // 2025-05-24
 	return []*ModelInfo{
 		{
+			ID:                  "auto",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "tencent",
+			Type:                "codebuddy",
+			DisplayName:         "Auto",
+			Description:         "Automatic model selection via CodeBuddy",
+			ContextLength:       128000,
+			MaxCompletionTokens: 32768,
+			SupportedEndpoints:  []string{"/chat/completions"},
+		},
+		{
+			ID:                  "glm-5.0-turbo",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "tencent",
+			Type:                "codebuddy",
+			DisplayName:         "GLM-5.0 Turbo",
+			Description:         "GLM-5.0 Turbo via CodeBuddy",
+			ContextLength:       128000,
+			MaxCompletionTokens: 32768,
+			SupportedEndpoints:  []string{"/chat/completions"},
+		},
+		{
 			ID:                  "glm-5.0",
 			Object:              "model",
 			Created:             now,
@@ -118,13 +142,13 @@ func GetCodeBuddyModels() []*ModelInfo {
 			SupportedEndpoints:  []string{"/chat/completions"},
 		},
 		{
-			ID:                  "minimax-m2.5",
+			ID:                  "minimax-m2.7",
 			Object:              "model",
 			Created:             now,
 			OwnedBy:             "tencent",
 			Type:                "codebuddy",
-			DisplayName:         "MiniMax M2.5",
-			Description:         "MiniMax M2.5 via CodeBuddy",
+			DisplayName:         "MiniMax M2.7",
+			Description:         "MiniMax M2.7 via CodeBuddy",
 			ContextLength:       200000,
 			MaxCompletionTokens: 32768,
 			SupportedEndpoints:  []string{"/chat/completions"},
@@ -142,28 +166,28 @@ func GetCodeBuddyModels() []*ModelInfo {
 			SupportedEndpoints:  []string{"/chat/completions"},
 		},
 		{
+			ID:                  "kimi-k2-thinking",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "tencent",
+			Type:                "codebuddy",
+			DisplayName:         "Kimi K2 Thinking",
+			Description:         "Kimi K2 Thinking via CodeBuddy",
+			ContextLength:       128000,
+			MaxCompletionTokens: 32768,
+			Thinking:            &ThinkingSupport{ZeroAllowed: true},
+			SupportedEndpoints:  []string{"/chat/completions"},
+		},
+		{
 			ID:                  "deepseek-v3-2-volc",
 			Object:              "model",
 			Created:             now,
 			OwnedBy:             "tencent",
 			Type:                "codebuddy",
 			DisplayName:         "DeepSeek V3.2 (Volc)",
-			Description:         "DeepSeek V3.2 via CodeBuddy (Volcano Engine)",
+			Description:         "DeepSeek V3.2 via CodeBuddy",
 			ContextLength:       128000,
 			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/chat/completions"},
-		},
-		{
-			ID:                  "hunyuan-2.0-thinking",
-			Object:              "model",
-			Created:             now,
-			OwnedBy:             "tencent",
-			Type:                "codebuddy",
-			DisplayName:         "Hunyuan 2.0 Thinking",
-			Description:         "Tencent Hunyuan 2.0 Thinking via CodeBuddy",
-			ContextLength:       128000,
-			MaxCompletionTokens: 32768,
-			Thinking:            &ThinkingSupport{ZeroAllowed: true},
 			SupportedEndpoints:  []string{"/chat/completions"},
 		},
 	}
@@ -231,8 +255,22 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetAntigravityModels()
 	case "codebuddy":
 		return GetCodeBuddyModels()
+	case "cursor":
+		return GetCursorModels()
 	default:
 		return nil
+	}
+}
+
+// GetCursorModels returns the fallback Cursor model definitions.
+func GetCursorModels() []*ModelInfo {
+	return []*ModelInfo{
+		{ID: "composer-2", Object: "model", OwnedBy: "cursor", Type: "cursor", DisplayName: "Composer 2", ContextLength: 200000, MaxCompletionTokens: 64000, Thinking: &ThinkingSupport{Max: 50000, DynamicAllowed: true}},
+		{ID: "claude-4-sonnet", Object: "model", OwnedBy: "cursor", Type: "cursor", DisplayName: "Claude 4 Sonnet", ContextLength: 200000, MaxCompletionTokens: 64000, Thinking: &ThinkingSupport{Max: 50000, DynamicAllowed: true}},
+		{ID: "claude-3.5-sonnet", Object: "model", OwnedBy: "cursor", Type: "cursor", DisplayName: "Claude 3.5 Sonnet", ContextLength: 200000, MaxCompletionTokens: 8192},
+		{ID: "gpt-4o", Object: "model", OwnedBy: "cursor", Type: "cursor", DisplayName: "GPT-4o", ContextLength: 128000, MaxCompletionTokens: 16384},
+		{ID: "cursor-small", Object: "model", OwnedBy: "cursor", Type: "cursor", DisplayName: "Cursor Small", ContextLength: 200000, MaxCompletionTokens: 64000},
+		{ID: "gemini-2.5-pro", Object: "model", OwnedBy: "cursor", Type: "cursor", DisplayName: "Gemini 2.5 Pro", ContextLength: 1000000, MaxCompletionTokens: 65536, Thinking: &ThinkingSupport{Max: 50000, DynamicAllowed: true}},
 	}
 }
 
@@ -260,6 +298,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		GetKiloModels(),
 		GetAmazonQModels(),
 		GetCodeBuddyModels(),
+		GetCursorModels(),
 	}
 	for _, models := range allModels {
 		for _, m := range models {
@@ -463,6 +502,19 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Thinking:            &ThinkingSupport{Levels: []string{"none", "low", "medium", "high", "xhigh"}},
 		},
 		{
+			ID:                  "gpt-5.4-mini",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "github-copilot",
+			Type:                "github-copilot",
+			DisplayName:         "GPT-5.4 mini",
+			Description:         "OpenAI GPT-5.4 mini via GitHub Copilot",
+			ContextLength:       200000,
+			MaxCompletionTokens: 32768,
+			SupportedEndpoints:  []string{"/responses"},
+			Thinking:            &ThinkingSupport{Levels: []string{"none", "low", "medium", "high", "xhigh"}},
+		},
+		{
 			ID:                  "claude-haiku-4.5",
 			Object:              "model",
 			Created:             now,
@@ -556,6 +608,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Description:         "Google Gemini 2.5 Pro via GitHub Copilot",
 			ContextLength:       1048576,
 			MaxCompletionTokens: 65536,
+			SupportedEndpoints:  []string{"/chat/completions"},
 		},
 		{
 			ID:                  "gemini-3-pro-preview",
@@ -567,6 +620,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Description:         "Google Gemini 3 Pro Preview via GitHub Copilot",
 			ContextLength:       1048576,
 			MaxCompletionTokens: 65536,
+			SupportedEndpoints:  []string{"/chat/completions"},
 		},
 		{
 			ID:                  "gemini-3.1-pro-preview",
@@ -576,8 +630,9 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Type:                "github-copilot",
 			DisplayName:         "Gemini 3.1 Pro (Preview)",
 			Description:         "Google Gemini 3.1 Pro Preview via GitHub Copilot",
-			ContextLength:       1048576,
+			ContextLength:       173000,
 			MaxCompletionTokens: 65536,
+			SupportedEndpoints:  []string{"/chat/completions"},
 		},
 		{
 			ID:                  "gemini-3-flash-preview",
@@ -587,8 +642,9 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Type:                "github-copilot",
 			DisplayName:         "Gemini 3 Flash (Preview)",
 			Description:         "Google Gemini 3 Flash Preview via GitHub Copilot",
-			ContextLength:       1048576,
+			ContextLength:       173000,
 			MaxCompletionTokens: 65536,
+			SupportedEndpoints:  []string{"/chat/completions"},
 		},
 		{
 			ID:                  "grok-code-fast-1",
