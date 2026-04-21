@@ -96,6 +96,7 @@ func main() {
 	var kiroIDCFlow string
 	var githubCopilotLogin bool
 	var codeBuddyLogin bool
+	var codeBuddyAILogin bool
 	var projectID string
 	var vertexImport string
 	var vertexImportPrefix string
@@ -135,6 +136,7 @@ func main() {
 	flag.StringVar(&kiroIDCFlow, "kiro-idc-flow", "", "IDC flow type: authcode (default) or device")
 	flag.BoolVar(&githubCopilotLogin, "github-copilot-login", false, "Login to GitHub Copilot using device flow")
 	flag.BoolVar(&codeBuddyLogin, "codebuddy-login", false, "Login to CodeBuddy using browser OAuth flow")
+	flag.BoolVar(&codeBuddyAILogin, "codebuddy-ai-login", false, "Login to CodeBuddy AI (www.codebuddy.ai) using browser OAuth flow")
 	flag.StringVar(&projectID, "project_id", "", "Project ID (Gemini only, not required)")
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
@@ -525,8 +527,9 @@ func main() {
 		// Handle GitHub Copilot login
 		cmd.DoGitHubCopilotLogin(cfg, options)
 	} else if codeBuddyLogin {
-		// Handle CodeBuddy login
 		cmd.DoCodeBuddyLogin(cfg, options)
+	} else if codeBuddyAILogin {
+		cmd.DoCodeBuddyAILogin(cfg, options)
 	} else if codexLogin {
 		// Handle Codex login
 		cmd.DoCodexLogin(cfg, options)
