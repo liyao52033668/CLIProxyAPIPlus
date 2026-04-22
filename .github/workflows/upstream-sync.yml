@@ -348,17 +348,17 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
           gh label create "${PR_LABEL}" \
             -R "${TARGET_REPO}" \
             --color "1D76DB" \
             --description "Automated upstream sync pull requests" \
-            --force
+            --force || echo "::warning::Failed to create label (issues may be disabled)"
           gh label create "${ISSUE_LABEL}" \
             -R "${TARGET_REPO}" \
             --color "D73A4A" \
             --description "Automated upstream sync manual review issues" \
-            --force
+            --force || echo "::warning::Failed to create label (issues may be disabled)"
 
       - name: Push sync branch
         if: steps.sync_branch.outputs.has_changes == 'true' && steps.sync_branch.outputs.merge_clean == 'true'
@@ -405,18 +405,18 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
           search_query="${REVIEW_ISSUE_TITLE} in:title"
           issue_number="$(gh issue list \
             -R "${TARGET_REPO}" \
             --state open \
             --search "$search_query" \
             --json number \
-            --jq '.[0].number // empty')"
+            --jq '.[0].number // empty' 2>/dev/null || echo "")"
 
           if [ -n "$issue_number" ]; then
-            gh issue comment "$issue_number" -R "${TARGET_REPO}" --body "Resolved by the latest clean upstream sync run."
-            gh issue close "$issue_number" -R "${TARGET_REPO}"
+            gh issue comment "$issue_number" -R "${TARGET_REPO}" --body "Resolved by the latest clean upstream sync run." || echo "::warning::Failed to comment on issue (issues may be disabled)"
+            gh issue close "$issue_number" -R "${TARGET_REPO}" || echo "::warning::Failed to close issue (issues may be disabled)"
           fi
 
       - name: Create or update manual review issue
@@ -425,25 +425,25 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
           search_query="${REVIEW_ISSUE_TITLE} in:title"
           issue_number="$(gh issue list \
             -R "${TARGET_REPO}" \
             --state open \
             --search "$search_query" \
             --json number \
-            --jq '.[0].number // empty')"
+            --jq '.[0].number // empty' 2>/dev/null || echo "")"
 
           if [ -n "$issue_number" ]; then
             gh issue edit "$issue_number" \
               -R "${TARGET_REPO}" \
               --title "${REVIEW_ISSUE_TITLE}" \
               --body-file "${{ steps.report.outputs.issue_report_path }}" \
-              --add-label "${ISSUE_LABEL}"
+              --add-label "${ISSUE_LABEL}" || echo "::warning::Failed to edit issue (issues may be disabled)"
           else
             gh issue create \
               -R "${TARGET_REPO}" \
               --title "${REVIEW_ISSUE_TITLE}" \
               --body-file "${{ steps.report.outputs.issue_report_path }}" \
-              --label "${ISSUE_LABEL}"
+              --label "${ISSUE_LABEL}" || echo "::warning::Failed to create issue (issues may be disabled)"
           fi
