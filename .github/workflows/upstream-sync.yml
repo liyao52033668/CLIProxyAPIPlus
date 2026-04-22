@@ -22,7 +22,7 @@ env:
   SYNC_BRANCH: sync/upstream-main
   PR_LABEL: upstream-sync
   ISSUE_LABEL: upstream-sync-conflict
-  CONFLICT_ISSUE_TITLE: 'chore(sync): upstream merge conflicts require manual review'
+  REVIEW_ISSUE_TITLE: 'chore(sync): upstream sync requires manual review'
   MENTION_LOGIN: ${{ github.repository_owner }}
 
 jobs:
@@ -50,13 +50,6 @@ jobs:
           git fetch --no-tags --prune upstream \
             "+refs/heads/${UPSTREAM_BRANCH}:refs/remotes/upstream/${UPSTREAM_BRANCH}"
 
-      - name: Update upstream mirror branch
-        run: |
-          set -euo pipefail
-          git push origin \
-            "refs/remotes/upstream/${UPSTREAM_BRANCH}:refs/heads/${MIRROR_BRANCH}" \
-            --force
-
       - name: Analyze upstream delta
         id: analyze
         shell: bash
@@ -70,40 +63,72 @@ jobs:
 
           mkdir -p .github/upstream-sync
           git log --oneline "$base_ref..$upstream_ref" > .github/upstream-sync/upstream_commits.txt || true
-          git diff --name-only "$base_ref..$upstream_ref" > .github/upstream-sync/upstream_changed_files.txt || true
+          git diff --name-only "$merge_base..$upstream_ref" > .github/upstream-sync/upstream_changed_files.txt || true
+          git diff --name-only "$base_ref..$upstream_ref" -- .github/workflows > .github/upstream-sync/mirror_blocked_workflow_files.txt || true
+          git diff --name-only "$merge_base..$upstream_ref" -- .github/workflows > .github/upstream-sync/workflow_changed_files.txt || true
+          git diff --name-only "$merge_base..$upstream_ref" -- . ':(exclude).github/workflows' > .github/upstream-sync/non_workflow_changed_files.txt || true
           comm -12 \
-            <(git diff --name-only "$merge_base..$base_ref" | sort) \
-            <(git diff --name-only "$merge_base..$upstream_ref" | sort) \
-            > .github/upstream-sync/overlap_files.txt || true
+            <(git diff --name-only "$merge_base..$base_ref" -- . ':(exclude).github/workflows' | sort) \
+            <(git diff --name-only "$merge_base..$upstream_ref" -- . ':(exclude).github/workflows' | sort) \
+            > .github/upstream-sync/sync_overlap_files.txt || true
+
+          mirror_blocked_workflow_count="$(wc -l < .github/upstream-sync/mirror_blocked_workflow_files.txt | tr -d ' ')"
+          workflow_changed_count="$(wc -l < .github/upstream-sync/workflow_changed_files.txt | tr -d ' ')"
+          non_workflow_changed_count="$(wc -l < .github/upstream-sync/non_workflow_changed_files.txt | tr -d ' ')"
 
           echo "merge_base=$merge_base" >> "$GITHUB_OUTPUT"
           echo "ahead=$ahead" >> "$GITHUB_OUTPUT"
           echo "behind=$behind" >> "$GITHUB_OUTPUT"
+          echo "mirror_blocked_workflow_count=$mirror_blocked_workflow_count" >> "$GITHUB_OUTPUT"
+          echo "workflow_changed_count=$workflow_changed_count" >> "$GITHUB_OUTPUT"
+          echo "non_workflow_changed_count=$non_workflow_changed_count" >> "$GITHUB_OUTPUT"
 
-      - name: Merge upstream into sync branch
-        id: merge
+      - name: Update upstream mirror branch
+        if: steps.analyze.outputs.behind != '0' && steps.analyze.outputs.mirror_blocked_workflow_count == '0'
+        run: |
+          set -euo pipefail
+          git push origin \
+            "refs/remotes/upstream/${UPSTREAM_BRANCH}:refs/heads/${MIRROR_BRANCH}" \
+            --force
+
+      - name: Build sync branch from non-workflow snapshot
+        id: sync_branch
         shell: bash
         run: |
           set -euo pipefail
           base_ref="origin/${BASE_BRANCH}"
           upstream_ref="upstream/${UPSTREAM_BRANCH}"
+          merge_base="${{ steps.analyze.outputs.merge_base }}"
+          patch_path=.github/upstream-sync/upstream_non_workflow.patch
 
           if [ "${{ steps.analyze.outputs.behind }}" = "0" ]; then
             echo "has_changes=false" >> "$GITHUB_OUTPUT"
             echo "merge_clean=true" >> "$GITHUB_OUTPUT"
+            echo "manual_reason=none" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          git checkout -B "${SYNC_BRANCH}" "$base_ref"
-
-          if git merge --no-ff --no-edit "$upstream_ref"; then
-            echo "has_changes=true" >> "$GITHUB_OUTPUT"
-            echo "merge_clean=true" >> "$GITHUB_OUTPUT"
-          else
-            git diff --name-only --diff-filter=U > .github/upstream-sync/conflict_files.txt || true
-            git merge --abort || git reset --hard "$base_ref"
+          if [ "${{ steps.analyze.outputs.non_workflow_changed_count }}" = "0" ]; then
             echo "has_changes=true" >> "$GITHUB_OUTPUT"
             echo "merge_clean=false" >> "$GITHUB_OUTPUT"
+            echo "manual_reason=workflow_only" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git diff --binary --full-index "$merge_base" "$upstream_ref" -- . ':(exclude).github/workflows' > "$patch_path"
+          git checkout -B "${SYNC_BRANCH}" "$base_ref"
+
+          if git apply --3way --index "$patch_path"; then
+            git commit -m "chore(sync): apply ${UPSTREAM_REPO#*/}/${UPSTREAM_BRANCH} snapshot (excluding workflow files)"
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            echo "merge_clean=true" >> "$GITHUB_OUTPUT"
+            echo "manual_reason=none" >> "$GITHUB_OUTPUT"
+          else
+            git diff --name-only --diff-filter=U > .github/upstream-sync/conflict_files.txt || true
+            git reset --hard "$base_ref"
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            echo "merge_clean=false" >> "$GITHUB_OUTPUT"
+            echo "manual_reason=patch_conflict" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Build sync report
@@ -114,12 +139,17 @@ jobs:
 
           commit_path=.github/upstream-sync/upstream_commits.txt
           changed_path=.github/upstream-sync/upstream_changed_files.txt
-          overlap_path=.github/upstream-sync/overlap_files.txt
+          non_workflow_path=.github/upstream-sync/non_workflow_changed_files.txt
+          mirror_workflow_path=.github/upstream-sync/mirror_blocked_workflow_files.txt
+          workflow_path=.github/upstream-sync/workflow_changed_files.txt
+          overlap_path=.github/upstream-sync/sync_overlap_files.txt
           conflict_path=.github/upstream-sync/conflict_files.txt
           commit_top20_path=.github/upstream-sync/upstream_commits_top20.txt
-          changed_top40_path=.github/upstream-sync/upstream_changed_files_top40.txt
-          changed_dirs_path=.github/upstream-sync/upstream_changed_dirs.txt
-          overlap_top20_path=.github/upstream-sync/overlap_files_top20.txt
+          changed_top40_path=.github/upstream-sync/non_workflow_changed_files_top40.txt
+          mirror_workflow_top20_path=.github/upstream-sync/mirror_blocked_workflow_files_top20.txt
+          workflow_top20_path=.github/upstream-sync/workflow_changed_files_top20.txt
+          changed_dirs_path=.github/upstream-sync/non_workflow_changed_dirs.txt
+          overlap_top20_path=.github/upstream-sync/sync_overlap_files_top20.txt
           conflict_top20_path=.github/upstream-sync/conflict_files_top20.txt
           pr_report_path=.github/upstream-sync/pr_report.md
           issue_report_path=.github/upstream-sync/issue_report.md
@@ -144,33 +174,50 @@ jobs:
           }
 
           sed -n '1,20p' "$commit_path" > "$commit_top20_path" || true
-          sed -n '1,40p' "$changed_path" > "$changed_top40_path" || true
+          sed -n '1,40p' "$non_workflow_path" > "$changed_top40_path" || true
+          sed -n '1,20p' "$mirror_workflow_path" > "$mirror_workflow_top20_path" || true
+          sed -n '1,20p' "$workflow_path" > "$workflow_top20_path" || true
           sed -n '1,20p' "$overlap_path" > "$overlap_top20_path" || true
           sed -n '1,20p' "$conflict_path" > "$conflict_top20_path" || true
 
-          if [ -s "$changed_path" ]; then
-            awk -F/ '{print ($1 == "" ? "(root)" : $1)}' "$changed_path" | sort | uniq -c | sort -nr > "$changed_dirs_path"
+          if [ -s "$non_workflow_path" ]; then
+            awk -F/ '{print ($1 == "" ? "(root)" : $1)}' "$non_workflow_path" | sort | uniq -c | sort -nr > "$changed_dirs_path"
           else
             : > "$changed_dirs_path"
           fi
 
-          changed_count="$(count_lines "$changed_path")"
+          total_changed_count="$(count_lines "$changed_path")"
+          changed_count="$(count_lines "$non_workflow_path")"
+          mirror_workflow_count="$(count_lines "$mirror_workflow_path")"
+          workflow_count="$(count_lines "$workflow_path")"
           overlap_count="$(count_lines "$overlap_path")"
           conflict_count="$(count_lines "$conflict_path")"
           commit_count="$(count_lines "$commit_path")"
 
-          if [ "${{ steps.merge.outputs.has_changes }}" = "false" ]; then
-            status_line="No upstream-only commits to sync at this time."
-            pr_status_line="$status_line"
-            issue_status_line="$status_line"
-          elif [ "${{ steps.merge.outputs.merge_clean }}" = "true" ]; then
-            status_line="Dry-run merge succeeded. The sync branch contains the upstream merge commit."
-            pr_status_line="$status_line"
-            issue_status_line="$status_line"
+          if [ "${{ steps.analyze.outputs.behind }}" = "0" ]; then
+            mirror_status="Mirror branch unchanged because upstream has no new commits."
+          elif [ "${{ steps.analyze.outputs.mirror_blocked_workflow_count }}" = "0" ]; then
+            mirror_status="Mirror branch was updated exactly from upstream."
           else
-            status_line="Dry-run merge hit conflicts. No sync branch was pushed; manual review is required."
-            pr_status_line="$status_line"
-            issue_status_line="@${MENTION_LOGIN} upstream sync hit merge conflicts and needs manual review."
+            mirror_status="Mirror branch update was skipped because the exact upstream snapshot differs on .github/workflows and GITHUB_TOKEN cannot push workflow file updates."
+          fi
+
+          if [ "${{ steps.sync_branch.outputs.has_changes }}" = "false" ]; then
+            pr_status_line="No upstream-only commits to sync at this time."
+            issue_status_line="$pr_status_line"
+          elif [ "${{ steps.sync_branch.outputs.merge_clean }}" = "true" ]; then
+            if [ "$workflow_count" = "0" ]; then
+              pr_status_line="A sync branch was created from the upstream snapshot."
+            else
+              pr_status_line="A sync branch was created from the upstream snapshot, excluding .github/workflows due to GitHub token restrictions."
+            fi
+            issue_status_line="$pr_status_line"
+          elif [ "${{ steps.sync_branch.outputs.manual_reason }}" = "workflow_only" ]; then
+            pr_status_line="Only .github/workflows changed upstream. Automation skipped those files because GITHUB_TOKEN cannot create or update workflow files."
+            issue_status_line="@${MENTION_LOGIN} only .github/workflows changed upstream. Automation skipped those files because GITHUB_TOKEN cannot create or update workflow files."
+          else
+            pr_status_line="Applying the upstream non-workflow snapshot hit conflicts. No sync branch was pushed."
+            issue_status_line="@${MENTION_LOGIN} applying the upstream non-workflow snapshot hit conflicts and needs manual review."
           fi
 
           cat > "$pr_report_path" <<REPORT
@@ -184,13 +231,20 @@ jobs:
           - Local branch ahead of upstream: ${{ steps.analyze.outputs.ahead }} commits
           - Local branch behind upstream: ${{ steps.analyze.outputs.behind }} commits
           - Upstream-only commits in this run: ${commit_count}
-          - Upstream changed files: ${changed_count}
-          - Overlapping files touched by both sides since the merge base: ${overlap_count}
-          - Conflicted files in dry-run merge: ${conflict_count}
+          - Total upstream changed files: ${total_changed_count}
+          - Auto-sync eligible files: ${changed_count}
+          - Workflow files that block exact mirror push: ${mirror_workflow_count}
+          - Upstream workflow files skipped by auto-sync: ${workflow_count}
+          - Overlap files for auto-sync: ${overlap_count}
+          - Conflicted files in auto-sync: ${conflict_count}
 
           **Status**
 
           ${pr_status_line}
+
+          **Mirror branch**
+
+          ${mirror_status}
 
           ### Top 20 upstream commits
 
@@ -198,25 +252,37 @@ jobs:
           $(print_block "$commit_top20_path" 20)
           ```
 
-          ### Changed directories summary
+          ### Mirror-blocking workflow files (top 20)
+
+          ```text
+          $(print_block "$mirror_workflow_top20_path" 20)
+          ```
+
+          ### Upstream workflow files skipped by auto-sync (top 20)
+
+          ```text
+          $(print_block "$workflow_top20_path" 20)
+          ```
+
+          ### Auto-sync changed directories summary
 
           ```text
           $(print_block "$changed_dirs_path" 20)
           ```
 
-          ### Potential overlap files (top 20)
+          ### Auto-sync overlap files (top 20)
 
           ```text
           $(print_block "$overlap_top20_path" 20)
           ```
 
-          ### Conflict files (top 20)
+          ### Auto-sync conflict files (top 20)
 
           ```text
           $(print_block "$conflict_top20_path" 20)
           ```
 
-          ### Upstream changed files sample (top 40)
+          ### Auto-sync changed files sample (top 40)
 
           ```text
           $(print_block "$changed_top40_path" 40)
@@ -224,7 +290,7 @@ jobs:
           REPORT
 
           cat > "$issue_report_path" <<REPORT
-          ## Upstream sync conflict report
+          ## Upstream sync manual review report
 
           ${issue_status_line}
 
@@ -236,9 +302,11 @@ jobs:
           - Local branch ahead of upstream: ${{ steps.analyze.outputs.ahead }} commits
           - Local branch behind upstream: ${{ steps.analyze.outputs.behind }} commits
           - Upstream-only commits in this run: ${commit_count}
-          - Upstream changed files: ${changed_count}
-          - Overlapping files touched by both sides since the merge base: ${overlap_count}
-          - Conflicted files in dry-run merge: ${conflict_count}
+          - Auto-sync eligible files: ${changed_count}
+          - Workflow files that block exact mirror push: ${mirror_workflow_count}
+          - Upstream workflow files skipped by auto-sync: ${workflow_count}
+          - Overlap files for auto-sync: ${overlap_count}
+          - Conflicted files in auto-sync: ${conflict_count}
 
           ### Top 20 upstream commits
 
@@ -246,13 +314,19 @@ jobs:
           $(print_block "$commit_top20_path" 20)
           ```
 
-          ### Potential overlap files (top 20)
+          ### Mirror-blocking workflow files (top 20)
 
           ```text
-          $(print_block "$overlap_top20_path" 20)
+          $(print_block "$mirror_workflow_top20_path" 20)
           ```
 
-          ### Conflict files (top 20)
+          ### Upstream workflow files skipped by auto-sync (top 20)
+
+          ```text
+          $(print_block "$workflow_top20_path" 20)
+          ```
+
+          ### Auto-sync conflict files (top 20)
 
           ```text
           $(print_block "$conflict_top20_path" 20)
@@ -268,7 +342,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Ensure sync labels exist
-        if: steps.merge.outputs.has_changes == 'true'
+        if: steps.sync_branch.outputs.has_changes == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
@@ -280,17 +354,17 @@ jobs:
             --force
           gh label create "${ISSUE_LABEL}" \
             --color "D73A4A" \
-            --description "Automated upstream sync conflict issues" \
+            --description "Automated upstream sync manual review issues" \
             --force
 
       - name: Push sync branch
-        if: steps.merge.outputs.has_changes == 'true' && steps.merge.outputs.merge_clean == 'true'
+        if: steps.sync_branch.outputs.has_changes == 'true' && steps.sync_branch.outputs.merge_clean == 'true'
         run: |
           set -euo pipefail
           git push origin "HEAD:refs/heads/${SYNC_BRANCH}" --force-with-lease
 
       - name: Create or update sync PR
-        if: steps.merge.outputs.has_changes == 'true' && steps.merge.outputs.merge_clean == 'true'
+        if: steps.sync_branch.outputs.has_changes == 'true' && steps.sync_branch.outputs.merge_clean == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
@@ -302,7 +376,7 @@ jobs:
             --state open \
             --json number \
             --jq '.[0].number // empty')"
-          title="chore(sync): merge ${UPSTREAM_REPO#*/}/${UPSTREAM_BRANCH} into ${BASE_BRANCH}"
+          title="chore(sync): apply ${UPSTREAM_REPO#*/}/${UPSTREAM_BRANCH} snapshot into ${BASE_BRANCH}"
 
           if [ -n "$pr_number" ]; then
             gh pr edit "$pr_number" \
@@ -319,14 +393,14 @@ jobs:
               --label "${PR_LABEL}"
           fi
 
-      - name: Close stale conflict issue when merge is clean
-        if: steps.merge.outputs.merge_clean == 'true'
+      - name: Close stale review issue when sync is clean
+        if: steps.sync_branch.outputs.merge_clean == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
-          search_query="${CONFLICT_ISSUE_TITLE} in:title"
+          search_query="${REVIEW_ISSUE_TITLE} in:title"
           issue_number="$(gh issue list \
             --state open \
             --search "$search_query" \
@@ -338,14 +412,14 @@ jobs:
             gh issue close "$issue_number"
           fi
 
-      - name: Create or update conflict issue
-        if: steps.merge.outputs.has_changes == 'true' && steps.merge.outputs.merge_clean != 'true'
+      - name: Create or update manual review issue
+        if: steps.sync_branch.outputs.has_changes == 'true' && steps.sync_branch.outputs.merge_clean != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
-          search_query="${CONFLICT_ISSUE_TITLE} in:title"
+          search_query="${REVIEW_ISSUE_TITLE} in:title"
           issue_number="$(gh issue list \
             --state open \
             --search "$search_query" \
@@ -354,12 +428,12 @@ jobs:
 
           if [ -n "$issue_number" ]; then
             gh issue edit "$issue_number" \
-              --title "${CONFLICT_ISSUE_TITLE}" \
+              --title "${REVIEW_ISSUE_TITLE}" \
               --body-file "${{ steps.report.outputs.issue_report_path }}" \
               --add-label "${ISSUE_LABEL}"
           else
             gh issue create \
-              --title "${CONFLICT_ISSUE_TITLE}" \
+              --title "${REVIEW_ISSUE_TITLE}" \
               --body-file "${{ steps.report.outputs.issue_report_path }}" \
               --label "${ISSUE_LABEL}"
           fi
