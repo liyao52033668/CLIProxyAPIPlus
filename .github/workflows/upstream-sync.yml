@@ -1,0 +1,365 @@
+name: upstream-sync
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '30 18 * * 0'
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+env:
+  BASE_BRANCH: main
+  UPSTREAM_REPO: router-for-me/CLIProxyAPI
+  UPSTREAM_BRANCH: main
+  MIRROR_BRANCH: mirror/upstream-main
+  SYNC_BRANCH: sync/upstream-main
+  PR_LABEL: upstream-sync
+  ISSUE_LABEL: upstream-sync-conflict
+  CONFLICT_ISSUE_TITLE: 'chore(sync): upstream merge conflicts require manual review'
+  MENTION_LOGIN: ${{ github.repository_owner }}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout base branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BASE_BRANCH }}
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch base and upstream branches
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --prune origin \
+            "+refs/heads/${BASE_BRANCH}:refs/remotes/origin/${BASE_BRANCH}"
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" 2>/dev/null || \
+            git remote set-url upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch --no-tags --prune upstream \
+            "+refs/heads/${UPSTREAM_BRANCH}:refs/remotes/upstream/${UPSTREAM_BRANCH}"
+
+      - name: Update upstream mirror branch
+        run: |
+          set -euo pipefail
+          git push origin \
+            "refs/remotes/upstream/${UPSTREAM_BRANCH}:refs/heads/${MIRROR_BRANCH}" \
+            --force
+
+      - name: Analyze upstream delta
+        id: analyze
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_ref="origin/${BASE_BRANCH}"
+          upstream_ref="upstream/${UPSTREAM_BRANCH}"
+          merge_base="$(git merge-base "$base_ref" "$upstream_ref")"
+          ahead="$(git rev-list --count "$upstream_ref..$base_ref")"
+          behind="$(git rev-list --count "$base_ref..$upstream_ref")"
+
+          mkdir -p .github/upstream-sync
+          git log --oneline "$base_ref..$upstream_ref" > .github/upstream-sync/upstream_commits.txt || true
+          git diff --name-only "$base_ref..$upstream_ref" > .github/upstream-sync/upstream_changed_files.txt || true
+          comm -12 \
+            <(git diff --name-only "$merge_base..$base_ref" | sort) \
+            <(git diff --name-only "$merge_base..$upstream_ref" | sort) \
+            > .github/upstream-sync/overlap_files.txt || true
+
+          echo "merge_base=$merge_base" >> "$GITHUB_OUTPUT"
+          echo "ahead=$ahead" >> "$GITHUB_OUTPUT"
+          echo "behind=$behind" >> "$GITHUB_OUTPUT"
+
+      - name: Merge upstream into sync branch
+        id: merge
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_ref="origin/${BASE_BRANCH}"
+          upstream_ref="upstream/${UPSTREAM_BRANCH}"
+
+          if [ "${{ steps.analyze.outputs.behind }}" = "0" ]; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            echo "merge_clean=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git checkout -B "${SYNC_BRANCH}" "$base_ref"
+
+          if git merge --no-ff --no-edit "$upstream_ref"; then
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            echo "merge_clean=true" >> "$GITHUB_OUTPUT"
+          else
+            git diff --name-only --diff-filter=U > .github/upstream-sync/conflict_files.txt || true
+            git merge --abort || git reset --hard "$base_ref"
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            echo "merge_clean=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build sync report
+        id: report
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          commit_path=.github/upstream-sync/upstream_commits.txt
+          changed_path=.github/upstream-sync/upstream_changed_files.txt
+          overlap_path=.github/upstream-sync/overlap_files.txt
+          conflict_path=.github/upstream-sync/conflict_files.txt
+          commit_top20_path=.github/upstream-sync/upstream_commits_top20.txt
+          changed_top40_path=.github/upstream-sync/upstream_changed_files_top40.txt
+          changed_dirs_path=.github/upstream-sync/upstream_changed_dirs.txt
+          overlap_top20_path=.github/upstream-sync/overlap_files_top20.txt
+          conflict_top20_path=.github/upstream-sync/conflict_files_top20.txt
+          pr_report_path=.github/upstream-sync/pr_report.md
+          issue_report_path=.github/upstream-sync/issue_report.md
+
+          count_lines() {
+            local path="$1"
+            if [ -s "$path" ]; then
+              wc -l < "$path" | tr -d ' '
+            else
+              echo 0
+            fi
+          }
+
+          print_block() {
+            local path="$1"
+            local limit="$2"
+            if [ -s "$path" ]; then
+              sed -n "1,${limit}p" "$path"
+            else
+              echo "(none)"
+            fi
+          }
+
+          sed -n '1,20p' "$commit_path" > "$commit_top20_path" || true
+          sed -n '1,40p' "$changed_path" > "$changed_top40_path" || true
+          sed -n '1,20p' "$overlap_path" > "$overlap_top20_path" || true
+          sed -n '1,20p' "$conflict_path" > "$conflict_top20_path" || true
+
+          if [ -s "$changed_path" ]; then
+            awk -F/ '{print ($1 == "" ? "(root)" : $1)}' "$changed_path" | sort | uniq -c | sort -nr > "$changed_dirs_path"
+          else
+            : > "$changed_dirs_path"
+          fi
+
+          changed_count="$(count_lines "$changed_path")"
+          overlap_count="$(count_lines "$overlap_path")"
+          conflict_count="$(count_lines "$conflict_path")"
+          commit_count="$(count_lines "$commit_path")"
+
+          if [ "${{ steps.merge.outputs.has_changes }}" = "false" ]; then
+            status_line="No upstream-only commits to sync at this time."
+            pr_status_line="$status_line"
+            issue_status_line="$status_line"
+          elif [ "${{ steps.merge.outputs.merge_clean }}" = "true" ]; then
+            status_line="Dry-run merge succeeded. The sync branch contains the upstream merge commit."
+            pr_status_line="$status_line"
+            issue_status_line="$status_line"
+          else
+            status_line="Dry-run merge hit conflicts. No sync branch was pushed; manual review is required."
+            pr_status_line="$status_line"
+            issue_status_line="@${MENTION_LOGIN} upstream sync hit merge conflicts and needs manual review."
+          fi
+
+          cat > "$pr_report_path" <<REPORT
+          ## Upstream sync report
+
+          - Base branch: \`${BASE_BRANCH}\`
+          - Upstream: \`${UPSTREAM_REPO}:${UPSTREAM_BRANCH}\`
+          - Mirror branch: \`${MIRROR_BRANCH}\`
+          - Sync branch: \`${SYNC_BRANCH}\`
+          - Merge base: \`${{ steps.analyze.outputs.merge_base }}\`
+          - Local branch ahead of upstream: ${{ steps.analyze.outputs.ahead }} commits
+          - Local branch behind upstream: ${{ steps.analyze.outputs.behind }} commits
+          - Upstream-only commits in this run: ${commit_count}
+          - Upstream changed files: ${changed_count}
+          - Overlapping files touched by both sides since the merge base: ${overlap_count}
+          - Conflicted files in dry-run merge: ${conflict_count}
+
+          **Status**
+
+          ${pr_status_line}
+
+          ### Top 20 upstream commits
+
+          ```text
+          $(print_block "$commit_top20_path" 20)
+          ```
+
+          ### Changed directories summary
+
+          ```text
+          $(print_block "$changed_dirs_path" 20)
+          ```
+
+          ### Potential overlap files (top 20)
+
+          ```text
+          $(print_block "$overlap_top20_path" 20)
+          ```
+
+          ### Conflict files (top 20)
+
+          ```text
+          $(print_block "$conflict_top20_path" 20)
+          ```
+
+          ### Upstream changed files sample (top 40)
+
+          ```text
+          $(print_block "$changed_top40_path" 40)
+          ```
+          REPORT
+
+          cat > "$issue_report_path" <<REPORT
+          ## Upstream sync conflict report
+
+          ${issue_status_line}
+
+          - Base branch: \`${BASE_BRANCH}\`
+          - Upstream: \`${UPSTREAM_REPO}:${UPSTREAM_BRANCH}\`
+          - Mirror branch: \`${MIRROR_BRANCH}\`
+          - Sync branch: \`${SYNC_BRANCH}\`
+          - Merge base: \`${{ steps.analyze.outputs.merge_base }}\`
+          - Local branch ahead of upstream: ${{ steps.analyze.outputs.ahead }} commits
+          - Local branch behind upstream: ${{ steps.analyze.outputs.behind }} commits
+          - Upstream-only commits in this run: ${commit_count}
+          - Upstream changed files: ${changed_count}
+          - Overlapping files touched by both sides since the merge base: ${overlap_count}
+          - Conflicted files in dry-run merge: ${conflict_count}
+
+          ### Top 20 upstream commits
+
+          ```text
+          $(print_block "$commit_top20_path" 20)
+          ```
+
+          ### Potential overlap files (top 20)
+
+          ```text
+          $(print_block "$overlap_top20_path" 20)
+          ```
+
+          ### Conflict files (top 20)
+
+          ```text
+          $(print_block "$conflict_top20_path" 20)
+          ```
+          REPORT
+
+          echo "pr_report_path=$pr_report_path" >> "$GITHUB_OUTPUT"
+          echo "issue_report_path=$issue_report_path" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## upstream-sync"
+            cat "$pr_report_path"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Ensure sync labels exist
+        if: steps.merge.outputs.has_changes == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh label create "${PR_LABEL}" \
+            --color "1D76DB" \
+            --description "Automated upstream sync pull requests" \
+            --force
+          gh label create "${ISSUE_LABEL}" \
+            --color "D73A4A" \
+            --description "Automated upstream sync conflict issues" \
+            --force
+
+      - name: Push sync branch
+        if: steps.merge.outputs.has_changes == 'true' && steps.merge.outputs.merge_clean == 'true'
+        run: |
+          set -euo pipefail
+          git push origin "HEAD:refs/heads/${SYNC_BRANCH}" --force-with-lease
+
+      - name: Create or update sync PR
+        if: steps.merge.outputs.has_changes == 'true' && steps.merge.outputs.merge_clean == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pr_number="$(gh pr list \
+            --base "${BASE_BRANCH}" \
+            --head "${SYNC_BRANCH}" \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty')"
+          title="chore(sync): merge ${UPSTREAM_REPO#*/}/${UPSTREAM_BRANCH} into ${BASE_BRANCH}"
+
+          if [ -n "$pr_number" ]; then
+            gh pr edit "$pr_number" \
+              --title "$title" \
+              --body-file "${{ steps.report.outputs.pr_report_path }}" \
+              --add-label "${PR_LABEL}"
+          else
+            gh pr create \
+              --draft \
+              --base "${BASE_BRANCH}" \
+              --head "${SYNC_BRANCH}" \
+              --title "$title" \
+              --body-file "${{ steps.report.outputs.pr_report_path }}" \
+              --label "${PR_LABEL}"
+          fi
+
+      - name: Close stale conflict issue when merge is clean
+        if: steps.merge.outputs.merge_clean == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          search_query="${CONFLICT_ISSUE_TITLE} in:title"
+          issue_number="$(gh issue list \
+            --state open \
+            --search "$search_query" \
+            --json number \
+            --jq '.[0].number // empty')"
+
+          if [ -n "$issue_number" ]; then
+            gh issue comment "$issue_number" --body "Resolved by the latest clean upstream sync run."
+            gh issue close "$issue_number"
+          fi
+
+      - name: Create or update conflict issue
+        if: steps.merge.outputs.has_changes == 'true' && steps.merge.outputs.merge_clean != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          search_query="${CONFLICT_ISSUE_TITLE} in:title"
+          issue_number="$(gh issue list \
+            --state open \
+            --search "$search_query" \
+            --json number \
+            --jq '.[0].number // empty')"
+
+          if [ -n "$issue_number" ]; then
+            gh issue edit "$issue_number" \
+              --title "${CONFLICT_ISSUE_TITLE}" \
+              --body-file "${{ steps.report.outputs.issue_report_path }}" \
+              --add-label "${ISSUE_LABEL}"
+          else
+            gh issue create \
+              --title "${CONFLICT_ISSUE_TITLE}" \
+              --body-file "${{ steps.report.outputs.issue_report_path }}" \
+              --label "${ISSUE_LABEL}"
+          fi
