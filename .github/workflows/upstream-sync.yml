@@ -24,6 +24,7 @@ env:
   ISSUE_LABEL: upstream-sync-conflict
   REVIEW_ISSUE_TITLE: 'chore(sync): upstream sync requires manual review'
   MENTION_LOGIN: ${{ github.repository_owner }}
+  TARGET_REPO: ${{ github.repository }}
 
 jobs:
   sync:
@@ -349,10 +350,12 @@ jobs:
         run: |
           set -euo pipefail
           gh label create "${PR_LABEL}" \
+            -R "${TARGET_REPO}" \
             --color "1D76DB" \
             --description "Automated upstream sync pull requests" \
             --force
           gh label create "${ISSUE_LABEL}" \
+            -R "${TARGET_REPO}" \
             --color "D73A4A" \
             --description "Automated upstream sync manual review issues" \
             --force
@@ -371,6 +374,7 @@ jobs:
         run: |
           set -euo pipefail
           pr_number="$(gh pr list \
+            -R "${TARGET_REPO}" \
             --base "${BASE_BRANCH}" \
             --head "${SYNC_BRANCH}" \
             --state open \
@@ -380,11 +384,13 @@ jobs:
 
           if [ -n "$pr_number" ]; then
             gh pr edit "$pr_number" \
+              -R "${TARGET_REPO}" \
               --title "$title" \
               --body-file "${{ steps.report.outputs.pr_report_path }}" \
               --add-label "${PR_LABEL}"
           else
             gh pr create \
+              -R "${TARGET_REPO}" \
               --draft \
               --base "${BASE_BRANCH}" \
               --head "${SYNC_BRANCH}" \
@@ -402,14 +408,15 @@ jobs:
           set -euo pipefail
           search_query="${REVIEW_ISSUE_TITLE} in:title"
           issue_number="$(gh issue list \
+            -R "${TARGET_REPO}" \
             --state open \
             --search "$search_query" \
             --json number \
             --jq '.[0].number // empty')"
 
           if [ -n "$issue_number" ]; then
-            gh issue comment "$issue_number" --body "Resolved by the latest clean upstream sync run."
-            gh issue close "$issue_number"
+            gh issue comment "$issue_number" -R "${TARGET_REPO}" --body "Resolved by the latest clean upstream sync run."
+            gh issue close "$issue_number" -R "${TARGET_REPO}"
           fi
 
       - name: Create or update manual review issue
@@ -421,6 +428,7 @@ jobs:
           set -euo pipefail
           search_query="${REVIEW_ISSUE_TITLE} in:title"
           issue_number="$(gh issue list \
+            -R "${TARGET_REPO}" \
             --state open \
             --search "$search_query" \
             --json number \
@@ -428,11 +436,13 @@ jobs:
 
           if [ -n "$issue_number" ]; then
             gh issue edit "$issue_number" \
+              -R "${TARGET_REPO}" \
               --title "${REVIEW_ISSUE_TITLE}" \
               --body-file "${{ steps.report.outputs.issue_report_path }}" \
               --add-label "${ISSUE_LABEL}"
           else
             gh issue create \
+              -R "${TARGET_REPO}" \
               --title "${REVIEW_ISSUE_TITLE}" \
               --body-file "${{ steps.report.outputs.issue_report_path }}" \
               --label "${ISSUE_LABEL}"
