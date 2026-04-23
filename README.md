@@ -1,6 +1,11 @@
-# CLIProxyAPI Plus
+<div align="center">
+  <img src="https://github.com/user-attachments/assets/d405a388-4f1b-4c62-a2fd-177562837645" width="1200">
+  <h1>CLIProxyAPI Plus</h1>
+  <p>English | <a href="README_CN.md">Chinese</a></p>
+</div>
 
-English | [Chinese](README_CN.md)
+
+
 
 This is the Plus version of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI), adding support for third-party providers on top of the mainline project.
 
