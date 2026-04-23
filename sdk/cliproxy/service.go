@@ -448,6 +448,8 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 		s.coreManager.RegisterExecutor(executor.NewCodeBuddyExecutor(s.cfg))
 	case "codebuddy-ai":
 		s.coreManager.RegisterExecutor(executor.NewCodeBuddyAIExecutor(s.cfg))
+	case "codearts":
+		s.coreManager.RegisterExecutor(executor.NewCodeArtsExecutor(s.cfg))
 	case "gitlab":
 		s.coreManager.RegisterExecutor(executor.NewGitLabExecutor(s.cfg))
 	default:
@@ -980,6 +982,9 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		models = applyExcludedModels(models, excluded)
 	case "kilo":
 		models = executor.FetchKiloModels(context.Background(), a, s.cfg)
+		models = applyExcludedModels(models, excluded)
+	case "codearts":
+		models = getCodeArtsModels()
 		models = applyExcludedModels(models, excluded)
 	case "gitlab":
 		models = executor.GitLabModelsFromAuth(a)

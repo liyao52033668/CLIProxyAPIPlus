@@ -24,6 +24,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/middleware"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules"
 	ampmodule "github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules/amp"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codearts"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -308,6 +309,11 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	kiroOAuthHandler := kiro.NewOAuthWebHandler(cfg)
 	kiroOAuthHandler.RegisterRoutes(engine)
 	log.Info("Kiro OAuth Web routes registered at /v0/oauth/kiro/*")
+
+	// === CLIProxyAPIPlus 扩展: 注册 CodeArts OAuth Web 路由 ===
+	codeArtsOAuthHandler := codearts.NewOAuthWebHandler(cfg)
+	codeArtsOAuthHandler.RegisterRoutes(engine)
+	log.Info("CodeArts OAuth Web routes registered at /v0/oauth/codearts/*")
 
 	if optionState.keepAliveEnabled {
 		s.enableKeepAlive(optionState.keepAliveTimeout, optionState.keepAliveOnTimeout)
