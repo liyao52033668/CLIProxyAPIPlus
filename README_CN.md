@@ -1,6 +1,8 @@
-# CLIProxyAPI Plus
-
-[English](README.md) | 中文
+<div align="center">
+  <img src="https://github.com/user-attachments/assets/d405a388-4f1b-4c62-a2fd-177562837645" width="1200">
+  <h1>CLIProxyAPI Plus</h1>
+  <p><a href="README.md">English</a> | Chinese</p>
+</div>
 
 这是 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 的 Plus 版本，在原有基础上增加了第三方供应商的支持。
 
