@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="https://github.com/user-attachments/assets/d405a388-4f1b-4c62-a2fd-177562837645" width="1200">
+  <img src="https://github.com/user-attachments/assets/ce98d03b-aa62-4461-971b-554cb6911f1a" width="1200">
   <h1>CLIProxyAPI Plus</h1>
   <p><a href="README.md">English</a> | Chinese</p>
 </div>
