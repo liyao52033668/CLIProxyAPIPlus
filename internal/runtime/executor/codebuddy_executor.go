@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codebuddy"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -548,4 +550,183 @@ func aggregateOpenAIChatCompletionStream(raw []byte) ([]byte, usage.Detail, erro
 		return nil, usageDetail, fmt.Errorf("codebuddy: failed to encode aggregated response: %w", err)
 	}
 	return out, usageDetail, nil
+}
+
+var codeBuddyInternalModelPrefixes = []string{
+	"completion-",
+	"codewise-",
+	"hunyuan-3b",
+	"hunyuan-7b",
+	"nes-",
+	"default-",
+	"deepseek-r1-0528",
+	"deepseek-v3-0324-taco-",
+	"chat-",
+	"glm-4.6",
+	"glm-4.6v",
+}
+
+var codeBuddyAllowedInternalModels = map[string]bool{
+	"deepseek-r1-0528":                 true,
+	"deepseek-v3-0324":                 true,
+	"deepseek-v3-0324-taco-completion": true,
+	"hunyuan-2.0-instruct":             true,
+	"hunyuan-chat":                     true,
+	"glm-4.7":                          true,
+}
+
+func isCodeBuddyInternalModel(id string) bool {
+	for _, prefix := range codeBuddyInternalModelPrefixes {
+		if strings.HasPrefix(id, prefix) {
+			return !codeBuddyAllowedInternalModels[id]
+		}
+	}
+	return false
+}
+
+func FetchCodeBuddyModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config) []*registry.ModelInfo {
+	accessToken, userID, domain := codeBuddyCredentials(auth)
+	if accessToken == "" {
+		log.Infof("codebuddy: no access token found, using static model list")
+		return registry.GetCodeBuddyModels()
+	}
+
+	log.Debugf("codebuddy: fetching dynamic models from config API")
+
+	httpClient := newProxyAwareHTTPClient(ctx, cfg, auth, 15*time.Second)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, codebuddy.BaseURL+"/v3/config", nil)
+	if err != nil {
+		log.Warnf("codebuddy: failed to create config request: %v", err)
+		return registry.GetCodeBuddyModels()
+	}
+
+	req.Header.Set("User-Agent", codebuddy.UserAgent)
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("X-User-Id", userID)
+	req.Header.Set("X-Domain", domain)
+	req.Header.Set("X-Product", "SaaS")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			log.Warnf("codebuddy: fetch models canceled: %v", err)
+		} else {
+			log.Warnf("codebuddy: using static models (config API fetch failed: %v)", err)
+		}
+		return registry.GetCodeBuddyModels()
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Errorf("codebuddy: close config response body error: %v", errClose)
+		}
+	}()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Warnf("codebuddy: failed to read config response: %v", err)
+		return registry.GetCodeBuddyModels()
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		log.Warnf("codebuddy: config API returned status %d", resp.StatusCode)
+		return registry.GetCodeBuddyModels()
+	}
+
+	modelsResult := gjson.GetBytes(body, "data.models")
+	if !modelsResult.Exists() || !modelsResult.IsArray() {
+		log.Warn("codebuddy: config API response missing data.models array")
+		return registry.GetCodeBuddyModels()
+	}
+
+	var dynamicModels []*registry.ModelInfo
+	now := time.Now().Unix()
+	count := 0
+
+	modelsResult.ForEach(func(key, value gjson.Result) bool {
+		id := value.Get("id").String()
+		if id == "" {
+			return true
+		}
+
+		if isCodeBuddyInternalModel(id) {
+			return true
+		}
+
+		name := value.Get("name").String()
+		if name == "" {
+			name = id
+		}
+
+		descZh := value.Get("descriptionZh").String()
+		descEn := value.Get("descriptionEn").String()
+		desc := descEn
+		if desc == "" {
+			desc = descZh
+		}
+		if desc == "" {
+			desc = name + " via CodeBuddy"
+		}
+
+		maxInputTokens := int(value.Get("maxInputTokens").Int())
+		maxOutputTokens := int(value.Get("maxOutputTokens").Int())
+		maxAllowedSize := int(value.Get("maxAllowedSize").Int())
+
+		contextLength := maxInputTokens
+		if contextLength <= 0 && maxAllowedSize > 0 {
+			contextLength = maxAllowedSize
+		}
+		if contextLength <= 0 {
+			contextLength = 128000
+		}
+		if maxOutputTokens <= 0 {
+			maxOutputTokens = 32768
+		}
+
+		supportsReasoning := value.Get("supportsReasoning").Bool()
+		onlyReasoning := value.Get("onlyReasoning").Bool()
+		supportsToolCall := value.Get("supportsToolCall").Bool()
+		supportsImages := value.Get("supportsImages").Bool()
+		disabledMultimodal := value.Get("disabledMultimodal").Bool()
+
+		_ = supportsToolCall
+		_ = supportsImages
+		_ = disabledMultimodal
+
+		var thinkingSupport *registry.ThinkingSupport
+		if supportsReasoning || onlyReasoning {
+			thinkingSupport = &registry.ThinkingSupport{ZeroAllowed: true}
+			reasoningEffort := value.Get("reasoning.effort").String()
+			if reasoningEffort == "medium" || reasoningEffort == "high" {
+				thinkingSupport.DynamicAllowed = true
+			}
+		}
+
+		displayName := name
+
+		dynamicModels = append(dynamicModels, &registry.ModelInfo{
+			ID:                  id,
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "tencent",
+			Type:                "codebuddy",
+			DisplayName:         displayName,
+			Description:         desc,
+			ContextLength:       contextLength,
+			MaxCompletionTokens: maxOutputTokens,
+			Thinking:            thinkingSupport,
+			SupportedEndpoints:  []string{"/chat/completions"},
+		})
+		count++
+		return true
+	})
+
+	log.Infof("codebuddy: fetched %d models from config API", count)
+	if count == 0 {
+		log.Warn("codebuddy: no models parsed from config API, using static fallback")
+		return registry.GetCodeBuddyModels()
+	}
+
+	return dynamicModels
 }

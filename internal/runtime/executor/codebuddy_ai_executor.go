@@ -4,18 +4,22 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codebuddy_ai"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -339,4 +343,168 @@ func (e *CodeBuddyAIExecutor) applyHeaders(req *http.Request, accessToken, userI
 	req.Header.Set("X-IDE-Version", "1.100.0")
 	req.Header.Set("X-Product", "cloud")
 	req.Header.Set("X-Product-Version", "1.100.0")
+}
+
+var codeBuddyAIInternalModelPrefixes = []string{
+	"completion-",
+	"codewise-",
+	"nes-",
+	"chat-",
+	"enhance-",
+}
+
+var codeBuddyAIAllowedInternalModels = map[string]bool{
+	"o4-mini": true,
+}
+
+func isCodeBuddyAIInternalModel(id string) bool {
+	for _, prefix := range codeBuddyAIInternalModelPrefixes {
+		if strings.HasPrefix(id, prefix) {
+			return !codeBuddyAIAllowedInternalModels[id]
+		}
+	}
+	return false
+}
+
+func FetchCodeBuddyAIModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config) []*registry.ModelInfo {
+	accessToken, userID, domain := codeBuddyAICredentials(auth)
+	if accessToken == "" {
+		log.Infof("codebuddy-ai: no access token found, using static model list")
+		return registry.GetCodeBuddyAIModels()
+	}
+
+	log.Debugf("codebuddy-ai: fetching dynamic models from config API")
+
+	httpClient := newProxyAwareHTTPClient(ctx, cfg, auth, 15*time.Second)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, codebuddy_ai.BaseURL+"/v3/config", nil)
+	if err != nil {
+		log.Warnf("codebuddy-ai: failed to create config request: %v", err)
+		return registry.GetCodeBuddyAIModels()
+	}
+
+	req.Header.Set("User-Agent", codebuddy_ai.UserAgent)
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("X-User-Id", userID)
+	req.Header.Set("X-Domain", domain)
+	req.Header.Set("X-IDE-Type", "CodeBuddyIDE")
+	req.Header.Set("X-IDE-Name", "CodeBuddyIDE")
+	req.Header.Set("X-IDE-Version", "4.9.5")
+	req.Header.Set("X-Product-Version", "4.9.5")
+	req.Header.Set("X-Env-ID", "production")
+	req.Header.Set("X-Product", "SaaS")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			log.Warnf("codebuddy-ai: fetch models canceled: %v", err)
+		} else {
+			log.Warnf("codebuddy-ai: using static models (config API fetch failed: %v)", err)
+		}
+		return registry.GetCodeBuddyAIModels()
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Errorf("codebuddy-ai: close config response body error: %v", errClose)
+		}
+	}()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Warnf("codebuddy-ai: failed to read config response: %v", err)
+		return registry.GetCodeBuddyAIModels()
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		log.Warnf("codebuddy-ai: config API returned status %d", resp.StatusCode)
+		return registry.GetCodeBuddyAIModels()
+	}
+
+	modelsResult := gjson.GetBytes(body, "data.models")
+	if !modelsResult.Exists() || !modelsResult.IsArray() {
+		log.Warn("codebuddy-ai: config API response missing data.models array")
+		return registry.GetCodeBuddyAIModels()
+	}
+
+	var dynamicModels []*registry.ModelInfo
+	now := time.Now().Unix()
+	count := 0
+
+	modelsResult.ForEach(func(key, value gjson.Result) bool {
+		id := value.Get("id").String()
+		if id == "" {
+			return true
+		}
+
+		if isCodeBuddyAIInternalModel(id) {
+			return true
+		}
+
+		name := value.Get("name").String()
+		if name == "" {
+			name = id
+		}
+
+		descEn := value.Get("descriptionEn").String()
+		descZh := value.Get("descriptionZh").String()
+		desc := descEn
+		if desc == "" {
+			desc = descZh
+		}
+		if desc == "" {
+			desc = name + " via CodeBuddy AI"
+		}
+
+		maxInputTokens := int(value.Get("maxInputTokens").Int())
+		maxOutputTokens := int(value.Get("maxOutputTokens").Int())
+		maxAllowedSize := int(value.Get("maxAllowedSize").Int())
+
+		contextLength := maxInputTokens
+		if contextLength <= 0 && maxAllowedSize > 0 {
+			contextLength = maxAllowedSize
+		}
+		if contextLength <= 0 {
+			contextLength = 128000
+		}
+		if maxOutputTokens <= 0 {
+			maxOutputTokens = 32768
+		}
+
+		supportsReasoning := value.Get("supportsReasoning").Bool()
+		onlyReasoning := value.Get("onlyReasoning").Bool()
+
+		var thinkingSupport *registry.ThinkingSupport
+		if supportsReasoning || onlyReasoning {
+			thinkingSupport = &registry.ThinkingSupport{ZeroAllowed: true}
+			reasoningEffort := value.Get("reasoning.effort").String()
+			if reasoningEffort == "medium" || reasoningEffort == "high" {
+				thinkingSupport.DynamicAllowed = true
+			}
+		}
+
+		dynamicModels = append(dynamicModels, &registry.ModelInfo{
+			ID:                  id,
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "codebuddy-ai",
+			Type:                "codebuddy-ai",
+			DisplayName:         name,
+			Description:         desc,
+			ContextLength:       contextLength,
+			MaxCompletionTokens: maxOutputTokens,
+			Thinking:            thinkingSupport,
+			SupportedEndpoints:  []string{"/chat/completions"},
+		})
+		count++
+		return true
+	})
+
+	log.Infof("codebuddy-ai: fetched %d models from config API", count)
+	if count == 0 {
+		log.Warn("codebuddy-ai: no models parsed from config API, using static fallback")
+		return registry.GetCodeBuddyAIModels()
+	}
+
+	return dynamicModels
 }

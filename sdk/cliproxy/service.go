@@ -985,10 +985,14 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		models = executor.GitLabModelsFromAuth(a)
 		models = applyExcludedModels(models, excluded)
 	case "codebuddy":
-		models = registry.GetCodeBuddyModels()
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		models = executor.FetchCodeBuddyModels(ctx, a, s.cfg)
 		models = applyExcludedModels(models, excluded)
 	case "codebuddy-ai":
-		models = registry.GetCodeBuddyAIModels()
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		models = executor.FetchCodeBuddyAIModels(ctx, a, s.cfg)
 		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
