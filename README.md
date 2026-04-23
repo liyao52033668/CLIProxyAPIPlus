@@ -2,6 +2,7 @@
   <img src="https://github.com/user-attachments/assets/ce98d03b-aa62-4461-971b-554cb6911f1a" width="1200">
   <h1>CLIProxyAPI Plus</h1>
   <p>English | <a href="README_CN.md">Chinese</a></p>
+  <p> (Please do not report CPA+ issues in Linux.do) <a href="README_CN.md">Linux.do</a> </p>
 </div>
 
 
