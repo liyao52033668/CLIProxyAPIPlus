@@ -1,3 +1,4 @@
+# 同步到cnb
 name: Sync to CNB
 on: [push]
 
