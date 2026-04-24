@@ -102,6 +102,9 @@ type Config struct {
 	// KiroKey defines a list of Kiro (AWS CodeWhisperer) configurations.
 	KiroKey []KiroKey `yaml:"kiro" json:"kiro"`
 
+	// BTKey defines a list of BaoTa (BT Panel) AI configurations.
+	BTKey []BTKey `yaml:"bt" json:"bt"`
+
 	// KiroFingerprint defines a global fingerprint configuration for all Kiro requests.
 	// When set, all Kiro requests will use this fixed fingerprint instead of random generation.
 	KiroFingerprint *KiroFingerprintConfig `yaml:"kiro-fingerprint,omitempty" json:"kiro-fingerprint,omitempty"`
@@ -557,6 +560,34 @@ type KiroKey struct {
 	PreferredEndpoint string `yaml:"preferred-endpoint,omitempty" json:"preferred-endpoint,omitempty"`
 }
 
+// BTKey represents the configuration for BaoTa (BT Panel) AI authentication.
+// Phone is stored in plaintext; password is stored as base64-encoded.
+type BTKey struct {
+	// Phone is the BaoTa account phone number (plaintext).
+	Phone string `yaml:"phone" json:"phone"`
+
+	// Password is the BaoTa account password (base64-encoded).
+	Password string `yaml:"password" json:"password"`
+
+	// Prefix optionally namespaces model aliases for this provider.
+	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
+
+	// ProxyURL optionally overrides the global proxy for this configuration.
+	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+
+	// Models defines optional model aliases for this credential.
+	Models []OpenAICompatibilityModel `yaml:"models,omitempty" json:"models,omitempty"`
+
+	// ExcludedModels defines models to exclude from listing.
+	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
+
+	// Priority controls selection preference. Higher values are preferred; defaults to 0.
+	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
+
+	// Headers optionally adds extra HTTP headers for requests sent to this provider.
+	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+}
+
 // KiroFingerprintConfig defines a global fingerprint configuration for Kiro requests.
 // When configured, all Kiro requests will use this fixed fingerprint instead of random generation.
 // Empty fields will fall back to random selection from built-in pools.
@@ -752,6 +783,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Sanitize Kiro keys: trim whitespace from credential fields
 	cfg.SanitizeKiroKeys()
+
+	// Sanitize BT keys: trim whitespace from credential fields
+	cfg.SanitizeBTKeys()
 
 	// Sanitize OpenAI compatibility providers: drop entries without base-url
 	cfg.SanitizeOpenAICompatibility()
@@ -1005,6 +1039,28 @@ func (cfg *Config) SanitizeKiroKeys() {
 		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 		entry.PreferredEndpoint = strings.TrimSpace(entry.PreferredEndpoint)
 	}
+}
+
+// SanitizeBTKeys trims whitespace and validates BT credential fields.
+func (cfg *Config) SanitizeBTKeys() {
+	if cfg == nil || len(cfg.BTKey) == 0 {
+		return
+	}
+	out := make([]BTKey, 0, len(cfg.BTKey))
+	for i := range cfg.BTKey {
+		entry := cfg.BTKey[i]
+		entry.Phone = strings.TrimSpace(entry.Phone)
+		entry.Password = strings.TrimSpace(entry.Password)
+		entry.Prefix = normalizeModelPrefix(entry.Prefix)
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+		entry.Headers = NormalizeHeaders(entry.Headers)
+		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
+		if entry.Phone == "" || entry.Password == "" {
+			continue
+		}
+		out = append(out, entry)
+	}
+	cfg.BTKey = out
 }
 
 // SanitizeGeminiKeys deduplicates and normalizes Gemini credentials.

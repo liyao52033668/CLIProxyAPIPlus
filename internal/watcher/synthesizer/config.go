@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	btauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/bt"
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/diff"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -39,6 +40,8 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 	out = append(out, s.synthesizeOpenAICompat(ctx)...)
 	// Vertex-compat
 	out = append(out, s.synthesizeVertexCompat(ctx)...)
+	// BT (BaoTa)
+	out = append(out, s.synthesizeBTKeys(ctx)...)
 
 	return out, nil
 }
@@ -320,6 +323,80 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*cor
 			UpdatedAt:  now,
 		}
 		ApplyAuthExcludedModelsMeta(a, cfg, compat.ExcludedModels, "apikey")
+		out = append(out, a)
+	}
+	return out
+}
+
+// synthesizeBTKeys creates Auth entries for BaoTa (BT Panel) AI credentials.
+// On first login, credentials are saved to a JSON file in the auth directory.
+// On subsequent loads, credentials are read from the JSON file.
+func (s *ConfigSynthesizer) synthesizeBTKeys(ctx *SynthesisContext) []*coreauth.Auth {
+	cfg := ctx.Config
+	now := ctx.Now
+	idGen := ctx.IDGenerator
+
+	if len(cfg.BTKey) == 0 {
+		return nil
+	}
+
+	out := make([]*coreauth.Auth, 0, len(cfg.BTKey))
+	for i := range cfg.BTKey {
+		entry := &cfg.BTKey[i]
+		phone := strings.TrimSpace(entry.Phone)
+		password := strings.TrimSpace(entry.Password)
+		if phone == "" || password == "" {
+			continue
+		}
+		prefix := strings.TrimSpace(entry.Prefix)
+		proxyURL := strings.TrimSpace(entry.ProxyURL)
+
+		authID := fmt.Sprintf("bt-%s.json", phone)
+		metadata := map[string]any{
+			"type":        "bt",
+			"bt_phone":    phone,
+			"bt_password": password,
+		}
+		var storage *btauth.BTTokenStorage
+
+		token, err := btauth.Login(phone, password)
+		if err != nil {
+			log.Warnf("bt synthesizer: login failed for phone %s: %v", phone, err)
+			continue
+		}
+
+		storage = token
+		metadata["uid"] = token.UID
+		metadata["access_key"] = token.AccessKey
+		metadata["serverid"] = token.ServerID
+
+		_, idToken := idGen.Next("bt:credentials", phone)
+		attrs := map[string]string{
+			"source":   fmt.Sprintf("config:bt[%s]", idToken),
+			"base_url": "https://www.bt.cn/plugin_api/chat/openai/v1",
+		}
+		if entry.Priority != 0 {
+			attrs["priority"] = strconv.Itoa(entry.Priority)
+		}
+		if hash := diff.ComputeOpenAICompatModelsHash(entry.Models); hash != "" {
+			attrs["models_hash"] = hash
+		}
+		addConfigHeadersToAttrs(entry.Headers, attrs)
+		a := &coreauth.Auth{
+			ID:         authID,
+			FileName:   authID,
+			Provider:   "bt",
+			Label:      phone,
+			Prefix:     prefix,
+			Status:     coreauth.StatusActive,
+			Storage:    storage,
+			ProxyURL:   proxyURL,
+			Attributes: attrs,
+			Metadata:   metadata,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		}
+		ApplyAuthExcludedModelsMeta(a, cfg, entry.ExcludedModels, "credentials")
 		out = append(out, a)
 	}
 	return out

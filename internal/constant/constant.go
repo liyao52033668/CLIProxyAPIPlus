@@ -30,4 +30,7 @@ const (
 
 	// Kilo represents the Kilo AI provider identifier.
 	Kilo = "kilo"
+
+	// CodeArts represents the HuaweiCloud CodeArts IDE provider identifier.
+	CodeArts = "codearts"
 )
