@@ -452,6 +452,8 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 		s.coreManager.RegisterExecutor(executor.NewCodeArtsExecutor(s.cfg))
 	case "gitlab":
 		s.coreManager.RegisterExecutor(executor.NewGitLabExecutor(s.cfg))
+	case "bt":
+		s.coreManager.RegisterExecutor(executor.NewBTExecutor(s.cfg))
 	default:
 		providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
 		if providerKey == "" {
@@ -999,6 +1001,17 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		defer cancel()
 		models = executor.FetchCodeBuddyAIModels(ctx, a, s.cfg)
 		models = applyExcludedModels(models, excluded)
+	case "bt":
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		models = executor.FetchBTModels(ctx, a, s.cfg)
+		if entry := s.resolveConfigBTKey(a); entry != nil {
+			if len(entry.Models) > 0 {
+				models = buildBTConfigModels(entry)
+			}
+			excluded = entry.ExcludedModels
+		}
+		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
 		if s.cfg != nil {
@@ -1483,6 +1496,38 @@ func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
 		return nil
 	}
 	return buildConfigModels(entry.Models, "openai", "openai")
+}
+
+func (s *Service) resolveConfigBTKey(auth *coreauth.Auth) *config.BTKey {
+	if auth == nil || s.cfg == nil {
+		return nil
+	}
+	var attrPhone string
+	if auth.Metadata != nil {
+		if v, ok := auth.Metadata["bt_phone"].(string); ok {
+			attrPhone = strings.TrimSpace(v)
+		}
+	}
+	if attrPhone == "" && auth.Attributes != nil {
+		attrPhone = strings.TrimSpace(auth.Attributes["bt_phone"])
+	}
+	if attrPhone == "" {
+		return nil
+	}
+	for i := range s.cfg.BTKey {
+		entry := &s.cfg.BTKey[i]
+		if strings.EqualFold(strings.TrimSpace(entry.Phone), attrPhone) {
+			return entry
+		}
+	}
+	return nil
+}
+
+func buildBTConfigModels(entry *config.BTKey) []*ModelInfo {
+	if entry == nil {
+		return nil
+	}
+	return buildConfigModels(entry.Models, "bt", "bt")
 }
 
 func rewriteModelInfoName(name, oldID, newID string) string {
