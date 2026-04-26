@@ -23,6 +23,9 @@ main:
         - name: sync to github
           image: tencentcom/git-sync
           imports: https://cnb.cool/liyao52033/envs/-/blob/main/github-env.yml
+          script:
+          # 强制推送本地main分支到远程target（GitHub）的main分支，覆盖远程所有历史
+          - git push target main --force
           settings:
             target_url: https://github.com/liyao52033668/CLIProxyAPIPlus.git
             auth_type: https
