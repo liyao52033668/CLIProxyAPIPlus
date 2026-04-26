@@ -22,4 +22,4 @@ If you need to submit any non-third-party provider changes, please open them aga
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the AGPL-3.0 License - see the [LICENSE](LICENSE) file for details.
