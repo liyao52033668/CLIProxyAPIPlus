@@ -23,21 +23,10 @@ main:
         - name: sync to github
           image: tencentcom/git-sync
           imports: https://cnb.cool/liyao52033/envs/-/blob/main/github-env.yml
-          script:
-             # 1. 设置Git用户信息（对应原settings的git_user/git_email）
-            - git config --global user.name "${GIT_USERNAME_NEW}"
-            - git config --global user.email "${GIT_EMAIL_NEW}"
-            
-            # 2. 添加目标远程仓库（对应原settings的target_url/auth_type）
-            # 用HTTPS URL携带认证信息（避免单独配置username/password）
-            - git remote add target https://${GIT_USERNAME_NEW}:${GIT_ACCESS_TOKEN_NEW}@github.com/liyao52033668/CLIProxyAPIPlus.git
-            
-            # 3. 强制覆盖远程main分支（核心需求）
-            - git push target main --force
-          # settings:
-          #   target_url: https://github.com/liyao52033668/CLIProxyAPIPlus.git
-          #   auth_type: https
-          #   git_user: ${GIT_USERNAME_NEW}
-          #   git_email: ${GIT_EMAIL_NEW}
-          #   username: ${GIT_USERNAME_NEW}
-          #   password: ${GIT_ACCESS_TOKEN_NEW}
+          settings:
+            target_url: https://github.com/liyao52033668/CLIProxyAPIPlus.git
+            auth_type: https
+            git_user: ${GIT_USERNAME_NEW}
+            git_email: ${GIT_EMAIL_NEW}
+            username: ${GIT_USERNAME_NEW}
+            password: ${GIT_ACCESS_TOKEN_NEW}
