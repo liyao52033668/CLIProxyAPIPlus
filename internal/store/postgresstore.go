@@ -15,6 +15,7 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -23,6 +24,8 @@ const (
 	defaultConfigTable = "config_store"
 	defaultAuthTable   = "auth_store"
 	defaultConfigKey   = "config"
+	defaultUsageKey    = "usage"
+	defaultUsageTable  = "usage_store"
 )
 
 // PostgresStoreConfig captures configuration required to initialize a Postgres-backed store.
@@ -31,6 +34,7 @@ type PostgresStoreConfig struct {
 	Schema      string
 	ConfigTable string
 	AuthTable   string
+	UsageTable  string
 	SpoolDir    string
 }
 
@@ -52,6 +56,10 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 		return nil, fmt.Errorf("postgres store: DSN is required")
 	}
 	cfg.DSN = trimmedDSN
+	// Add default value for UsageTable
+	if cfg.UsageTable == "" {
+		cfg.UsageTable = defaultUsageTable
+	}
 	if cfg.ConfigTable == "" {
 		cfg.ConfigTable = defaultConfigTable
 	}
@@ -140,21 +148,46 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 	`, authTable)); err != nil {
 		return fmt.Errorf("postgres store: create auth table: %w", err)
 	}
+	if err := s.EnsureUsageTable(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+// EnsureUsageTable creates the usage statistics table if it does not exist.
+func (s *PostgresStore) EnsureUsageTable(ctx context.Context) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("postgres store: not initialized")
+	}
+	usageTable := s.fullTableName(s.usageTable())
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id TEXT PRIMARY KEY,
+			content JSONB NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`, usageTable)); err != nil {
+		return fmt.Errorf("postgres store: create usage table: %w", err)
+	}
 	return nil
 }
 
 // Bootstrap synchronizes configuration and auth records between PostgreSQL and the local workspace.
 func (s *PostgresStore) Bootstrap(ctx context.Context, exampleConfigPath string) error {
-	if err := s.EnsureSchema(ctx); err != nil {
-		return err
-	}
-	if err := s.syncConfigFromDatabase(ctx, exampleConfigPath); err != nil {
-		return err
-	}
-	if err := s.syncAuthFromDatabase(ctx); err != nil {
-		return err
-	}
-	return nil
+		if err := s.EnsureSchema(ctx); err != nil {
+			return err
+		}
+		if err := s.EnsureUsageTable(ctx); err != nil {
+			return err
+		}
+		if err := s.syncConfigFromDatabase(ctx, exampleConfigPath); err != nil {
+			return err
+		}
+		if err := s.syncAuthFromDatabase(ctx); err != nil {
+			return err
+		}
+		return nil
 }
 
 // ConfigPath returns the managed configuration file path inside the spool directory.
@@ -543,6 +576,57 @@ func (s *PostgresStore) deleteConfigRecord(ctx context.Context) error {
 		return fmt.Errorf("postgres store: delete config: %w", err)
 	}
 	return nil
+}
+
+// LoadUsage reads usage statistics from PostgreSQL.
+func (s *PostgresStore) LoadUsage(ctx context.Context) (*usage.StatisticsSnapshot, error) {
+	if s == nil || s.db == nil {
+		return nil, nil
+	}
+	usageTable := s.fullTableName(s.usageTable())
+	query := fmt.Sprintf("SELECT content FROM %s WHERE id = $1", usageTable)
+	var content string
+	err := s.db.QueryRowContext(ctx, query, defaultUsageKey).Scan(&content)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil, nil
+	case err != nil:
+		return nil, fmt.Errorf("postgres store: load usage stats: %w", err)
+	default:
+		var snapshot usage.StatisticsSnapshot
+		if err := json.Unmarshal([]byte(content), &snapshot); err != nil {
+			return nil, fmt.Errorf("postgres store: parse usage stats: %w", err)
+		}
+		return &snapshot, nil
+	}
+}
+
+// SaveUsage upserts usage statistics to PostgreSQL.
+func (s *PostgresStore) SaveUsage(ctx context.Context, snapshot *usage.StatisticsSnapshot) error {
+	if s == nil || s.db == nil || snapshot == nil {
+		return nil
+	}
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		return fmt.Errorf("postgres store: marshal usage stats: %w", err)
+	}
+	query := fmt.Sprintf(`
+		INSERT INTO %s (id, content, created_at, updated_at)
+		VALUES ($1, $2, NOW(), NOW())
+		ON CONFLICT (id)
+		DO UPDATE SET content = EXCLUDED.content, updated_at = NOW()
+	`, s.fullTableName(s.usageTable()))
+	if _, err := s.db.ExecContext(ctx, query, defaultUsageKey, string(data)); err != nil {
+		return fmt.Errorf("postgres store: upsert usage stats: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) usageTable() string {
+	if t := strings.TrimSpace(s.cfg.UsageTable); t != "" {
+		return t
+	}
+	return defaultUsageTable
 }
 
 func (s *PostgresStore) resolveAuthPath(auth *cliproxyauth.Auth) (string, error) {

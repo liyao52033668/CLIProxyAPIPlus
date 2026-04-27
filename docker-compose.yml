@@ -8,8 +8,8 @@ services:
         COMMIT: ${COMMIT:-none}
         BUILD_DATE: ${BUILD_DATE:-unknown}
     container_name: cli-proxy-api-plus
-    # env_file:
-    #   - .env
+    env_file:
+      - .env
     environment:
       DEPLOY: ${DEPLOY:-}
     ports:
@@ -23,4 +23,5 @@ services:
       - ${CLI_PROXY_CONFIG_PATH:-./config.yaml}:/CLIProxyAPI/config.yaml
       - ${CLI_PROXY_AUTH_PATH:-./auths}:/root/.cli-proxy-api
       - ${CLI_PROXY_LOG_PATH:-./logs}:/CLIProxyAPI/logs
+      - ./data:/CLIProxyAPI/data
     restart: unless-stopped

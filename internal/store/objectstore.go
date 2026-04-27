@@ -18,6 +18,7 @@ import (
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -25,6 +26,7 @@ import (
 const (
 	objectStoreConfigKey  = "config/config.yaml"
 	objectStoreAuthPrefix = "auths"
+	objectStoreUsageKey   = "usage-stats.json"
 )
 
 // ObjectStoreConfig captures configuration for the object storage-backed token store.
@@ -322,6 +324,53 @@ func (s *ObjectTokenStore) PersistConfig(ctx context.Context) error {
 		return s.deleteObject(ctx, objectStoreConfigKey)
 	}
 	return s.putObject(ctx, objectStoreConfigKey, data, "application/x-yaml")
+}
+
+// LoadUsage downloads usage statistics from object storage.
+func (s *ObjectTokenStore) LoadUsage(ctx context.Context) (*usage.StatisticsSnapshot, error) {
+	if s == nil || s.client == nil {
+		return nil, nil
+	}
+	key := s.prefixedKey(objectStoreUsageKey)
+	// Check if object exists first
+	_, err := s.client.StatObject(ctx, s.cfg.Bucket, key, minio.StatObjectOptions{})
+	if err != nil {
+		if isObjectNotFound(err) {
+			// Create empty usage statistics if not exists
+			emptySnapshot := &usage.StatisticsSnapshot{}
+			if err := s.SaveUsage(ctx, emptySnapshot); err != nil {
+				return nil, fmt.Errorf("object store: create initial usage stats: %w", err)
+			}
+			return emptySnapshot, nil
+		}
+		return nil, fmt.Errorf("object store: check usage stats exists: %w", err)
+	}
+	object, err := s.client.GetObject(ctx, s.cfg.Bucket, key, minio.GetObjectOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("object store: fetch usage stats: %w", err)
+	}
+	defer object.Close()
+	data, err := io.ReadAll(object)
+	if err != nil {
+		return nil, fmt.Errorf("object store: read usage stats: %w", err)
+	}
+	var snapshot usage.StatisticsSnapshot
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		return nil, fmt.Errorf("object store: parse usage stats: %w", err)
+	}
+	return &snapshot, nil
+}
+
+// SaveUsage uploads usage statistics to object storage.
+func (s *ObjectTokenStore) SaveUsage(ctx context.Context, snapshot *usage.StatisticsSnapshot) error {
+	if s == nil || s.client == nil || snapshot == nil {
+		return nil
+	}
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		return fmt.Errorf("object store: marshal usage stats: %w", err)
+	}
+	return s.putObject(ctx, objectStoreUsageKey, data, "application/json")
 }
 
 func (s *ObjectTokenStore) ensureBucket(ctx context.Context) error {

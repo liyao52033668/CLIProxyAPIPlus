@@ -313,9 +313,32 @@ func resolveReleaseURL(repo string) string {
 
 	host := strings.ToLower(parsed.Host)
 	parsed.Path = strings.TrimSuffix(parsed.Path, "/")
+	pathLower := strings.ToLower(parsed.Path)
 
 	if host == "api.github.com" {
-		if !strings.HasSuffix(strings.ToLower(parsed.Path), "/releases/latest") {
+		if strings.Contains(pathLower, "/releases/tag/") {
+			tagParts := strings.Split(pathLower, "/releases/tag/")
+			if len(tagParts) >= 2 && tagParts[1] != "" {
+				tag := strings.Trim(tagParts[1], "/")
+				parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+				// URL 格式可能是 /{owner}/{repo}/releases/tags/{tag}
+				// 或 /repos/{owner}/{repo}/releases/tags/{tag}
+				var owner, repoName string
+				if len(parts) >= 5 && parts[0] == "repos" {
+					owner = parts[1]
+					repoName = parts[2]
+				} else if len(parts) >= 3 {
+					owner = parts[0]
+					repoName = parts[1]
+				}
+				if owner != "" && repoName != "" {
+					result := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/tags/%s", owner, repoName, tag)
+					log.Debugf("Resolved release URL: %s", result)
+					return result
+				}
+			}
+		}
+		if !strings.Contains(pathLower, "/releases/") {
 			parsed.Path = parsed.Path + "/releases/latest"
 		}
 		return parsed.String()
@@ -365,8 +388,9 @@ func fetchLatestAsset(ctx context.Context, client *http.Client, releaseURL strin
 	if err = json.NewDecoder(resp.Body).Decode(&release); err != nil {
 		return nil, "", fmt.Errorf("decode release response: %w", err)
 	}
-
+	log.Debugf("Fetched release with %d assets", len(release.Assets))
 	for i := range release.Assets {
+		log.Debugf("Asset %d: name=%s, url=%s", i, release.Assets[i].Name, release.Assets[i].BrowserDownloadURL)
 		asset := &release.Assets[i]
 		if strings.EqualFold(asset.Name, managementAssetName) {
 			remoteHash := parseDigest(asset.Digest)
@@ -381,6 +405,7 @@ func downloadAsset(ctx context.Context, client *http.Client, downloadURL string)
 	if strings.TrimSpace(downloadURL) == "" {
 		return nil, "", fmt.Errorf("empty download url")
 	}
+	log.Debugf("Downloading asset from: %s", downloadURL)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
 	if err != nil {
@@ -398,6 +423,7 @@ func downloadAsset(ctx context.Context, client *http.Client, downloadURL string)
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		log.Debugf("Download failed: status=%d, body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
 		return nil, "", fmt.Errorf("unexpected download status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
@@ -410,6 +436,7 @@ func downloadAsset(ctx context.Context, client *http.Client, downloadURL string)
 	}
 
 	sum := sha256.Sum256(data)
+	log.Debugf("Download successful: size=%d, hash=%s", len(data), hex.EncodeToString(sum[:]))
 	return data, hex.EncodeToString(sum[:]), nil
 }
 
