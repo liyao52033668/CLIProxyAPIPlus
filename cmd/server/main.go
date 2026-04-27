@@ -512,8 +512,8 @@ func main() {
 			configFileExists = true
 		}
 	}
-	usage.SetStatisticsEnabled(cfg.UsageStatisticsEnabled)
 	if cfg.UsageStatisticsEnabled {
+		usage.SetStatisticsEnabled(cfg.UsageStatisticsEnabled)
 		var persister usage.UsagePersister
 		switch {
 		case usePostgresStore && pgStoreInst != nil:
