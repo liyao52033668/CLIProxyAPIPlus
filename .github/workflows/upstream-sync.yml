@@ -15,9 +15,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  BASE_BRANCH: main
-  UPSTREAM_REPO: router-for-me/CLIProxyAPI
-  UPSTREAM_BRANCH: main
+  BASE_BRANCH: dev
+  UPSTREAM_REPO: Ve-ria/CLIProxyAPIPlus
+  UPSTREAM_BRANCH: dev
   MIRROR_BRANCH: mirror/upstream-main
   SYNC_BRANCH: sync/upstream-main
   PR_LABEL: upstream-sync
