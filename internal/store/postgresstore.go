@@ -175,19 +175,19 @@ func (s *PostgresStore) EnsureUsageTable(ctx context.Context) error {
 
 // Bootstrap synchronizes configuration and auth records between PostgreSQL and the local workspace.
 func (s *PostgresStore) Bootstrap(ctx context.Context, exampleConfigPath string) error {
-		if err := s.EnsureSchema(ctx); err != nil {
-			return err
-		}
-		if err := s.EnsureUsageTable(ctx); err != nil {
-			return err
-		}
-		if err := s.syncConfigFromDatabase(ctx, exampleConfigPath); err != nil {
-			return err
-		}
-		if err := s.syncAuthFromDatabase(ctx); err != nil {
-			return err
-		}
-		return nil
+	if err := s.EnsureSchema(ctx); err != nil {
+		return err
+	}
+	if err := s.EnsureUsageTable(ctx); err != nil {
+		return err
+	}
+	if err := s.syncConfigFromDatabase(ctx, exampleConfigPath); err != nil {
+		return err
+	}
+	if err := s.syncAuthFromDatabase(ctx); err != nil {
+		return err
+	}
+	return nil
 }
 
 // ConfigPath returns the managed configuration file path inside the spool directory.
