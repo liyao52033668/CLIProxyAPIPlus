@@ -1,6 +1,6 @@
 services:
   cli-proxy-api:
-    image: ${CLI_PROXY_IMAGE:-eceasy/cli-proxy-api-plus:latest}
+    image: rensumo/cli-proxy-api-plus:latest
     pull_policy: always
     build:
       context: .
