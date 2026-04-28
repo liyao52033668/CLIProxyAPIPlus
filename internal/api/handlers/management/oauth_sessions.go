@@ -165,9 +165,7 @@ func (s *oauthSessionStore) IsPending(state, provider string) bool {
 		return false
 	}
 	if session.Status != "" {
-		if !strings.EqualFold(session.Provider, "kiro") {
-			return false
-		}
+		// Allow special status prefixes for polling-based auth flows
 		if !strings.HasPrefix(session.Status, "device_code|") && !strings.HasPrefix(session.Status, "auth_url|") {
 			return false
 		}

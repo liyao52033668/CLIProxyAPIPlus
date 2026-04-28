@@ -45,12 +45,12 @@ type AuthSuccessCallback func(stateID string)
 
 // OAuthWebHandler handles CodeArts OAuth web login flow.
 type OAuthWebHandler struct {
-	cfg                *config.Config
-	sessions           map[string]*webSession
+	cfg      *config.Config
+	sessions map[string]*webSession
 	// Map ticket_id -> stateID for callback lookup
-	ticketToState      map[string]string
-	mu                 sync.RWMutex
-	auth               *CodeArtsAuth
+	ticketToState       map[string]string
+	mu                  sync.RWMutex
+	auth                *CodeArtsAuth
 	authSuccessCallback AuthSuccessCallback
 }
 

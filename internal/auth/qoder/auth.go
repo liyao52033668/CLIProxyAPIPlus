@@ -76,6 +76,20 @@ func BuildAuthURLWithRedirect(nonce, challenge, machineID, redirectURI string) s
 	return AuthBase + SelectAccountsPath + "?" + params.Encode()
 }
 
+// BuildAuthURLWithRedirectAndState constructs the Qoder login URL with a custom redirect URI and state.
+func BuildAuthURLWithRedirectAndState(nonce, challenge, machineID, redirectURI, state string) string {
+	params := url.Values{}
+	params.Set("nonce", nonce)
+	params.Set("challenge", challenge)
+	params.Set("challenge_method", "S256")
+	params.Set("redirect_uri", redirectURI)
+	params.Set("machine_id", machineID)
+	if state != "" {
+		params.Set("state", state)
+	}
+	return AuthBase + SelectAccountsPath + "?" + params.Encode()
+}
+
 // FetchUserStatus retrieves user info using a device token.
 func (o *QoderAuth) FetchUserStatus(deviceToken string) (*UserStatusResponse, error) {
 	deviceToken = strings.TrimSpace(deviceToken)
