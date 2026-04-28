@@ -7,6 +7,7 @@ package api
 import (
 	"context"
 	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -24,6 +25,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/middleware"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules"
 	ampmodule "github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules/amp"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codearts"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -309,6 +311,11 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	kiroOAuthHandler.RegisterRoutes(engine)
 	log.Info("Kiro OAuth Web routes registered at /v0/oauth/kiro/*")
 
+	// === CLIProxyAPIPlus 扩展: 注册 CodeArts OAuth Web 路由 ===
+	codeArtsOAuthHandler := codearts.NewOAuthWebHandler(cfg)
+	codeArtsOAuthHandler.RegisterRoutes(engine)
+	log.Info("CodeArts OAuth Web routes registered at /v0/oauth/codearts/*")
+
 	if optionState.keepAliveEnabled {
 		s.enableKeepAlive(optionState.keepAliveTimeout, optionState.keepAliveOnTimeout)
 	}
@@ -460,6 +467,32 @@ func (s *Server) setupRoutes() {
 		}
 		if state != "" {
 			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "kiro", state, code, errStr)
+		}
+		c.Header("Content-Type", "text/html; charset=utf-8")
+		c.String(http.StatusOK, oauthCallbackSuccessHTML)
+	})
+
+	s.engine.GET("/qoder/callback", func(c *gin.Context) {
+		state := c.Query("state")
+		token := c.Query("tokenString")
+		if token == "" {
+			token = c.Query("token")
+		}
+		authField := c.Query("auth")
+		errStr := c.Query("error")
+		if state != "" && (token != "" || errStr != "") {
+			// Write token/auth into the callback file for the pending session
+			payload := map[string]string{
+				"token": token,
+				"auth":  authField,
+				"state": state,
+				"error": errStr,
+			}
+			payloadJSON, _ := json.Marshal(payload)
+			if managementHandlers.IsOAuthSessionPending(state, "qoder") {
+				waitFile := filepath.Join(s.cfg.AuthDir, fmt.Sprintf(".oauth-qoder-%s.oauth", state))
+				_ = os.WriteFile(waitFile, payloadJSON, 0o600)
+			}
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
@@ -677,6 +710,7 @@ func (s *Server) registerManagementRoutes() {
 			mgmt.GET("/kiro-auth-url", s.mgmt.RequestKiroToken)
 			mgmt.GET("/cursor-auth-url", s.mgmt.RequestCursorToken)
 			mgmt.GET("/github-auth-url", s.mgmt.RequestGitHubToken)
+			mgmt.GET("/qoder-auth-url", s.mgmt.RequestQoderToken)
 			mgmt.POST("/oauth-callback", s.mgmt.PostOAuthCallback)
 			mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
 		}

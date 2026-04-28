@@ -231,6 +231,20 @@ nonstream-keepalive-interval: 0
 #   user-agent: "codex_cli_rs/0.114.0 (Mac OS 14.2.0; x86_64) vscode/1.111.0"
 #   beta-features: "multi_agent"
 
+# BaoTa (BT Panel) AI configuration
+# Phone is stored in plaintext; password is stored as base64-encoded.
+# Use: ./server --bt-login  (reads credentials from config and saves JSON to auth directory)
+#bt:
+#  - phone: "13800138000"
+#    password: "base64-encoded-password"
+#    prefix: ""                # optional: namespace model aliases
+#    proxy-url: ""             # optional: per-key proxy override
+#    models:                   # optional: model aliases
+#      - name: "qwen3.6-plus"  # upstream model name
+#        alias: "qwen"         # client-visible alias
+#    excluded-models: []       # optional: models to exclude
+#    priority: 0               # optional: selection priority (higher preferred)
+
 # Kiro (AWS CodeWhisperer) configuration
 # Note: Kiro API currently only operates in us-east-1 region
 #kiro:
@@ -250,13 +264,6 @@ nonstream-keepalive-interval: 0
 # oauth-model-alias:
 #   kilo:
 #     - name: "minimax/minimax-m2.5:free"
-#       alias: "minimax-m2.5"
-#     - name: "z-ai/glm-5:free"
-#       alias: "glm-5"
-# oauth-excluded-models:
-#   kilo:
-#     - "kilo-claude-opus-4-6"  # exclude specific models (exact match)
-#     - "*:free"                # wildcard matching suffix (e.g. all free models)
 
 # OpenAI compatibility providers
 # openai-compatibility:

@@ -76,6 +76,112 @@ func GetAntigravityModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Antigravity)
 }
 
+// GetQoderModels returns the available models for the Qoder provider.
+func GetQoderModels() []*ModelInfo {
+	now := int64(1748044800) // 2025-05-24
+	return []*ModelInfo{
+		{
+			ID:          "auto",
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     "qoder",
+			Type:        "qoder",
+			DisplayName: "Auto",
+			Description: "Automatic model selection",
+		},
+		{
+			ID:          "ultimate",
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     "qoder",
+			Type:        "qoder",
+			DisplayName: "Ultimate",
+			Description: "Qoder Ultimate tier model",
+		},
+		{
+			ID:          "performance",
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     "qoder",
+			Type:        "qoder",
+			DisplayName: "Performance",
+			Description: "Qoder Performance tier model",
+		},
+		{
+			ID:          "efficient",
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     "qoder",
+			Type:        "qoder",
+			DisplayName: "Efficient",
+			Description: "Qoder Efficient tier model",
+		},
+		{
+			ID:          "lite",
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     "qoder",
+			Type:        "qoder",
+			DisplayName: "Lite",
+			Description: "Qoder Lite tier model",
+		},
+		{
+			ID:          "qmodel",
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     "qoder",
+			Type:        "qoder",
+			DisplayName: "Qwen3.6-Plus",
+			Description: "Qwen 3.6 Plus via Qoder",
+		},
+		{
+			ID:          "dmodel",
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     "qoder",
+			Type:        "qoder",
+			DisplayName: "DeepSeek-V4-Pro",
+			Description: "DeepSeek V4 Pro via Qoder",
+		},
+		{
+			ID:          "dfmodel",
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     "qoder",
+			Type:        "qoder",
+			DisplayName: "DeepSeek-V4-Flash",
+			Description: "DeepSeek V4 Flash via Qoder",
+		},
+		{
+			ID:          "gm51model",
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     "qoder",
+			Type:        "qoder",
+			DisplayName: "GLM-5.1",
+			Description: "GLM 5.1 via Qoder",
+		},
+		{
+			ID:          "kmodel",
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     "qoder",
+			Type:        "qoder",
+			DisplayName: "Kimi-K2.6",
+			Description: "Kimi K2.6 via Qoder",
+		},
+		{
+			ID:          "mmodel",
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     "qoder",
+			Type:        "qoder",
+			DisplayName: "MiniMax-M2.7",
+			Description: "MiniMax M2.7 via Qoder",
+		},
+	}
+}
+
 // GetCodeBuddyModels returns the available models for CodeBuddy (Tencent).
 // These models are served through the copilot.tencent.com API.
 func GetCodeBuddyModels() []*ModelInfo {
@@ -130,38 +236,14 @@ func GetCodeBuddyModels() []*ModelInfo {
 			SupportedEndpoints:  []string{"/chat/completions"},
 		},
 		{
-			ID:                  "glm-5.0",
+			ID:                  "kimi-k2.6",
 			Object:              "model",
 			Created:             now,
 			OwnedBy:             "tencent",
 			Type:                "codebuddy",
-			DisplayName:         "GLM-5.0",
-			Description:         "GLM-5.0 via CodeBuddy",
-			ContextLength:       200000,
-			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/chat/completions"},
-		},
-		{
-			ID:                  "glm-4.7",
-			Object:              "model",
-			Created:             now,
-			OwnedBy:             "tencent",
-			Type:                "codebuddy",
-			DisplayName:         "GLM-4.7",
-			Description:         "GLM-4.7 via CodeBuddy",
-			ContextLength:       200000,
-			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/chat/completions"},
-		},
-		{
-			ID:                  "minimax-m2.7",
-			Object:              "model",
-			Created:             now,
-			OwnedBy:             "tencent",
-			Type:                "codebuddy",
-			DisplayName:         "MiniMax M2.7",
-			Description:         "MiniMax M2.7 via CodeBuddy",
-			ContextLength:       200000,
+			DisplayName:         "Kimi K2.6",
+			Description:         "Kimi K2.6 via CodeBuddy",
+			ContextLength:       256000,
 			MaxCompletionTokens: 32768,
 			SupportedEndpoints:  []string{"/chat/completions"},
 		},
@@ -178,16 +260,15 @@ func GetCodeBuddyModels() []*ModelInfo {
 			SupportedEndpoints:  []string{"/chat/completions"},
 		},
 		{
-			ID:                  "kimi-k2-thinking",
+			ID:                  "minimax-m2.7",
 			Object:              "model",
 			Created:             now,
 			OwnedBy:             "tencent",
 			Type:                "codebuddy",
-			DisplayName:         "Kimi K2 Thinking",
-			Description:         "Kimi K2 Thinking via CodeBuddy",
-			ContextLength:       256000,
+			DisplayName:         "MiniMax M2.7",
+			Description:         "MiniMax M2.7 via CodeBuddy",
+			ContextLength:       200000,
 			MaxCompletionTokens: 32768,
-			Thinking:            &ThinkingSupport{ZeroAllowed: true},
 			SupportedEndpoints:  []string{"/chat/completions"},
 		},
 		{
@@ -213,6 +294,16 @@ func GetCodeBuddyAIModels() []*ModelInfo {
 			ID: "default-model", Object: "model", Created: now, OwnedBy: "codebuddy-ai",
 			Type: "codebuddy-ai", DisplayName: "Default Model", Description: "Default model via CodeBuddy AI",
 			ContextLength: 128000, MaxCompletionTokens: 32768, SupportedEndpoints: []string{"/chat/completions"},
+		},
+		{
+			ID: "glm-5v-turbo", Object: "model", Created: now, OwnedBy: "codebuddy-ai",
+			Type: "codebuddy-ai", DisplayName: "GLM-5v Turbo", Description: "GLM-5v Turbo via CodeBuddy AI",
+			ContextLength: 200000, MaxCompletionTokens: 32768, SupportedEndpoints: []string{"/chat/completions"},
+		},
+		{
+			ID: "kimi-k2.5", Object: "model", Created: now, OwnedBy: "codebuddy-ai",
+			Type: "codebuddy-ai", DisplayName: "Kimi-K2.5", Description: "Kimi K2.5 via CodeBuddy AI",
+			ContextLength: 256000, MaxCompletionTokens: 32768, SupportedEndpoints: []string{"/chat/completions"},
 		},
 		{
 			ID: "gpt-5.4", Object: "model", Created: now, OwnedBy: "codebuddy-ai",
@@ -255,11 +346,6 @@ func GetCodeBuddyAIModels() []*ModelInfo {
 			ContextLength: 200000, MaxCompletionTokens: 32768, SupportedEndpoints: []string{"/chat/completions"},
 		},
 		{
-			ID: "kimi-k2.5", Object: "model", Created: now, OwnedBy: "codebuddy-ai",
-			Type: "codebuddy-ai", DisplayName: "Kimi-K2.5", Description: "Kimi K2.5 via CodeBuddy AI",
-			ContextLength: 256000, MaxCompletionTokens: 32768, SupportedEndpoints: []string{"/chat/completions"},
-		},
-		{
 			ID: "deepseek-v3.2", Object: "model", Created: now, OwnedBy: "codebuddy-ai",
 			Type: "codebuddy-ai", DisplayName: "DeepSeek-V3.2", Description: "DeepSeek V3.2 via CodeBuddy AI",
 			ContextLength: 128000, MaxCompletionTokens: 32768, SupportedEndpoints: []string{"/chat/completions"},
@@ -299,6 +385,7 @@ func cloneModelInfos(models []*ModelInfo) []*ModelInfo {
 //   - github-copilot
 //   - amazonq
 //   - antigravity (returns static overrides only)
+//   - bt (BaoTa Panel; dynamically fetched with static fallbacks)
 func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 	key := strings.ToLower(strings.TrimSpace(channel))
 	switch key {
@@ -326,6 +413,10 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetAmazonQModels()
 	case "antigravity":
 		return GetAntigravityModels()
+	case "qoder":
+		return GetQoderModels()
+	case "bt":
+		return GetBTModels()
 	case "codebuddy":
 		return GetCodeBuddyModels()
 	case "codebuddy-ai":
@@ -334,6 +425,47 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetCursorModels()
 	default:
 		return nil
+	}
+}
+
+// GetBTModels returns the BaoTa (BT Panel) model definitions.
+// Models are dynamically fetched at runtime via FetchBTModels; these static
+// entries provide fallback metadata for model listing and alias configuration.
+func GetBTModels() []*ModelInfo {
+	now := int64(1745548800) // 2025-04-25
+	return []*ModelInfo{
+		{ID: "ernie-4.5-21b-a3b-thinking", Object: "model", Created: now, OwnedBy: "bt", Type: "bt", DisplayName: "ERNIE 4.5 21B A3B Thinking", Description: "Baidu ERNIE 4.5 thinking model via BaoTa", ContextLength: 128000, MaxCompletionTokens: 8192, Thinking: &ThinkingSupport{Levels: []string{"low", "medium", "high"}}},
+		{ID: "ernie-x1-turbo-32k-preview", Object: "model", Created: now, OwnedBy: "bt", Type: "bt", DisplayName: "ERNIE X1 Turbo 32K Preview", Description: "Baidu ERNIE X1 Turbo via BaoTa", ContextLength: 32768, MaxCompletionTokens: 8192},
+		{ID: "ernie-x1.1", Object: "model", Created: now, OwnedBy: "bt", Type: "bt", DisplayName: "ERNIE X1.1", Description: "Baidu ERNIE X1.1 via BaoTa", ContextLength: 128000, MaxCompletionTokens: 8192},
+		{ID: "ernie-5.0", Object: "model", Created: now, OwnedBy: "bt", Type: "bt", DisplayName: "ERNIE 5.0", Description: "Baidu ERNIE 5.0 via BaoTa", ContextLength: 128000, MaxCompletionTokens: 16384},
+		{ID: "ernie-5.0-thinking-preview", Object: "model", Created: now, OwnedBy: "bt", Type: "bt", DisplayName: "ERNIE 5.0 Thinking Preview", Description: "Baidu ERNIE 5.0 thinking model via BaoTa", ContextLength: 128000, MaxCompletionTokens: 16384, Thinking: &ThinkingSupport{Levels: []string{"low", "medium", "high"}}},
+		{ID: "hunyuan-2.0-instruct-20251111", Object: "model", Created: now, OwnedBy: "bt", Type: "bt", DisplayName: "Hunyuan 2.0 Instruct", Description: "Tencent Hunyuan 2.0 Instruct via BaoTa", ContextLength: 128000, MaxCompletionTokens: 8192},
+		{ID: "hunyuan-2.0-thinking-20251109", Object: "model", Created: now, OwnedBy: "bt", Type: "bt", DisplayName: "Hunyuan 2.0 Thinking", Description: "Tencent Hunyuan 2.0 thinking model via BaoTa", ContextLength: 128000, MaxCompletionTokens: 8192, Thinking: &ThinkingSupport{Levels: []string{"low", "medium", "high"}}},
+		{ID: "deepseek-r1-250528", Object: "model", Created: now, OwnedBy: "bt", Type: "bt", DisplayName: "DeepSeek R1 250528", Description: "DeepSeek R1 via BaoTa", ContextLength: 128000, MaxCompletionTokens: 16384, Thinking: &ThinkingSupport{Levels: []string{"low", "medium", "high"}}},
+		{ID: "deepseek-v3-2-251201", Object: "model", Created: now, OwnedBy: "bt", Type: "bt", DisplayName: "DeepSeek V3.2 251201", Description: "DeepSeek V3.2 via BaoTa", ContextLength: 128000, MaxCompletionTokens: 8192},
+		{ID: "glm-4-7-251222", Object: "model", Created: now, OwnedBy: "bt", Type: "bt", DisplayName: "GLM-4.7 251222", Description: "Zhipu GLM-4.7 via BaoTa", ContextLength: 128000, MaxCompletionTokens: 8192},
+		{ID: "doubao-seed-2-0-code-preview-260215", Object: "model", Created: now, OwnedBy: "bt", Type: "bt", DisplayName: "Doubao Seed 2.0 Code Preview", Description: "ByteDance Doubao Seed 2.0 Code via BaoTa", ContextLength: 128000, MaxCompletionTokens: 16384},
+		{ID: "doubao-seed-2-0-mini-260215", Object: "model", Created: now, OwnedBy: "bt", Type: "bt", DisplayName: "Doubao Seed 2.0 Mini", Description: "ByteDance Doubao Seed 2.0 Mini via BaoTa", ContextLength: 128000, MaxCompletionTokens: 8192},
+		{ID: "doubao-seed-2-0-lite-260215", Object: "model", Created: now, OwnedBy: "bt", Type: "bt", DisplayName: "Doubao Seed 2.0 Lite", Description: "ByteDance Doubao Seed 2.0 Lite via BaoTa", ContextLength: 128000, MaxCompletionTokens: 8192},
+		{ID: "doubao-seed-2-0-pro-260215", Object: "model", Created: now, OwnedBy: "bt", Type: "bt", DisplayName: "Doubao Seed 2.0 Pro", Description: "ByteDance Doubao Seed 2.0 Pro via BaoTa", ContextLength: 128000, MaxCompletionTokens: 16384},
+		{ID: "text-embedding-v4", Object: "model", Created: now, OwnedBy: "bt", Type: "bt", DisplayName: "Text Embedding V4", Description: "Baidu Text Embedding V4 via BaoTa"},
+		{ID: "kimi-k2.5", Object: "model", Created: now, OwnedBy: "bt", Type: "bt", DisplayName: "Kimi K2.5", Description: "Moonshot Kimi K2.5 via BaoTa", ContextLength: 128000, MaxCompletionTokens: 16384},
+		{ID: "deepseek-v3.2", Object: "model", Created: now, OwnedBy: "bt", Type: "bt", DisplayName: "DeepSeek V3.2", Description: "DeepSeek V3.2 via BaoTa", ContextLength: 128000, MaxCompletionTokens: 8192},
+		{ID: "qwen-max-2025-01-25", Object: "model", Created: now, OwnedBy: "bt", Type: "bt", DisplayName: "Qwen Max 2025-01-25", Description: "Alibaba Qwen Max via BaoTa", ContextLength: 128000, MaxCompletionTokens: 8192},
+		{ID: "glm-5", Object: "model", Created: now, OwnedBy: "bt", Type: "bt", DisplayName: "GLM-5", Description: "Zhipu GLM-5 via BaoTa", ContextLength: 128000, MaxCompletionTokens: 16384},
+		{ID: "qwen-flash", Object: "model", Created: now, OwnedBy: "bt", Type: "bt", DisplayName: "Qwen Flash", Description: "Alibaba Qwen Flash via BaoTa", ContextLength: 128000, MaxCompletionTokens: 8192},
+		{ID: "qwen-plus", Object: "model", Created: now, OwnedBy: "bt", Type: "bt", DisplayName: "Qwen Plus", Description: "Alibaba Qwen Plus via BaoTa", ContextLength: 128000, MaxCompletionTokens: 8192},
+		{ID: "doubao-seed-1-8-251228", Object: "model", Created: now, OwnedBy: "bt", Type: "bt", DisplayName: "Doubao Seed 1.8 251228", Description: "ByteDance Doubao Seed 1.8 via BaoTa", ContextLength: 128000, MaxCompletionTokens: 8192},
+		{ID: "qwen-plus-2025-12-01", Object: "model", Created: now, OwnedBy: "bt", Type: "bt", DisplayName: "Qwen Plus 2025-12-01", Description: "Alibaba Qwen Plus via BaoTa", ContextLength: 128000, MaxCompletionTokens: 8192},
+		{ID: "deepseek-v4-flash", Object: "model", Created: now, OwnedBy: "bt", Type: "bt", DisplayName: "DeepSeek V4 Flash", Description: "DeepSeek V4 Flash via BaoTa", ContextLength: 1000000, MaxCompletionTokens: 384000},
+		{ID: "deepseek-v4-pro", Object: "model", Created: now, OwnedBy: "bt", Type: "bt", DisplayName: "DeepSeek V4 Pro", Description: "DeepSeek V4 Pro via BaoTa", ContextLength: 1000000, MaxCompletionTokens: 384000},
+		{ID: "qwen3.5-plus", Object: "model", Created: now, OwnedBy: "bt", Type: "bt", DisplayName: "Qwen3.5 Plus", Description: "Alibaba Qwen3.5 Plus via BaoTa", ContextLength: 128000, MaxCompletionTokens: 8192},
+		{ID: "qwen3.5-flash", Object: "model", Created: now, OwnedBy: "bt", Type: "bt", DisplayName: "Qwen3.5 Flash", Description: "Alibaba Qwen3.5 Flash via BaoTa", ContextLength: 128000, MaxCompletionTokens: 8192},
+		{ID: "qwen3-coder-flash", Object: "model", Created: now, OwnedBy: "bt", Type: "bt", DisplayName: "Qwen3 Coder Flash", Description: "Alibaba Qwen3 Coder Flash via BaoTa", ContextLength: 128000, MaxCompletionTokens: 8192},
+		{ID: "qwen3-coder-plus", Object: "model", Created: now, OwnedBy: "bt", Type: "bt", DisplayName: "Qwen3 Coder Plus", Description: "Alibaba Qwen3 Coder Plus via BaoTa", ContextLength: 128000, MaxCompletionTokens: 16384},
+		{ID: "qwen3.6-plus", Object: "model", Created: now, OwnedBy: "bt", Type: "bt", DisplayName: "Qwen3.6 Plus", Description: "Alibaba Qwen3.6 Plus via BaoTa", ContextLength: 128000, MaxCompletionTokens: 8192},
+		{ID: "qwen3-max", Object: "model", Created: now, OwnedBy: "bt", Type: "bt", DisplayName: "Qwen3 Max", Description: "Alibaba Qwen3 Max via BaoTa", ContextLength: 128000, MaxCompletionTokens: 8192},
+		{ID: "qwen3-max-2026-01-23", Object: "model", Created: now, OwnedBy: "bt", Type: "bt", DisplayName: "Qwen3 Max 2026-01-23", Description: "Alibaba Qwen3 Max via BaoTa", ContextLength: 128000, MaxCompletionTokens: 8192},
 	}
 }
 
@@ -366,6 +498,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.CodexPro,
 		data.Kimi,
 		data.Antigravity,
+		GetQoderModels(),
 		GetGitHubCopilotModels(),
 		GetKiroModels(),
 		GetKiloModels(),
