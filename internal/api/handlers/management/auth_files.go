@@ -36,6 +36,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kilo"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kimi"
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
+	qoderauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/qoder"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
@@ -3825,3 +3826,171 @@ func (h *Handler) RequestCursorToken(c *gin.Context) {
 		"state":  state,
 	})
 }
+
+func (h *Handler) RequestQoderToken(c *gin.Context) {
+	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
+
+	fmt.Println("Initializing Qoder authentication...")
+
+	nonce, challenge, verifier, errPKCE := qoderauth.GeneratePKCE()
+	if errPKCE != nil {
+		log.Errorf("Failed to generate PKCE parameters: %v", errPKCE)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate PKCE parameters"})
+		return
+	}
+
+	machineID := qoderauth.GenerateMachineID("cliproxy", "00:00:00:00:00:00", "server", "x86_64")
+	authURL := qoderauth.BuildAuthURL(nonce, challenge, machineID)
+
+	state, errState := misc.GenerateRandomState()
+	if errState != nil {
+		log.Errorf("Failed to generate state parameter: %v", errState)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate state parameter"})
+		return
+	}
+
+	RegisterOAuthSession(state, "qoder")
+
+	isWebUI := isWebUIRequest(c)
+	var forwarder *callbackForwarder
+	if isWebUI {
+		targetURL, errTarget := h.managementCallbackURL("/qoder/callback")
+		if errTarget != nil {
+			log.WithError(errTarget).Error("failed to compute qoder callback target")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "callback server unavailable"})
+			return
+		}
+		var errStart error
+		if forwarder, errStart = startCallbackForwarder(qoderauth.CallbackPort, "qoder", targetURL); errStart != nil {
+			log.WithError(errStart).Error("failed to start qoder callback forwarder")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
+			return
+		}
+	}
+
+	go func() {
+		if isWebUI {
+			defer stopCallbackForwarderInstance(qoderauth.CallbackPort, forwarder)
+		}
+
+		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-qoder-%s.oauth", state))
+		deadline := time.Now().Add(5 * time.Minute)
+		var tokenString, authField string
+		for {
+			if !IsOAuthSessionPending(state, "qoder") {
+				return
+			}
+			if time.Now().After(deadline) {
+				log.Error("oauth flow timed out")
+				SetOAuthSessionError(state, "OAuth flow timed out")
+				return
+			}
+			if data, errReadFile := os.ReadFile(waitFile); errReadFile == nil {
+				var payload map[string]string
+				_ = json.Unmarshal(data, &payload)
+				_ = os.Remove(waitFile)
+				if errStr := strings.TrimSpace(payload["error"]); errStr != "" {
+					log.Errorf("Authentication failed: %s", errStr)
+					SetOAuthSessionError(state, "Authentication failed")
+					return
+				}
+				tokenString = strings.TrimSpace(payload["token"])
+				authField = strings.TrimSpace(payload["auth"])
+				if tokenString == "" {
+					log.Error("Authentication failed: token not found")
+					SetOAuthSessionError(state, "Authentication failed: token not found")
+					return
+				}
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+
+		// Decode auth field to get user info
+		uid := ""
+		name := ""
+		email := ""
+		if authField != "" {
+			authInfo, errDecode := qoderauth.DecodeAuthField(authField)
+			if errDecode != nil {
+				log.Warnf("qoder: failed to decode auth field: %v", errDecode)
+			} else {
+				if v, ok := authInfo["uid"].(string); ok {
+					uid = v
+				}
+				if v, ok := authInfo["name"].(string); ok {
+					name = v
+				}
+			}
+		}
+
+		// Fallback: fetch user info via device token
+		if uid == "" {
+			authSvc := qoderauth.NewQoderAuth(nil)
+			user, errUser := authSvc.FetchUserStatus(tokenString)
+			if errUser != nil {
+				log.Warnf("qoder: user status probe failed: %v", errUser)
+			} else {
+				uid = user.ID
+				name = user.Name
+				email = user.Email
+			}
+		}
+
+		if uid == "" {
+			log.Error("qoder: cannot determine user ID")
+			SetOAuthSessionError(state, "Cannot determine user ID")
+			return
+		}
+
+		now := time.Now()
+		metadata := map[string]any{
+			"type":         "qoder",
+			"access_token": tokenString,
+			"auth":         authField,
+			"nonce":        nonce,
+			"verifier":     verifier,
+			"machine_id":   machineID,
+			"uid":          uid,
+			"timestamp":    now.UnixMilli(),
+		}
+		if name != "" {
+			metadata["name"] = name
+		}
+		if email != "" {
+			metadata["email"] = email
+		}
+
+		fileName := qoderauth.CredentialFileName(uid)
+		label := name
+		if strings.TrimSpace(label) == "" {
+			label = uid
+		}
+		if strings.TrimSpace(label) == "" {
+			label = "qoder"
+		}
+
+		record := &coreauth.Auth{
+			ID:       fileName,
+			Provider: "qoder",
+			FileName: fileName,
+			Label:    label,
+			Metadata: metadata,
+		}
+		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		if errSave != nil {
+			log.Errorf("Failed to save token to file: %v", errSave)
+			SetOAuthSessionError(state, "Failed to save token to file")
+			return
+		}
+
+		CompleteOAuthSession(state)
+		CompleteOAuthSessionsByProvider("qoder")
+		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
+		fmt.Println("You can now use Qoder services through this CLI")
+	}()
+
+	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
+}
+
