@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"net"
 	"net/http"
@@ -222,7 +223,10 @@ waitForCallback:
 	}
 
 	if uid == "" {
-		return nil, fmt.Errorf("qoder: cannot determine user ID")
+		// Fallback: derive a stable UID from the token hash so we can still save credentials
+		tokenHash := fmt.Sprintf("%x", sha256.Sum256([]byte(cbRes.TokenString)))
+		uid = tokenHash[:16]
+		log.Warnf("qoder: using derived UID from token hash: %s", uid)
 	}
 
 	now := time.Now()
@@ -280,20 +284,15 @@ func startQoderCallbackServer(port int) (*http.Server, int, <-chan qoderCallback
 		prefix := "qoder://aicoding.aicoding-agent/login-success?"
 		if strings.HasPrefix(rawURL, prefix) {
 			qs := rawURL[len(prefix):]
-			parsed, errParse := url.ParseQuery(qs)
-			if errParse == nil {
-				token := ""
-				for _, k := range []string{"tokenString", "token"} {
-					if v := parsed.Get(k); v != "" {
-						token = v
-						break
-					}
-				}
-				if token != "" {
-					resultCh <- qoderCallbackResult{
-						TokenString: token,
-						AuthField:   parsed.Get("auth"),
-					}
+			// The query string values are URL-encoded by Qoder. We need to extract
+			// them carefully: first split on literal "&" (not encoded %26 inside values),
+			// then URL-decode each value. url.ParseQuery would incorrectly split on
+			// encoded %26 inside token values, so we use a manual extraction approach.
+			token, authField := extractQoderCallbackParams(qs)
+			if token != "" {
+				resultCh <- qoderCallbackResult{
+					TokenString: token,
+					AuthField:   authField,
 				}
 			}
 		}
@@ -316,3 +315,49 @@ func startQoderCallbackServer(port int) (*http.Server, int, <-chan qoderCallback
 
 	return srv, port, resultCh, nil
 }
+
+// extractQoderCallbackParams extracts tokenString and auth from the Qoder callback
+// query string. The query string comes from a qoder:// URI where parameter values
+// contain URL-encoded special characters (like %26 for &). Standard url.ParseQuery
+// would incorrectly interpret encoded %26 as a parameter separator after URL decoding,
+// so we extract the raw parameter values by finding known key= prefixes and splitting
+// on key boundaries, then URL-decode each value individually.
+func extractQoderCallbackParams(qs string) (token, authField string) {
+	// Known parameter keys in the callback URL
+	params := map[string]string{}
+	keys := []string{"tokenString", "token", "auth"}
+
+	for _, key := range keys {
+		prefix := key + "="
+		idx := strings.Index(qs, prefix)
+		if idx < 0 {
+			continue
+		}
+		valueStart := idx + len(prefix)
+		// Find the end of this parameter: look for the next "&key=" boundary
+		rest := qs[valueStart:]
+		endIdx := len(rest)
+		for _, nextKey := range keys {
+			boundary := "&" + nextKey + "="
+			if bi := strings.Index(rest, boundary); bi >= 0 && bi < endIdx {
+				endIdx = bi
+			}
+		}
+		rawValue := rest[:endIdx]
+		// URL-decode the value
+		decoded, err := url.QueryUnescape(rawValue)
+		if err != nil {
+			decoded = rawValue
+		}
+		params[key] = decoded
+	}
+
+	// Try tokenString first, fallback to token
+	token = params["tokenString"]
+	if token == "" {
+		token = params["token"]
+	}
+	authField = params["auth"]
+	return token, authField
+}
+
