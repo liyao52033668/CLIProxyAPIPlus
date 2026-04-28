@@ -7,6 +7,7 @@ package api
 import (
 	"context"
 	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -471,6 +472,32 @@ func (s *Server) setupRoutes() {
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
 	})
 
+	s.engine.GET("/qoder/callback", func(c *gin.Context) {
+		state := c.Query("state")
+		token := c.Query("tokenString")
+		if token == "" {
+			token = c.Query("token")
+		}
+		authField := c.Query("auth")
+		errStr := c.Query("error")
+		if state != "" && (token != "" || errStr != "") {
+			// Write token/auth into the callback file for the pending session
+			payload := map[string]string{
+				"token": token,
+				"auth":  authField,
+				"state": state,
+				"error": errStr,
+			}
+			payloadJSON, _ := json.Marshal(payload)
+			if managementHandlers.IsOAuthSessionPending(state, "qoder") {
+				waitFile := filepath.Join(s.cfg.AuthDir, fmt.Sprintf(".oauth-qoder-%s.oauth", state))
+				_ = os.WriteFile(waitFile, payloadJSON, 0o600)
+			}
+		}
+		c.Header("Content-Type", "text/html; charset=utf-8")
+		c.String(http.StatusOK, oauthCallbackSuccessHTML)
+	})
+
 	// Management routes are registered lazily by registerManagementRoutes when a secret is configured.
 }
 
@@ -683,6 +710,7 @@ func (s *Server) registerManagementRoutes() {
 			mgmt.GET("/kiro-auth-url", s.mgmt.RequestKiroToken)
 			mgmt.GET("/cursor-auth-url", s.mgmt.RequestCursorToken)
 			mgmt.GET("/github-auth-url", s.mgmt.RequestGitHubToken)
+			mgmt.GET("/qoder-auth-url", s.mgmt.RequestQoderToken)
 			mgmt.POST("/oauth-callback", s.mgmt.PostOAuthCallback)
 			mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
 		}
