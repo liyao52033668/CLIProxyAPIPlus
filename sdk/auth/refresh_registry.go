@@ -18,6 +18,7 @@ func init() {
 	registerRefreshLead("gitlab", func() Authenticator { return NewGitLabAuthenticator() })
 	registerRefreshLead("codebuddy", func() Authenticator { return NewCodeBuddyAuthenticator() })
 	registerRefreshLead("cursor", func() Authenticator { return NewCursorAuthenticator() })
+	registerRefreshLead("qoder", func() Authenticator { return NewQoderAuthenticator() })
 }
 
 func registerRefreshLead(provider string, factory func() Authenticator) {

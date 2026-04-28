@@ -454,6 +454,8 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 		s.coreManager.RegisterExecutor(executor.NewGitLabExecutor(s.cfg))
 	case "bt":
 		s.coreManager.RegisterExecutor(executor.NewBTExecutor(s.cfg))
+	case "qoder":
+		s.coreManager.RegisterExecutor(executor.NewQoderExecutor(s.cfg))
 	default:
 		providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
 		if providerKey == "" {
@@ -1011,6 +1013,9 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 			}
 			excluded = entry.ExcludedModels
 		}
+		models = applyExcludedModels(models, excluded)
+	case "qoder":
+		models = registry.GetQoderModels()
 		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config

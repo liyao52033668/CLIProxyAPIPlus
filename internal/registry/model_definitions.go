@@ -76,6 +76,112 @@ func GetAntigravityModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Antigravity)
 }
 
+// GetQoderModels returns the available models for the Qoder provider.
+func GetQoderModels() []*ModelInfo {
+	now := int64(1748044800) // 2025-05-24
+	return []*ModelInfo{
+		{
+			ID:          "auto",
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     "qoder",
+			Type:        "qoder",
+			DisplayName: "Auto",
+			Description: "Automatic model selection",
+		},
+		{
+			ID:          "ultimate",
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     "qoder",
+			Type:        "qoder",
+			DisplayName: "Ultimate",
+			Description: "Qoder Ultimate tier model",
+		},
+		{
+			ID:          "performance",
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     "qoder",
+			Type:        "qoder",
+			DisplayName: "Performance",
+			Description: "Qoder Performance tier model",
+		},
+		{
+			ID:          "efficient",
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     "qoder",
+			Type:        "qoder",
+			DisplayName: "Efficient",
+			Description: "Qoder Efficient tier model",
+		},
+		{
+			ID:          "lite",
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     "qoder",
+			Type:        "qoder",
+			DisplayName: "Lite",
+			Description: "Qoder Lite tier model",
+		},
+		{
+			ID:          "qmodel",
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     "qoder",
+			Type:        "qoder",
+			DisplayName: "Qwen3.6-Plus",
+			Description: "Qwen 3.6 Plus via Qoder",
+		},
+		{
+			ID:          "dmodel",
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     "qoder",
+			Type:        "qoder",
+			DisplayName: "DeepSeek-V4-Pro",
+			Description: "DeepSeek V4 Pro via Qoder",
+		},
+		{
+			ID:          "dfmodel",
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     "qoder",
+			Type:        "qoder",
+			DisplayName: "DeepSeek-V4-Flash",
+			Description: "DeepSeek V4 Flash via Qoder",
+		},
+		{
+			ID:          "gm51model",
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     "qoder",
+			Type:        "qoder",
+			DisplayName: "GLM-5.1",
+			Description: "GLM 5.1 via Qoder",
+		},
+		{
+			ID:          "kmodel",
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     "qoder",
+			Type:        "qoder",
+			DisplayName: "Kimi-K2.6",
+			Description: "Kimi K2.6 via Qoder",
+		},
+		{
+			ID:          "mmodel",
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     "qoder",
+			Type:        "qoder",
+			DisplayName: "MiniMax-M2.7",
+			Description: "MiniMax M2.7 via Qoder",
+		},
+	}
+}
+
 // GetCodeBuddyModels returns the available models for CodeBuddy (Tencent).
 // These models are served through the copilot.tencent.com API.
 func GetCodeBuddyModels() []*ModelInfo {
@@ -307,6 +413,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetAmazonQModels()
 	case "antigravity":
 		return GetAntigravityModels()
+	case "qoder":
+		return GetQoderModels()
 	case "bt":
 		return GetBTModels()
 	case "codebuddy":
@@ -390,6 +498,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.CodexPro,
 		data.Kimi,
 		data.Antigravity,
+		GetQoderModels(),
 		GetGitHubCopilotModels(),
 		GetKiroModels(),
 		GetKiloModels(),
