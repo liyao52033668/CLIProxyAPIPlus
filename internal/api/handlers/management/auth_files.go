@@ -40,6 +40,7 @@ import (
 	// "github.com/router-for-me/CLIProxyAPI/v6/internal/browser"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kimi"
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
+	qoder "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/qoder"
 	qoderauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/qoder"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
@@ -202,6 +203,72 @@ func startCallbackForwarder(port int, provider, targetBase string) (*callbackFor
 	log.Infof("callback forwarder for %s listening on %s", provider, addr)
 
 	return forwarder, nil
+}
+
+type qoderCallbackResult struct {
+	TokenString string
+	AuthField   string
+}
+
+func startQoderCallbackServerWebUI(port int, state string) (*http.Server, <-chan qoderCallbackResult, error) {
+	if port <= 0 {
+		port = qoder.CallbackPort
+	}
+	addr := fmt.Sprintf(":%d", port)
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("qoder callback server: failed to listen on %s: %w", addr, err)
+	}
+	port = listener.Addr().(*net.TCPAddr).Port
+	resultCh := make(chan qoderCallbackResult, 1)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/forward", func(w http.ResponseWriter, r *http.Request) {
+		rawURL := r.URL.Query().Get("url")
+		rawURL, _ = url.QueryUnescape(rawURL)
+		prefix := "qoder://aicoding.aicoding-agent/login-success?"
+		if strings.HasPrefix(rawURL, prefix) {
+			qs := rawURL[len(prefix):]
+			parsed, errParse := url.ParseQuery(qs)
+			if errParse == nil {
+				stateParam := parsed.Get("state")
+				if stateParam != state {
+					log.Warnf("qoder callback: state mismatch (expected %s, got %s)", state, stateParam)
+				}
+				token := ""
+				for _, k := range []string{"tokenString", "token"} {
+					if v := parsed.Get(k); v != "" {
+						token = v
+						break
+					}
+				}
+				if token != "" {
+					resultCh <- qoderCallbackResult{
+						TokenString: token,
+						AuthField:   parsed.Get("auth"),
+					}
+				}
+			}
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Qoder Login</title></head>` +
+			`<body style="display:flex;justify-content:center;align-items:center;height:100vh;` +
+			`font-family:system-ui;background:#1a1a2e;color:#e0e0e0">` +
+			`<div style="text-align:center">` +
+			`<h1 style="color:#4CAF50">&#10003; Login Successful</h1>` +
+			`<p>You can close this window and return to the terminal.</p>` +
+			`</div></body></html>`))
+	})
+
+	srv := &http.Server{Handler: mux}
+	go func() {
+		if errServe := srv.Serve(listener); errServe != nil && !strings.Contains(errServe.Error(), "Server closed") {
+			log.Warnf("qoder callback server error: %v", errServe)
+		}
+	}()
+
+	log.Infof("qoder callback server listening on %s", addr)
+	return srv, resultCh, nil
 }
 
 func stopCallbackForwarderInstance(port int, forwarder *callbackForwarder) {
@@ -3384,10 +3451,10 @@ func PopulateAuthContext(ctx context.Context, c *gin.Context) context.Context {
 // 	// Get the login method from query parameter
 // 	method := strings.ToLower(strings.TrimSpace(c.Query("method")))
 // 	isWebUI := isWebUIRequest(c)
-	
+
 // 	log.Infof("=== Kiro auth request START ===")
 // 	log.Infof("method=%q, isWebUI=%v", method, isWebUI)
-	
+
 // 	if method == "" {
 // 		if isWebUI {
 // 			method = "google"
@@ -4544,49 +4611,42 @@ func (h *Handler) RequestQoderToken(c *gin.Context) {
 
 	RegisterOAuthSession(state, "qoder")
 
-	authURL := qoderauth.BuildAuthURL(nonce, challenge, machineID)
+	authURL := qoderauth.BuildAuthURLWithRedirectAndState(nonce, challenge, machineID, qoderauth.RedirectURI, state)
 
 	log.Infof("Qoder auth URL built: %s for state: %s", authURL, state)
 
-	// Store auth URL for frontend immediately (like Kiro does)
 	SetOAuthSessionError(state, "auth_url|"+authURL)
 	log.Infof("Qoder auth URL stored for state: %s", state)
 
+	callbackPort := qoderauth.CallbackPort
+	cleanupURI := qoder.RegisterURIHandler(callbackPort)
+
+	srv, cbChan, errServer := startQoderCallbackServerWebUI(callbackPort, state)
+	if errServer != nil {
+		log.Errorf("Failed to start Qoder callback server: %v", errServer)
+		cleanupURI()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
+		return
+	}
+
 	go func() {
+		defer cleanupURI()
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_ = srv.Shutdown(shutdownCtx)
+		}()
+
 		var tokenString, authField string
 
-		// CLI: Wait for callback file (original behavior)
-		// WebUI: User clicks link and auth completes via qoder:// protocol
-		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-qoder-%s.oauth", state))
-		deadline := time.Now().Add(5 * time.Minute)
-		for {
-			if !IsOAuthSessionPending(state, "qoder") {
-				return
-			}
-			if time.Now().After(deadline) {
-				log.Error("oauth flow timed out")
-				SetOAuthSessionError(state, "OAuth flow timed out")
-				return
-			}
-			if data, errReadFile := os.ReadFile(waitFile); errReadFile == nil {
-				var payload map[string]string
-				_ = json.Unmarshal(data, &payload)
-				_ = os.Remove(waitFile)
-				if errStr := strings.TrimSpace(payload["error"]); errStr != "" {
-					log.Errorf("Authentication failed: %s", errStr)
-					SetOAuthSessionError(state, "Authentication failed")
-					return
-				}
-				tokenString = strings.TrimSpace(payload["token"])
-				authField = strings.TrimSpace(payload["auth"])
-				if tokenString == "" {
-					log.Error("Authentication failed: token not found")
-					SetOAuthSessionError(state, "Authentication failed: token not found")
-					return
-				}
-				break
-			}
-			time.Sleep(500 * time.Millisecond)
+		select {
+		case cbRes := <-cbChan:
+			tokenString = cbRes.TokenString
+			authField = cbRes.AuthField
+		case <-time.After(5 * time.Minute):
+			log.Error("Qoder authentication timed out")
+			SetOAuthSessionError(state, "Authentication timed out")
+			return
 		}
 
 		if tokenString == "" {
@@ -4678,5 +4738,9 @@ func (h *Handler) RequestQoderToken(c *gin.Context) {
 		log.Infof("Qoder authentication successful! Token saved to %s", savedPath)
 	}()
 
-	c.JSON(200, gin.H{"status": "ok", "state": state, "method": "protocol"})
+	c.JSON(http.StatusOK, gin.H{
+		"status": "ok",
+		"url":    authURL,
+		"state":  state,
+	})
 }

@@ -15,6 +15,7 @@ type oauthCallbackRequest struct {
 	Code        string `json:"code"`
 	State       string `json:"state"`
 	Error       string `json:"error"`
+	Token       string `json:"token"`
 }
 
 func (h *Handler) PostOAuthCallback(c *gin.Context) {
@@ -38,6 +39,7 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 	state := strings.TrimSpace(req.State)
 	code := strings.TrimSpace(req.Code)
 	errMsg := strings.TrimSpace(req.Error)
+	token := strings.TrimSpace(req.Token)
 
 	if rawRedirect := strings.TrimSpace(req.RedirectURL); rawRedirect != "" {
 		u, errParse := url.Parse(rawRedirect)
@@ -58,6 +60,12 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 				errMsg = strings.TrimSpace(q.Get("error_description"))
 			}
 		}
+		if token == "" {
+			token = strings.TrimSpace(q.Get("token"))
+			if token == "" {
+				token = strings.TrimSpace(q.Get("tokenString"))
+			}
+		}
 	}
 
 	if state == "" {
@@ -68,8 +76,8 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "invalid state"})
 		return
 	}
-	if code == "" && errMsg == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "code or error is required"})
+	if code == "" && errMsg == "" && token == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "code, token, or error is required"})
 		return
 	}
 
@@ -78,13 +86,19 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"status": "error", "error": "unknown or expired state"})
 		return
 	}
-	if sessionStatus != "" {
+	if sessionStatus != "" && !strings.HasPrefix(sessionStatus, "auth_url|") {
 		c.JSON(http.StatusConflict, gin.H{"status": "error", "error": "oauth flow is not pending"})
 		return
 	}
 	if !strings.EqualFold(sessionProvider, canonicalProvider) {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "provider does not match state"})
 		return
+	}
+
+	if canonicalProvider == "qoder" {
+		if token != "" {
+			code = token
+		}
 	}
 
 	if _, errWrite := WriteOAuthCallbackFileForPendingSession(h.cfg.AuthDir, canonicalProvider, state, code, errMsg); errWrite != nil {

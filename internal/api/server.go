@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -471,6 +472,42 @@ func (s *Server) setupRoutes() {
 		}
 		if state != "" {
 			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "kiro", state, code, errStr)
+		}
+		c.Header("Content-Type", "text/html; charset=utf-8")
+		c.String(http.StatusOK, oauthCallbackSuccessHTML)
+	})
+
+	s.engine.GET("/forward", func(c *gin.Context) {
+		rawURL := c.Query("url")
+		// VBS double-encodes the URL, need to unquote first
+		rawURL, _ = url.QueryUnescape(rawURL)
+		prefix := "qoder://aicoding.aicoding-agent/login-success?"
+		if strings.HasPrefix(rawURL, prefix) {
+			qs := rawURL[len(prefix):]
+			parsed, errParse := url.ParseQuery(qs)
+			if errParse == nil {
+				state := parsed.Get("state")
+				token := parsed.Get("tokenString")
+				if token == "" {
+					token = parsed.Get("token")
+				}
+				authField := parsed.Get("auth")
+				errStr := parsed.Get("error")
+				if state != "" && (token != "" || errStr != "") {
+					// Write token/auth into the callback file for the pending session
+					payload := map[string]string{
+						"token": token,
+						"auth":  authField,
+						"state": state,
+						"error": errStr,
+					}
+					payloadJSON, _ := json.Marshal(payload)
+					if managementHandlers.IsOAuthSessionPending(state, "qoder") {
+						waitFile := filepath.Join(s.cfg.AuthDir, fmt.Sprintf(".oauth-qoder-%s.oauth", state))
+						_ = os.WriteFile(waitFile, payloadJSON, 0o600)
+					}
+				}
+			}
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
