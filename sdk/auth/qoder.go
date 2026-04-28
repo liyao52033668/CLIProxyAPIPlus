@@ -83,6 +83,10 @@ func (a QoderAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 
 	_ = port // port is used for the callback URL
 
+	// Register qoder:// URI protocol handler (Windows: registry + VBS, other: no-op)
+	cleanupURI := qoder.RegisterURIHandler(port)
+	defer cleanupURI()
+
 	authURL := qoder.BuildAuthURL(nonce, challenge, machineID)
 
 	if !opts.NoBrowser {
