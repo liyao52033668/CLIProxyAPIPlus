@@ -52,8 +52,8 @@ End Function
 	regCmds := [][]string{
 		{"reg", "add", `HKCU\Software\Classes\qoder`, "/ve", "/t", "REG_SZ", "/d", "URL:QoderLogin", "/f"},
 		{"reg", "add", `HKCU\Software\Classes\qoder`, "/v", "URL Protocol", "/t", "REG_SZ", "/d", "", "/f"},
-		{"reg", "add", `HKCU\Software\Classes\qoder\shell`},
-		{"reg", "add", `HKCU\Software\Classes\qoder\shell\open`},
+		{"reg", "add", `HKCU\Software\Classes\qoder\shell`, "/f"},
+		{"reg", "add", `HKCU\Software\Classes\qoder\shell\open`, "/f"},
 		{"reg", "add", `HKCU\Software\Classes\qoder\shell\open\command`,
 			"/ve", "/t", "REG_SZ", "/d", fmt.Sprintf(`wscript.exe "%s" %%1`, vbsPath), "/f"},
 	}
