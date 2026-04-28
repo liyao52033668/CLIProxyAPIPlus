@@ -22,11 +22,11 @@ import (
 type sessionStatus string
 
 const (
-	sPending    sessionStatus = "pending"
-	sWaitingCB  sessionStatus = "waiting_callback"
-	sPolling    sessionStatus = "polling"
-	sSuccess    sessionStatus = "success"
-	sFailed     sessionStatus = "failed"
+	sPending   sessionStatus = "pending"
+	sWaitingCB sessionStatus = "waiting_callback"
+	sPolling   sessionStatus = "polling"
+	sSuccess   sessionStatus = "success"
+	sFailed    sessionStatus = "failed"
 )
 
 type webSession struct {
@@ -40,14 +40,18 @@ type webSession struct {
 	cancel     context.CancelFunc
 }
 
+// AuthSuccessCallback is called when authentication is successful.
+type AuthSuccessCallback func(stateID string)
+
 // OAuthWebHandler handles CodeArts OAuth web login flow.
 type OAuthWebHandler struct {
-	cfg      *config.Config
-	sessions map[string]*webSession
+	cfg                *config.Config
+	sessions           map[string]*webSession
 	// Map ticket_id -> stateID for callback lookup
-	ticketToState map[string]string
-	mu            sync.RWMutex
-	auth          *CodeArtsAuth
+	ticketToState      map[string]string
+	mu                 sync.RWMutex
+	auth               *CodeArtsAuth
+	authSuccessCallback AuthSuccessCallback
 }
 
 // NewOAuthWebHandler creates a new CodeArts OAuth web handler.
@@ -60,6 +64,11 @@ func NewOAuthWebHandler(cfg *config.Config) *OAuthWebHandler {
 	}
 }
 
+// SetAuthSuccessCallback sets the callback to be called when authentication is successful.
+func (h *OAuthWebHandler) SetAuthSuccessCallback(callback AuthSuccessCallback) {
+	h.authSuccessCallback = callback
+}
+
 // RegisterRoutes registers CodeArts OAuth web routes.
 func (h *OAuthWebHandler) RegisterRoutes(router gin.IRouter) {
 	oauth := router.Group("/v0/oauth/codearts")
@@ -69,7 +78,7 @@ func (h *OAuthWebHandler) RegisterRoutes(router gin.IRouter) {
 		oauth.GET("/callback", h.handleCallback)
 		oauth.GET("/status", h.handleStatus)
 	}
-	// Root-level callback: HuaweiCloud redirects to http://127.0.0.1:{port}/callback
+	// Root-level callback: HuaweiCloud redirects to http://localhost:{port}/callback
 	router.GET("/callback", h.handleCallback)
 }
 
@@ -99,6 +108,21 @@ func (h *OAuthWebHandler) handleStart(c *gin.Context) {
 		return
 	}
 
+	loginURL, err := h.CreateSessionAndGetAuthURL(stateID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create session"})
+		return
+	}
+
+	log.Infof("CodeArts OAuth: session %s started, login URL: %s", stateID, loginURL)
+
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.String(http.StatusOK, fmt.Sprintf(codeArtsWaitingPage, loginURL, stateID))
+}
+
+// CreateSessionAndGetAuthURL creates a new session and returns the CodeArts authorization URL.
+// This method is exposed for use by management API handlers.
+func (h *OAuthWebHandler) CreateSessionAndGetAuthURL(stateID string) (string, error) {
 	// Generate ticket_id matching Python: secrets.token_hex(32) = 64 hex chars
 	ticketID := generateTicketID()
 
@@ -120,12 +144,7 @@ func (h *OAuthWebHandler) handleStart(c *gin.Context) {
 	h.mu.Unlock()
 
 	// Build login URL matching Python: {REDIRECT_HOST}/redirect1?ticket_id=...&theme=1&...
-	loginURL := h.auth.AuthorizationURL(ticketID, port)
-
-	log.Infof("CodeArts OAuth: session %s started, login URL: %s", stateID, loginURL)
-
-	c.Header("Content-Type", "text/html; charset=utf-8")
-	c.String(http.StatusOK, fmt.Sprintf(codeArtsWaitingPage, loginURL, stateID))
+	return h.auth.AuthorizationURL(ticketID, port), nil
 }
 
 // handleCallback receives the callback from HuaweiCloud after user login.
@@ -232,11 +251,17 @@ func (h *OAuthWebHandler) pollLogin(ctx context.Context, sess *webSession) {
 	h.mu.Lock()
 	sess.status = sSuccess
 	sess.token = tokenData
+	stateID := sess.stateID
 	h.mu.Unlock()
 
 	// Save auth file
 	h.saveTokenToFile(tokenData)
 	log.Infof("CodeArts OAuth: authentication successful for user %s", tokenData.UserName)
+
+	// Call the success callback if registered
+	if h.authSuccessCallback != nil {
+		h.authSuccessCallback(stateID)
+	}
 }
 
 func (h *OAuthWebHandler) handleStatus(c *gin.Context) {
@@ -301,17 +326,17 @@ func (h *OAuthWebHandler) saveTokenToFile(tokenData *CodeArtsTokenData) {
 	// Save in the same format as the file synthesizer expects:
 	// { "type": "codearts", ... }
 	storage := map[string]interface{}{
-		"type":            "codearts",
-		"ak":              tokenData.AK,
-		"sk":              tokenData.SK,
-		"security_token":  tokenData.SecurityToken,
-		"x_auth_token":    tokenData.XAuthToken,
-		"expires_at":      tokenData.ExpiresAt.Format(time.RFC3339),
-		"user_id":         tokenData.UserID,
-		"user_name":       tokenData.UserName,
-		"domain_id":       tokenData.DomainID,
-		"email":           tokenData.Email,
-		"last_refresh":    time.Now().Format(time.RFC3339),
+		"type":           "codearts",
+		"ak":             tokenData.AK,
+		"sk":             tokenData.SK,
+		"security_token": tokenData.SecurityToken,
+		"x_auth_token":   tokenData.XAuthToken,
+		"expires_at":     tokenData.ExpiresAt.Format(time.RFC3339),
+		"user_id":        tokenData.UserID,
+		"user_name":      tokenData.UserName,
+		"domain_id":      tokenData.DomainID,
+		"email":          tokenData.Email,
+		"last_refresh":   time.Now().Format(time.RFC3339),
 	}
 
 	data, err := json.MarshalIndent(storage, "", "  ")

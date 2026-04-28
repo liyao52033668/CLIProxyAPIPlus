@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codearts"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
@@ -48,6 +49,7 @@ type Handler struct {
 	envSecret           string
 	logDir              string
 	postAuthHook        coreauth.PostAuthHook
+	codeArtsOAuthHandler *codearts.OAuthWebHandler
 }
 
 // NewHandler creates a new management handler instance.
@@ -115,6 +117,17 @@ func (h *Handler) SetUsageStatistics(stats *usage.RequestStatistics) { h.usageSt
 
 // SetLocalPassword configures the runtime-local password accepted for localhost requests.
 func (h *Handler) SetLocalPassword(password string) { h.localPassword = password }
+
+// SetCodeArtsOAuthHandler sets the CodeArts OAuth web handler.
+func (h *Handler) SetCodeArtsOAuthHandler(handler *codearts.OAuthWebHandler) {
+	h.codeArtsOAuthHandler = handler
+	if handler != nil {
+		handler.SetAuthSuccessCallback(func(stateID string) {
+			CompleteOAuthSession(stateID)
+			CompleteOAuthSessionsByProvider("codearts")
+		})
+	}
+}
 
 // SetLogDirectory updates the directory where main.log should be looked up.
 func (h *Handler) SetLogDirectory(dir string) {

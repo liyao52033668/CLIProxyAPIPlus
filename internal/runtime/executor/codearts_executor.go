@@ -113,7 +113,7 @@ func (e *CodeArtsExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 		body, _ := io.ReadAll(httpResp.Body)
 		return resp, statusErr{
 			code: httpResp.StatusCode,
-			msg: fmt.Sprintf("codearts: API returned %d: %s", httpResp.StatusCode, string(body)),
+			msg:  fmt.Sprintf("codearts: API returned %d: %s", httpResp.StatusCode, string(body)),
 		}
 	}
 
@@ -207,7 +207,7 @@ func (e *CodeArtsExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 		httpResp.Body.Close()
 		return nil, statusErr{
 			code: httpResp.StatusCode,
-			msg: fmt.Sprintf("codearts: API returned %d: %s", httpResp.StatusCode, string(body)),
+			msg:  fmt.Sprintf("codearts: API returned %d: %s", httpResp.StatusCode, string(body)),
 		}
 	}
 

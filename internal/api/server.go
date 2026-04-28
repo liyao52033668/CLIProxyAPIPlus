@@ -180,6 +180,9 @@ type Server struct {
 	keepAliveOnTimeout func()
 	keepAliveHeartbeat chan struct{}
 	keepAliveStop      chan struct{}
+
+	// codeArtsOAuthHandler handles CodeArts OAuth web login flow.
+	codeArtsOAuthHandler *codearts.OAuthWebHandler
 }
 
 // NewServer creates and initializes a new API server instance.
@@ -312,8 +315,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	log.Info("Kiro OAuth Web routes registered at /v0/oauth/kiro/*")
 
 	// === CLIProxyAPIPlus 扩展: 注册 CodeArts OAuth Web 路由 ===
-	codeArtsOAuthHandler := codearts.NewOAuthWebHandler(cfg)
-	codeArtsOAuthHandler.RegisterRoutes(engine)
+	s.codeArtsOAuthHandler = codearts.NewOAuthWebHandler(cfg)
+	s.codeArtsOAuthHandler.RegisterRoutes(engine)
+	s.mgmt.SetCodeArtsOAuthHandler(s.codeArtsOAuthHandler)
 	log.Info("CodeArts OAuth Web routes registered at /v0/oauth/codearts/*")
 
 	if optionState.keepAliveEnabled {
@@ -702,19 +706,24 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/gitlab-auth-url", s.mgmt.RequestGitLabToken)
 		mgmt.POST("/gitlab-auth-url", s.mgmt.RequestGitLabPATToken)
 		mgmt.GET("/gemini-cli-auth-url", s.mgmt.RequestGeminiCLIToken)
-			mgmt.GET("/antigravity-auth-url", s.mgmt.RequestAntigravityToken)
-			mgmt.GET("/kilo-auth-url", s.mgmt.RequestKiloToken)
-			mgmt.GET("/kimi-auth-url", s.mgmt.RequestKimiToken)
-			mgmt.GET("/iflow-auth-url", s.mgmt.RequestIFlowToken)
-			mgmt.POST("/iflow-auth-url", s.mgmt.RequestIFlowCookieToken)
-			mgmt.GET("/kiro-auth-url", s.mgmt.RequestKiroToken)
-			mgmt.GET("/cursor-auth-url", s.mgmt.RequestCursorToken)
-			mgmt.GET("/github-auth-url", s.mgmt.RequestGitHubToken)
-			mgmt.GET("/qoder-auth-url", s.mgmt.RequestQoderToken)
-			mgmt.POST("/oauth-callback", s.mgmt.PostOAuthCallback)
-			mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
-		}
+		mgmt.GET("/antigravity-auth-url", s.mgmt.RequestAntigravityToken)
+		mgmt.GET("/kilo-auth-url", s.mgmt.RequestKiloToken)
+		mgmt.GET("/kimi-auth-url", s.mgmt.RequestKimiToken)
+		mgmt.GET("/iflow-auth-url", s.mgmt.RequestIFlowToken)
+		mgmt.POST("/iflow-auth-url", s.mgmt.RequestIFlowCookieToken)
+		mgmt.GET("/kiro-auth-url", s.mgmt.RequestKiroToken)
+		mgmt.GET("/cursor-auth-url", s.mgmt.RequestCursorToken)
+		mgmt.GET("/github-auth-url", s.mgmt.RequestGitHubToken)
+		mgmt.GET("/qoder-auth-url", s.mgmt.RequestQoderToken)
+		mgmt.GET("/codebuddy-auth-url", s.mgmt.RequestCodeBuddyToken)
+		mgmt.GET("/codebuddy-ai-auth-url", s.mgmt.RequestCodeBuddyAIToken)
+		mgmt.GET("/codearts-auth-url", s.mgmt.RequestCodeArtsToken)
+		mgmt.GET("/bt-auth-url", s.mgmt.RequestBTToken)
+		mgmt.POST("/bt-auth-url", s.mgmt.RequestBTToken)
+		mgmt.POST("/oauth-callback", s.mgmt.PostOAuthCallback)
+		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
 	}
+}
 
 func (s *Server) managementAvailabilityMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {

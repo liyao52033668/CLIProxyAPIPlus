@@ -1,6 +1,8 @@
 // Package qoder provides OAuth2 authentication functionality for the Qoder provider.
 package qoder
 
+import "time"
+
 // Qoder login configuration
 const (
 	CallbackPort = 51122
@@ -38,4 +40,13 @@ const (
 	ModelListPath  = "/algo/api/v2/model/list"
 	UserPlanPath   = "/algo/api/v2/user/plan"
 	UserStatusPath = "/api/v3/user/status"
+)
+
+// Polling configuration
+const (
+	PollBaseDelay        = 3 * time.Second
+	PollMaxDelay         = 30 * time.Second
+	PollBackoffMultiply  = 1.5
+	PollMaxAttempts      = 100
+	MaxConsecutiveErrors = 5
 )

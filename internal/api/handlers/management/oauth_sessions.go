@@ -90,10 +90,17 @@ func (s *oauthSessionStore) SetError(state, message string) {
 	s.purgeExpiredLocked(now)
 	session, ok := s.sessions[state]
 	if !ok {
-		return
+		// Create session if it doesn't exist to ensure error message is stored
+		session = oauthSession{
+			Provider:  "",
+			Status:    message,
+			CreatedAt: now,
+			ExpiresAt: now.Add(s.ttl),
+		}
+	} else {
+		session.Status = message
+		session.ExpiresAt = now.Add(s.ttl)
 	}
-	session.Status = message
-	session.ExpiresAt = now.Add(s.ttl)
 	s.sessions[state] = session
 }
 

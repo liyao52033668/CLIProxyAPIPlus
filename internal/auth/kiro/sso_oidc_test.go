@@ -110,7 +110,7 @@ func TestRegisterClientForAuthCodeWithIDC(t *testing.T) {
 
 	resp, err := client.RegisterClientForAuthCodeWithIDC(
 		context.Background(),
-		"http://127.0.0.1:19877/oauth/callback",
+		"http://localhost:19877/oauth/callback",
 		"https://my-idc-instance.awsapps.com/start",
 		"us-east-1",
 	)
@@ -183,8 +183,8 @@ func TestRegisterClientForAuthCodeWithIDC(t *testing.T) {
 	if !ok || len(redirectRaw) != 1 {
 		t.Fatalf("redirectUris: got %v, want 1-element array", capturedReq.Body["redirectUris"])
 	}
-	if redirectRaw[0].(string) != "http://127.0.0.1:19877/oauth/callback" {
-		t.Errorf("redirectUris[0] = %q, want %q", redirectRaw[0], "http://127.0.0.1:19877/oauth/callback")
+	if redirectRaw[0].(string) != "http://localhost:19877/oauth/callback" {
+		t.Errorf("redirectUris[0] = %q, want %q", redirectRaw[0], "http://localhost:19877/oauth/callback")
 	}
 
 	// Verify response parsing
@@ -221,7 +221,7 @@ func (t *rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 func TestBuildAuthorizationURL(t *testing.T) {
 	scopes := "codewhisperer:completions,codewhisperer:analysis,codewhisperer:conversations,codewhisperer:transformations,codewhisperer:taskassist"
 	endpoint := "https://oidc.us-east-1.amazonaws.com"
-	redirectURI := "http://127.0.0.1:19877/oauth/callback"
+	redirectURI := "http://localhost:19877/oauth/callback"
 
 	authURL := buildAuthorizationURL(endpoint, "test-client-id", redirectURI, scopes, "random-state", "test-challenge")
 
