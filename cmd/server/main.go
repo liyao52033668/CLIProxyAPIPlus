@@ -98,6 +98,7 @@ func main() {
 	var codeBuddyLogin bool
 	var codeBuddyAILogin bool
 	var btLogin bool
+	var qoderLogin bool
 	var projectID string
 	var vertexImport string
 	var vertexImportPrefix string
@@ -139,6 +140,7 @@ func main() {
 	flag.BoolVar(&codeBuddyLogin, "codebuddy-login", false, "Login to CodeBuddy using browser OAuth flow")
 	flag.BoolVar(&codeBuddyAILogin, "codebuddy-ai-login", false, "Login to CodeBuddy AI (www.codebuddy.ai) using browser OAuth flow")
 	flag.BoolVar(&btLogin, "bt-login", false, "Login to BaoTa Panel AI using phone and password")
+	flag.BoolVar(&qoderLogin, "qoder-login", false, "Login to Qoder using PKCE browser flow")
 	flag.StringVar(&projectID, "project_id", "", "Project ID (Gemini only, not required)")
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
@@ -591,6 +593,8 @@ func main() {
 		cmd.DoKiroIDCLogin(cfg, options, kiroIDCStartURL, kiroIDCRegion, kiroIDCFlow)
 	} else if btLogin {
 		cmd.DoBTLogin(cfg)
+	} else if qoderLogin {
+		cmd.DoQoderLogin(cfg, options)
 	} else {
 		// In cloud deploy mode without config file, just wait for shutdown signals
 		if isCloudDeploy && !configFileExists {
