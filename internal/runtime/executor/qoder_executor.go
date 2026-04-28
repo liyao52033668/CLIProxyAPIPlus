@@ -402,18 +402,17 @@ func (e *QoderExecutor) buildCosyRequest(ctx context.Context, auth *cliproxyauth
 	bodyForSig := string(body)
 	bodyBytes := body
 
-	// Parse path for signature
-	path := reqURL
+	// Parse path for signature — match Python: path = "/" + url.split("://")[1].split("/", 1)[1]
+	sigPath := ""
 	if idx := strings.Index(reqURL, "://"); idx >= 0 {
-		path = "/" + reqURL[idx+3:]
-		if slashIdx := strings.Index(path[1:], "/"); slashIdx >= 0 {
-			path = path[slashIdx+1:]
+		afterScheme := reqURL[idx+3:] // "api3.qoder.sh/algo/api/v2/..."
+		if slashIdx := strings.Index(afterScheme, "/"); slashIdx >= 0 {
+			sigPath = afterScheme[slashIdx:] // "/algo/api/v2/..."
 		}
 	}
-	if idx := strings.Index(path, "?"); idx >= 0 {
-		path = path[:idx]
+	if idx := strings.Index(sigPath, "?"); idx >= 0 {
+		sigPath = sigPath[:idx]
 	}
-	sigPath := path
 	if strings.HasPrefix(sigPath, "/algo") {
 		sigPath = sigPath[len("/algo"):]
 	}

@@ -281,18 +281,26 @@ func startQoderCallbackServer(port int) (*http.Server, int, <-chan qoderCallback
 	mux := http.NewServeMux()
 	mux.HandleFunc("/forward", func(w http.ResponseWriter, r *http.Request) {
 		rawURL := r.URL.Query().Get("url")
+		// Match Python: raw_url = unquote(raw_url) — VBS double-encodes the URL
+		rawURL, _ = url.QueryUnescape(rawURL)
 		prefix := "qoder://aicoding.aicoding-agent/login-success?"
 		if strings.HasPrefix(rawURL, prefix) {
 			qs := rawURL[len(prefix):]
-			// The query string values are URL-encoded by Qoder. We need to extract
-			// them carefully: first split on literal "&" (not encoded %26 inside values),
-			// then URL-decode each value. url.ParseQuery would incorrectly split on
-			// encoded %26 inside token values, so we use a manual extraction approach.
-			token, authField := extractQoderCallbackParams(qs)
-			if token != "" {
-				resultCh <- qoderCallbackResult{
-					TokenString: token,
-					AuthField:   authField,
+			// Now parse_qs equivalent — url.ParseQuery auto-decodes %xx values
+			parsed, errParse := url.ParseQuery(qs)
+			if errParse == nil {
+				token := ""
+				for _, k := range []string{"tokenString", "token"} {
+					if v := parsed.Get(k); v != "" {
+						token = v
+						break
+					}
+				}
+				if token != "" {
+					resultCh <- qoderCallbackResult{
+						TokenString: token,
+						AuthField:   parsed.Get("auth"),
+					}
 				}
 			}
 		}
