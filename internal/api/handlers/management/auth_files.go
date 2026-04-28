@@ -26,7 +26,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/antigravity"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/bt"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/claude"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codebuddy"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codebuddy_ai"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/copilot"
 	cursorauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/cursor"
@@ -34,6 +37,7 @@ import (
 	gitlabauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/gitlab"
 	iflowauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/iflow"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kilo"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/browser"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kimi"
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
 	qoderauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/qoder"
@@ -244,7 +248,7 @@ func (h *Handler) managementCallbackURL(path string) (string, error) {
 	if h.cfg.TLS.Enable {
 		scheme = "https"
 	}
-	return fmt.Sprintf("%s://127.0.0.1:%d%s", scheme, h.cfg.Port, path), nil
+	return fmt.Sprintf("%s://localhost:%d%s", scheme, h.cfg.Port, path), nil
 }
 
 func (h *Handler) ListAuthFiles(c *gin.Context) {
@@ -2739,6 +2743,7 @@ func (h *Handler) RequestGitHubToken(c *gin.Context) {
 	userCode := deviceCode.UserCode
 
 	RegisterOAuthSession(state, "github-copilot")
+	SetOAuthSessionError(state, "device_code|"+authURL+"|"+userCode)
 
 	go func() {
 		fmt.Printf("Please visit %s and enter code: %s\n", authURL, userCode)
@@ -2805,11 +2810,12 @@ func (h *Handler) RequestGitHubToken(c *gin.Context) {
 	}()
 
 	c.JSON(200, gin.H{
-		"status":           "ok",
+		"status":           "device_code",
 		"url":              authURL,
 		"state":            state,
 		"user_code":        userCode,
 		"verification_uri": authURL,
+		"verification_url": authURL,
 	})
 }
 
@@ -3324,13 +3330,16 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 		return
 	}
 
-	_, status, ok := GetOAuthSession(state)
+	provider, status, ok := GetOAuthSession(state)
+	log.Infof("GetAuthStatus: state=%s, provider=%s, status=%s, ok=%v", state, provider, status, ok)
 	if !ok {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 		return
 	}
 	if status != "" {
+		log.Infof("GetAuthStatus: status is not empty, checking prefixes: %s", status)
 		if strings.HasPrefix(status, "device_code|") {
+			log.Infof("GetAuthStatus: status has device_code| prefix")
 			parts := strings.SplitN(status, "|", 3)
 			if len(parts) == 3 {
 				c.JSON(http.StatusOK, gin.H{
@@ -3342,6 +3351,7 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 			}
 		}
 		if strings.HasPrefix(status, "auth_url|") {
+			log.Infof("GetAuthStatus: status has auth_url| prefix, returning auth_url")
 			authURL := strings.TrimPrefix(status, "auth_url|")
 			c.JSON(http.StatusOK, gin.H{
 				"status": "auth_url",
@@ -3349,9 +3359,11 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 			})
 			return
 		}
+		log.Infof("GetAuthStatus: status is an error: %s", status)
 		c.JSON(http.StatusOK, gin.H{"status": "error", "error": status})
 		return
 	}
+	log.Infof("GetAuthStatus: status is empty, returning wait")
 	c.JSON(http.StatusOK, gin.H{"status": "wait"})
 }
 
@@ -3363,6 +3375,410 @@ func PopulateAuthContext(ctx context.Context, c *gin.Context) context.Context {
 	}
 	return coreauth.WithRequestInfo(ctx, info)
 }
+
+// const kiroCallbackPort = 19876
+
+// func (h *Handler) RequestKiroToken(c *gin.Context) {
+// 	ctx := context.Background()
+
+// 	// Get the login method from query parameter
+// 	method := strings.ToLower(strings.TrimSpace(c.Query("method")))
+// 	isWebUI := isWebUIRequest(c)
+	
+// 	log.Infof("=== Kiro auth request START ===")
+// 	log.Infof("method=%q, isWebUI=%v", method, isWebUI)
+	
+// 	if method == "" {
+// 		if isWebUI {
+// 			method = "google"
+// 		} else {
+// 			method = "aws"
+// 		}
+// 	}
+
+// 	log.Infof("method determined: %q", method)
+// 	log.Infof("=== Kiro auth request END ===")
+
+// 	state := fmt.Sprintf("kiro-%d", time.Now().UnixNano())
+
+// 	switch method {
+// 	case "aws", "builder-id":
+// 		RegisterOAuthSession(state, "kiro")
+
+// 		// AWS Builder ID uses device code flow (no callback needed)
+// 		go func() {
+// 			ssoClient := kiroauth.NewSSOOIDCClient(h.cfg)
+
+// 			// Step 1: Register client
+// 			fmt.Println("Registering client...")
+// 			regResp, errRegister := ssoClient.RegisterClient(ctx)
+// 			if errRegister != nil {
+// 				log.Errorf("Failed to register client: %v", errRegister)
+// 				SetOAuthSessionError(state, "Failed to register client")
+// 				return
+// 			}
+
+// 			// Step 2: Start device authorization
+// 			fmt.Println("Starting device authorization...")
+// 			authResp, errAuth := ssoClient.StartDeviceAuthorization(ctx, regResp.ClientID, regResp.ClientSecret)
+// 			if errAuth != nil {
+// 				log.Errorf("Failed to start device auth: %v", errAuth)
+// 				SetOAuthSessionError(state, "Failed to start device authorization")
+// 				return
+// 			}
+
+// 			// Store the verification URL for the frontend to display.
+// 			// Using "|" as separator because URLs contain ":".
+// 			SetOAuthSessionError(state, "device_code|"+authResp.VerificationURIComplete+"|"+authResp.UserCode)
+
+// 			// Step 3: Poll for token
+// 			fmt.Println("Waiting for authorization...")
+// 			interval := 5 * time.Second
+// 			if authResp.Interval > 0 {
+// 				interval = time.Duration(authResp.Interval) * time.Second
+// 			}
+// 			deadline := time.Now().Add(time.Duration(authResp.ExpiresIn) * time.Second)
+
+// 			for time.Now().Before(deadline) {
+// 				select {
+// 				case <-ctx.Done():
+// 					SetOAuthSessionError(state, "Authorization cancelled")
+// 					return
+// 				case <-time.After(interval):
+// 					tokenResp, errToken := ssoClient.CreateToken(ctx, regResp.ClientID, regResp.ClientSecret, authResp.DeviceCode)
+// 					if errToken != nil {
+// 						errStr := errToken.Error()
+// 						if strings.Contains(errStr, "authorization_pending") {
+// 							continue
+// 						}
+// 						if strings.Contains(errStr, "slow_down") {
+// 							interval += 5 * time.Second
+// 							continue
+// 						}
+// 						log.Errorf("Token creation failed: %v", errToken)
+// 						SetOAuthSessionError(state, "Token creation failed")
+// 						return
+// 					}
+
+// 					// Success! Save the token
+// 					expiresAt := time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
+// 					email := kiroauth.ExtractEmailFromJWT(tokenResp.AccessToken)
+
+// 					idPart := kiroauth.SanitizeEmailForFilename(email)
+// 					if idPart == "" {
+// 						idPart = fmt.Sprintf("%d", time.Now().UnixNano()%100000)
+// 					}
+
+// 					now := time.Now()
+// 					fileName := fmt.Sprintf("kiro-aws-%s.json", idPart)
+
+// 					record := &coreauth.Auth{
+// 						ID:       fileName,
+// 						Provider: "kiro",
+// 						FileName: fileName,
+// 						Metadata: map[string]any{
+// 							"type":          "kiro",
+// 							"access_token":  tokenResp.AccessToken,
+// 							"refresh_token": tokenResp.RefreshToken,
+// 							"expires_at":    expiresAt.Format(time.RFC3339),
+// 							"auth_method":   "builder-id",
+// 							"provider":      "AWS",
+// 							"client_id":     regResp.ClientID,
+// 							"client_secret": regResp.ClientSecret,
+// 							"email":         email,
+// 							"last_refresh":  now.Format(time.RFC3339),
+// 						},
+// 					}
+
+// 					savedPath, errSave := h.saveTokenRecord(ctx, record)
+// 					if errSave != nil {
+// 						log.Errorf("Failed to save authentication tokens: %v", errSave)
+// 						SetOAuthSessionError(state, "Failed to save authentication tokens")
+// 						return
+// 					}
+
+// 					fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
+// 					if email != "" {
+// 						fmt.Printf("Authenticated as: %s\n", email)
+// 					}
+// 					CompleteOAuthSession(state)
+// 					return
+// 				}
+// 			}
+
+// 			SetOAuthSessionError(state, "Authorization timed out")
+// 		}()
+
+// 		// Return immediately with the state for polling
+// 		c.JSON(http.StatusOK, gin.H{"status": "ok", "state": state, "method": "device_code"})
+
+// 	case "google", "github":
+// 		RegisterOAuthSession(state, "kiro")
+
+// 		// Social auth uses protocol handler - for WEB UI we use a callback forwarder
+// 		provider := "Google"
+// 		if method == "github" {
+// 			provider = "Github"
+// 		}
+
+// 		isWebUI := isWebUIRequest(c)
+// 		var forwarder *callbackForwarder
+// 		if isWebUI {
+// 			targetURL, errTarget := h.managementCallbackURL("/kiro/callback")
+// 			if errTarget != nil {
+// 				log.WithError(errTarget).Error("failed to compute kiro callback target")
+// 				c.JSON(http.StatusInternalServerError, gin.H{"error": "callback server unavailable"})
+// 				return
+// 			}
+// 			var errStart error
+// 			if forwarder, errStart = startCallbackForwarder(kiroCallbackPort, "kiro", targetURL); errStart != nil {
+// 				log.WithError(errStart).Error("failed to start kiro callback forwarder")
+// 				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
+// 				return
+// 			}
+// 		}
+
+// 		// Generate PKCE codes in main thread to return auth_url immediately
+// 		socialClient := kiroauth.NewSocialAuthClient(h.cfg)
+// 		codeVerifier, codeChallenge, errPKCE := generateKiroPKCE()
+// 		if errPKCE != nil {
+// 			log.Errorf("Failed to generate PKCE: %v", errPKCE)
+// 			SetOAuthSessionError(state, "Failed to generate PKCE")
+// 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate auth params"})
+// 			return
+// 		}
+
+// 		authURL := fmt.Sprintf("%s?redirect_uri=%s&code_challenge=%s&code_challenge_method=S256&state=%s&redirect_from=KiroIDE",
+// 			"https://app.kiro.dev/signin",
+// 			url.QueryEscape(fmt.Sprintf("http://localhost:%d/redirect", kiroCallbackPort)),
+// 			codeChallenge,
+// 			state,
+// 		)
+
+// 		log.Infof("Kiro auth URL built: %s for state: %s", authURL, state)
+
+// 		// Store auth URL for frontend immediately
+// 		SetOAuthSessionError(state, "auth_url|"+authURL)
+// 		log.Infof("Kiro auth URL stored for state: %s", state)
+
+// 		log.Infof("Kiro auth: about to start goroutine for state: %s, isWebUI: %v", state, isWebUI)
+
+// 		go func() {
+// 			log.Infof("Kiro social auth goroutine STARTED for state: %s", state)
+// 			if isWebUI {
+// 				defer stopCallbackForwarderInstance(kiroCallbackPort, forwarder)
+// 			}
+
+// 			log.Infof("Kiro social auth goroutine started for state: %s, provider: %s", state, provider)
+
+// 			// Open browser with the auth URL
+// 			if err := browser.OpenURL(authURL); err != nil {
+// 				log.Errorf("Failed to open browser for Kiro auth: %v", err)
+// 			} else {
+// 				log.Infof("Successfully opened browser for Kiro auth: %s", authURL)
+// 			}
+
+// 			// Wait for callback file
+// 			waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-kiro-%s.oauth", state))
+// 			deadline := time.Now().Add(5 * time.Minute)
+
+// 			for {
+// 				if time.Now().After(deadline) {
+// 					log.Error("oauth flow timed out")
+// 					SetOAuthSessionError(state, "OAuth flow timed out")
+// 					return
+// 				}
+// 				if data, errRead := os.ReadFile(waitFile); errRead == nil {
+// 					var m map[string]string
+// 					_ = json.Unmarshal(data, &m)
+// 					_ = os.Remove(waitFile)
+// 					if errStr := m["error"]; errStr != "" {
+// 						log.Errorf("Authentication failed: %s", errStr)
+// 						SetOAuthSessionError(state, "Authentication failed")
+// 						return
+// 					}
+// 					if m["state"] != state {
+// 						log.Errorf("State mismatch")
+// 						SetOAuthSessionError(state, "State mismatch")
+// 						return
+// 					}
+// 					code := m["code"]
+// 					if code == "" {
+// 						log.Error("No authorization code received")
+// 						SetOAuthSessionError(state, "No authorization code received")
+// 						return
+// 					}
+
+// 					// Exchange code for tokens
+// 					tokenReq := &kiroauth.CreateTokenRequest{
+// 						Code:         code,
+// 						CodeVerifier: codeVerifier,
+// 						RedirectURI:  kiroauth.KiroRedirectURI,
+// 					}
+
+// 					tokenResp, errToken := socialClient.CreateToken(ctx, tokenReq)
+// 					if errToken != nil {
+// 						log.Errorf("Failed to exchange code for tokens: %v", errToken)
+// 						SetOAuthSessionError(state, "Failed to exchange code for tokens")
+// 						return
+// 					}
+
+// 					// Save the token
+// 					expiresIn := tokenResp.ExpiresIn
+// 					if expiresIn <= 0 {
+// 						expiresIn = 3600
+// 					}
+// 					expiresAt := time.Now().Add(time.Duration(expiresIn) * time.Second)
+// 					email := kiroauth.ExtractEmailFromJWT(tokenResp.AccessToken)
+
+// 					idPart := kiroauth.SanitizeEmailForFilename(email)
+// 					if idPart == "" {
+// 						idPart = fmt.Sprintf("%d", time.Now().UnixNano()%100000)
+// 					}
+
+// 					now := time.Now()
+// 					fileName := fmt.Sprintf("kiro-%s-%s.json", strings.ToLower(provider), idPart)
+
+// 					record := &coreauth.Auth{
+// 						ID:       fileName,
+// 						Provider: "kiro",
+// 						FileName: fileName,
+// 						Metadata: map[string]any{
+// 							"type":          "kiro",
+// 							"access_token":  tokenResp.AccessToken,
+// 							"refresh_token": tokenResp.RefreshToken,
+// 							"profile_arn":   tokenResp.ProfileArn,
+// 							"expires_at":    expiresAt.Format(time.RFC3339),
+// 							"auth_method":   "social",
+// 							"provider":      provider,
+// 							"email":         email,
+// 							"last_refresh":  now.Format(time.RFC3339),
+// 						},
+// 					}
+
+// 					savedPath, errSave := h.saveTokenRecord(ctx, record)
+// 					if errSave != nil {
+// 						log.Errorf("Failed to save authentication tokens: %v", errSave)
+// 						SetOAuthSessionError(state, "Failed to save authentication tokens")
+// 						return
+// 					}
+
+// 					fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
+// 					if email != "" {
+// 						fmt.Printf("Authenticated as: %s\n", email)
+// 					}
+// 					CompleteOAuthSession(state)
+// 					return
+// 				}
+// 				time.Sleep(500 * time.Millisecond)
+// 			}
+// 		}()
+
+// 		c.JSON(http.StatusOK, gin.H{"status": "ok", "state": state, "method": "social"})
+
+// 	default:
+// 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid method, use 'aws', 'google', or 'github'"})
+// 	}
+// }
+
+// // generateKiroPKCE generates PKCE code verifier and challenge for Kiro OAuth.
+// func generateKiroPKCE() (verifier, challenge string, err error) {
+// 	b := make([]byte, 32)
+// 	if _, errRead := io.ReadFull(rand.Reader, b); errRead != nil {
+// 		return "", "", fmt.Errorf("failed to generate random bytes: %w", errRead)
+// 	}
+// 	verifier = base64.RawURLEncoding.EncodeToString(b)
+
+// 	h := sha256.Sum256([]byte(verifier))
+// 	challenge = base64.RawURLEncoding.EncodeToString(h[:])
+
+// 	return verifier, challenge, nil
+// }
+
+// func (h *Handler) RequestKiloToken(c *gin.Context) {
+// 	ctx := context.Background()
+
+// 	fmt.Println("Initializing Kilo authentication...")
+
+// 	state := fmt.Sprintf("kil-%d", time.Now().UnixNano())
+// 	kilocodeAuth := kilo.NewKiloAuth()
+
+// 	resp, err := kilocodeAuth.InitiateDeviceFlow(ctx)
+// 	if err != nil {
+// 		log.Errorf("Failed to initiate device flow: %v", err)
+// 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to initiate device flow"})
+// 		return
+// 	}
+
+// 	RegisterOAuthSession(state, "kilo")
+
+// 	go func() {
+// 		fmt.Printf("Please visit %s and enter code: %s\n", resp.VerificationURL, resp.Code)
+
+// 		status, err := kilocodeAuth.PollForToken(ctx, resp.Code)
+// 		if err != nil {
+// 			SetOAuthSessionError(state, "Authentication failed")
+// 			fmt.Printf("Authentication failed: %v\n", err)
+// 			return
+// 		}
+
+// 		profile, err := kilocodeAuth.GetProfile(ctx, status.Token)
+// 		if err != nil {
+// 			log.Warnf("Failed to fetch profile: %v", err)
+// 			profile = &kilo.Profile{Email: status.UserEmail}
+// 		}
+
+// 		var orgID string
+// 		if len(profile.Orgs) > 0 {
+// 			orgID = profile.Orgs[0].ID
+// 		}
+
+// 		defaults, err := kilocodeAuth.GetDefaults(ctx, status.Token, orgID)
+// 		if err != nil {
+// 			defaults = &kilo.Defaults{}
+// 		}
+
+// 		ts := &kilo.KiloTokenStorage{
+// 			Token:          status.Token,
+// 			OrganizationID: orgID,
+// 			Model:          defaults.Model,
+// 			Email:          status.UserEmail,
+// 			Type:           "kilo",
+// 		}
+
+// 		fileName := kilo.CredentialFileName(status.UserEmail)
+// 		record := &coreauth.Auth{
+// 			ID:       fileName,
+// 			Provider: "kilo",
+// 			FileName: fileName,
+// 			Storage:  ts,
+// 			Metadata: map[string]any{
+// 				"email":           status.UserEmail,
+// 				"organization_id": orgID,
+// 				"model":           defaults.Model,
+// 			},
+// 		}
+
+// 		savedPath, errSave := h.saveTokenRecord(ctx, record)
+// 		if errSave != nil {
+// 			log.Errorf("Failed to save authentication tokens: %v", errSave)
+// 			SetOAuthSessionError(state, "Failed to save authentication tokens")
+// 			return
+// 		}
+
+// 		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
+// 		CompleteOAuthSession(state)
+// 		CompleteOAuthSessionsByProvider("kilo")
+// 	}()
+
+// 	c.JSON(200, gin.H{
+// 		"status":           "ok",
+// 		"url":              resp.VerificationURL,
+// 		"state":            state,
+// 		"user_code":        resp.Code,
+// 		"verification_uri": resp.VerificationURL,
+// 	})
+// }
 
 const kiroCallbackPort = 9876
 
@@ -3827,11 +4243,288 @@ func (h *Handler) RequestCursorToken(c *gin.Context) {
 	})
 }
 
+func (h *Handler) RequestCodeBuddyToken(c *gin.Context) {
+	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
+
+	fmt.Println("Initializing CodeBuddy authentication...")
+
+	authSvc := codebuddy.NewCodeBuddyAuth(h.cfg)
+	authState, errState := authSvc.FetchAuthState(ctx)
+	if errState != nil {
+		log.Errorf("Failed to fetch CodeBuddy auth state: %v", errState)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch auth url"})
+		return
+	}
+
+	state := strings.TrimSpace(authState.State)
+	if state == "" {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid auth state"})
+		return
+	}
+
+	RegisterOAuthSession(state, "codebuddy")
+
+	go func() {
+		tokens, errPoll := authSvc.PollForToken(ctx, state)
+		if errPoll != nil {
+			SetOAuthSessionError(state, "Authentication failed: "+errPoll.Error())
+			log.Errorf("CodeBuddy authentication failed: %v", errPoll)
+			return
+		}
+		if tokens == nil || strings.TrimSpace(tokens.AccessToken) == "" {
+			SetOAuthSessionError(state, "Authentication failed")
+			log.Errorf("CodeBuddy authentication failed: empty token")
+			return
+		}
+
+		uid := strings.TrimSpace(tokens.UserID)
+		if uid == "" {
+			uid = fmt.Sprintf("%d", time.Now().UnixMilli())
+		}
+
+		fileName := fmt.Sprintf("codebuddy-%s.json", uid)
+		record := &coreauth.Auth{
+			ID:       fileName,
+			Provider: "codebuddy",
+			FileName: fileName,
+			Label:    uid,
+			Storage:  tokens,
+			Metadata: map[string]any{
+				"type":          "codebuddy",
+				"access_token":  strings.TrimSpace(tokens.AccessToken),
+				"refresh_token": strings.TrimSpace(tokens.RefreshToken),
+				"expires_in":    tokens.ExpiresIn,
+				"token_type":    strings.TrimSpace(tokens.TokenType),
+				"domain":        strings.TrimSpace(tokens.Domain),
+				"user_id":       strings.TrimSpace(tokens.UserID),
+				"timestamp":     time.Now().UnixMilli(),
+			},
+		}
+
+		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		if errSave != nil {
+			log.Errorf("Failed to save CodeBuddy token: %v", errSave)
+			SetOAuthSessionError(state, "Failed to save token")
+			return
+		}
+
+		CompleteOAuthSession(state)
+		CompleteOAuthSessionsByProvider("codebuddy")
+		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
+		fmt.Println("You can now use CodeBuddy services through this CLI")
+	}()
+
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "url": authState.AuthURL, "state": state})
+}
+
+func (h *Handler) RequestCodeBuddyAIToken(c *gin.Context) {
+	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
+
+	fmt.Println("Initializing CodeBuddy AI authentication...")
+
+	authSvc := codebuddy_ai.NewCodeBuddyAIAuth(h.cfg)
+	authState, errState := authSvc.FetchAuthState(ctx)
+	if errState != nil {
+		log.Errorf("Failed to fetch CodeBuddy AI auth state: %v", errState)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch auth url"})
+		return
+	}
+
+	state := strings.TrimSpace(authState.State)
+	if state == "" {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid auth state"})
+		return
+	}
+
+	RegisterOAuthSession(state, "codebuddy-ai")
+
+	go func() {
+		tokens, errPoll := authSvc.PollForToken(ctx, state)
+		if errPoll != nil {
+			SetOAuthSessionError(state, "Authentication failed: "+errPoll.Error())
+			log.Errorf("CodeBuddy AI authentication failed: %v", errPoll)
+			return
+		}
+		if tokens == nil || strings.TrimSpace(tokens.AccessToken) == "" {
+			SetOAuthSessionError(state, "Authentication failed")
+			log.Errorf("CodeBuddy AI authentication failed: empty token")
+			return
+		}
+
+		uid := strings.TrimSpace(tokens.UserID)
+		if uid == "" {
+			uid = fmt.Sprintf("%d", time.Now().UnixMilli())
+		}
+
+		fileName := fmt.Sprintf("codebuddy-ai-%s.json", uid)
+		record := &coreauth.Auth{
+			ID:       fileName,
+			Provider: "codebuddy-ai",
+			FileName: fileName,
+			Label:    uid,
+			Storage:  tokens,
+			Metadata: map[string]any{
+				"type":          "codebuddy-ai",
+				"access_token":  strings.TrimSpace(tokens.AccessToken),
+				"refresh_token": strings.TrimSpace(tokens.RefreshToken),
+				"expires_in":    tokens.ExpiresIn,
+				"token_type":    strings.TrimSpace(tokens.TokenType),
+				"domain":        strings.TrimSpace(tokens.Domain),
+				"user_id":       strings.TrimSpace(tokens.UserID),
+				"timestamp":     time.Now().UnixMilli(),
+			},
+		}
+
+		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		if errSave != nil {
+			log.Errorf("Failed to save CodeBuddy AI token: %v", errSave)
+			SetOAuthSessionError(state, "Failed to save token")
+			return
+		}
+
+		CompleteOAuthSession(state)
+		CompleteOAuthSessionsByProvider("codebuddy-ai")
+		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
+		fmt.Println("You can now use CodeBuddy AI services through this CLI")
+	}()
+
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "url": authState.AuthURL, "state": state})
+}
+
+func (h *Handler) RequestBTToken(c *gin.Context) {
+	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
+
+	if c.Request.Method == http.MethodPost {
+		var req struct {
+			Phone    string `json:"phone" binding:"required"`
+			Password string `json:"password" binding:"required"`
+		}
+
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "phone and password are required"})
+			return
+		}
+
+		phone := strings.TrimSpace(req.Phone)
+		passwordBase64 := strings.TrimSpace(req.Password)
+
+		if phone == "" || passwordBase64 == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "phone and password cannot be empty"})
+			return
+		}
+
+		fmt.Printf("Initializing BT authentication for phone: %s\n", phone)
+
+		tokenStorage, err := bt.Login(phone, passwordBase64)
+		if err != nil {
+			log.Errorf("BT authentication failed: %v", err)
+			c.JSON(http.StatusUnauthorized, gin.H{"error": fmt.Sprintf("Authentication failed: %v", err)})
+			return
+		}
+
+		fileName := fmt.Sprintf("bt-%s.json", tokenStorage.UID)
+		record := &coreauth.Auth{
+			ID:       fileName,
+			Provider: "bt",
+			FileName: fileName,
+			Label:    tokenStorage.Phone,
+			Storage:  tokenStorage,
+			Metadata: map[string]any{
+				"type":       "bt",
+				"phone":      tokenStorage.Phone,
+				"uid":        tokenStorage.UID,
+				"access_key": tokenStorage.AccessKey,
+				"serverid":   tokenStorage.ServerID,
+				"timestamp":  time.Now().UnixMilli(),
+			},
+		}
+
+		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		if errSave != nil {
+			log.Errorf("Failed to save BT token: %v", errSave)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save token"})
+			return
+		}
+
+		fmt.Printf("BT authentication successful! Token saved to %s\n", savedPath)
+		c.JSON(http.StatusOK, gin.H{
+			"status":  "ok",
+			"message": "Authentication successful",
+			"file":    fileName,
+			"path":    savedPath,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":  "ok",
+		"message": "BT authentication requires POST request with phone and password",
+		"method":  "POST",
+		"body": gin.H{
+			"phone":    "your_phone_number",
+			"password": "base64_encoded_password",
+		},
+	})
+}
+
+func (h *Handler) RequestCodeArtsToken(c *gin.Context) {
+	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
+
+	state, errState := misc.GenerateRandomState()
+	if errState != nil {
+		log.Errorf("Failed to generate state parameter: %v", errState)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate state"})
+		return
+	}
+
+	RegisterOAuthSession(state, "codearts")
+
+	callbackURL, errCallback := h.managementCallbackURL("/v0/oauth/codearts/status")
+	if errCallback != nil {
+		log.WithError(errCallback).Error("failed to compute codearts status url")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "callback server unavailable"})
+		return
+	}
+
+	// Use CodeArts OAuth handler to generate the real authorization URL directly
+	var authURL string
+	if h.codeArtsOAuthHandler != nil {
+		var err error
+		authURL, err = h.codeArtsOAuthHandler.CreateSessionAndGetAuthURL(state)
+		if err != nil {
+			log.WithError(err).Error("failed to create CodeArts OAuth session")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create auth session"})
+			return
+		}
+	} else {
+		// Fallback to local start endpoint if handler is not available
+		var err error
+		authURL, err = h.managementCallbackURL("/v0/oauth/codearts/start")
+		if err != nil {
+			log.WithError(err).Error("failed to compute codearts login url")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "callback server unavailable"})
+			return
+		}
+	}
+
+	SetOAuthSessionError(state, "auth_url|"+callbackURL+"?state="+url.QueryEscape(state))
+
+	c.JSON(http.StatusOK, gin.H{
+		"status": "ok",
+		"url":    authURL,
+		"state":  state,
+	})
+}
+
 func (h *Handler) RequestQoderToken(c *gin.Context) {
 	ctx := context.Background()
 	ctx = PopulateAuthContext(ctx, c)
 
-	fmt.Println("Initializing Qoder authentication...")
+	log.Info("Initializing Qoder authentication...")
 
 	nonce, challenge, verifier, errPKCE := qoderauth.GeneratePKCE()
 	if errPKCE != nil {
@@ -3841,7 +4534,6 @@ func (h *Handler) RequestQoderToken(c *gin.Context) {
 	}
 
 	machineID := qoderauth.GenerateMachineID("cliproxy", "00:00:00:00:00:00", "server", "x86_64")
-	authURL := qoderauth.BuildAuthURL(nonce, challenge, machineID)
 
 	state, errState := misc.GenerateRandomState()
 	if errState != nil {
@@ -3852,31 +4544,21 @@ func (h *Handler) RequestQoderToken(c *gin.Context) {
 
 	RegisterOAuthSession(state, "qoder")
 
-	isWebUI := isWebUIRequest(c)
-	var forwarder *callbackForwarder
-	if isWebUI {
-		targetURL, errTarget := h.managementCallbackURL("/qoder/callback")
-		if errTarget != nil {
-			log.WithError(errTarget).Error("failed to compute qoder callback target")
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "callback server unavailable"})
-			return
-		}
-		var errStart error
-		if forwarder, errStart = startCallbackForwarder(qoderauth.CallbackPort, "qoder", targetURL); errStart != nil {
-			log.WithError(errStart).Error("failed to start qoder callback forwarder")
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
-			return
-		}
-	}
+	authURL := qoderauth.BuildAuthURL(nonce, challenge, machineID)
+
+	log.Infof("Qoder auth URL built: %s for state: %s", authURL, state)
+
+	// Store auth URL for frontend immediately (like Kiro does)
+	SetOAuthSessionError(state, "auth_url|"+authURL)
+	log.Infof("Qoder auth URL stored for state: %s", state)
 
 	go func() {
-		if isWebUI {
-			defer stopCallbackForwarderInstance(qoderauth.CallbackPort, forwarder)
-		}
+		var tokenString, authField string
 
+		// CLI: Wait for callback file (original behavior)
+		// WebUI: User clicks link and auth completes via qoder:// protocol
 		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-qoder-%s.oauth", state))
 		deadline := time.Now().Add(5 * time.Minute)
-		var tokenString, authField string
 		for {
 			if !IsOAuthSessionPending(state, "qoder") {
 				return
@@ -3905,6 +4587,12 @@ func (h *Handler) RequestQoderToken(c *gin.Context) {
 				break
 			}
 			time.Sleep(500 * time.Millisecond)
+		}
+
+		if tokenString == "" {
+			log.Error("Authentication failed: token not found")
+			SetOAuthSessionError(state, "Authentication failed: token not found")
+			return
 		}
 
 		// Decode auth field to get user info
@@ -3987,10 +4675,8 @@ func (h *Handler) RequestQoderToken(c *gin.Context) {
 
 		CompleteOAuthSession(state)
 		CompleteOAuthSessionsByProvider("qoder")
-		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
-		fmt.Println("You can now use Qoder services through this CLI")
+		log.Infof("Qoder authentication successful! Token saved to %s", savedPath)
 	}()
 
-	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
+	c.JSON(200, gin.H{"status": "ok", "state": state, "method": "protocol"})
 }
-

@@ -22,7 +22,7 @@ func RegisterURIHandler(callbackPort int) func() {
 
 	vbsContent := fmt.Sprintf(`Set objHTTP = CreateObject("MSXML2.XMLHTTP")
 On Error Resume Next
-url = "http://127.0.0.1:%d/forward?url="
+url = "http://localhost:%d/forward?url="
 url = url & UrlEncode(WScript.Arguments(0))
 objHTTP.Open "GET", url, False
 objHTTP.send

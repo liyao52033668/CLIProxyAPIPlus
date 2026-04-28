@@ -21,7 +21,7 @@ type Client struct {
 // NewClient creates a new management API client.
 func NewClient(port int, secretKey string) *Client {
 	return &Client{
-		baseURL:   fmt.Sprintf("http://127.0.0.1:%d", port),
+		baseURL:   fmt.Sprintf("http://localhost:%d", port),
 		secretKey: strings.TrimSpace(secretKey),
 		http: &http.Client{
 			Timeout: 10 * time.Second,
