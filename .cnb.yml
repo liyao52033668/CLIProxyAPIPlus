@@ -12,6 +12,24 @@ main:
           script: |
             ls -al
 
+  push:
+    - services:
+        - docker
+      stages:
+        - name: sync to github
+          image: tencentcom/git-sync
+          imports: https://cnb.cool/liyao52033/envs/-/blob/main/github-env.yml
+          settings:
+            target_url: https://github.com/liyao52033668/CLIProxyAPIPlus.git
+            auth_type: https
+            branch: main
+            git_user: ${GIT_USERNAME_NEW}
+            git_email: ${GIT_EMAIL_NEW}
+            username: ${GIT_USERNAME_NEW}
+            password: ${GIT_ACCESS_TOKEN_NEW}
+            push_tags: true
+   
+
 # 对所有tag生效，推tag时触发
 $:
   tag_push:
@@ -27,16 +45,16 @@ $:
               -t ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:latest .
         - name: docker push
           script: docker push ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:latest
-        - name: sync to github
-          image: tencentcom/git-sync
-          imports: https://cnb.cool/liyao52033/envs/-/blob/main/github-env.yml
-          settings:
-            target_url: https://github.com/liyao52033668/CLIProxyAPIPlus.git
-            auth_type: https
-            branch: main
-            git_user: ${GIT_USERNAME_NEW}
-            git_email: ${GIT_EMAIL_NEW}
-            username: ${GIT_USERNAME_NEW}
-            password: ${GIT_ACCESS_TOKEN_NEW}
-            push_tags: true
-            sync_mode: push
+        # - name: sync to github
+        #   image: tencentcom/git-sync
+        #   imports: https://cnb.cool/liyao52033/envs/-/blob/main/github-env.yml
+        #   settings:
+        #     target_url: https://github.com/liyao52033668/CLIProxyAPIPlus.git
+        #     auth_type: https
+        #     branch: main
+        #     git_user: ${GIT_USERNAME_NEW}
+        #     git_email: ${GIT_EMAIL_NEW}
+        #     username: ${GIT_USERNAME_NEW}
+        #     password: ${GIT_ACCESS_TOKEN_NEW}
+        #     push_tags: true
+        #     sync_mode: push
