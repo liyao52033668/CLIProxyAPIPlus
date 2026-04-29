@@ -963,15 +963,32 @@ func (s *GitTokenStore) LoadUsage(_ context.Context) (*usage.StatisticsSnapshot,
 	return &snapshot, nil
 }
 
-// SaveUsage commits and pushes usage statistics to git.
-func (s *GitTokenStore) SaveUsage(_ context.Context, snapshot *usage.StatisticsSnapshot) error {
+// SaveUsage commits and pushes usage statistics to git after merging with existing data.
+func (s *GitTokenStore) SaveUsage(ctx context.Context, snapshot *usage.StatisticsSnapshot) error {
 	if snapshot == nil {
 		return nil
 	}
 	if err := s.EnsureRepository(); err != nil {
 		return err
 	}
-	data, err := json.Marshal(snapshot)
+
+	// 先加载现有数据
+	existing, err := s.LoadUsage(ctx)
+	if err != nil {
+		return err
+	}
+
+	// 创建临时统计结构，合并两个快照
+	finalStats := usage.NewRequestStatistics()
+	if existing != nil {
+		finalStats.MergeSnapshot(*existing)
+	}
+	finalStats.MergeSnapshot(*snapshot)
+
+	// 保存合并后的快照
+	mergedSnapshot := finalStats.Snapshot()
+
+	data, err := json.Marshal(&mergedSnapshot)
 	if err != nil {
 		return fmt.Errorf("git token store: marshal usage stats: %w", err)
 	}

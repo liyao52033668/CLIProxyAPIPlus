@@ -72,9 +72,17 @@ type callbackForwarder struct {
 	done     chan struct{}
 }
 
+type qoderCallbackServer struct {
+	server *http.Server
+	done   chan struct{}
+	state  string
+}
+
 var (
 	callbackForwardersMu  sync.Mutex
 	callbackForwarders    = make(map[int]*callbackForwarder)
+	qoderCallbackServersMu sync.Mutex
+	qoderCallbackServers   = make(map[int]*qoderCallbackServer)
 	errAuthFileMustBeJSON = errors.New("auth file must be .json")
 	errAuthFileNotFound   = errors.New("auth file not found")
 )
@@ -210,15 +218,64 @@ type qoderCallbackResult struct {
 	AuthField   string
 }
 
+func stopQoderCallbackServer(port int) {
+	qoderCallbackServersMu.Lock()
+	prev := qoderCallbackServers[port]
+	if prev != nil {
+		delete(qoderCallbackServers, port)
+	}
+	qoderCallbackServersMu.Unlock()
+
+	if prev != nil {
+		stopQoderCallbackServerInstance(port, prev)
+	}
+}
+
+func stopQoderCallbackServerInstance(port int, srv *qoderCallbackServer) {
+	if srv == nil || srv.server == nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if err := srv.server.Shutdown(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.WithError(err).Warnf("failed to shut down qoder callback server on port %d", port)
+	}
+
+	select {
+	case <-srv.done:
+	case <-time.After(2 * time.Second):
+	}
+
+	log.Infof("qoder callback server on port %d stopped", port)
+}
+
 func startQoderCallbackServerWebUI(port int, state string) (*http.Server, <-chan qoderCallbackResult, error) {
 	if port <= 0 {
 		port = qoder.CallbackPort
 	}
+
+	stopQoderCallbackServer(port)
+
 	addr := fmt.Sprintf(":%d", port)
-	listener, err := net.Listen("tcp", addr)
+
+	var listener net.Listener
+	var err error
+
+	for i := 0; i < 3; i++ {
+		listener, err = net.Listen("tcp", addr)
+		if err == nil {
+			break
+		}
+		log.Warnf("Failed to listen on %s (attempt %d/3): %v, retrying...", addr, i+1, err)
+		time.Sleep(500 * time.Millisecond)
+	}
+
 	if err != nil {
 		return nil, nil, fmt.Errorf("qoder callback server: failed to listen on %s: %w", addr, err)
 	}
+
 	resultCh := make(chan qoderCallbackResult, 1)
 
 	mux := http.NewServeMux()
@@ -282,11 +339,23 @@ func startQoderCallbackServerWebUI(port int, state string) (*http.Server, <-chan
 	})
 
 	srv := &http.Server{Handler: mux}
+	done := make(chan struct{})
 	go func() {
 		if errServe := srv.Serve(listener); errServe != nil && !strings.Contains(errServe.Error(), "Server closed") {
 			log.Warnf("qoder callback server error: %v", errServe)
 		}
+		close(done)
 	}()
+
+	callbackSrv := &qoderCallbackServer{
+		server: srv,
+		done:   done,
+		state:  state,
+	}
+
+	qoderCallbackServersMu.Lock()
+	qoderCallbackServers[port] = callbackSrv
+	qoderCallbackServersMu.Unlock()
 
 	log.Infof("qoder callback server listening on %s", addr)
 	return srv, resultCh, nil
@@ -4614,6 +4683,9 @@ func (h *Handler) RequestQoderToken(c *gin.Context) {
 
 	log.Info("Initializing Qoder authentication...")
 
+	CompleteOAuthSessionsByProvider("qoder")
+	stopQoderCallbackServer(qoder.CallbackPort)
+
 	nonce, challenge, verifier, errPKCE := qoderauth.GeneratePKCE()
 	if errPKCE != nil {
 		log.Errorf("Failed to generate PKCE parameters: %v", errPKCE)
@@ -4634,7 +4706,7 @@ func (h *Handler) RequestQoderToken(c *gin.Context) {
 
 	// Start HTTP callback server (for Windows VBS handler)
 	callbackPort := qoderauth.CallbackPort
-	srv, cbChan, errServer := startQoderCallbackServerWebUI(callbackPort, state)
+	_, cbChan, errServer := startQoderCallbackServerWebUI(callbackPort, state)
 	if errServer != nil {
 		log.Errorf("Failed to start Qoder callback server: %v", errServer)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
@@ -4651,9 +4723,7 @@ func (h *Handler) RequestQoderToken(c *gin.Context) {
 
 	go func() {
 		defer func() {
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
-			_ = srv.Shutdown(shutdownCtx)
+			stopQoderCallbackServer(callbackPort)
 		}()
 
 		var tokenString, authField string

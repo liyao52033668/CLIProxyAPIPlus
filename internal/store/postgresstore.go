@@ -601,12 +601,29 @@ func (s *PostgresStore) LoadUsage(ctx context.Context) (*usage.StatisticsSnapsho
 	}
 }
 
-// SaveUsage upserts usage statistics to PostgreSQL.
+// SaveUsage upserts usage statistics to PostgreSQL after merging with existing data.
 func (s *PostgresStore) SaveUsage(ctx context.Context, snapshot *usage.StatisticsSnapshot) error {
 	if s == nil || s.db == nil || snapshot == nil {
 		return nil
 	}
-	data, err := json.Marshal(snapshot)
+
+	// 先加载现有数据
+	existing, err := s.LoadUsage(ctx)
+	if err != nil {
+		return err
+	}
+
+	// 创建临时统计结构，合并两个快照
+	finalStats := usage.NewRequestStatistics()
+	if existing != nil {
+		finalStats.MergeSnapshot(*existing)
+	}
+	finalStats.MergeSnapshot(*snapshot)
+
+	// 保存合并后的快照
+	mergedSnapshot := finalStats.Snapshot()
+
+	data, err := json.Marshal(&mergedSnapshot)
 	if err != nil {
 		return fmt.Errorf("postgres store: marshal usage stats: %w", err)
 	}

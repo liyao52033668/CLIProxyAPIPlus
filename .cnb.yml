@@ -38,8 +38,14 @@ $:
       stages:
         - name: docker build
           script: |
+            # 获取最新 tag，无 tag 则返回空
+            LATEST_TAG=$(git describe --tags $(git rev-list --tags --max-count=1) 2>/dev/null)
+            # 赋值 VERSION：有 tag 用 tag，无则用 dev
+            VERSION="${LATEST_TAG:-dev}"
+            echo "VERSION: $VERSION"
+            
             docker build \
-              --build-arg VERSION="${CNB_TAG:-dev}" \
+              --build-arg VERSION="$VERSION" \
               --build-arg COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo none)" \
               --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
               -t ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:latest .

@@ -361,12 +361,29 @@ func (s *ObjectTokenStore) LoadUsage(ctx context.Context) (*usage.StatisticsSnap
 	return &snapshot, nil
 }
 
-// SaveUsage uploads usage statistics to object storage.
+// SaveUsage uploads usage statistics to object storage after merging with existing data.
 func (s *ObjectTokenStore) SaveUsage(ctx context.Context, snapshot *usage.StatisticsSnapshot) error {
 	if s == nil || s.client == nil || snapshot == nil {
 		return nil
 	}
-	data, err := json.Marshal(snapshot)
+
+	// 先加载现有数据
+	existing, err := s.LoadUsage(ctx)
+	if err != nil {
+		return err
+	}
+
+	// 创建临时统计结构，合并两个快照
+	finalStats := usage.NewRequestStatistics()
+	if existing != nil {
+		finalStats.MergeSnapshot(*existing)
+	}
+	finalStats.MergeSnapshot(*snapshot)
+
+	// 保存合并后的快照
+	mergedSnapshot := finalStats.Snapshot()
+
+	data, err := json.Marshal(&mergedSnapshot)
 	if err != nil {
 		return fmt.Errorf("object store: marshal usage stats: %w", err)
 	}
