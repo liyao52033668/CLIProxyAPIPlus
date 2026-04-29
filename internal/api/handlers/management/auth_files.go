@@ -219,7 +219,6 @@ func startQoderCallbackServerWebUI(port int, state string) (*http.Server, <-chan
 	if err != nil {
 		return nil, nil, fmt.Errorf("qoder callback server: failed to listen on %s: %w", addr, err)
 	}
-	port = listener.Addr().(*net.TCPAddr).Port
 	resultCh := make(chan qoderCallbackResult, 1)
 
 	mux := http.NewServeMux()
@@ -227,8 +226,10 @@ func startQoderCallbackServerWebUI(port int, state string) (*http.Server, <-chan
 		rawURL := r.URL.Query().Get("url")
 		rawURL, _ = url.QueryUnescape(rawURL)
 		prefix := "qoder://aicoding.aicoding-agent/login-success?"
+		
+		qs := ""
 		if strings.HasPrefix(rawURL, prefix) {
-			qs := rawURL[len(prefix):]
+			qs = rawURL[len(prefix):]
 			parsed, errParse := url.ParseQuery(qs)
 			if errParse == nil {
 				stateParam := parsed.Get("state")
@@ -250,13 +251,33 @@ func startQoderCallbackServerWebUI(port int, state string) (*http.Server, <-chan
 				}
 			}
 		}
+		
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		callbackURL := "qoder://aicoding.aicoding-agent/login-success?" + qs
 		_, _ = w.Write([]byte(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Qoder Login</title></head>` +
 			`<body style="display:flex;justify-content:center;align-items:center;height:100vh;` +
 			`font-family:system-ui;background:#1a1a2e;color:#e0e0e0">` +
-			`<div style="text-align:center">` +
+			`<div style="text-align:center;max-width:600px;padding:20px">` +
 			`<h1 style="color:#4CAF50">&#10003; Login Successful</h1>` +
-			`<p>You can close this window and return to the terminal.</p>` +
+			`<p style="margin:20px 0">Your authentication token has been received.</p>` +
+			`<div style="background:#2a2a4e;border-radius:8px;padding:16px;margin:20px 0">` +
+			`<p style="margin-bottom:8px;color:#aaa;font-size:14px">Callback URL:</p>` +
+			`<input type="text" readonly value="` + callbackURL + `" ` +
+			`style="width:100%;padding:12px;font-family:monospace;font-size:12px;` +
+			`background:#1a1a2e;color:#4CAF50;border:1px solid #3a3a5e;border-radius:4px;` +
+			`word-break:break-all;" id="callbackUrl">` +
+			`<button onclick="copyUrl()" ` +
+			`style="margin-top:12px;padding:10px 24px;background:#4CAF50;color:white;` +
+			`border:none;border-radius:4px;cursor:pointer;font-size:14px;">` +
+			`Copy URL</button>` +
+			`<p id="copyMsg" style="margin-top:10px;color:#4CAF50;font-size:14px;display:none;">` +
+			`Copied to clipboard!</p>` +
+			`</div>` +
+			`<p style="color:#aaa;font-size:14px">If you're on Linux/macOS and the terminal didn't receive the callback automatically, ` +
+			`paste the URL above into the terminal window.</p>` +
+			`<p>You can close this window now.</p>` +
+			`<script>function copyUrl(){var e=document.getElementById("callbackUrl");e.select();navigator.clipboard.writeText(e.value);` +
+			`document.getElementById("copyMsg").style.display="block";setTimeout(function(){document.getElementById("copyMsg").style.display="none"},2000)}</script>` +
 			`</div></body></html>`))
 	})
 
@@ -3852,7 +3873,7 @@ const kiroCallbackPort = 9876
 func (h *Handler) RequestKiroToken(c *gin.Context) {
 	ctx := context.Background()
 
-	// Get the login method from query parameter (default: aws for device code flow)
+	// Get the login method from query parameter (default: google for social auth flow)
 	method := strings.ToLower(strings.TrimSpace(c.Query("method")))
 	if method == "" {
 		method = "aws"
@@ -3999,33 +4020,33 @@ func (h *Handler) RequestKiroToken(c *gin.Context) {
 			}
 		}
 
+		// Generate PKCE codes outside goroutine so we can return auth URL immediately
+		codeVerifier, codeChallenge, errPKCE := generateKiroPKCE()
+		if errPKCE != nil {
+			log.Errorf("Failed to generate PKCE: %v", errPKCE)
+			SetOAuthSessionError(state, "Failed to generate PKCE")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate auth params"})
+			return
+		}
+
+		// Build login URL
+		authURL := fmt.Sprintf("%s/login?idp=%s&redirect_uri=%s&code_challenge=%s&code_challenge_method=S256&state=%s&prompt=select_account",
+			"https://prod.us-east-1.auth.desktop.kiro.dev",
+			provider,
+			url.QueryEscape(kiroauth.KiroRedirectURI),
+			codeChallenge,
+			state,
+		)
+
+		// Store auth URL for frontend polling
+		SetOAuthSessionError(state, "auth_url|"+authURL)
+
+		// Start background goroutine to wait for callback
+		socialClient := kiroauth.NewSocialAuthClient(h.cfg)
 		go func() {
 			if isWebUI {
 				defer stopCallbackForwarderInstance(kiroCallbackPort, forwarder)
 			}
-
-			socialClient := kiroauth.NewSocialAuthClient(h.cfg)
-
-			// Generate PKCE codes
-			codeVerifier, codeChallenge, errPKCE := generateKiroPKCE()
-			if errPKCE != nil {
-				log.Errorf("Failed to generate PKCE: %v", errPKCE)
-				SetOAuthSessionError(state, "Failed to generate PKCE")
-				return
-			}
-
-			// Build login URL
-			authURL := fmt.Sprintf("%s/login?idp=%s&redirect_uri=%s&code_challenge=%s&code_challenge_method=S256&state=%s&prompt=select_account",
-				"https://prod.us-east-1.auth.desktop.kiro.dev",
-				provider,
-				url.QueryEscape(kiroauth.KiroRedirectURI),
-				codeChallenge,
-				state,
-			)
-
-			// Store auth URL for frontend.
-			// Using "|" as separator because URLs contain ":".
-			SetOAuthSessionError(state, "auth_url|"+authURL)
 
 			// Wait for callback file
 			waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-kiro-%s.oauth", state))
@@ -4123,7 +4144,7 @@ func (h *Handler) RequestKiroToken(c *gin.Context) {
 			}
 		}()
 
-		c.JSON(http.StatusOK, gin.H{"status": "ok", "state": state, "method": "social"})
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "url": authURL, "state": state})
 
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid method, use 'aws', 'google', or 'github'"})
@@ -4611,6 +4632,16 @@ func (h *Handler) RequestQoderToken(c *gin.Context) {
 
 	RegisterOAuthSession(state, "qoder")
 
+	// Start HTTP callback server (for Windows VBS handler)
+	callbackPort := qoderauth.CallbackPort
+	srv, cbChan, errServer := startQoderCallbackServerWebUI(callbackPort, state)
+	if errServer != nil {
+		log.Errorf("Failed to start Qoder callback server: %v", errServer)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
+		return
+	}
+
+	// Use qoder:// redirect URI (required by Qoder server)
 	authURL := qoderauth.BuildAuthURLWithRedirectAndState(nonce, challenge, machineID, qoderauth.RedirectURI, state)
 
 	log.Infof("Qoder auth URL built: %s for state: %s", authURL, state)
@@ -4618,19 +4649,7 @@ func (h *Handler) RequestQoderToken(c *gin.Context) {
 	SetOAuthSessionError(state, "auth_url|"+authURL)
 	log.Infof("Qoder auth URL stored for state: %s", state)
 
-	callbackPort := qoderauth.CallbackPort
-	cleanupURI := qoder.RegisterURIHandler(callbackPort)
-
-	srv, cbChan, errServer := startQoderCallbackServerWebUI(callbackPort, state)
-	if errServer != nil {
-		log.Errorf("Failed to start Qoder callback server: %v", errServer)
-		cleanupURI()
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
-		return
-	}
-
 	go func() {
-		defer cleanupURI()
 		defer func() {
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
@@ -4639,12 +4658,73 @@ func (h *Handler) RequestQoderToken(c *gin.Context) {
 
 		var tokenString, authField string
 
-		select {
-		case cbRes := <-cbChan:
-			tokenString = cbRes.TokenString
-			authField = cbRes.AuthField
-		case <-time.After(5 * time.Minute):
-			log.Error("Qoder authentication timed out")
+		// Wait for callback via file (for WebUI) or channel (for Windows auto callback)
+		waitFiles := []string{
+			filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-qoder-%s.oauth", state)), // With state
+			filepath.Join(h.cfg.AuthDir, ".oauth-qoder-.oauth"), // Without state (Qoder callback URL may not contain state)
+		}
+		waitForCallback := func() (string, string, error) {
+			deadline := time.Now().Add(5 * time.Minute)
+			for {
+				if !IsOAuthSessionPending(state, "qoder") {
+					return "", "", errOAuthSessionNotPending
+				}
+				if time.Now().After(deadline) {
+					return "", "", fmt.Errorf("timeout waiting for Qoder callback")
+				}
+
+				// Check channel first (Windows auto callback)
+				select {
+				case cbRes := <-cbChan:
+					return cbRes.TokenString, cbRes.AuthField, nil
+				default:
+				}
+
+				// Check files (WebUI manual input)
+				for _, waitFile := range waitFiles {
+					data, errRead := os.ReadFile(waitFile)
+					if errRead == nil {
+						var m map[string]string
+						if json.Unmarshal(data, &m) == nil {
+							_ = os.Remove(waitFile)
+							code := m["code"]
+							if code != "" {
+								// New format: code contains the token directly
+								return code, m["auth"], nil
+							}
+							// Legacy format: code contains query string
+							qs := m["code"]
+							if qs != "" {
+								// Qoder callback URL may be double-encoded
+								// Decode once first to get the actual query string
+								qs, _ = url.QueryUnescape(qs)
+								parsed, errParse := url.ParseQuery(qs)
+								if errParse == nil {
+									token := ""
+									for _, k := range []string{"tokenString", "token"} {
+										if v := parsed.Get(k); v != "" {
+											token = v
+											break
+										}
+									}
+									return token, parsed.Get("auth"), nil
+								}
+							}
+						}
+					}
+				}
+
+				time.Sleep(500 * time.Millisecond)
+			}
+		}
+
+		var errWait error
+		tokenString, authField, errWait = waitForCallback()
+		if errWait != nil {
+			if errors.Is(errWait, errOAuthSessionNotPending) {
+				return
+			}
+			log.Errorf("Qoder authentication timed out: %v", errWait)
 			SetOAuthSessionError(state, "Authentication timed out")
 			return
 		}
@@ -4684,6 +4764,13 @@ func (h *Handler) RequestQoderToken(c *gin.Context) {
 				name = user.Name
 				email = user.Email
 			}
+		}
+
+		// Fallback: derive a stable UID from the token hash so we can still save credentials
+		if uid == "" {
+			tokenHash := sha256.Sum256([]byte(tokenString))
+			uid = hex.EncodeToString(tokenHash[:16])
+			log.Warnf("qoder: using derived UID from token hash: %s", uid)
 		}
 
 		if uid == "" {

@@ -254,9 +254,10 @@ type oauthCallbackFilePayload struct {
 	Code  string `json:"code"`
 	State string `json:"state"`
 	Error string `json:"error"`
+	Auth  string `json:"auth"`
 }
 
-func WriteOAuthCallbackFile(authDir, provider, state, code, errorMessage string) (string, error) {
+func WriteOAuthCallbackFile(authDir, provider, state, code, errorMessage, auth string) (string, error) {
 	if strings.TrimSpace(authDir) == "" {
 		return "", fmt.Errorf("auth dir is empty")
 	}
@@ -264,8 +265,10 @@ func WriteOAuthCallbackFile(authDir, provider, state, code, errorMessage string)
 	if err != nil {
 		return "", err
 	}
-	if err := ValidateOAuthState(state); err != nil {
-		return "", err
+	if canonicalProvider != "qoder" {
+		if err := ValidateOAuthState(state); err != nil {
+			return "", err
+		}
 	}
 
 	fileName := fmt.Sprintf(".oauth-%s-%s.oauth", canonicalProvider, state)
@@ -274,6 +277,7 @@ func WriteOAuthCallbackFile(authDir, provider, state, code, errorMessage string)
 		Code:  strings.TrimSpace(code),
 		State: strings.TrimSpace(state),
 		Error: strings.TrimSpace(errorMessage),
+		Auth:  strings.TrimSpace(auth),
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -286,12 +290,16 @@ func WriteOAuthCallbackFile(authDir, provider, state, code, errorMessage string)
 }
 
 func WriteOAuthCallbackFileForPendingSession(authDir, provider, state, code, errorMessage string) (string, error) {
+	return WriteOAuthCallbackFileForPendingSessionWithAuth(authDir, provider, state, code, errorMessage, "")
+}
+
+func WriteOAuthCallbackFileForPendingSessionWithAuth(authDir, provider, state, code, errorMessage, auth string) (string, error) {
 	canonicalProvider, err := NormalizeOAuthProvider(provider)
 	if err != nil {
 		return "", err
 	}
-	if !IsOAuthSessionPending(state, canonicalProvider) {
+	if canonicalProvider != "qoder" && !IsOAuthSessionPending(state, canonicalProvider) {
 		return "", errOAuthSessionNotPending
 	}
-	return WriteOAuthCallbackFile(authDir, canonicalProvider, state, code, errorMessage)
+	return WriteOAuthCallbackFile(authDir, canonicalProvider, state, code, errorMessage, auth)
 }
