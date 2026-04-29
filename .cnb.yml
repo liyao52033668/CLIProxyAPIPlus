@@ -18,7 +18,7 @@ main:
       stages:
         - name: Generate Build Metadata
           script: |
-            echo "VERSION=${GITHUB_REF_NAME}" >> .cnb.env
+            echo "VERSION=${CNB_TAG}" >> .cnb.env
             echo "COMMIT=$(git rev-parse --short HEAD)" >> .cnb.env
             echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> .cnb.env
         - name: docker build
