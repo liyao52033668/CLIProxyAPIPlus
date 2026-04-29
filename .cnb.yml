@@ -38,3 +38,5 @@ $:
             git_email: ${GIT_EMAIL_NEW}
             username: ${GIT_USERNAME_NEW}
             password: ${GIT_ACCESS_TOKEN_NEW}
+            push_tags: true
+            sync_mode: push
