@@ -12,7 +12,7 @@ main:
           script: |
             ls -al
 
-  push:
+  tag_push:
   - services:
       - docker
     stages:
