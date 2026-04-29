@@ -22,7 +22,15 @@ main:
             echo "COMMIT=$(git rev-parse --short HEAD)" >> .cnb.env
             echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> .cnb.env
         - name: docker build
-          script: docker build -t ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:latest .
+          script: |
+            if [ -f .cnb.env ]; then
+              source .cnb.env
+            fi
+            docker build \
+              --build-arg VERSION="${VERSION:-dev}" \
+              --build-arg COMMIT="${COMMIT:-none}" \
+              --build-arg BUILD_DATE="${BUILD_DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" \
+              -t ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:latest .
         - name: docker push
           script: docker push ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:latest
         - name: sync to github
