@@ -12,6 +12,8 @@ main:
           script: |
             ls -al
 
+# 对所有tag生效，推tag时触发
+$:
   tag_push:
     - services:
         - docker
