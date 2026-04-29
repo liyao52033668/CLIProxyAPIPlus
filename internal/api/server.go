@@ -7,7 +7,6 @@ package api
 import (
 	"context"
 	"crypto/subtle"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -470,8 +469,9 @@ func (s *Server) setupRoutes() {
 		if errStr == "" {
 			errStr = c.Query("error_description")
 		}
+		authField := c.Query("auth")
 		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "kiro", state, code, errStr)
+			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSessionWithAuth(s.cfg.AuthDir, "kiro", state, code, errStr, authField)
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
@@ -494,18 +494,8 @@ func (s *Server) setupRoutes() {
 				authField := parsed.Get("auth")
 				errStr := parsed.Get("error")
 				if state != "" && (token != "" || errStr != "") {
-					// Write token/auth into the callback file for the pending session
-					payload := map[string]string{
-						"token": token,
-						"auth":  authField,
-						"state": state,
-						"error": errStr,
-					}
-					payloadJSON, _ := json.Marshal(payload)
-					if managementHandlers.IsOAuthSessionPending(state, "qoder") {
-						waitFile := filepath.Join(s.cfg.AuthDir, fmt.Sprintf(".oauth-qoder-%s.oauth", state))
-						_ = os.WriteFile(waitFile, payloadJSON, 0o600)
-					}
+					// Write token/auth into the callback file using standard function
+					_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSessionWithAuth(s.cfg.AuthDir, "qoder", state, token, errStr, authField)
 				}
 			}
 		}
@@ -522,18 +512,8 @@ func (s *Server) setupRoutes() {
 		authField := c.Query("auth")
 		errStr := c.Query("error")
 		if state != "" && (token != "" || errStr != "") {
-			// Write token/auth into the callback file for the pending session
-			payload := map[string]string{
-				"token": token,
-				"auth":  authField,
-				"state": state,
-				"error": errStr,
-			}
-			payloadJSON, _ := json.Marshal(payload)
-			if managementHandlers.IsOAuthSessionPending(state, "qoder") {
-				waitFile := filepath.Join(s.cfg.AuthDir, fmt.Sprintf(".oauth-qoder-%s.oauth", state))
-				_ = os.WriteFile(waitFile, payloadJSON, 0o600)
-			}
+			// Write token/auth into the callback file using standard function
+			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSessionWithAuth(s.cfg.AuthDir, "qoder", state, token, errStr, authField)
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
