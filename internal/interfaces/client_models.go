@@ -94,7 +94,7 @@ type FunctionCall struct {
 	Name string `json:"name"`
 
 	// Args contains the arguments to pass to the function.
-	Args map[string]interface{} `json:"args"`
+	Args map[string]any `json:"args"`
 }
 
 // FunctionResponse represents the result of a tool execution.
@@ -107,7 +107,7 @@ type FunctionResponse struct {
 	Name string `json:"name"`
 
 	// Response contains the result data from the function execution.
-	Response map[string]interface{} `json:"response"`
+	Response map[string]any `json:"response"`
 }
 
 // GenerateContentRequest is the top-level request structure for the streamGenerateContent endpoint.
@@ -130,7 +130,7 @@ type GenerateContentRequest struct {
 // These parameters affect the creativity, randomness, and reasoning of the model's responses.
 type GenerationConfig struct {
 	// ThinkingConfig specifies configuration for the model's "thinking" process.
-	ThinkingConfig GenerationConfigThinkingConfig `json:"thinkingConfig,omitempty"`
+	ThinkingConfig GenerationConfigThinkingConfig `json:"thinkingConfig"`
 
 	// Temperature controls the randomness of the model's responses.
 	// Values closer to 0 make responses more deterministic, while values closer to 1 increase randomness.
@@ -157,5 +157,5 @@ type GenerationConfigThinkingConfig struct {
 // that the model can call during content generation.
 type ToolDeclaration struct {
 	// FunctionDeclarations is a list of available functions that the model can call.
-	FunctionDeclarations []interface{} `json:"functionDeclarations"`
+	FunctionDeclarations []any `json:"functionDeclarations"`
 }

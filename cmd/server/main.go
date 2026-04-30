@@ -414,7 +414,7 @@ func main() {
 			return
 		}
 		examplePath := filepath.Join(wd, "config.example.yaml")
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 		if errBootstrap := objectStoreInst.Bootstrap(ctx, examplePath); errBootstrap != nil {
 			cancel()
 			log.Errorf("failed to bootstrap object-backed config: %v", errBootstrap)
@@ -714,7 +714,7 @@ func main() {
 				client := tui.NewClient(cfg.Port, password)
 				ready := false
 				backoff := 100 * time.Millisecond
-				for i := 0; i < 30; i++ {
+				for range 30 {
 					if _, errGetConfig := client.GetConfig(); errGetConfig == nil {
 						ready = true
 						break

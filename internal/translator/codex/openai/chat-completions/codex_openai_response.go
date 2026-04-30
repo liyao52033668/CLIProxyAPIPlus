@@ -387,7 +387,7 @@ func buildReverseMapFromOriginalOpenAI(original []byte) map[string]string {
 	if tools.IsArray() && len(tools.Array()) > 0 {
 		var names []string
 		arr := tools.Array()
-		for i := 0; i < len(arr); i++ {
+		for i := range arr {
 			t := arr[i]
 			if t.Get("type").String() != "function" {
 				continue

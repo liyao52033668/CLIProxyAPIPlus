@@ -118,10 +118,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.width > 0 {
 			a.authInput.Width = a.width - 6
 		}
-		contentH := a.height - 4 // tab bar + status bar
-		if contentH < 1 {
-			contentH = 1
-		}
+		contentH := max(
+			// tab bar + status bar
+			a.height-4, 1)
 		contentW := a.width
 		a.dashboard.SetSize(contentW, contentH)
 		a.config.SetSize(contentW, contentH)
@@ -413,34 +412,22 @@ func (a App) renderStatusBar() string {
 	left := strings.TrimRight(T("status_left"), " ")
 	right := strings.TrimRight(T("status_right"), " ")
 
-	width := a.width
-	if width < 1 {
-		width = 1
-	}
+	width := max(a.width, 1)
 
 	// statusBarStyle has left/right padding(1), so content area is width-2.
-	contentWidth := width - 2
-	if contentWidth < 0 {
-		contentWidth = 0
-	}
+	contentWidth := max(width-2, 0)
 
 	if lipgloss.Width(left) > contentWidth {
 		left = fitStringWidth(left, contentWidth)
 		right = ""
 	}
 
-	remaining := contentWidth - lipgloss.Width(left)
-	if remaining < 0 {
-		remaining = 0
-	}
+	remaining := max(contentWidth-lipgloss.Width(left), 0)
 	if lipgloss.Width(right) > remaining {
 		right = fitStringWidth(right, remaining)
 	}
 
-	gap := contentWidth - lipgloss.Width(left) - lipgloss.Width(right)
-	if gap < 0 {
-		gap = 0
-	}
+	gap := max(contentWidth-lipgloss.Width(left)-lipgloss.Width(right), 0)
 	return statusBarStyle.Width(width).Render(left + strings.Repeat(" ", gap) + right)
 }
 

@@ -43,7 +43,7 @@ type CopilotAPIToken struct {
 		Proxy         string `json:"proxy"`
 		OriginTracker string `json:"origin-tracker"`
 		Telemetry     string `json:"telemetry"`
-	} `json:"endpoints,omitempty"`
+	} `json:"endpoints"`
 	// ErrorDetails contains error information if the request failed.
 	ErrorDetails *struct {
 		URL              string `json:"url"`

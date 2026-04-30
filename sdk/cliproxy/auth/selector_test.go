@@ -138,12 +138,10 @@ func TestRoundRobinSelectorPick_Concurrent(t *testing.T) {
 
 	goroutines := 32
 	iterations := 100
-	for i := 0; i < goroutines; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range goroutines {
+		wg.Go(func() {
 			<-start
-			for j := 0; j < iterations; j++ {
+			for range iterations {
 				got, err := selector.Pick(context.Background(), "gemini", "", cliproxyexecutor.Options{}, auths)
 				if err != nil {
 					select {
@@ -167,7 +165,7 @@ func TestRoundRobinSelectorPick_Concurrent(t *testing.T) {
 					return
 				}
 			}
-		}()
+		})
 	}
 
 	close(start)
@@ -426,7 +424,7 @@ func TestRoundRobinSelectorPick_GeminiCLICredentialGrouping(t *testing.T) {
 	// advances by 1, so consecutive picks should cycle through different parents.
 	picks := make([]string, 6)
 	parents := make([]string, 6)
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		got, err := selector.Pick(context.Background(), "gemini-cli", "gemini-2.5-pro", cliproxyexecutor.Options{}, auths)
 		if err != nil {
 			t.Fatalf("Pick() #%d error = %v", i, err)
@@ -541,7 +539,7 @@ func TestSessionAffinitySelector_SameSessionSameAuth(t *testing.T) {
 	}
 
 	// Verify consistency: same session, same auths -> same result
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		got, err := selector.Pick(context.Background(), "claude", "claude-3", opts, auths)
 		if err != nil {
 			t.Fatalf("Pick() #%d error = %v", i, err)
@@ -601,7 +599,7 @@ func TestSessionAffinitySelector_DifferentSessionsDifferentAuths(t *testing.T) {
 
 	// Different sessions may or may not pick different auths (depends on hash collision)
 	// But each session should be consistent
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		got1, _ := selector.Pick(context.Background(), "claude", "claude-3", opts1, auths)
 		got2, _ := selector.Pick(context.Background(), "claude", "claude-3", opts2, auths)
 		if got1.ID != auth1.ID {
@@ -692,7 +690,7 @@ func TestSessionAffinitySelector_FailoverWhenAuthUnavailable(t *testing.T) {
 	}
 
 	// Subsequent picks should consistently return the new binding
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		got, _ := selector.Pick(context.Background(), "claude", "claude-3", opts, availableWithoutFirst)
 		if got.ID != second.ID {
 			t.Fatalf("Pick() #%d after failover inconsistent: got %q, want %q", i, got.ID, second.ID)
@@ -1028,7 +1026,6 @@ func TestSessionAffinitySelector_ThreeScenarios(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			opts := cliproxyexecutor.Options{OriginalRequest: tc.payload}
 			picked, err := selector.Pick(context.Background(), "provider", "model", opts, auths)
@@ -1121,7 +1118,7 @@ func TestSessionAffinitySelector_MultiModelSession(t *testing.T) {
 	}
 
 	// Verify bindings are stable for multiple calls
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		gotA, _ := selector.Pick(context.Background(), "provider", "model-a", opts, authsForModelA)
 		gotB, _ := selector.Pick(context.Background(), "provider", "model-b", opts, authsForModelB)
 		if gotA.ID != "auth-a" {
@@ -1207,7 +1204,7 @@ func TestSessionAffinitySelector_CrossProviderIsolation(t *testing.T) {
 	}
 
 	// Verify both bindings remain stable
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		gotC, _ := selector.Pick(context.Background(), "claude", "claude-3", opts, []*Auth{authClaude})
 		gotG, _ := selector.Pick(context.Background(), "gemini", "gemini-2.5-pro", opts, []*Auth{authGemini})
 		if gotC.ID != "auth-claude" {
@@ -1274,8 +1271,8 @@ func TestSessionAffinitySelector_RoundRobinDistribution(t *testing.T) {
 
 	sessionCount := 12
 	counts := make(map[string]int)
-	for i := 0; i < sessionCount; i++ {
-		payload := []byte(fmt.Sprintf(`{"metadata":{"user_id":"user_xxx_account__session_%08d-0000-0000-0000-000000000000"}}`, i))
+	for i := range sessionCount {
+		payload := fmt.Appendf(nil, `{"metadata":{"user_id":"user_xxx_account__session_%08d-0000-0000-0000-000000000000"}}`, i)
 		opts := cliproxyexecutor.Options{OriginalRequest: payload}
 		got, err := selector.Pick(context.Background(), "provider", "model", opts, auths)
 		if err != nil {
@@ -1325,12 +1322,10 @@ func TestSessionAffinitySelector_Concurrent(t *testing.T) {
 
 	goroutines := 32
 	iterations := 50
-	for i := 0; i < goroutines; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range goroutines {
+		wg.Go(func() {
 			<-start
-			for j := 0; j < iterations; j++ {
+			for range iterations {
 				got, err := selector.Pick(context.Background(), "claude", "claude-3", opts, auths)
 				if err != nil {
 					select {
@@ -1347,7 +1342,7 @@ func TestSessionAffinitySelector_Concurrent(t *testing.T) {
 					return
 				}
 			}
-		}()
+		})
 	}
 
 	close(start)

@@ -10,7 +10,7 @@ import (
 func TestConvertGeminiRequestToAntigravity_PreserveValidSignature(t *testing.T) {
 	// Valid signature on functionCall should be preserved
 	validSignature := "abc123validSignature1234567890123456789012345678901234567890"
-	inputJSON := []byte(fmt.Sprintf(`{
+	inputJSON := fmt.Appendf(nil, `{
 		"model": "gemini-3-pro-preview",
 		"contents": [
 			{
@@ -20,7 +20,7 @@ func TestConvertGeminiRequestToAntigravity_PreserveValidSignature(t *testing.T) 
 				]
 			}
 		]
-	}`, validSignature))
+	}`, validSignature)
 
 	output := ConvertGeminiRequestToAntigravity("gemini-3-pro-preview", inputJSON, false)
 	outputStr := string(output)

@@ -89,7 +89,7 @@ func DialH2Stream(host string, headers map[string]string) (*H2Stream, error) {
 	// Track server's initial window size (how much WE can send)
 	serverInitialWindowSize := int32(defaultInitialWindowSize)
 	connWindowSize := int32(defaultInitialWindowSize) // connection-level send window
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		f, err := framer.ReadFrame()
 		if err != nil {
 			tlsConn.Close()
@@ -177,10 +177,7 @@ func (s *H2Stream) Write(data []byte) error {
 			s.windowCond.Wait()
 		}
 		// Limit chunk to available window
-		allowed := int(s.sendWindow)
-		if int(s.connWindow) < allowed {
-			allowed = int(s.connWindow)
-		}
+		allowed := min(int(s.connWindow), int(s.sendWindow))
 		if len(chunk) > allowed {
 			chunk = chunk[:allowed]
 		}

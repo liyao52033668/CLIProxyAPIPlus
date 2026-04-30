@@ -28,7 +28,8 @@ func (AntigravityAuthenticator) Provider() string { return "antigravity" }
 
 // RefreshLead instructs the manager to refresh five minutes before expiry.
 func (AntigravityAuthenticator) RefreshLead() *time.Duration {
-	return new(5 * time.Minute)
+	d := 5 * time.Minute
+	return &d
 }
 
 // Login launches a local OAuth flow to obtain antigravity tokens and persists them.
@@ -93,7 +94,7 @@ func (AntigravityAuthenticator) Login(ctx context.Context, cfg *config.Config, o
 	var manualPromptTimer *time.Timer
 	var manualPromptC <-chan time.Time
 	if opts.Prompt != nil {
-		manualPromptTimer = time.NewTimer(15 * time.Second)
+		manualPromptTimer = time.NewTimer(30 * time.Second)
 		manualPromptC = manualPromptTimer.C
 		defer manualPromptTimer.Stop()
 	}

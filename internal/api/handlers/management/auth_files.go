@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -37,6 +38,7 @@ import (
 	gitlabauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/gitlab"
 	iflowauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/iflow"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kilo"
+
 	// "github.com/router-for-me/CLIProxyAPI/v6/internal/browser"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kimi"
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
@@ -263,7 +265,7 @@ func startQoderCallbackServerWebUI(port int, state string) (*http.Server, <-chan
 	var listener net.Listener
 	var err error
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		listener, err = net.Listen("tcp", addr)
 		if err == nil {
 			break
@@ -1020,6 +1022,13 @@ func extractAccountFromMetadata(metadata map[string]any) string {
 					}
 				}
 			}
+		case "builder-id", "social", "idc":
+			// Kiro auth methods - check email first
+			if email, ok := metadata["email"].(string); ok {
+				if trimmed := strings.TrimSpace(email); trimmed != "" {
+					return trimmed
+				}
+			}
 		}
 	}
 
@@ -1522,9 +1531,7 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	if len(req.Headers) > 0 {
 		existingHeaders := coreauth.ExtractCustomHeadersFromMetadata(targetAuth.Metadata)
 		nextHeaders := make(map[string]string, len(existingHeaders))
-		for k, v := range existingHeaders {
-			nextHeaders[k] = v
-		}
+		maps.Copy(nextHeaders, existingHeaders)
 		headerChanged := false
 
 		for key, value := range req.Headers {
@@ -4175,7 +4182,8 @@ func (h *Handler) RequestKiroToken(c *gin.Context) {
 					}
 
 					now := time.Now()
-					fileName := fmt.Sprintf("kiro-aws-%s.json", idPart)
+					// Use format: provider-email.json
+					fileName := fmt.Sprintf("kiro-%s.json", idPart)
 
 					record := &coreauth.Auth{
 						ID:       fileName,
@@ -4875,9 +4883,12 @@ func (h *Handler) RequestQoderToken(c *gin.Context) {
 	SetOAuthSessionError(state, "auth_url|"+authURL)
 	log.Infof("Qoder auth URL stored for state: %s", state)
 
+	cleanupURIHandler := qoder.RegisterURIHandler(callbackPort)
+
 	go func() {
 		defer func() {
 			stopQoderCallbackServer(callbackPort)
+			cleanupURIHandler()
 		}()
 
 		var tokenString, authField string
@@ -4964,15 +4975,39 @@ func (h *Handler) RequestQoderToken(c *gin.Context) {
 		name := ""
 		email := ""
 		if authField != "" {
-			authInfo, errDecode := qoderauth.DecodeAuthField(authField)
+			// URL decode first since authField may come from URL query string
+			authFieldDecoded, err := url.QueryUnescape(authField)
+			if err != nil {
+				log.Warnf("qoder: failed to URL decode auth field: %v", err)
+				authFieldDecoded = authField
+			}
+			previewLen := 50
+			if len(authField) < 50 {
+				previewLen = len(authField)
+			}
+			log.Infof("qoder: authField before URL decode (len=%d): %s", len(authField), authField[:previewLen])
+			previewLen = 50
+			if len(authFieldDecoded) < 50 {
+				previewLen = len(authFieldDecoded)
+			}
+			log.Infof("qoder: authField after URL decode (len=%d): %s", len(authFieldDecoded), authFieldDecoded[:previewLen])
+			authInfo, errDecode := qoderauth.DecodeAuthField(authFieldDecoded)
 			if errDecode != nil {
-				log.Warnf("qoder: failed to decode auth field: %v", errDecode)
+				previewLen := 100
+				if len(authField) < 100 {
+					previewLen = len(authField)
+				}
+				log.Warnf("qoder: failed to decode auth field: %v, raw authField (first %d chars): %s", errDecode, previewLen, authField[:previewLen])
 			} else {
+				log.Infof("qoder: decoded auth field: %+v", authInfo)
 				if v, ok := authInfo["uid"].(string); ok {
 					uid = v
 				}
 				if v, ok := authInfo["name"].(string); ok {
 					name = v
+				}
+				if v, ok := authInfo["email"].(string); ok {
+					email = v
 				}
 			}
 		}
@@ -4984,6 +5019,7 @@ func (h *Handler) RequestQoderToken(c *gin.Context) {
 			if errUser != nil {
 				log.Warnf("qoder: user status probe failed: %v", errUser)
 			} else {
+				log.Infof("qoder: user status via API - id=%s, name=%s, email=%s", user.ID, user.Name, user.Email)
 				uid = user.ID
 				name = user.Name
 				email = user.Email
@@ -5021,7 +5057,7 @@ func (h *Handler) RequestQoderToken(c *gin.Context) {
 			metadata["email"] = email
 		}
 
-		fileName := qoderauth.CredentialFileName(uid)
+		fileName := qoderauth.CredentialFileName(uid, email)
 		label := name
 		if strings.TrimSpace(label) == "" {
 			label = uid

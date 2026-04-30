@@ -107,7 +107,7 @@ type KiroToolSpecification struct {
 
 // KiroInputSchema wraps the JSON schema for tool input
 type KiroInputSchema struct {
-	JSON interface{} `json:"json"`
+	JSON any `json:"json"`
 }
 
 // KiroAssistantResponseMessage represents an assistant message
@@ -118,9 +118,9 @@ type KiroAssistantResponseMessage struct {
 
 // KiroToolUse represents a tool invocation by the assistant
 type KiroToolUse struct {
-	ToolUseID string                 `json:"toolUseId"`
-	Name      string                 `json:"name"`
-	Input     map[string]interface{} `json:"input"`
+	ToolUseID string         `json:"toolUseId"`
+	Name      string         `json:"name"`
+	Input     map[string]any `json:"input"`
 }
 
 // ConvertOpenAIRequestToKiro converts an OpenAI Chat Completions request to Kiro format.
@@ -408,13 +408,13 @@ func shortenToolNameIfNeeded(name string) string {
 	return name[:limit]
 }
 
-func ensureKiroInputSchema(parameters interface{}) interface{} {
+func ensureKiroInputSchema(parameters any) any {
 	if parameters != nil {
 		return parameters
 	}
-	return map[string]interface{}{
+	return map[string]any{
 		"type":       "object",
-		"properties": map[string]interface{}{},
+		"properties": map[string]any{},
 	}
 }
 
@@ -439,7 +439,7 @@ func convertOpenAIToolsToKiro(tools gjson.Result) []KiroToolWrapper {
 		name := fn.Get("name").String()
 		description := fn.Get("description").String()
 		parametersResult := fn.Get("parameters")
-		var parameters interface{}
+		var parameters any
 		if parametersResult.Exists() && parametersResult.Type != gjson.Null {
 			parameters = parametersResult.Value()
 		}
@@ -753,7 +753,7 @@ func buildAssistantMessageFromOpenAI(msg gjson.Result) KiroAssistantResponseMess
 				toolName := part.Get("name").String()
 				inputData := part.Get("input")
 
-				inputMap := make(map[string]interface{})
+				inputMap := make(map[string]any)
 				if inputData.Exists() && inputData.IsObject() {
 					inputData.ForEach(func(key, value gjson.Result) bool {
 						inputMap[key.String()] = value.Value()
@@ -783,10 +783,10 @@ func buildAssistantMessageFromOpenAI(msg gjson.Result) KiroAssistantResponseMess
 			toolName := tc.Get("function.name").String()
 			toolArgs := tc.Get("function.arguments").String()
 
-			var inputMap map[string]interface{}
+			var inputMap map[string]any
 			if err := json.Unmarshal([]byte(toolArgs), &inputMap); err != nil {
 				log.Debugf("kiro-openai: failed to parse tool arguments: %v", err)
-				inputMap = make(map[string]interface{})
+				inputMap = make(map[string]any)
 			}
 
 			toolUses = append(toolUses, KiroToolUse{

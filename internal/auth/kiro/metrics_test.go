@@ -142,7 +142,7 @@ func TestCalculateScore_PerfectToken(t *testing.T) {
 
 func TestCalculateScore_FailedToken(t *testing.T) {
 	s := NewTokenScorer()
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		s.RecordRequest("token1", false, 1000*time.Millisecond)
 	}
 	s.SetQuotaRemaining("token1", 0.1)
@@ -236,11 +236,11 @@ func TestTokenScorer_ConcurrentAccess(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(numGoroutines)
 
-	for i := 0; i < numGoroutines; i++ {
+	for i := range numGoroutines {
 		go func(id int) {
 			defer wg.Done()
 			tokenKey := "token" + string(rune('a'+id%10))
-			for j := 0; j < numOperations; j++ {
+			for j := range numOperations {
 				switch j % 6 {
 				case 0:
 					s.RecordRequest(tokenKey, j%2 == 0, time.Duration(j)*time.Millisecond)

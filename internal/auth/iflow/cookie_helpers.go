@@ -42,11 +42,11 @@ func SanitizeIFlowFileName(raw string) string {
 
 // ExtractBXAuth extracts the BXAuth value from a cookie string.
 func ExtractBXAuth(cookie string) string {
-	parts := strings.Split(cookie, ";")
-	for _, part := range parts {
+	parts := strings.SplitSeq(cookie, ";")
+	for part := range parts {
 		part = strings.TrimSpace(part)
-		if strings.HasPrefix(part, "BXAuth=") {
-			return strings.TrimPrefix(part, "BXAuth=")
+		if after, ok := strings.CutPrefix(part, "BXAuth="); ok {
+			return after
 		}
 	}
 	return ""

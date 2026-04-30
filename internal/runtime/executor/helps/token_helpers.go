@@ -143,7 +143,7 @@ func CountClaudeChatTokens(enc tokenizer.Codec, payload []byte) (int64, error) {
 
 // BuildOpenAIUsageJSON returns a minimal usage structure understood by downstream translators.
 func BuildOpenAIUsageJSON(count int64) []byte {
-	return []byte(fmt.Sprintf(`{"usage":{"prompt_tokens":%d,"completion_tokens":0,"total_tokens":%d}}`, count, count))
+	return fmt.Appendf(nil, `{"usage":{"prompt_tokens":%d,"completion_tokens":0,"total_tokens":%d}}`, count, count)
 }
 
 func collectOpenAIMessages(messages gjson.Result, segments *[]string) {

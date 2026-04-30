@@ -34,7 +34,6 @@ func TestMultiSourceSecret_PrecedenceOrder(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		tc := tc // capture range variable
 		t.Run(tc.name, func(t *testing.T) {
 			tmpDir := t.TempDir()
 			secretsPath := filepath.Join(tmpDir, "secrets.json")
@@ -184,11 +183,9 @@ func TestMultiSourceSecret_Concurrency(t *testing.T) {
 	var wg sync.WaitGroup
 	errors := make(chan error, goroutines)
 
-	for i := 0; i < goroutines; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < iterations; j++ {
+	for range goroutines {
+		wg.Go(func() {
+			for range iterations {
 				val, err := s.Get(ctx)
 				if err != nil {
 					errors <- err
@@ -199,7 +196,7 @@ func TestMultiSourceSecret_Concurrency(t *testing.T) {
 					return
 				}
 			}
-		}()
+		})
 	}
 
 	wg.Wait()

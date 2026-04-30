@@ -112,7 +112,7 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 		} else if system.Type == gjson.JSON {
 			if system.IsArray() {
 				systemResults := system.Array()
-				for i := 0; i < len(systemResults); i++ {
+				for i := range systemResults {
 					if contentItem, ok := convertClaudeContentPart(systemResults[i]); ok {
 						systemMsgJSON, _ = sjson.SetRawBytes(systemMsgJSON, "content.-1", []byte(contentItem))
 						hasSystemContent = true
@@ -136,7 +136,7 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 			if contentResult.Exists() && contentResult.IsArray() {
 				contentItems := make([][]byte, 0)
 				var reasoningParts []string // Accumulate thinking text for reasoning_content
-				var toolCalls []interface{}
+				var toolCalls []any
 				toolResults := make([][]byte, 0) // Collect tool_result messages to emit after the main message
 
 				contentResult.ForEach(func(_, part gjson.Result) bool {

@@ -320,13 +320,6 @@ func getAnyString(m map[string]any, key string) string {
 	return fmt.Sprintf("%v", v)
 }
 
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
 func (m authTabModel) handleEditInput(msg tea.KeyMsg) (authTabModel, tea.Cmd) {
 	switch msg.String() {
 	case "enter":

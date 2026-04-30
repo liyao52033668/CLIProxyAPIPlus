@@ -520,9 +520,9 @@ func fixGeminiImageAspectRatio(modelName string, rawJSON []byte) []byte {
 			if len(contentArray) > 0 {
 				hasInlineData := false
 			loopContent:
-				for i := 0; i < len(contentArray); i++ {
+				for i := range contentArray {
 					parts := contentArray[i].Get("parts").Array()
-					for j := 0; j < len(parts); j++ {
+					for j := range parts {
 						if parts[j].Get("inlineData").Exists() {
 							hasInlineData = true
 							break loopContent
@@ -539,7 +539,7 @@ func fixGeminiImageAspectRatio(modelName string, rawJSON []byte) []byte {
 					newPartsJson, _ = sjson.SetRawBytes(newPartsJson, "-1", emptyImagePart)
 
 					parts := contentArray[0].Get("parts").Array()
-					for j := 0; j < len(parts); j++ {
+					for j := range parts {
 						newPartsJson, _ = sjson.SetRawBytes(newPartsJson, "-1", []byte(parts[j].Raw))
 					}
 

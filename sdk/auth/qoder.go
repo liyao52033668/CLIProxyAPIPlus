@@ -1,3 +1,4 @@
+// Package auth 提供 Qoder 的 PKCE + URI-scheme 登录认证功能。
 package auth
 
 import (
@@ -63,6 +64,9 @@ func (a QoderAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 		_ = srv.Shutdown(shutdownCtx)
 	}()
 
+	cleanupURIHandler := qoder.RegisterURIHandler(callbackPort)
+	defer cleanupURIHandler()
+
 	// Generate PKCE + machine ID
 	nonce, challenge, verifier, err := qoder.GeneratePKCE()
 	if err != nil {
@@ -96,6 +100,8 @@ func (a QoderAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 	fmt.Println("If using Linux/macOS:")
 	fmt.Println("  1. After login success, copy the 'qoder://' callback URL from browser DevTools Network tab")
 	fmt.Println("  2. Paste the URL in the terminal below, OR")
+	fmt.Println("  3. Forward the callback to the local server using VBS script:")
+	fmt.Println("     http://localhost:%d/forward?url=qoder://...", callbackPort)
 	fmt.Printf("  3. Open http://localhost:%d/complete in browser and paste the URL\n", callbackPort)
 	fmt.Println()
 	fmt.Println("Paste the qoder:// callback URL here, or press Enter to keep waiting...")
@@ -129,8 +135,8 @@ func (a QoderAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 			}
 		} else if strings.Contains(input, "tokenString=") || strings.Contains(input, "token=") {
 			qs := input
-			if idx := strings.Index(input, "?"); idx >= 0 {
-				qs = input[idx+1:]
+			if _, after, ok := strings.Cut(input, "?"); ok {
+				qs = after
 			}
 			parsed, errParse := url.ParseQuery(qs)
 			if errParse == nil {
@@ -220,7 +226,7 @@ func (a QoderAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 		metadata["email"] = email
 	}
 
-	fileName := qoder.CredentialFileName(uid)
+	fileName := qoder.CredentialFileName(uid, email)
 	label := name
 	if label == "" {
 		label = uid
@@ -252,7 +258,7 @@ func startQoderCallbackServer(port int) (*http.Server, int, <-chan map[string]st
 	resultCh := make(chan map[string]string, 1)
 
 	mux := http.NewServeMux()
-	
+
 	// Root path - show server status
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -265,17 +271,22 @@ func startQoderCallbackServer(port int) (*http.Server, int, <-chan map[string]st
 			`<p><a href="/complete" style="color:#4CAF50">Go to manual completion page</a></p>` +
 			`</div></body></html>`))
 	})
-	
+
 	// Handle callback from qoder:// protocol (Windows)
 	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
 		handleQoderCallback(w, r, resultCh)
 	})
-	
+
+	// Handle callback forwarded by VBS script (Windows URI handler)
+	mux.HandleFunc("/forward", func(w http.ResponseWriter, r *http.Request) {
+		handleQoderCallback(w, r, resultCh)
+	})
+
 	// Handle manual callback URL input via HTTP (Linux/macOS fallback)
 	mux.HandleFunc("/login-success", func(w http.ResponseWriter, r *http.Request) {
 		handleQoderCallback(w, r, resultCh)
 	})
-	
+
 	// Manual completion page for users who can't get the qoder:// callback
 	mux.HandleFunc("/complete", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -321,10 +332,10 @@ func handleQoderCallback(w http.ResponseWriter, r *http.Request, resultCh chan<-
 	// First, check if there's a URL parameter (for manual input)
 	rawURL := r.URL.Query().Get("url")
 	rawURL, _ = url.QueryUnescape(rawURL)
-	
+
 	qs := r.URL.RawQuery
 	prefix := "qoder://aicoding.aicoding-agent/login-success?"
-	
+
 	// If manual URL input, extract query string from the qoder:// URL
 	if strings.HasPrefix(rawURL, prefix) {
 		qs = rawURL[len(prefix):]
@@ -335,7 +346,7 @@ func handleQoderCallback(w http.ResponseWriter, r *http.Request, resultCh chan<-
 			qs = qoderPart[len(prefix):]
 		}
 	}
-	
+
 	if qs != "" {
 		parsed, errParse := url.ParseQuery(qs)
 		if errParse == nil {
@@ -354,7 +365,7 @@ func handleQoderCallback(w http.ResponseWriter, r *http.Request, resultCh chan<-
 			}
 		}
 	}
-	
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	callbackURL := "qoder://aicoding.aicoding-agent/login-success?" + qs
 	_, _ = w.Write([]byte(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Qoder Login</title></head>` +

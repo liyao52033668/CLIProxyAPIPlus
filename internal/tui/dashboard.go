@@ -138,10 +138,7 @@ func (m dashboardModel) renderDashboard(cfg, usage map[string]any, authFiles []m
 	// ━━━ Stats Cards ━━━
 	cardWidth := 25
 	if m.width > 0 {
-		cardWidth = (m.width - 6) / 4
-		if cardWidth < 18 {
-			cardWidth = 18
-		}
+		cardWidth = max((m.width-6)/4, 18)
 	}
 
 	cardStyle := lipgloss.NewStyle().

@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -404,7 +405,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 	}
 
 	slot := startSlot
-	for offset := 0; offset < len(normalized); offset++ {
+	for offset := range normalized {
 		providerIndex := (startProviderIndex + offset) % len(normalized)
 		if weights[providerIndex] == 0 {
 			continue
@@ -453,10 +454,7 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 		return &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	if cooldownCount == total && !earliest.IsZero() {
-		resetIn := earliest.Sub(now)
-		if resetIn < 0 {
-			resetIn = 0
-		}
+		resetIn := max(earliest.Sub(now), 0)
 		return newModelCooldownError(model, "", resetIn)
 	}
 	return &Error{Code: "auth_unavailable", Message: "no auth available"}
@@ -496,12 +494,7 @@ func normalizeProviderKeys(providers []string) []string {
 
 // containsProvider reports whether provider is present in the normalized provider list.
 func containsProvider(providers []string, provider string) bool {
-	for _, candidate := range providers {
-		if candidate == provider {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(providers, provider)
 }
 
 // upsertAuthLocked updates one auth in-place while the scheduler mutex is held.
@@ -857,10 +850,7 @@ func (m *modelScheduler) unavailableErrorLocked(provider, model string, predicat
 		if providerForError == "mixed" {
 			providerForError = ""
 		}
-		resetIn := earliest.Sub(now)
-		if resetIn < 0 {
-			resetIn = 0
-		}
+		resetIn := max(earliest.Sub(now), 0)
 		return newModelCooldownError(model, providerForError, resetIn)
 	}
 	return &Error{Code: "auth_unavailable", Message: "no auth available"}

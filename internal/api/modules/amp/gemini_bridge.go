@@ -24,9 +24,9 @@ func createGeminiBridgeHandler(handler gin.HandlerFunc) gin.HandlerFunc {
 		// Extract model:method from AMP CLI path format
 		// Example: /publishers/google/models/gemini-3-pro-preview:streamGenerateContent
 		const modelsPrefix = "/models/"
-		if idx := strings.Index(path, modelsPrefix); idx >= 0 {
+		if _, after, ok := strings.Cut(path, modelsPrefix); ok {
 			// Extract everything after modelsPrefix
-			actionPart := path[idx+len(modelsPrefix):]
+			actionPart := after
 
 			// Check if model was mapped by FallbackHandler
 			if mappedModel, exists := c.Get(MappedModelContextKey); exists {

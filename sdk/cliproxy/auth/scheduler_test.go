@@ -105,7 +105,7 @@ func TestSchedulerPick_FillFirstSticksToFirstReady(t *testing.T) {
 		&Auth{ID: "c", Provider: "gemini"},
 	)
 
-	for index := 0; index < 3; index++ {
+	for index := range 3 {
 		got, errPick := scheduler.pickSingle(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
 		if errPick != nil {
 			t.Fatalf("pickSingle() #%d error = %v", index, errPick)
@@ -513,7 +513,7 @@ func TestManager_SchedulerTracksMarkResultCooldownAndRecovery(t *testing.T) {
 	})
 
 	seen := make(map[string]struct{}, 2)
-	for index := 0; index < 2; index++ {
+	for index := range 2 {
 		got, errPick = manager.scheduler.pickSingle(context.Background(), "gemini", "test-model", cliproxyexecutor.Options{}, nil)
 		if errPick != nil {
 			t.Fatalf("scheduler.pickSingle() after recovery #%d error = %v", index, errPick)

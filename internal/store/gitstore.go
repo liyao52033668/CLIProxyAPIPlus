@@ -683,8 +683,8 @@ func resolveRemoteDefaultBranch(repo *git.Repository, authMethod transport.AuthM
 				}
 			}
 			s := r.String()
-			if idx := strings.Index(s, "->"); idx != -1 {
-				if target, ok := normalizeRemoteBranchReference(plumbing.ReferenceName(strings.TrimSpace(s[idx+2:]))); ok {
+			if _, after, ok := strings.Cut(s, "->"); ok {
+				if target, ok := normalizeRemoteBranchReference(plumbing.ReferenceName(strings.TrimSpace(after))); ok {
 					return resolvedRemoteBranch{name: target}, nil
 				}
 			}

@@ -30,7 +30,7 @@ func BuildOpenAIResponse(content string, toolUses []KiroToolUse, model string, u
 // stopReason is passed from upstream; fallback logic applied if empty.
 func BuildOpenAIResponseWithReasoning(content, reasoningContent string, toolUses []KiroToolUse, model string, usageInfo usage.Detail, stopReason string) []byte {
 	// Build the message object
-	message := map[string]interface{}{
+	message := map[string]any{
 		"role":    "assistant",
 		"content": content,
 	}
@@ -42,14 +42,14 @@ func BuildOpenAIResponseWithReasoning(content, reasoningContent string, toolUses
 
 	// Add tool_calls if present
 	if len(toolUses) > 0 {
-		var toolCalls []map[string]interface{}
+		var toolCalls []map[string]any
 		for i, tu := range toolUses {
 			inputJSON, _ := json.Marshal(tu.Input)
-			toolCalls = append(toolCalls, map[string]interface{}{
+			toolCalls = append(toolCalls, map[string]any{
 				"id":    tu.ToolUseID,
 				"type":  "function",
 				"index": i,
-				"function": map[string]interface{}{
+				"function": map[string]any{
 					"name":      tu.Name,
 					"arguments": string(inputJSON),
 				},
@@ -72,19 +72,19 @@ func BuildOpenAIResponseWithReasoning(content, reasoningContent string, toolUses
 		log.Debugf("kiro-openai: buildOpenAIResponse using fallback finish_reason: %s", finishReason)
 	}
 
-	response := map[string]interface{}{
+	response := map[string]any{
 		"id":      "chatcmpl-" + uuid.New().String()[:24],
 		"object":  "chat.completion",
 		"created": time.Now().Unix(),
 		"model":   model,
-		"choices": []map[string]interface{}{
+		"choices": []map[string]any{
 			{
 				"index":         0,
 				"message":       message,
 				"finish_reason": finishReason,
 			},
 		},
-		"usage": map[string]interface{}{
+		"usage": map[string]any{
 			"prompt_tokens":     usageInfo.InputTokens,
 			"completion_tokens": usageInfo.OutputTokens,
 			"total_tokens":      usageInfo.InputTokens + usageInfo.OutputTokens,
@@ -115,8 +115,8 @@ func mapKiroStopReasonToOpenAI(stopReason string) string {
 
 // BuildOpenAIStreamChunk constructs an OpenAI Chat Completions streaming chunk.
 // This is the delta format used in streaming responses.
-func BuildOpenAIStreamChunk(model string, deltaContent string, deltaToolCalls []map[string]interface{}, finishReason string, index int) []byte {
-	delta := map[string]interface{}{}
+func BuildOpenAIStreamChunk(model string, deltaContent string, deltaToolCalls []map[string]any, finishReason string, index int) []byte {
+	delta := map[string]any{}
 
 	// First chunk should include role
 	if index == 0 && deltaContent == "" && len(deltaToolCalls) == 0 {
@@ -131,7 +131,7 @@ func BuildOpenAIStreamChunk(model string, deltaContent string, deltaToolCalls []
 		delta["tool_calls"] = deltaToolCalls
 	}
 
-	choice := map[string]interface{}{
+	choice := map[string]any{
 		"index": 0,
 		"delta": delta,
 	}
@@ -142,12 +142,12 @@ func BuildOpenAIStreamChunk(model string, deltaContent string, deltaToolCalls []
 		choice["finish_reason"] = nil
 	}
 
-	chunk := map[string]interface{}{
+	chunk := map[string]any{
 		"id":      "chatcmpl-" + uuid.New().String()[:12],
 		"object":  "chat.completion.chunk",
 		"created": time.Now().Unix(),
 		"model":   model,
-		"choices": []map[string]interface{}{choice},
+		"choices": []map[string]any{choice},
 	}
 
 	result, _ := json.Marshal(chunk)
@@ -156,32 +156,32 @@ func BuildOpenAIStreamChunk(model string, deltaContent string, deltaToolCalls []
 
 // BuildOpenAIStreamChunkWithToolCallStart creates a stream chunk for tool call start
 func BuildOpenAIStreamChunkWithToolCallStart(model string, toolUseID, toolName string, toolIndex int) []byte {
-	toolCall := map[string]interface{}{
+	toolCall := map[string]any{
 		"index": toolIndex,
 		"id":    toolUseID,
 		"type":  "function",
-		"function": map[string]interface{}{
+		"function": map[string]any{
 			"name":      toolName,
 			"arguments": "",
 		},
 	}
 
-	delta := map[string]interface{}{
-		"tool_calls": []map[string]interface{}{toolCall},
+	delta := map[string]any{
+		"tool_calls": []map[string]any{toolCall},
 	}
 
-	choice := map[string]interface{}{
+	choice := map[string]any{
 		"index":         0,
 		"delta":         delta,
 		"finish_reason": nil,
 	}
 
-	chunk := map[string]interface{}{
+	chunk := map[string]any{
 		"id":      "chatcmpl-" + uuid.New().String()[:12],
 		"object":  "chat.completion.chunk",
 		"created": time.Now().Unix(),
 		"model":   model,
-		"choices": []map[string]interface{}{choice},
+		"choices": []map[string]any{choice},
 	}
 
 	result, _ := json.Marshal(chunk)
@@ -190,29 +190,29 @@ func BuildOpenAIStreamChunkWithToolCallStart(model string, toolUseID, toolName s
 
 // BuildOpenAIStreamChunkWithToolCallDelta creates a stream chunk for tool call arguments delta
 func BuildOpenAIStreamChunkWithToolCallDelta(model string, argumentsDelta string, toolIndex int) []byte {
-	toolCall := map[string]interface{}{
+	toolCall := map[string]any{
 		"index": toolIndex,
-		"function": map[string]interface{}{
+		"function": map[string]any{
 			"arguments": argumentsDelta,
 		},
 	}
 
-	delta := map[string]interface{}{
-		"tool_calls": []map[string]interface{}{toolCall},
+	delta := map[string]any{
+		"tool_calls": []map[string]any{toolCall},
 	}
 
-	choice := map[string]interface{}{
+	choice := map[string]any{
 		"index":         0,
 		"delta":         delta,
 		"finish_reason": nil,
 	}
 
-	chunk := map[string]interface{}{
+	chunk := map[string]any{
 		"id":      "chatcmpl-" + uuid.New().String()[:12],
 		"object":  "chat.completion.chunk",
 		"created": time.Now().Unix(),
 		"model":   model,
-		"choices": []map[string]interface{}{choice},
+		"choices": []map[string]any{choice},
 	}
 
 	result, _ := json.Marshal(chunk)
@@ -226,18 +226,18 @@ func BuildOpenAIStreamDoneChunk() []byte {
 
 // BuildOpenAIStreamFinishChunk creates the final chunk with finish_reason
 func BuildOpenAIStreamFinishChunk(model string, finishReason string) []byte {
-	choice := map[string]interface{}{
+	choice := map[string]any{
 		"index":         0,
-		"delta":         map[string]interface{}{},
+		"delta":         map[string]any{},
 		"finish_reason": finishReason,
 	}
 
-	chunk := map[string]interface{}{
+	chunk := map[string]any{
 		"id":      "chatcmpl-" + uuid.New().String()[:12],
 		"object":  "chat.completion.chunk",
 		"created": time.Now().Unix(),
 		"model":   model,
-		"choices": []map[string]interface{}{choice},
+		"choices": []map[string]any{choice},
 	}
 
 	result, _ := json.Marshal(chunk)
@@ -246,13 +246,13 @@ func BuildOpenAIStreamFinishChunk(model string, finishReason string) []byte {
 
 // BuildOpenAIStreamUsageChunk creates a chunk with usage information (optional, for stream_options.include_usage)
 func BuildOpenAIStreamUsageChunk(model string, usageInfo usage.Detail) []byte {
-	chunk := map[string]interface{}{
+	chunk := map[string]any{
 		"id":      "chatcmpl-" + uuid.New().String()[:12],
 		"object":  "chat.completion.chunk",
 		"created": time.Now().Unix(),
 		"model":   model,
-		"choices": []map[string]interface{}{},
-		"usage": map[string]interface{}{
+		"choices": []map[string]any{},
+		"usage": map[string]any{
 			"prompt_tokens":     usageInfo.InputTokens,
 			"completion_tokens": usageInfo.OutputTokens,
 			"total_tokens":      usageInfo.InputTokens + usageInfo.OutputTokens,
@@ -266,12 +266,4 @@ func BuildOpenAIStreamUsageChunk(model string, usageInfo usage.Detail) []byte {
 // GenerateToolCallID generates a unique tool call ID in OpenAI format
 func GenerateToolCallID(toolName string) string {
 	return fmt.Sprintf("call_%s_%d_%d", toolName[:min(8, len(toolName))], time.Now().UnixNano(), atomic.AddUint64(&functionCallIDCounter, 1))
-}
-
-// min returns the minimum of two integers
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

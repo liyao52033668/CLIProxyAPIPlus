@@ -34,6 +34,10 @@ type AntigravityAuth struct {
 	httpClient *http.Client
 }
 
+func (o *AntigravityAuth) RefreshLead() {
+	panic("unimplemented")
+}
+
 // NewAntigravityAuth creates a new Antigravity auth service.
 func NewAntigravityAuth(cfg *config.Config, httpClient *http.Client) *AntigravityAuth {
 	if httpClient != nil {

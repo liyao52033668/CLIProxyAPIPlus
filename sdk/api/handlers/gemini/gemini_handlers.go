@@ -8,6 +8,7 @@ package gemini
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net/http"
 	"strings"
 	"time"
@@ -53,9 +54,7 @@ func (h *GeminiAPIHandler) GeminiModels(c *gin.Context) {
 	defaultMethods := []string{"generateContent"}
 	for _, model := range rawModels {
 		normalizedModel := make(map[string]any, len(model))
-		for k, v := range model {
-			normalizedModel[k] = v
-		}
+		maps.Copy(normalizedModel, model)
 		if name, ok := normalizedModel["name"].(string); ok && name != "" {
 			if !strings.HasPrefix(name, "models/") {
 				normalizedModel["name"] = "models/" + name
@@ -304,7 +303,8 @@ func (h *GeminiAPIHandler) handleGenerateContent(c *gin.Context, modelName strin
 func (h *GeminiAPIHandler) forwardGeminiStream(c *gin.Context, flusher http.Flusher, alt string, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
 	var keepAliveInterval *time.Duration
 	if alt != "" {
-		keepAliveInterval = new(time.Duration(0))
+		interval := time.Duration(0)
+		keepAliveInterval = &interval
 	}
 
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{

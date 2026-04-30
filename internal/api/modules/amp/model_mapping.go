@@ -3,6 +3,7 @@
 package amp
 
 import (
+	"maps"
 	"regexp"
 	"strings"
 	"sync"
@@ -159,9 +160,7 @@ func (m *DefaultModelMapper) GetMappings() map[string]string {
 	defer m.mu.RUnlock()
 
 	result := make(map[string]string, len(m.mappings))
-	for k, v := range m.mappings {
-		result[k] = v
-	}
+	maps.Copy(result, m.mappings)
 	return result
 }
 

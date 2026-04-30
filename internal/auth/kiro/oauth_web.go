@@ -324,10 +324,7 @@ func (h *OAuthWebHandler) startIDCAuth(c *gin.Context) {
 func (h *OAuthWebHandler) pollForToken(ctx context.Context, session *webAuthSession) {
 	defer session.cancelFunc()
 
-	interval := time.Duration(session.interval) * time.Second
-	if interval < time.Duration(pollIntervalSeconds)*time.Second {
-		interval = time.Duration(pollIntervalSeconds) * time.Second
-	}
+	interval := max(time.Duration(session.interval)*time.Second, time.Duration(pollIntervalSeconds)*time.Second)
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -660,7 +657,7 @@ func (h *OAuthWebHandler) renderStartPage(c *gin.Context, session *webAuthSessio
 		return
 	}
 
-	data := map[string]interface{}{
+	data := map[string]any{
 		"AuthURL":   session.authURL,
 		"UserCode":  session.userCode,
 		"ExpiresIn": session.expiresIn,
@@ -695,7 +692,7 @@ func (h *OAuthWebHandler) renderError(c *gin.Context, errMsg string) {
 		return
 	}
 
-	data := map[string]interface{}{
+	data := map[string]any{
 		"Error": errMsg,
 	}
 
@@ -714,7 +711,7 @@ func (h *OAuthWebHandler) renderSuccess(c *gin.Context, session *webAuthSession)
 		return
 	}
 
-	data := map[string]interface{}{
+	data := map[string]any{
 		"ExpiresAt": session.expiresAt.Format(time.RFC3339),
 	}
 

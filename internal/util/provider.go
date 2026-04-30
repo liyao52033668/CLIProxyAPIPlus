@@ -5,6 +5,7 @@ package util
 
 import (
 	"net/url"
+	"slices"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -149,12 +150,7 @@ func GetOpenAICompatibilityConfig(alias string, cfg *config.Config) (*config.Ope
 // Returns:
 //   - bool: True if the string is found, false otherwise
 func InArray(hystack []string, needle string) bool {
-	for _, item := range hystack {
-		if needle == item {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(hystack, needle)
 }
 
 // HideAPIKey obscures an API key for logging purposes, showing only the first and last few characters.
@@ -233,9 +229,9 @@ func MaskSensitiveQuery(raw string) string {
 		}
 		keyPart := part
 		valuePart := ""
-		if idx := strings.Index(part, "="); idx >= 0 {
-			keyPart = part[:idx]
-			valuePart = part[idx+1:]
+		if before, after, ok := strings.Cut(part, "="); ok {
+			keyPart = before
+			valuePart = after
 		}
 		decodedKey, err := url.QueryUnescape(keyPart)
 		if err != nil {

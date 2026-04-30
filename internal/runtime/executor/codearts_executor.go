@@ -393,7 +393,7 @@ func buildCodeArtsPayload(openaiPayload []byte, modelName, agentID string, opts 
 		})
 	}
 
-	request := map[string]interface{}{
+	request := map[string]any{
 		"messages": codeArtsMessages,
 		"model":    modelName,
 		"agent_id": agentID,
@@ -429,7 +429,7 @@ func convertCodeArtsSSEToOpenAI(data string, model string) []byte {
 		return nil
 	}
 
-	deltaMap := make(map[string]interface{})
+	deltaMap := make(map[string]any)
 	if content != "" {
 		deltaMap["content"] = content
 	}
@@ -437,12 +437,12 @@ func convertCodeArtsSSEToOpenAI(data string, model string) []byte {
 		deltaMap["reasoning_content"] = reasoningContent
 	}
 
-	chunk := map[string]interface{}{
+	chunk := map[string]any{
 		"id":      "chatcmpl-codearts",
 		"object":  "chat.completion.chunk",
 		"created": time.Now().Unix(),
 		"model":   model,
-		"choices": []map[string]interface{}{
+		"choices": []map[string]any{
 			{
 				"index": 0,
 				"delta": deltaMap,
@@ -460,7 +460,7 @@ func convertCodeArtsSSEToOpenAI(data string, model string) []byte {
 
 // buildOpenAINonStreamResponse builds a complete OpenAI non-stream response.
 func buildOpenAINonStreamResponse(content, reasoning, model string, promptTokens, completionTokens int64) []byte {
-	message := map[string]interface{}{
+	message := map[string]any{
 		"role":    "assistant",
 		"content": content,
 	}
@@ -468,19 +468,19 @@ func buildOpenAINonStreamResponse(content, reasoning, model string, promptTokens
 		message["reasoning_content"] = reasoning
 	}
 
-	resp := map[string]interface{}{
+	resp := map[string]any{
 		"id":      "chatcmpl-codearts",
 		"object":  "chat.completion",
 		"created": time.Now().Unix(),
 		"model":   model,
-		"choices": []map[string]interface{}{
+		"choices": []map[string]any{
 			{
 				"index":         0,
 				"finish_reason": "stop",
 				"message":       message,
 			},
 		},
-		"usage": map[string]interface{}{
+		"usage": map[string]any{
 			"prompt_tokens":     promptTokens,
 			"completion_tokens": completionTokens,
 			"total_tokens":      promptTokens + completionTokens,

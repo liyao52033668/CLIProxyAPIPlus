@@ -482,7 +482,7 @@ func ensureColonSpacedJSON(payload []byte) []byte {
 	inString := false
 	skipSpace := false
 
-	for i := 0; i < len(indented); i++ {
+	for i := range indented {
 		ch := indented[i]
 		if ch == '"' {
 			// A quote is escaped only when preceded by an odd number of consecutive backslashes.

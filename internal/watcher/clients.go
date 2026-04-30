@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -210,9 +211,7 @@ func (w *Watcher) addOrUpdateClient(path string) {
 	}
 
 	oldByID := make(map[string]*coreauth.Auth, len(w.fileAuthsByPath[normalized]))
-	for id, a := range w.fileAuthsByPath[normalized] {
-		oldByID[id] = a
-	}
+	maps.Copy(oldByID, w.fileAuthsByPath[normalized])
 
 	// Build synthesized auth entries for this single file only.
 	sctx := &synthesizer.SynthesisContext{
@@ -239,9 +238,7 @@ func (w *Watcher) removeClient(path string) {
 	normalized := w.normalizeAuthPath(path)
 	w.clientsMutex.Lock()
 	oldByID := make(map[string]*coreauth.Auth, len(w.fileAuthsByPath[normalized]))
-	for id, a := range w.fileAuthsByPath[normalized] {
-		oldByID[id] = a
-	}
+	maps.Copy(oldByID, w.fileAuthsByPath[normalized])
 	delete(w.lastAuthHashes, normalized)
 	delete(w.lastAuthContents, normalized)
 	delete(w.fileAuthsByPath, normalized)
@@ -436,10 +433,7 @@ func (w *Watcher) triggerServerUpdate(cfg *config.Config) {
 		return
 	}
 
-	delay := serverUpdateDebounce - now.Sub(w.serverUpdateLast)
-	if delay < 10*time.Millisecond {
-		delay = 10 * time.Millisecond
-	}
+	delay := max(serverUpdateDebounce-now.Sub(w.serverUpdateLast), 10*time.Millisecond)
 	w.serverUpdatePend = true
 	if w.serverUpdateTimer != nil {
 		w.serverUpdateTimer.Stop()

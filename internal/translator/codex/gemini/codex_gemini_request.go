@@ -47,7 +47,7 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	if tools := root.Get("tools"); tools.IsArray() {
 		var names []string
 		tarr := tools.Array()
-		for i := 0; i < len(tarr); i++ {
+		for i := range tarr {
 			fns := tarr[i].Get("functionDeclarations")
 			if !fns.IsArray() {
 				continue
@@ -74,7 +74,7 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 		var b strings.Builder
 		// 8 chars random suffix
-		for i := 0; i < 24; i++ {
+		for range 24 {
 			n, _ := rand.Int(rand.Reader, big.NewInt(int64(len(letters))))
 			b.WriteByte(letters[n.Int64()])
 		}
@@ -89,7 +89,7 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	if sysParts.IsArray() {
 		msg := []byte(`{"type":"message","role":"developer","content":[]}`)
 		arr := sysParts.Array()
-		for i := 0; i < len(arr); i++ {
+		for i := range arr {
 			p := arr[i]
 			if t := p.Get("text"); t.Exists() {
 				part := []byte(`{}`)
@@ -107,7 +107,7 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	contents := root.Get("contents")
 	if contents.IsArray() {
 		items := contents.Array()
-		for i := 0; i < len(items); i++ {
+		for i := range items {
 			item := items[i]
 			role := item.Get("role").String()
 			if role == "model" {
@@ -119,7 +119,7 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 				continue
 			}
 			parr := parts.Array()
-			for j := 0; j < len(parr); j++ {
+			for j := range parr {
 				p := parr[j]
 				// text part
 				if t := p.Get("text"); t.Exists() {
@@ -196,14 +196,14 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		out, _ = sjson.SetRawBytes(out, "tools", []byte(`[]`))
 		out, _ = sjson.SetBytes(out, "tool_choice", "auto")
 		tarr := tools.Array()
-		for i := 0; i < len(tarr); i++ {
+		for i := range tarr {
 			td := tarr[i]
 			fns := td.Get("functionDeclarations")
 			if !fns.IsArray() {
 				continue
 			}
 			farr := fns.Array()
-			for j := 0; j < len(farr); j++ {
+			for j := range farr {
 				fn := farr[j]
 				tool := []byte(`{}`)
 				tool, _ = sjson.SetBytes(tool, "type", "function")
@@ -339,10 +339,7 @@ func buildShortNameMap(names []string) map[string]string {
 		base := cand
 		for i := 1; ; i++ {
 			suffix := "_" + strconv.Itoa(i)
-			allowed := limit - len(suffix)
-			if allowed < 0 {
-				allowed = 0
-			}
+			allowed := max(limit-len(suffix), 0)
 			tmp := base
 			if len(tmp) > allowed {
 				tmp = tmp[:allowed]
