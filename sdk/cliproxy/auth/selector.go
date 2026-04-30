@@ -472,7 +472,7 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 // that may be supported by different auth credentials, and to avoid cross-provider conflicts.
 func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	entry := selectorLogEntry(ctx)
-	primaryID, fallbackID := extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	primaryID, fallbackID := extractSessionIDs(opts.Headers, opts.OriginalRequest, nil)
 	if primaryID == "" {
 		entry.Debugf("session-affinity: no session ID extracted, falling back to default selector | provider=%s model=%s", provider, model)
 		return s.fallback.Pick(ctx, provider, model, opts, auths)
@@ -565,15 +565,15 @@ func (s *SessionAffinitySelector) InvalidateAuth(authID string) {
 //  3. metadata.user_id (non-Claude Code format)
 //  4. conversation_id field in request body
 //  5. Stable hash from first few messages content (fallback)
-func ExtractSessionID(headers http.Header, payload []byte, metadata map[string]any) string {
-	primary, _ := extractSessionIDs(headers, payload, metadata)
+func ExtractSessionID(headers http.Header, payload []byte, _ map[string]any) string {
+	primary, _ := extractSessionIDs(headers, payload, nil)
 	return primary
 }
 
 // extractSessionIDs returns (primaryID, fallbackID) for session affinity.
 // primaryID: full hash including assistant response (stable after first turn)
 // fallbackID: short hash without assistant (used to inherit binding from first turn)
-func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]any) (string, string) {
+func extractSessionIDs(headers http.Header, payload []byte, _ map[string]any) (string, string) {
 	// 1. metadata.user_id with Claude Code session format (highest priority)
 	if len(payload) > 0 {
 		userID := gjson.GetBytes(payload, "metadata.user_id").String()
