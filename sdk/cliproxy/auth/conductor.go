@@ -1195,7 +1195,10 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 			return cliproxyexecutor.Response{}, errWait
 		}
 	}
-	return cliproxyexecutor.Response{}, lastErr
+	if lastErr != nil {
+		return cliproxyexecutor.Response{}, lastErr
+	}
+	return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
 }
 
 // ExecuteCount performs a non-streaming execution using the configured selector and executor.
@@ -1223,7 +1226,10 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 			return cliproxyexecutor.Response{}, errWait
 		}
 	}
-	return cliproxyexecutor.Response{}, lastErr
+	if lastErr != nil {
+		return cliproxyexecutor.Response{}, lastErr
+	}
+	return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
 }
 
 // ExecuteStream performs a streaming execution using the configured selector and executor.
@@ -1251,7 +1257,10 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 			return nil, errWait
 		}
 	}
-	return nil, lastErr
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 }
 
 func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int) (cliproxyexecutor.Response, error) {
