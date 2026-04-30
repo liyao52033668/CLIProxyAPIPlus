@@ -56,9 +56,9 @@ main:
 
             # 先检查 Release 是否已存在
             EXIST_RELEASE=$(curl --silent --fail --request GET \
-              --url "https://api.cnb.cool/liyao52033/CLIProxyAPIPlus/-/releases/${TAG}" \
+              --url "${CNB_API_ENDPOINT}/liyao52033/CLIProxyAPIPlus/-/releases/tags/${TAG}" \
               --header "Accept: application/vnd.cnb.api+json" \
-              --header "Authorization: ${CNB_TOKEN}" || echo "")
+              --header "Authorization: Bearer ${CNB_TOKEN}" || echo "")
 
             if [ -n "${EXIST_RELEASE}" ]; then
               echo "Release ${TAG} already exists, skip creation"
@@ -71,9 +71,9 @@ main:
               
               curl --fail --silent --show-error \
                 --request POST \
-                --url "https://api.cnb.cool/liyao52033/CLIProxyAPIPlus/-/releases" \
+                --url "${CNB_API_ENDPOINT}/liyao52033/CLIProxyAPIPlus/-/releases" \
                 --header "Accept: application/vnd.cnb.api+json" \
-                --header "Authorization: ${CNB_TOKEN}" \
+                --header "Authorization: Bearer ${CNB_TOKEN}" \
                 --header "Content-Type: application/json" \
                 --data "${PAYLOAD}"
               
