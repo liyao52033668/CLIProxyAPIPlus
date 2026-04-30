@@ -33,26 +33,6 @@ main:
           script: echo $NEW_TAG
         - name: show tag res
           script: cat tag_info.json
-        - name: sync to github
-          image: tencentcom/git-sync
-          imports: https://cnb.cool/liyao52033/envs/-/blob/main/github-env.yml
-          settings:
-            target_url: https://github.com/liyao52033668/CLIProxyAPIPlus.git
-            auth_type: https
-            branch: main
-            git_user: ${GIT_USERNAME_NEW}
-            git_email: ${GIT_EMAIL_NEW}
-            username: ${GIT_USERNAME_NEW}
-            password: ${GIT_ACCESS_TOKEN_NEW}
-            push_tags: true
-   
-
-# 对所有tag生效，推tag时触发
-$:
-  tag_push:
-    - services:
-        - docker
-      stages:
         - name: generate changelog and create release
           script: |
             set -e
@@ -89,27 +69,38 @@ $:
               --data "${PAYLOAD}"
 
             echo "✅ Release ${TAG} created successfully"
-
         - name: prepare build args
           script: |
-            VERSION="${CNB_TAG}"
-            COMMIT="${CNB_COMMIT:-$(git rev-parse --short HEAD 2>/dev/null || echo none)}"
-            BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              VERSION="${CNB_TAG:-$(git tag --sort=-v:refname | grep -v "^${TAG}$" | head -n 1 || echo "")}"
+              COMMIT="${CNB_COMMIT:-$(git rev-parse --short HEAD 2>/dev/null || echo none)}"
+              BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-            echo "=== Build Args ==="
-            echo "VERSION:   ${VERSION}"
-            echo "COMMIT:    ${COMMIT}"
-            echo "BUILD_DATE: ${BUILD_DATE}"
+              echo "=== Build Args ==="
+              echo "VERSION:   ${VERSION}"
+              echo "COMMIT:    ${COMMIT}"
+              echo "BUILD_DATE: ${BUILD_DATE}"
 
-            docker build \
-              --build-arg VERSION="${VERSION}" \
-              --build-arg COMMIT="${COMMIT}" \
-              --build-arg BUILD_DATE="${BUILD_DATE}" \
-              --build-arg CNB_TOKEN="${CNB_TOKEN}" \
-              -t ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:latest \
-              -t ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:${TAG} \
-              .
+              docker build \
+                --build-arg VERSION="${VERSION}" \
+                --build-arg COMMIT="${COMMIT}" \
+                --build-arg BUILD_DATE="${BUILD_DATE}" \
+                --build-arg CNB_TOKEN="${CNB_TOKEN}" \
+                -t ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:latest \
+                .
         - name: docker push
           script: |
             docker push ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:latest
-            docker push ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:${TAG}
+        - name: sync to github
+          image: tencentcom/git-sync
+          imports: https://cnb.cool/liyao52033/envs/-/blob/main/github-env.yml
+          settings:
+            target_url: https://github.com/liyao52033668/CLIProxyAPIPlus.git
+            auth_type: https
+            branch: main
+            git_user: ${GIT_USERNAME_NEW}
+            git_email: ${GIT_EMAIL_NEW}
+            username: ${GIT_USERNAME_NEW}
+            password: ${GIT_ACCESS_TOKEN_NEW}
+            push_tags: true
+  
+
