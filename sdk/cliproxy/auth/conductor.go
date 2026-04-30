@@ -1,3 +1,4 @@
+// Package auth provides authentication management, scheduling, and session handling for CLIProxyAPI.
 package auth
 
 import (
@@ -2580,7 +2581,7 @@ func shouldRetrySchedulerPick(err error) bool {
 		return true
 	}
 	var authErr *Error
-	if !errors.As(err, &authErr) || authErr == nil {
+	if !errors.As(err, &authErr) {
 		return false
 	}
 	return authErr.Code == "auth_not_found" || authErr.Code == "auth_unavailable"
@@ -3367,8 +3368,8 @@ func (m *Manager) InjectCredentials(req *http.Request, authID string) error {
 	return nil
 }
 
-// PrepareHttpRequest injects provider credentials into the supplied HTTP request.
-func (m *Manager) PrepareHttpRequest(ctx context.Context, auth *Auth, req *http.Request) error {
+// PrepareHTTPRequest injects provider credentials into the supplied HTTP request.
+func (m *Manager) PrepareHTTPRequest(ctx context.Context, auth *Auth, req *http.Request) error {
 	if m == nil {
 		return &Error{Code: "provider_not_found", Message: "manager is nil"}
 	}
@@ -3396,8 +3397,13 @@ func (m *Manager) PrepareHttpRequest(ctx context.Context, auth *Auth, req *http.
 	return preparer.PrepareRequest(req, auth)
 }
 
-// NewHttpRequest constructs a new HTTP request and injects provider credentials into it.
-func (m *Manager) NewHttpRequest(ctx context.Context, auth *Auth, method, targetURL string, body []byte, headers http.Header) (*http.Request, error) {
+// PrepareHttpRequest is deprecated, use PrepareHTTPRequest instead.
+func (m *Manager) PrepareHttpRequest(ctx context.Context, auth *Auth, req *http.Request) error {
+	return m.PrepareHTTPRequest(ctx, auth, req)
+}
+
+// NewHTTPRequest constructs a new HTTP request and injects provider credentials into it.
+func (m *Manager) NewHTTPRequest(ctx context.Context, auth *Auth, method, targetURL string, body []byte, headers http.Header) (*http.Request, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -3416,14 +3422,19 @@ func (m *Manager) NewHttpRequest(ctx context.Context, auth *Auth, method, target
 	if headers != nil {
 		httpReq.Header = headers.Clone()
 	}
-	if errPrepare := m.PrepareHttpRequest(ctx, auth, httpReq); errPrepare != nil {
+	if errPrepare := m.PrepareHTTPRequest(ctx, auth, httpReq); errPrepare != nil {
 		return nil, errPrepare
 	}
 	return httpReq, nil
 }
 
-// HttpRequest injects provider credentials into the supplied HTTP request and executes it.
-func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error) {
+// NewHttpRequest is deprecated, use NewHTTPRequest instead.
+func (m *Manager) NewHttpRequest(ctx context.Context, auth *Auth, method, targetURL string, body []byte, headers http.Header) (*http.Request, error) {
+	return m.NewHTTPRequest(ctx, auth, method, targetURL, body, headers)
+}
+
+// HTTPRequest injects provider credentials into the supplied HTTP request and executes it.
+func (m *Manager) HTTPRequest(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error) {
 	if m == nil {
 		return nil, &Error{Code: "provider_not_found", Message: "manager is nil"}
 	}
@@ -3442,4 +3453,9 @@ func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request
 		return nil, &Error{Code: "provider_not_found", Message: "executor not registered for provider: " + providerKey}
 	}
 	return exec.HttpRequest(ctx, auth, req)
+}
+
+// HttpRequest is deprecated, use HTTPRequest instead.
+func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error) {
+	return m.HTTPRequest(ctx, auth, req)
 }

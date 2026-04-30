@@ -1,3 +1,4 @@
+// Package auth provides authentication management, scheduling, and session handling for CLIProxyAPI.
 package auth
 
 import "strings"

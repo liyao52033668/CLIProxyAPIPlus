@@ -1,3 +1,5 @@
+// Package auth provides authentication management, scheduling, and session handling for CLIProxyAPI.
+// It includes round-robin and fill-first scheduling strategies, cooldown management, and OAuth support.
 package auth
 
 import (

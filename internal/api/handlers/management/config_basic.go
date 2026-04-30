@@ -194,7 +194,7 @@ func (h *Handler) GetConfigYAML(c *gin.Context) {
 func (h *Handler) GetDebug(c *gin.Context) { c.JSON(200, gin.H{"debug": h.cfg.Debug}) }
 func (h *Handler) PutDebug(c *gin.Context) { h.updateBoolField(c, func(v bool) { h.cfg.Debug = v }) }
 
-// UsageStatisticsEnabled
+// GetUsageStatisticsEnabled returns whether usage statistics collection is enabled.
 func (h *Handler) GetUsageStatisticsEnabled(c *gin.Context) {
 	c.JSON(200, gin.H{"usage-statistics-enabled": h.cfg.UsageStatisticsEnabled})
 }
@@ -210,7 +210,7 @@ func (h *Handler) PutLoggingToFile(c *gin.Context) {
 	h.updateBoolField(c, func(v bool) { h.cfg.LoggingToFile = v })
 }
 
-// LogsMaxTotalSizeMB
+// GetLogsMaxTotalSizeMB returns the maximum total size of log files in MB.
 func (h *Handler) GetLogsMaxTotalSizeMB(c *gin.Context) {
 	c.JSON(200, gin.H{"logs-max-total-size-mb": h.cfg.LogsMaxTotalSizeMB})
 }
@@ -261,7 +261,7 @@ func (h *Handler) PutWebsocketAuth(c *gin.Context) {
 	h.updateBoolField(c, func(v bool) { h.cfg.WebsocketAuth = v })
 }
 
-// Request retry
+// GetRequestRetry returns whether request retry is enabled.
 func (h *Handler) GetRequestRetry(c *gin.Context) {
 	c.JSON(200, gin.H{"request-retry": h.cfg.RequestRetry})
 }
@@ -297,7 +297,7 @@ func normalizeRoutingStrategy(strategy string) (string, bool) {
 	}
 }
 
-// RoutingStrategy
+// GetRoutingStrategy returns the current routing strategy.
 func (h *Handler) GetRoutingStrategy(c *gin.Context) {
 	strategy, ok := normalizeRoutingStrategy(h.cfg.Routing.Strategy)
 	if !ok {
