@@ -35,6 +35,7 @@ main:
           script: |
             if [ -f tag_info.json ]; then cat tag_info.json; else echo "tag_info.json not found, skipping"; fi
         - name: generate changelog and create release
+          imports: https://cnb.cool/liyao52033/envs/-/blob/main/envs.yml
           script: |
             set -e
 
@@ -79,7 +80,7 @@ main:
                 --request POST \
                 --url "${CNB_API_ENDPOINT}/liyao52033/CLIProxyAPIPlus/-/releases" \
                 --header "Accept: application/vnd.cnb.api+json" \
-                --header "Authorization: Bearer ${CNB_TOKEN}" \
+                --header "Authorization: Bearer ${CPA_TOKEN}" \
                 --header "Content-Type: application/json" \
                 --data "${PAYLOAD}"
               
