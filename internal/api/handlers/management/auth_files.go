@@ -79,12 +79,12 @@ type qoderCallbackServer struct {
 }
 
 var (
-	callbackForwardersMu  sync.Mutex
-	callbackForwarders    = make(map[int]*callbackForwarder)
+	callbackForwardersMu   sync.Mutex
+	callbackForwarders     = make(map[int]*callbackForwarder)
 	qoderCallbackServersMu sync.Mutex
 	qoderCallbackServers   = make(map[int]*qoderCallbackServer)
-	errAuthFileMustBeJSON = errors.New("auth file must be .json")
-	errAuthFileNotFound   = errors.New("auth file not found")
+	errAuthFileMustBeJSON  = errors.New("auth file must be .json")
+	errAuthFileNotFound    = errors.New("auth file not found")
 )
 
 func extractLastRefreshTimestamp(meta map[string]any) (time.Time, bool) {
@@ -283,7 +283,7 @@ func startQoderCallbackServerWebUI(port int, state string) (*http.Server, <-chan
 		rawURL := r.URL.Query().Get("url")
 		rawURL, _ = url.QueryUnescape(rawURL)
 		prefix := "qoder://aicoding.aicoding-agent/login-success?"
-		
+
 		qs := ""
 		if strings.HasPrefix(rawURL, prefix) {
 			qs = rawURL[len(prefix):]
@@ -308,7 +308,7 @@ func startQoderCallbackServerWebUI(port int, state string) (*http.Server, <-chan
 				}
 			}
 		}
-		
+
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		callbackURL := "qoder://aicoding.aicoding-agent/login-success?" + qs
 		_, _ = w.Write([]byte(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Qoder Login</title></head>` +
@@ -810,25 +810,27 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "no files uploaded"})
 		return
 	}
-	name := strings.TrimSpace(c.Query("name"))
-	if isUnsafeAuthFileName(name) {
-		c.JSON(400, gin.H{"error": "invalid name"})
-		return
-	}
-	if !strings.HasSuffix(strings.ToLower(name), ".json") {
-		c.JSON(400, gin.H{"error": "name must end with .json"})
-		return
-	}
 	data, err := io.ReadAll(c.Request.Body)
 	if err != nil {
 		c.JSON(400, gin.H{"error": "failed to read body"})
 		return
 	}
-	if err = h.writeAuthFile(ctx, filepath.Base(name), data); err != nil {
+
+	// Generate provider-email filename if possible
+	name := h.generateAuthFileName(data)
+	if name == "" {
+		c.JSON(400, gin.H{"error": "cannot generate filename: unable to extract provider and account from request body"})
+		return
+	}
+
+	// Resolve conflict if file already exists
+	name = h.resolveFilenameConflict(name)
+
+	if err = h.writeAuthFile(ctx, name, data); err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(200, gin.H{"status": "ok"})
+	c.JSON(200, gin.H{"status": "ok", "filename": name})
 }
 
 // Delete auth files: single by name or all
@@ -955,10 +957,162 @@ func (h *Handler) storeUploadedAuthFile(ctx context.Context, file *multipart.Fil
 	if err != nil {
 		return "", fmt.Errorf("failed to read uploaded file: %w", err)
 	}
+
+	// Generate provider-email filename if possible
+	if generatedName := h.generateAuthFileName(data); generatedName != "" {
+		name = generatedName
+		// Resolve conflict if file already exists
+		name = h.resolveFilenameConflict(name)
+	}
+
 	if err := h.writeAuthFile(ctx, name, data); err != nil {
 		return "", err
 	}
 	return name, nil
+}
+
+// generateAuthFileName generates a filename in the format "provider-email.json"
+// based on the auth file content. It returns empty string if the content cannot
+// be parsed or required fields are missing.
+func (h *Handler) generateAuthFileName(data []byte) string {
+	var metadata map[string]any
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return ""
+	}
+
+	provider, _ := metadata["type"].(string)
+	if provider == "" {
+		return ""
+	}
+	provider = strings.TrimSpace(provider)
+
+	// Try to get email/account using the same logic as AccountInfo()
+	account := extractAccountFromMetadata(metadata)
+	if account == "" {
+		return ""
+	}
+
+	// Sanitize account for use in filename
+	account = sanitizeForFilename(account)
+
+	return fmt.Sprintf("%s-%s.json", provider, account)
+}
+
+// extractAccountFromMetadata extracts the account identifier from auth metadata.
+// It follows the same priority as Auth.AccountInfo().
+func extractAccountFromMetadata(metadata map[string]any) string {
+	// Check auth_method to determine the type of auth
+	if method, ok := metadata["auth_method"].(string); ok {
+		switch strings.ToLower(strings.TrimSpace(method)) {
+		case "oauth":
+			for _, key := range []string{"email", "username", "name"} {
+				if value, okValue := metadata[key].(string); okValue {
+					if trimmed := strings.TrimSpace(value); trimmed != "" {
+						return trimmed
+					}
+				}
+			}
+		case "pat", "personal_access_token":
+			for _, key := range []string{"username", "email", "name", "token_preview"} {
+				if value, okValue := metadata[key].(string); okValue {
+					if trimmed := strings.TrimSpace(value); trimmed != "" {
+						return trimmed
+					}
+				}
+			}
+		}
+	}
+
+	// For GitHub provider, return username when email isn't available
+	if provider, ok := metadata["type"].(string); ok && strings.HasPrefix(strings.ToLower(provider), "github") {
+		if username, ok := metadata["username"].(string); ok {
+			if trimmed := strings.TrimSpace(username); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+
+	// Check metadata for email
+	if v, ok := metadata["email"].(string); ok {
+		if trimmed := strings.TrimSpace(v); trimmed != "" {
+			return trimmed
+		}
+	}
+
+	// Fall back to username or name
+	for _, key := range []string{"username", "name"} {
+		if value, okValue := metadata[key].(string); okValue {
+			if trimmed := strings.TrimSpace(value); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+
+	return ""
+}
+
+// sanitizeForFilename removes or replaces characters that are unsafe for filenames.
+func sanitizeForFilename(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return s
+	}
+	// Replace characters that are unsafe in filenames
+	// Windows forbids: < > : " | ? * \ /
+	// We'll replace them with _
+	replacer := strings.NewReplacer(
+		"<", "_",
+		">", "_",
+		":", "_",
+		"\"", "_",
+		"|", "_",
+		"?", "_",
+		"*", "_",
+		"\\", "_",
+		"/", "_",
+	)
+	return replacer.Replace(s)
+}
+
+// resolveFilenameConflict generates a unique filename if the target already exists.
+// It appends a numeric suffix before the extension (e.g., "provider-account_1.json").
+func (h *Handler) resolveFilenameConflict(name string) string {
+	if h == nil || h.cfg.AuthDir == "" {
+		return name
+	}
+
+	dst := filepath.Join(h.cfg.AuthDir, filepath.Base(name))
+	if !filepath.IsAbs(dst) {
+		if abs, err := filepath.Abs(dst); err == nil {
+			dst = abs
+		}
+	}
+
+	// If file doesn't exist, return original name
+	if _, err := os.Stat(dst); os.IsNotExist(err) {
+		return name
+	}
+
+	// Split name into base and extension
+	ext := filepath.Ext(name)
+	base := strings.TrimSuffix(name, ext)
+
+	// Try appending _1, _2, etc.
+	for i := 1; i <= 99; i++ {
+		newName := fmt.Sprintf("%s_%d%s", base, i, ext)
+		newDst := filepath.Join(h.cfg.AuthDir, filepath.Base(newName))
+		if !filepath.IsAbs(newDst) {
+			if abs, err := filepath.Abs(newDst); err == nil {
+				newDst = abs
+			}
+		}
+		if _, err := os.Stat(newDst); os.IsNotExist(err) {
+			return newName
+		}
+	}
+
+	// If we can't find a unique name after 99 attempts, return original (will overwrite)
+	return name
 }
 
 func (h *Handler) writeAuthFile(ctx context.Context, name string, data []byte) error {
@@ -4731,7 +4885,7 @@ func (h *Handler) RequestQoderToken(c *gin.Context) {
 		// Wait for callback via file (for WebUI) or channel (for Windows auto callback)
 		waitFiles := []string{
 			filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-qoder-%s.oauth", state)), // With state
-			filepath.Join(h.cfg.AuthDir, ".oauth-qoder-.oauth"), // Without state (Qoder callback URL may not contain state)
+			filepath.Join(h.cfg.AuthDir, ".oauth-qoder-.oauth"),                       // Without state (Qoder callback URL may not contain state)
 		}
 		waitForCallback := func() (string, string, error) {
 			deadline := time.Now().Add(5 * time.Minute)

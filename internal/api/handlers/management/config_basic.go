@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	latestReleaseURL       = "https://api.github.com/repos/router-for-me/CLIProxyAPIPlus/releases/latest"
+	latestReleaseURL       = "https://api.cnb.cool/liyao52033/CLIProxyAPIPlus/-/releases/latest"
 	latestReleaseUserAgent = "CLIProxyAPIPlus"
 )
 
@@ -53,8 +53,17 @@ func (h *Handler) GetLatestVersion(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "request_create_failed", "message": err.Error()})
 		return
 	}
-	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Accept", "application/vnd.cnb.api+json")
 	req.Header.Set("User-Agent", latestReleaseUserAgent)
+
+	// Add CNB token if configured (env CNB_TOKEN takes priority over config)
+	cnbToken := strings.TrimSpace(os.Getenv("CNB_TOKEN"))
+	if cnbToken == "" {
+		cnbToken = strings.TrimSpace(h.cfg.CNBToken)
+	}
+	if cnbToken != "" {
+		req.Header.Set("Authorization", cnbToken)
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {

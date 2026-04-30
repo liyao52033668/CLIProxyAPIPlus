@@ -20,9 +20,12 @@ FROM alpine:3.22.0
 
 RUN apk add --no-cache tzdata
 
+ARG CNB_TOKEN
+ENV CNB_TOKEN=${CNB_TOKEN}
+
 RUN mkdir /CLIProxyAPI
 
-COPY --from=builder ./app/CLIProxyAPIPlus /CLIProxyAPI/CLIProxyAPIPlus
+COPY --from=builder /app/CLIProxyAPIPlus /CLIProxyAPI/CLIProxyAPIPlus
 
 COPY config.example.yaml /CLIProxyAPI/config.example.yaml
 
