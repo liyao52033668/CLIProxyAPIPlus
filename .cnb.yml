@@ -35,7 +35,6 @@ main:
           script: |
             if [ -f tag_info.json ]; then cat tag_info.json; else echo "tag_info.json not found, skipping"; fi
         - name: generate changelog and create release
-          imports: https://cnb.cool/liyao52033/envs/-/blob/main/envs.yml
           script: |
             set -e
 
@@ -80,13 +79,14 @@ main:
                 --request POST \
                 --url "${CNB_API_ENDPOINT}/liyao52033/CLIProxyAPIPlus/-/releases" \
                 --header "Accept: application/vnd.cnb.api+json" \
-                --header "Authorization: Bearer ${CPA_TOKEN}" \
+                --header "Authorization: Bearer ${CNB_TOKEN}" \
                 --header "Content-Type: application/json" \
                 --data "${PAYLOAD}"
               
               echo "✅ Release ${CURRENT_TAG} created successfully"
             fi
         - name: prepare build args
+          imports: https://cnb.cool/liyao52033/envs/-/blob/main/envs.yml
           script: |
               VERSION="${NEW_TAG}"
               COMMIT="${CNB_COMMIT:-$(git rev-parse --short HEAD 2>/dev/null || echo none)}"
@@ -101,7 +101,7 @@ main:
                 --build-arg VERSION="${VERSION}" \
                 --build-arg COMMIT="${COMMIT}" \
                 --build-arg BUILD_DATE="${BUILD_DATE}" \
-                --build-arg CNB_TOKEN="${CNB_TOKEN}" \
+                --build-arg CNB_TOKEN="${CPA_TOKEN}" \
                 -t ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:latest \
                 .
         - name: docker push
