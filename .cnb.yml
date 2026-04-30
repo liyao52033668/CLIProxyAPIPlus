@@ -16,8 +16,8 @@ main:
     - services:
         - docker
       stages:
-        - name: commitlint
-          image: cnbcool/commitlint
+        # - name: commitlint
+        #   image: cnbcool/commitlint
         - name: auto-tag
           image: cnbcool/git-auto-tag:latest
           settings:
