@@ -57,16 +57,14 @@ $:
           script: |
             set -e
 
-            TAG="${CNB_TAG}"
-            PREV_TAG=$(git tag --sort=-v:refname | grep -v "^${TAG}$" | head -n 1 || echo "")
+            TAG=$(git tag --sort=-v:refname | grep -v "^${TAG}$" | head -n 1 || echo "")
 
             echo "=== Release Info ==="
             echo "TAG:        ${TAG}"
-            echo "PREV_TAG:   ${PREV_TAG:-<none>}"
 
             # Generate changelog from commit history
-            if [ -n "${PREV_TAG}" ]; then
-              RANGE="${PREV_TAG}..HEAD"
+            if [ -n "${TAG}" ]; then
+              RANGE="${TAG}..HEAD"
             else
               RANGE="HEAD"
             fi
