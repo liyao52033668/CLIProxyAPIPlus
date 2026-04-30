@@ -42,7 +42,6 @@ import (
 	// "github.com/router-for-me/CLIProxyAPI/v6/internal/browser"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kimi"
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
-	qoder "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/qoder"
 	qoderauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/qoder"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
@@ -255,7 +254,7 @@ func stopQoderCallbackServerInstance(port int, srv *qoderCallbackServer) {
 
 func startQoderCallbackServerWebUI(port int, state string) (*http.Server, <-chan qoderCallbackResult, error) {
 	if port <= 0 {
-		port = qoder.CallbackPort
+		port = qoderauth.CallbackPort
 	}
 
 	stopQoderCallbackServer(port)
@@ -4847,7 +4846,7 @@ func (h *Handler) RequestQoderToken(c *gin.Context) {
 	log.Info("Initializing Qoder authentication...")
 
 	CompleteOAuthSessionsByProvider("qoder")
-	stopQoderCallbackServer(qoder.CallbackPort)
+	stopQoderCallbackServer(qoderauth.CallbackPort)
 
 	nonce, challenge, verifier, errPKCE := qoderauth.GeneratePKCE()
 	if errPKCE != nil {
@@ -4884,7 +4883,7 @@ func (h *Handler) RequestQoderToken(c *gin.Context) {
 	SetOAuthSessionError(state, "auth_url|"+authURL)
 	log.Infof("Qoder auth URL stored for state: %s", state)
 
-	cleanupURIHandler := qoder.RegisterURIHandler(callbackPort)
+	cleanupURIHandler := qoderauth.RegisterURIHandler(callbackPort)
 
 	go func() {
 		defer func() {

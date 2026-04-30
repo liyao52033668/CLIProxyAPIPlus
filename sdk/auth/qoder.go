@@ -41,9 +41,7 @@ func (a QoderAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 	if cfg == nil {
 		return nil, fmt.Errorf("cliproxy auth: configuration is required")
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
+
 	if opts == nil {
 		opts = &LoginOptions{}
 	}
@@ -101,7 +99,7 @@ func (a QoderAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 	fmt.Println("  1. After login success, copy the 'qoder://' callback URL from browser DevTools Network tab")
 	fmt.Println("  2. Paste the URL in the terminal below, OR")
 	fmt.Println("  3. Forward the callback to the local server using VBS script:")
-	fmt.Println("     http://localhost:%d/forward?url=qoder://...", callbackPort)
+	fmt.Printf("     http://localhost:%d/forward?url=qoder://...\n", callbackPort)
 	fmt.Printf("  3. Open http://localhost:%d/complete in browser and paste the URL\n", callbackPort)
 	fmt.Println()
 	fmt.Println("Paste the qoder:// callback URL here, or press Enter to keep waiting...")
