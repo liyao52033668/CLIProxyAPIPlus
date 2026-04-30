@@ -727,7 +727,7 @@ func isUnsafeAuthFileName(name string) bool {
 	return false
 }
 
-// Download single auth file by name
+// DownloadAuthFile downloads a single auth file by name.
 func (h *Handler) DownloadAuthFile(c *gin.Context) {
 	name := strings.TrimSpace(c.Query("name"))
 	if isUnsafeAuthFileName(name) {
@@ -752,7 +752,7 @@ func (h *Handler) DownloadAuthFile(c *gin.Context) {
 	c.Data(200, "application/json", data)
 }
 
-// Upload auth file: multipart or raw JSON with ?name=
+// UploadAuthFile uploads an auth file via multipart or raw JSON.
 func (h *Handler) UploadAuthFile(c *gin.Context) {
 	if h.authManager == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
@@ -835,7 +835,7 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 	c.JSON(200, gin.H{"status": "ok", "filename": name})
 }
 
-// Delete auth files: single by name or all
+// DeleteAuthFile deletes auth files by name or all.
 func (h *Handler) DeleteAuthFile(c *gin.Context) {
 	if h.authManager == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
@@ -4792,6 +4792,7 @@ func (h *Handler) RequestBTToken(c *gin.Context) {
 func (h *Handler) RequestCodeArtsToken(c *gin.Context) {
 	ctx := context.Background()
 	ctx = PopulateAuthContext(ctx, c)
+	_ = ctx
 
 	state, errState := misc.GenerateRandomState()
 	if errState != nil {
@@ -4981,22 +4982,13 @@ func (h *Handler) RequestQoderToken(c *gin.Context) {
 				log.Warnf("qoder: failed to URL decode auth field: %v", err)
 				authFieldDecoded = authField
 			}
-			previewLen := 50
-			if len(authField) < 50 {
-				previewLen = len(authField)
-			}
+			previewLen := min(50, len(authField))
 			log.Infof("qoder: authField before URL decode (len=%d): %s", len(authField), authField[:previewLen])
-			previewLen = 50
-			if len(authFieldDecoded) < 50 {
-				previewLen = len(authFieldDecoded)
-			}
+			previewLen = min(50, len(authFieldDecoded))
 			log.Infof("qoder: authField after URL decode (len=%d): %s", len(authFieldDecoded), authFieldDecoded[:previewLen])
 			authInfo, errDecode := qoderauth.DecodeAuthField(authFieldDecoded)
 			if errDecode != nil {
-				previewLen := 100
-				if len(authField) < 100 {
-					previewLen = len(authField)
-				}
+				previewLen := min(100, len(authField))
 				log.Warnf("qoder: failed to decode auth field: %v, raw authField (first %d chars): %s", errDecode, previewLen, authField[:previewLen])
 			} else {
 				log.Infof("qoder: decoded auth field: %+v", authInfo)
