@@ -1,5 +1,7 @@
 services:
   cli-proxy-api:
+    image: rensumo/cli-proxy-api-plus:latest
+    pull_policy: always
     build:
       context: .
       dockerfile: Dockerfile
