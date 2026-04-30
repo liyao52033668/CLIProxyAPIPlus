@@ -38,34 +38,38 @@ main:
           script: |
             set -e
 
-            TAG=$(git tag --sort=-v:refname | grep -v "^${TAG}$" | head -n 1 || echo "")
+            # 新 tag 由 auto-tag 阶段提供
+            CURRENT_TAG="${NEW_TAG}"
+            # 获取上一个 tag
+            PREV_TAG=$(git tag --sort=-v:refname | grep -v "^${CURRENT_TAG}$" | head -n 1 || echo "")
 
             echo "=== Release Info ==="
-            echo "TAG:        ${TAG}"
+            echo "CURRENT_TAG: ${CURRENT_TAG}"
+            echo "PREV_TAG:    ${PREV_TAG}"
 
             # Generate changelog from commit history
-            if [ -n "${TAG}" ]; then
-              RANGE="${TAG}..HEAD"
+            if [ -n "${PREV_TAG}" ]; then
+              RANGE="${PREV_TAG}..${CURRENT_TAG}"
             else
-              RANGE="HEAD"
+              RANGE="${CURRENT_TAG}"
             fi
 
             echo "=== Changelog ==="
             NOTES=$(git log ${RANGE} --pretty=format:"- %s (%h)" --no-merges)
             echo "${NOTES}"
 
-            # 先检查 Release 是否已存在
+            # 检查 Release 是否已存在
             EXIST_RELEASE=$(curl --silent --fail --request GET \
-              --url "${CNB_API_ENDPOINT}/liyao52033/CLIProxyAPIPlus/-/releases/tags/${TAG}" \
+              --url "${CNB_API_ENDPOINT}/liyao52033/CLIProxyAPIPlus/-/releases/tags/${CURRENT_TAG}" \
               --header "Accept: application/vnd.cnb.api+json" \
               --header "Authorization: Bearer ${CNB_TOKEN}" || echo "")
 
             if [ -n "${EXIST_RELEASE}" ]; then
-              echo "Release ${TAG} already exists, skip creation"
+              echo "Release ${CURRENT_TAG} already exists, skip creation"
             else
               PAYLOAD=$(jq -n \
-                --arg tag_name "${TAG}" \
-                --arg name "${TAG}" \
+                --arg tag_name "${CURRENT_TAG}" \
+                --arg name "${CURRENT_TAG}" \
                 --arg body "${NOTES}" \
                 '{tag_name: $tag_name, name: $name, body: $body, draft: false, prerelease: false}')
               
@@ -77,11 +81,11 @@ main:
                 --header "Content-Type: application/json" \
                 --data "${PAYLOAD}"
               
-              echo "✅ Release ${TAG} created successfully"
+              echo "✅ Release ${CURRENT_TAG} created successfully"
             fi
         - name: prepare build args
           script: |
-              VERSION="${CNB_TAG:-$(git tag --sort=-v:refname | grep -v "^${TAG}$" | head -n 1 || echo "")}"
+              VERSION="${NEW_TAG}"
               COMMIT="${CNB_COMMIT:-$(git rev-parse --short HEAD 2>/dev/null || echo none)}"
               BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
