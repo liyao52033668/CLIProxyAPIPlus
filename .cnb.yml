@@ -16,6 +16,23 @@ main:
     - services:
         - docker
       stages:
+        - name: commitlint
+          image: cnbcool/commitlint
+        - name: auto-tag
+          image: cnbcool/git-auto-tag:latest
+          settings:
+            tagFormat: v\${version}
+            toFile: tag_info.json
+            dryRun: false
+            blockWhenFail: false
+            branch: $CNB_BRANCH
+            repoUrlHttps: $CNB_REPO_URL_HTTPS
+          exports:
+            tag: NEW_TAG
+        - name: show tag
+          script: echo $NEW_TAG
+        - name: show tag res
+          script: cat tag_info.json
         - name: sync to github
           image: tencentcom/git-sync
           imports: https://cnb.cool/liyao52033/envs/-/blob/main/github-env.yml
@@ -36,18 +53,65 @@ $:
     - services:
         - docker
       stages:
-        - name: docker build
+        - name: generate changelog and create release
           script: |
-            # 获取最新 tag，无 tag 则返回空
-            LATEST_TAG=$(git describe --tags $(git rev-list --tags --max-count=1) 2>/dev/null)
-            # 赋值 VERSION：有 tag 用 tag，无则用 dev
-            VERSION="${LATEST_TAG:-dev}"
-            echo "VERSION: $VERSION"
-            
+            set -e
+
+            TAG="${CNB_TAG}"
+            PREV_TAG=$(git tag --sort=-v:refname | grep -v "^${TAG}$" | head -n 1 || echo "")
+
+            echo "=== Release Info ==="
+            echo "TAG:        ${TAG}"
+            echo "PREV_TAG:   ${PREV_TAG:-<none>}"
+
+            # Generate changelog from commit history
+            if [ -n "${PREV_TAG}" ]; then
+              RANGE="${PREV_TAG}..HEAD"
+            else
+              RANGE="HEAD"
+            fi
+
+            echo "=== Changelog ==="
+            NOTES=$(git log ${RANGE} --pretty=format:"- %s (%h)" --no-merges)
+            echo "${NOTES}"
+
+            # Build JSON payload safely with jq and create release via CNB API
+            PAYLOAD=$(jq -n \
+              --arg tag_name "${TAG}" \
+              --arg name "${TAG}" \
+              --arg body "${NOTES}" \
+              '{tag_name: $tag_name, name: $name, body: $body, draft: false, prerelease: false}')
+
+            curl --fail --silent --show-error \
+              --request POST \
+              --url "https://api.cnb.cool/liyao52033/CLIProxyAPIPlus/-/releases" \
+              --header "Accept: application/vnd.cnb.api+json" \
+              --header "Authorization: ${CNB_TOKEN}" \
+              --header "Content-Type: application/json" \
+              --data "${PAYLOAD}"
+
+            echo "✅ Release ${TAG} created successfully"
+
+        - name: prepare build args
+          script: |
+            VERSION="${CNB_TAG}"
+            COMMIT="${CNB_COMMIT:-$(git rev-parse --short HEAD 2>/dev/null || echo none)}"
+            BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+            echo "=== Build Args ==="
+            echo "VERSION:   ${VERSION}"
+            echo "COMMIT:    ${COMMIT}"
+            echo "BUILD_DATE: ${BUILD_DATE}"
+
             docker build \
-              --build-arg VERSION="$VERSION" \
-              --build-arg COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo none)" \
-              --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-              -t ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:latest .
+              --build-arg VERSION="${VERSION}" \
+              --build-arg COMMIT="${COMMIT}" \
+              --build-arg BUILD_DATE="${BUILD_DATE}" \
+              --build-arg CNB_TOKEN="${CNB_TOKEN}" \
+              -t ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:latest \
+              -t ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:${TAG} \
+              .
         - name: docker push
-          script: docker push ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:latest
+          script: |
+            docker push ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:latest
+            docker push ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:${TAG}
