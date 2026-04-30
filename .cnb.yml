@@ -32,7 +32,8 @@ main:
         - name: show tag
           script: echo $NEW_TAG
         - name: show tag res
-          script: cat tag_info.json
+          script: |
+            if [ -f tag_info.json ]; then cat tag_info.json; else echo "tag_info.json not found, skipping"; fi
         - name: generate changelog and create release
           script: |
             set -e
