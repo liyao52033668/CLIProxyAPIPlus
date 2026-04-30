@@ -67,11 +67,13 @@ main:
             if [ -n "${EXIST_RELEASE}" ]; then
               echo "Release ${CURRENT_TAG} already exists, skip creation"
             else
+              # 使用 jq -s 正确转义多行字符串
+              NOTES_JSON=$(echo "${NOTES}" | jq -Rs '.')
               PAYLOAD=$(jq -n \
+                --argjson body "${NOTES_JSON}" \
                 --arg tag_name "${CURRENT_TAG}" \
                 --arg name "${CURRENT_TAG}" \
-                --arg body "${NOTES}" \
-                '{tag_name: $tag_name, name: $name, body: $body, draft: false, prerelease: false}')
+                '{tag_name: $tag_name, name: $name, body: $body, draft: false, prerelease: false, make_latest: "true"}')
               
               curl --fail --silent --show-error \
                 --request POST \
