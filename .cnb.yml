@@ -55,7 +55,8 @@ main:
             fi
 
             echo "=== Changelog ==="
-            NOTES=$(git log ${RANGE} --pretty=format:"- %s (%h)" --no-merges)
+            REPO_URL="https://cnb.cool/liyao52033/CLIProxyAPIPlus"
+            NOTES=$(git log ${RANGE} --pretty=format:"- [%h](${REPO_URL}/-/commit/%H) %s" --no-merges)
             echo "${NOTES}"
 
             # 检查 Release 是否已存在
