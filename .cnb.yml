@@ -89,7 +89,7 @@ main:
         - name: prepare build args
           imports: https://cnb.cool/liyao52033/envs/-/blob/main/envs.yml
           script: |
-              VERSION="${NEW_TAG}"
+              VERSION="${NEW_TAG:-$(git tag --sort=-v:refname | grep -v "^${CURRENT_TAG}$" | head -n 1 || echo "")}"
               COMMIT="${CNB_COMMIT:-$(git rev-parse --short HEAD 2>/dev/null || echo none)}"
               BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
