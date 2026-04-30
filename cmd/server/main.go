@@ -414,6 +414,7 @@ func main() {
 			return
 		}
 		examplePath := filepath.Join(wd, "config.example.yaml")
+		log.Infof("Starting object store bootstrap (timeout: 5 minutes)...")
 		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 		if errBootstrap := objectStoreInst.Bootstrap(ctx, examplePath); errBootstrap != nil {
 			cancel()
@@ -421,6 +422,7 @@ func main() {
 			return
 		}
 		cancel()
+		log.Infof("Object store bootstrap completed successfully")
 		configFilePath = objectStoreInst.ConfigPath()
 		cfg, err = config.LoadConfigOptional(configFilePath, isCloudDeploy)
 		if err == nil {

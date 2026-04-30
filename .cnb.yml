@@ -121,4 +121,24 @@ main:
             password: ${GIT_ACCESS_TOKEN_NEW}
             push_tags: true
   
+   
+  pull_request:
+    - stages:
+        - name: code-review
+          image: cnbcool/code-review:latest
+          settings:
+            # 输出文件路径
+            output: ./code_review.json
+            context: 10
+            comment: true
+            max_comments: 10
+            max_diff_size: 100000
+            # 是否在代码评审发现严重问题时返回非零退出码（流水线会失败）
+            fail_on_critical: true
+            # 指定 AI 模型
+            # model: glm-4.7
+            # AI 最大轮数限制（可选）
+            # max_turns: 3
+            # 将 prompt 输出到文件（调试用）
+            # prompt_output: ./prompt.txt
 
