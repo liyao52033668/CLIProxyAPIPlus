@@ -190,7 +190,7 @@ func (h *Handler) GetConfigYAML(c *gin.Context) {
 	_, _ = c.Writer.Write(data)
 }
 
-// Debug
+// GetDebug returns whether debug mode is enabled.
 func (h *Handler) GetDebug(c *gin.Context) { c.JSON(200, gin.H{"debug": h.cfg.Debug}) }
 func (h *Handler) PutDebug(c *gin.Context) { h.updateBoolField(c, func(v bool) { h.cfg.Debug = v }) }
 
@@ -202,7 +202,7 @@ func (h *Handler) PutUsageStatisticsEnabled(c *gin.Context) {
 	h.updateBoolField(c, func(v bool) { h.cfg.UsageStatisticsEnabled = v })
 }
 
-// UsageStatisticsEnabled
+// GetLoggingToFile returns whether logging to file is enabled.
 func (h *Handler) GetLoggingToFile(c *gin.Context) {
 	c.JSON(200, gin.H{"logging-to-file": h.cfg.LoggingToFile})
 }
@@ -227,7 +227,7 @@ func (h *Handler) PutLogsMaxTotalSizeMB(c *gin.Context) {
 	h.persist(c)
 }
 
-// ErrorLogsMaxFiles
+// GetErrorLogsMaxFiles returns the maximum number of error log files.
 func (h *Handler) GetErrorLogsMaxFiles(c *gin.Context) {
 	c.JSON(200, gin.H{"error-logs-max-files": h.cfg.ErrorLogsMaxFiles})
 }
@@ -247,13 +247,13 @@ func (h *Handler) PutErrorLogsMaxFiles(c *gin.Context) {
 	h.persist(c)
 }
 
-// Request log
+// GetRequestLog returns whether request logging is enabled.
 func (h *Handler) GetRequestLog(c *gin.Context) { c.JSON(200, gin.H{"request-log": h.cfg.RequestLog}) }
 func (h *Handler) PutRequestLog(c *gin.Context) {
 	h.updateBoolField(c, func(v bool) { h.cfg.RequestLog = v })
 }
 
-// Websocket auth
+// GetWebsocketAuth returns whether websocket authentication is enabled.
 func (h *Handler) GetWebsocketAuth(c *gin.Context) {
 	c.JSON(200, gin.H{"ws-auth": h.cfg.WebsocketAuth})
 }
@@ -269,7 +269,7 @@ func (h *Handler) PutRequestRetry(c *gin.Context) {
 	h.updateIntField(c, func(v int) { h.cfg.RequestRetry = v })
 }
 
-// Max retry interval
+// GetMaxRetryInterval returns the maximum retry interval in seconds.
 func (h *Handler) GetMaxRetryInterval(c *gin.Context) {
 	c.JSON(200, gin.H{"max-retry-interval": h.cfg.MaxRetryInterval})
 }
@@ -277,7 +277,7 @@ func (h *Handler) PutMaxRetryInterval(c *gin.Context) {
 	h.updateIntField(c, func(v int) { h.cfg.MaxRetryInterval = v })
 }
 
-// ForceModelPrefix
+// GetForceModelPrefix returns whether force model prefix is enabled.
 func (h *Handler) GetForceModelPrefix(c *gin.Context) {
 	c.JSON(200, gin.H{"force-model-prefix": h.cfg.ForceModelPrefix})
 }
@@ -323,7 +323,7 @@ func (h *Handler) PutRoutingStrategy(c *gin.Context) {
 	h.persist(c)
 }
 
-// Proxy URL
+// GetProxyURL returns the proxy URL.
 func (h *Handler) GetProxyURL(c *gin.Context) { c.JSON(200, gin.H{"proxy-url": h.cfg.ProxyURL}) }
 func (h *Handler) PutProxyURL(c *gin.Context) {
 	h.updateStringField(c, func(v string) { h.cfg.ProxyURL = v })
