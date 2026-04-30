@@ -39,7 +39,8 @@ main:
             set -e
 
             # 新 tag 由 auto-tag 阶段提供
-            CURRENT_TAG="${NEW_TAG}"
+            # 优先取 NEW_TAG，如果 NEW_TAG 为空，则尝试取当前 HEAD 的精确 tag，都没有则赋空值
+            CURRENT_TAG="${NEW_TAG:-$(git describe --tags --exact-match HEAD 2>/dev/null)}"
             # 获取上一个 tag
             PREV_TAG=$(git tag --sort=-v:refname | grep -v "^${CURRENT_TAG}$" | head -n 1 || echo "")
 
