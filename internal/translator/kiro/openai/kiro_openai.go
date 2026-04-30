@@ -55,9 +55,9 @@ func ConvertKiroStreamToOpenAI(ctx context.Context, model string, originalReques
 		if len(lines) >= 2 && strings.HasPrefix(lines[1], "data:") {
 			eventData = strings.TrimSpace(strings.TrimPrefix(lines[1], "data:"))
 		}
-	} else if strings.HasPrefix(responseStr, "data:") {
+	} else if after, ok := strings.CutPrefix(responseStr, "data:"); ok {
 		// Just data line
-		eventData = strings.TrimSpace(strings.TrimPrefix(responseStr, "data:"))
+		eventData = strings.TrimSpace(after)
 	} else {
 		// Try to parse as raw JSON
 		eventData = strings.TrimSpace(responseStr)
@@ -186,8 +186,8 @@ func ConvertKiroNonStreamToOpenAI(ctx context.Context, model string, originalReq
 	response := gjson.ParseBytes(rawResponse)
 
 	// Extract content
-	var content string
-	var reasoningContent string
+	var content strings.Builder
+	var reasoningContent strings.Builder
 	var toolUses []KiroToolUse
 	var stopReason string
 
@@ -201,18 +201,18 @@ func ConvertKiroNonStreamToOpenAI(ctx context.Context, model string, originalReq
 			blockType := block.Get("type").String()
 			switch blockType {
 			case "text":
-				content += block.Get("text").String()
+				content.WriteString(block.Get("text").String())
 			case "thinking":
 				// Convert thinking blocks to reasoning_content for OpenAI format
-				reasoningContent += block.Get("thinking").String()
+				reasoningContent.WriteString(block.Get("thinking").String())
 			case "tool_use":
 				toolUseID := block.Get("id").String()
 				toolName := block.Get("name").String()
 				toolInput := block.Get("input")
 
-				var inputMap map[string]interface{}
+				var inputMap map[string]any
 				if toolInput.IsObject() {
-					inputMap = make(map[string]interface{})
+					inputMap = make(map[string]any)
 					toolInput.ForEach(func(key, value gjson.Result) bool {
 						inputMap[key.String()] = value.Value()
 						return true
@@ -236,19 +236,19 @@ func ConvertKiroNonStreamToOpenAI(ctx context.Context, model string, originalReq
 	usageInfo.TotalTokens = usageInfo.InputTokens + usageInfo.OutputTokens
 
 	// Build OpenAI response with reasoning_content support
-	openaiResponse := BuildOpenAIResponseWithReasoning(content, reasoningContent, toolUses, model, usageInfo, stopReason)
+	openaiResponse := BuildOpenAIResponseWithReasoning(content.String(), reasoningContent.String(), toolUses, model, usageInfo, stopReason)
 	return openaiResponse
 }
 
 // ParseClaudeEvent parses a Claude SSE event and returns the event type and data
 func ParseClaudeEvent(rawEvent []byte) (eventType string, eventData []byte) {
-	lines := bytes.Split(rawEvent, []byte("\n"))
-	for _, line := range lines {
+	lines := bytes.SplitSeq(rawEvent, []byte("\n"))
+	for line := range lines {
 		line = bytes.TrimSpace(line)
-		if bytes.HasPrefix(line, []byte("event:")) {
-			eventType = string(bytes.TrimSpace(bytes.TrimPrefix(line, []byte("event:"))))
-		} else if bytes.HasPrefix(line, []byte("data:")) {
-			eventData = bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+		if after, ok := bytes.CutPrefix(line, []byte("event:")); ok {
+			eventType = string(bytes.TrimSpace(after))
+		} else if after, ok := bytes.CutPrefix(line, []byte("data:")); ok {
+			eventData = bytes.TrimSpace(after)
 		}
 	}
 	return eventType, eventData
@@ -298,7 +298,7 @@ func ExtractThinkingFromContent(content string) (string, string, bool) {
 }
 
 // ConvertOpenAIToolsToKiroFormat is a helper that converts OpenAI tools format to Kiro format
-func ConvertOpenAIToolsToKiroFormat(tools []map[string]interface{}) []KiroToolWrapper {
+func ConvertOpenAIToolsToKiroFormat(tools []map[string]any) []KiroToolWrapper {
 	var kiroTools []KiroToolWrapper
 
 	for _, tool := range tools {
@@ -307,7 +307,7 @@ func ConvertOpenAIToolsToKiroFormat(tools []map[string]interface{}) []KiroToolWr
 			continue
 		}
 
-		fn, ok := tool["function"].(map[string]interface{})
+		fn, ok := tool["function"].(map[string]any)
 		if !ok {
 			continue
 		}
@@ -353,12 +353,12 @@ func NewOpenAIStreamParams(model string) *OpenAIStreamParams {
 }
 
 // ConvertClaudeToolUseToOpenAI converts a Claude tool_use block to OpenAI tool_calls format
-func ConvertClaudeToolUseToOpenAI(toolUseID, toolName string, input map[string]interface{}) map[string]interface{} {
+func ConvertClaudeToolUseToOpenAI(toolUseID, toolName string, input map[string]any) map[string]any {
 	inputJSON, _ := json.Marshal(input)
-	return map[string]interface{}{
+	return map[string]any{
 		"id":   toolUseID,
 		"type": "function",
-		"function": map[string]interface{}{
+		"function": map[string]any{
 			"name":      toolName,
 			"arguments": string(inputJSON),
 		},

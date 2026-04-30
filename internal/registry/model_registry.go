@@ -324,10 +324,7 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 			if oldCount == 0 {
 				continue
 			}
-			toRemove := newCount
-			if oldCount < toRemove {
-				toRemove = oldCount
-			}
+			toRemove := min(oldCount, newCount)
 			if reg, ok := r.models[id]; ok && reg.Providers != nil {
 				if count, okProv := reg.Providers[oldProvider]; okProv {
 					if count <= toRemove {
@@ -346,7 +343,7 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 	// Apply removals first to keep counters accurate.
 	for _, id := range removed {
 		oldCount := oldCounts[id]
-		for i := 0; i < oldCount; i++ {
+		for range oldCount {
 			r.removeModelRegistration(clientID, id, oldProvider, now)
 		}
 	}
@@ -357,7 +354,7 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 			continue
 		}
 		overage := oldCount - newCount
-		for i := 0; i < overage; i++ {
+		for range overage {
 			r.removeModelRegistration(clientID, id, oldProvider, now)
 		}
 	}
@@ -370,7 +367,7 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 		}
 		model := newModels[id]
 		diff := newCount - oldCount
-		for i := 0; i < diff; i++ {
+		for range diff {
 			r.addModelRegistration(id, provider, model, now)
 		}
 	}
@@ -818,10 +815,7 @@ func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.
 			}
 		}
 
-		effectiveClients := availableClients - expiredClients - otherSuspended
-		if effectiveClients < 0 {
-			effectiveClients = 0
-		}
+		effectiveClients := max(availableClients-expiredClients-otherSuspended, 0)
 
 		if effectiveClients > 0 || (availableClients > 0 && (expiredClients > 0 || cooldownSuspended > 0) && otherSuspended == 0) {
 			model := r.convertModelToMap(registration.Info, handlerType)
@@ -976,10 +970,7 @@ func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelIn
 		}
 
 		availableClients := entry.count
-		effectiveClients := availableClients - expiredClients - otherSuspended
-		if effectiveClients < 0 {
-			effectiveClients = 0
-		}
+		effectiveClients := max(availableClients-expiredClients-otherSuspended, 0)
 
 		if effectiveClients > 0 || (availableClients > 0 && (expiredClients > 0 || cooldownSuspended > 0) && otherSuspended == 0) {
 			if entry.info != nil {

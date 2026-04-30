@@ -404,8 +404,8 @@ func (e *QoderExecutor) buildCosyRequest(ctx context.Context, auth *cliproxyauth
 
 	// Parse path for signature — match Python: path = "/" + url.split("://")[1].split("/", 1)[1]
 	sigPath := ""
-	if idx := strings.Index(reqURL, "://"); idx >= 0 {
-		afterScheme := reqURL[idx+3:] // "api3.qoder.sh/algo/api/v2/..."
+	if _, after, ok := strings.Cut(reqURL, "://"); ok {
+		afterScheme := after // "api3.qoder.sh/algo/api/v2/..."
 		if slashIdx := strings.Index(afterScheme, "/"); slashIdx >= 0 {
 			sigPath = afterScheme[slashIdx:] // "/algo/api/v2/..."
 		}
@@ -525,8 +525,8 @@ func (e *QoderExecutor) parseQoderSSEToCompletion(data []byte, model string) []b
 	var fullContent strings.Builder
 	var finishReason string
 
-	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
+	lines := strings.SplitSeq(string(data), "\n")
+	for line := range lines {
 		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(line, "data:") {
 			continue

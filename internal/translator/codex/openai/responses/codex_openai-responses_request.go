@@ -75,7 +75,7 @@ func convertSystemRoleToDeveloper(rawJSON []byte) []byte {
 	result := rawJSON
 
 	// Directly modify role values for items with "system" role
-	for i := 0; i < len(inputArray); i++ {
+	for i := range inputArray {
 		rolePath := fmt.Sprintf("input.%d.role", i)
 		if gjson.GetBytes(result, rolePath).String() == "system" {
 			result, _ = sjson.SetBytes(result, rolePath, "developer")
@@ -93,7 +93,7 @@ func normalizeCodexBuiltinTools(rawJSON []byte) []byte {
 	tools := gjson.GetBytes(result, "tools")
 	if tools.IsArray() {
 		toolArray := tools.Array()
-		for i := 0; i < len(toolArray); i++ {
+		for i := range toolArray {
 			typePath := fmt.Sprintf("tools.%d.type", i)
 			result = normalizeCodexBuiltinToolAtPath(result, typePath)
 		}
@@ -104,7 +104,7 @@ func normalizeCodexBuiltinTools(rawJSON []byte) []byte {
 	toolChoiceTools := gjson.GetBytes(result, "tool_choice.tools")
 	if toolChoiceTools.IsArray() {
 		toolArray := toolChoiceTools.Array()
-		for i := 0; i < len(toolArray); i++ {
+		for i := range toolArray {
 			typePath := fmt.Sprintf("tool_choice.tools.%d.type", i)
 			result = normalizeCodexBuiltinToolAtPath(result, typePath)
 		}

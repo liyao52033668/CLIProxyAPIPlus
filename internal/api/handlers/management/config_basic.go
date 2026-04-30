@@ -28,7 +28,7 @@ func (h *Handler) GetConfig(c *gin.Context) {
 		c.JSON(200, gin.H{})
 		return
 	}
-	c.JSON(200, new(*h.cfg))
+	c.JSON(200, h.cfg)
 }
 
 type releaseInfo struct {
@@ -222,10 +222,7 @@ func (h *Handler) PutLogsMaxTotalSizeMB(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
-	value := *body.Value
-	if value < 0 {
-		value = 0
-	}
+	value := max(*body.Value, 0)
 	h.cfg.LogsMaxTotalSizeMB = value
 	h.persist(c)
 }

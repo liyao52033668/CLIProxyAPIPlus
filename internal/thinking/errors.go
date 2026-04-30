@@ -49,7 +49,7 @@ type ThinkingError struct {
 	// Model is the model name related to this error (optional)
 	Model string
 	// Details contains additional context information (optional)
-	Details map[string]interface{}
+	Details map[string]any
 }
 
 // Error implements the error interface.

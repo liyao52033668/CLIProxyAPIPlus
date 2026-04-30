@@ -90,7 +90,7 @@ func Login(phone, passwordBase64 string) (*BTTokenStorage, error) {
 		return nil, fmt.Errorf("bt login read body failed: %w", err)
 	}
 
-	var result map[string]interface{}
+	var result map[string]any
 	if err := json.Unmarshal(body, &result); err != nil {
 		return nil, fmt.Errorf("bt login parse response failed: %w", err)
 	}
@@ -114,7 +114,7 @@ func Login(phone, passwordBase64 string) (*BTTokenStorage, error) {
 		return nil, fmt.Errorf("bt login unescape failed: %w", err)
 	}
 
-	var data map[string]interface{}
+	var data map[string]any
 	if err := json.Unmarshal([]byte(unescaped), &data); err != nil {
 		return nil, fmt.Errorf("bt login parse data failed: %w", err)
 	}

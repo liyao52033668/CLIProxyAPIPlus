@@ -55,10 +55,10 @@ func (a *CodeArtsAuth) AuthorizationURL(ticketID string, port int) string {
 // PollForLoginResult polls the ticket endpoint until the user completes login.
 // Matches Python: poll_login_ticket(ticket_id, identifier, timeout=120)
 // Returns the full auth result JSON map.
-func (a *CodeArtsAuth) PollForLoginResult(ctx context.Context, ticketID, identifier string) (map[string]interface{}, error) {
+func (a *CodeArtsAuth) PollForLoginResult(ctx context.Context, ticketID, identifier string) (map[string]any, error) {
 	pollURL := fmt.Sprintf("%s/v2/login/ticket", APIHost)
 
-	for i := 0; i < 60; i++ {
+	for i := range 60 {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -84,14 +84,14 @@ func (a *CodeArtsAuth) PollForLoginResult(ctx context.Context, ticketID, identif
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 
-		var result map[string]interface{}
+		var result map[string]any
 		if err := json.Unmarshal(body, &result); err != nil {
 			continue
 		}
 
 		// Python checks: if data.get("status") == "success": return data.get("result")
 		if status, _ := result["status"].(string); status == "success" {
-			if authResult, ok := result["result"].(map[string]interface{}); ok {
+			if authResult, ok := result["result"].(map[string]any); ok {
 				log.Info("codearts: login successful")
 				return authResult, nil
 			}
@@ -107,11 +107,11 @@ func (a *CodeArtsAuth) PollForLoginResult(ctx context.Context, ticketID, identif
 func (a *CodeArtsAuth) ExchangeForSecurityToken(ctx context.Context, xAuthToken string) (*CodeArtsTokenData, error) {
 	exchangeURL := fmt.Sprintf("%s/v3.0/OS-CREDENTIAL/securitytokens", IAMHost)
 
-	payload := map[string]interface{}{
-		"auth": map[string]interface{}{
-			"identity": map[string]interface{}{
+	payload := map[string]any{
+		"auth": map[string]any{
+			"identity": map[string]any{
 				"methods": []string{"token"},
-				"token": map[string]interface{}{
+				"token": map[string]any{
 					"duration_seconds": 86400,
 				},
 			},
@@ -162,7 +162,7 @@ func (a *CodeArtsAuth) ExchangeForSecurityToken(ctx context.Context, xAuthToken 
 
 // ProcessLoginResult extracts credentials from login result.
 // Matches Python logic: check for credential in result, or exchange x_auth_token.
-func (a *CodeArtsAuth) ProcessLoginResult(ctx context.Context, authResult map[string]interface{}) (*CodeArtsTokenData, error) {
+func (a *CodeArtsAuth) ProcessLoginResult(ctx context.Context, authResult map[string]any) (*CodeArtsTokenData, error) {
 	userID, _ := authResult["user_id"].(string)
 	userName, _ := authResult["user_name"].(string)
 	domainID, _ := authResult["domain_id"].(string)
@@ -170,7 +170,7 @@ func (a *CodeArtsAuth) ProcessLoginResult(ctx context.Context, authResult map[st
 	// Check if credential is directly in the result
 	var tokenData *CodeArtsTokenData
 
-	if credMap, ok := authResult["credential"].(map[string]interface{}); ok {
+	if credMap, ok := authResult["credential"].(map[string]any); ok {
 		// Credential directly in login result
 		ak, _ := credMap["access"].(string)
 		sk, _ := credMap["secret"].(string)
@@ -255,16 +255,16 @@ func (a *CodeArtsAuth) RefreshToken(ctx context.Context, token *CodeArtsTokenDat
 		return nil, fmt.Errorf("codearts: refresh failed with status %d", resp.StatusCode)
 	}
 
-	var result map[string]interface{}
+	var result map[string]any
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, fmt.Errorf("codearts: failed to parse refresh response: %w", err)
 	}
 
 	// Extract credential from response
-	credMap, ok := result["credential"].(map[string]interface{})
+	credMap, ok := result["credential"].(map[string]any)
 	if !ok {
-		if r, ok2 := result["result"].(map[string]interface{}); ok2 {
-			credMap, _ = r["credential"].(map[string]interface{})
+		if r, ok2 := result["result"].(map[string]any); ok2 {
+			credMap, _ = r["credential"].(map[string]any)
 		}
 	}
 	if credMap == nil {

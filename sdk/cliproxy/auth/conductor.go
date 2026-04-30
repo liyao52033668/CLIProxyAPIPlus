@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"net/http"
 	"path/filepath"
 	"sort"
@@ -627,10 +628,7 @@ func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeMode
 			if providerForError == "mixed" {
 				providerForError = ""
 			}
-			resetIn := earliest.Sub(now)
-			if resetIn < 0 {
-				resetIn = 0
-			}
+			resetIn := max(earliest.Sub(now), 0)
 			return nil, newModelCooldownError(routeModel, providerForError, resetIn)
 		}
 		return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
@@ -1495,9 +1493,7 @@ func ensureRequestedModelMetadata(opts cliproxyexecutor.Options, requestedModel 
 		return opts
 	}
 	meta := make(map[string]any, len(opts.Metadata)+1)
-	for k, v := range opts.Metadata {
-		meta[k] = v
-	}
+	maps.Copy(meta, opts.Metadata)
 	meta[cliproxyexecutor.RequestedModelMetadataKey] = requestedModel
 	opts.Metadata = meta
 	return opts
@@ -1812,10 +1808,7 @@ func (m *Manager) closestCooldownWait(providers []string, model string, attempt 
 		return 0, false
 	}
 	now := time.Now()
-	defaultRetry := int(m.requestRetry.Load())
-	if defaultRetry < 0 {
-		defaultRetry = 0
-	}
+	defaultRetry := max(int(m.requestRetry.Load()), 0)
 	providerSet := make(map[string]struct{}, len(providers))
 	for i := range providers {
 		key := strings.TrimSpace(strings.ToLower(providers[i]))
@@ -1872,10 +1865,7 @@ func (m *Manager) retryAllowed(attempt int, providers []string) bool {
 	if m == nil || attempt < 0 || len(providers) == 0 {
 		return false
 	}
-	defaultRetry := int(m.requestRetry.Load())
-	if defaultRetry < 0 {
-		defaultRetry = 0
-	}
+	defaultRetry := max(int(m.requestRetry.Load()), 0)
 	providerSet := make(map[string]struct{}, len(providers))
 	for i := range providers {
 		key := strings.TrimSpace(strings.ToLower(providers[i]))
@@ -2314,7 +2304,7 @@ func retryAfterFromError(err error) *time.Duration {
 	if retryAfter == nil {
 		return nil
 	}
-	return new(*retryAfter)
+	return retryAfter
 }
 
 func statusCodeFromResult(err *Error) int {
@@ -2494,10 +2484,7 @@ func nextQuotaCooldown(prevLevel int, disableCooling bool) (time.Duration, int) 
 	if disableCooling {
 		return 0, prevLevel
 	}
-	cooldown := quotaBackoffBase * time.Duration(1<<prevLevel)
-	if cooldown < quotaBackoffBase {
-		cooldown = quotaBackoffBase
-	}
+	cooldown := max(quotaBackoffBase*time.Duration(1<<prevLevel), quotaBackoffBase)
 	if cooldown >= quotaBackoffMax {
 		return quotaBackoffMax, prevLevel
 	}

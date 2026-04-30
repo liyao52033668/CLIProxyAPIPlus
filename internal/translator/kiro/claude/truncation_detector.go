@@ -76,7 +76,7 @@ var RequiredFieldsByTool = map[string][][]string{
 
 // DetectTruncation checks if the tool use input appears to be truncated.
 // It returns detailed information about the truncation status and type.
-func DetectTruncation(toolName, toolUseID, rawInput string, parsedInput map[string]interface{}) TruncationInfo {
+func DetectTruncation(toolName, toolUseID, rawInput string, parsedInput map[string]any) TruncationInfo {
 	info := TruncationInfo{
 		ToolName:     toolName,
 		ToolUseID:    toolUseID,
@@ -224,8 +224,8 @@ func extractPartialFields(raw string) map[string]string {
 	content := strings.TrimPrefix(trimmed, "{")
 
 	// Split by comma (rough parsing)
-	parts := strings.Split(content, ",")
-	for _, part := range parts {
+	parts := strings.SplitSeq(content, ",")
+	for part := range parts {
 		part = strings.TrimSpace(part)
 		if colonIdx := strings.Index(part, ":"); colonIdx > 0 {
 			key := strings.TrimSpace(part[:colonIdx])
@@ -244,7 +244,7 @@ func extractPartialFields(raw string) map[string]string {
 }
 
 // extractParsedFieldNames returns the field names from a successfully parsed map.
-func extractParsedFieldNames(parsed map[string]interface{}) map[string]string {
+func extractParsedFieldNames(parsed map[string]any) map[string]string {
 	fields := make(map[string]string)
 	for key, val := range parsed {
 		switch v := val.(type) {
@@ -267,7 +267,7 @@ func extractParsedFieldNames(parsed map[string]interface{}) map[string]string {
 // findMissingRequiredFields checks which required field groups are unsatisfied.
 // Each group is a slice of alternative field names; the group is satisfied when ANY alternative exists.
 // Returns the list of unsatisfied groups (represented by their alternatives joined with "/").
-func findMissingRequiredFields(parsed map[string]interface{}, requiredGroups [][]string) []string {
+func findMissingRequiredFields(parsed map[string]any, requiredGroups [][]string) []string {
 	var missing []string
 	for _, group := range requiredGroups {
 		satisfied := false
@@ -290,7 +290,7 @@ func isWriteTool(toolName string) bool {
 }
 
 // detectContentTruncation checks if the content field appears truncated for write tools.
-func detectContentTruncation(parsed map[string]interface{}, rawInput string) string {
+func detectContentTruncation(parsed map[string]any, rawInput string) string {
 	// Check for content field
 	content, hasContent := parsed["content"]
 	if !hasContent {
@@ -376,7 +376,7 @@ func buildMissingFieldsErrorMessage(toolName string, missingFields []string, par
 }
 
 // IsTruncated is a convenience function to check if a tool use appears truncated.
-func IsTruncated(toolName, rawInput string, parsedInput map[string]interface{}) bool {
+func IsTruncated(toolName, rawInput string, parsedInput map[string]any) bool {
 	info := DetectTruncation(toolName, "", rawInput, parsedInput)
 	return info.IsTruncated
 }
@@ -387,7 +387,7 @@ func GetTruncationSummary(info TruncationInfo) string {
 		return ""
 	}
 
-	result, _ := json.Marshal(map[string]interface{}{
+	result, _ := json.Marshal(map[string]any{
 		"tool":           info.ToolName,
 		"type":           info.TruncationType,
 		"parsed_fields":  info.ParsedFields,

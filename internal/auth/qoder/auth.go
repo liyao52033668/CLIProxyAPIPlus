@@ -141,7 +141,7 @@ func DecodeAuthField(authStr string) (map[string]any, error) {
 		return nil, fmt.Errorf("qoder: empty auth field")
 	}
 
-	// Reverse custom alphabet to standard base64
+	// Reverse custom alphabet to standard base64, skipping unknown characters
 	var b64 strings.Builder
 	for _, c := range authStr {
 		ch := string(c)
@@ -151,8 +151,6 @@ func DecodeAuthField(authStr string) (map[string]any, error) {
 			idx := strings.Index(CustomAlphabet, ch)
 			if idx >= 0 {
 				b64.WriteByte(StdAlphabet[idx])
-			} else {
-				b64.WriteString(ch)
 			}
 		}
 	}
@@ -160,14 +158,14 @@ func DecodeAuthField(authStr string) (map[string]any, error) {
 	decoded := b64.String()
 
 	// Find the base64-encoded JSON payload starting with "eyJ"
-	eqPos := strings.Index(decoded, "=")
+	before, after, ok := strings.Cut(decoded, "=")
 	var head, tail string
-	if eqPos < 0 {
+	if !ok {
 		head = decoded
 		tail = ""
 	} else {
-		tail = decoded[:eqPos]
-		head = decoded[eqPos+1:]
+		tail = before
+		head = after
 	}
 
 	eyjPos := strings.Index(head, "eyJ")
@@ -208,10 +206,7 @@ func GenerateMachineID(hostname, macAddr, system, machine string) string {
 	encoded := base64.RawURLEncoding.EncodeToString(digest[:])
 	var parts []string
 	for i := 0; i < len(encoded); i += 22 {
-		end := i + 22
-		if end > len(encoded) {
-			end = len(encoded)
-		}
+		end := min(i+22, len(encoded))
 		parts = append(parts, encoded[i:end])
 	}
 	return strings.Join(parts, "-")
@@ -232,7 +227,7 @@ func PollForToken(ctx context.Context, machineID, challenge string) (*PollRespon
 
 	client := &http.Client{Timeout: 10 * time.Second}
 
-	for attempt := 0; attempt < PollMaxAttempts; attempt++ {
+	for range PollMaxAttempts {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -255,10 +250,7 @@ func PollForToken(ctx context.Context, machineID, challenge string) (*PollRespon
 			if consecutiveErrors >= MaxConsecutiveErrors {
 				return nil, fmt.Errorf("qoder poll: too many consecutive errors: %w", err)
 			}
-			delay = time.Duration(float64(delay) * PollBackoffMultiply)
-			if delay > PollMaxDelay {
-				delay = PollMaxDelay
-			}
+			delay = min(time.Duration(float64(delay)*PollBackoffMultiply), PollMaxDelay)
 			continue
 		}
 
@@ -267,10 +259,7 @@ func PollForToken(ctx context.Context, machineID, challenge string) (*PollRespon
 
 		if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusUnauthorized {
 			consecutiveErrors = 0
-			delay = time.Duration(float64(delay) * PollBackoffMultiply)
-			if delay > PollMaxDelay {
-				delay = PollMaxDelay
-			}
+			delay = min(time.Duration(float64(delay)*PollBackoffMultiply), PollMaxDelay)
 			continue
 		}
 
@@ -281,10 +270,7 @@ func PollForToken(ctx context.Context, machineID, challenge string) (*PollRespon
 			}
 			if pollResp.Status == "pending" {
 				consecutiveErrors = 0
-				delay = time.Duration(float64(delay) * PollBackoffMultiply)
-				if delay > PollMaxDelay {
-					delay = PollMaxDelay
-				}
+				delay = min(time.Duration(float64(delay)*PollBackoffMultiply), PollMaxDelay)
 				continue
 			}
 			if pollResp.Token != "" {

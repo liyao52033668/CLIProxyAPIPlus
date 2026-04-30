@@ -75,7 +75,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 				if content := item.Get("content"); content.Exists() && content.IsArray() {
 					var messageContent string
-					var toolCalls []interface{}
+					var toolCalls []any
 
 					content.ForEach(func(_, contentItem gjson.Result) bool {
 						contentType := contentItem.Get("type").String()
@@ -158,7 +158,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 	// Convert tools from responses format to chat completions format
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
-		var chatCompletionsTools []interface{}
+		var chatCompletionsTools []any
 
 		tools.ForEach(func(_, tool gjson.Result) bool {
 			// Built-in tools (e.g. {"type":"web_search"}) are already compatible with the Chat Completions schema.

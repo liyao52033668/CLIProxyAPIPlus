@@ -1424,11 +1424,8 @@ func mergeNodePreserve(dst, src *yaml.Node, path ...[]string) {
 		}
 		reorderSequenceForMerge(dst, src)
 		// Update elements in place
-		minContent := len(dst.Content)
-		if len(src.Content) < minContent {
-			minContent = len(src.Content)
-		}
-		for i := 0; i < minContent; i++ {
+		minContent := min(len(src.Content), len(dst.Content))
+		for i := range minContent {
 			if dst.Content[i] == nil {
 				dst.Content[i] = deepCopyNode(src.Content[i])
 				continue

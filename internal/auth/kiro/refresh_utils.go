@@ -128,10 +128,7 @@ func RefreshWithRetry(
 ) (*KiroTokenData, error) {
 	var lastErr error
 
-	maxAttempts := config.MaxRetries + 1
-	if maxAttempts < 1 {
-		maxAttempts = 1
-	}
+	maxAttempts := max(config.MaxRetries+1, 1)
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		tokenData, err := refreshFunc(ctx)

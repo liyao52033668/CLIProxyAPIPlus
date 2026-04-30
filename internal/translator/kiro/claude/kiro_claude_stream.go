@@ -12,17 +12,17 @@ import (
 
 // BuildClaudeMessageStartEvent creates the message_start SSE event
 func BuildClaudeMessageStartEvent(model string, inputTokens int64) []byte {
-	event := map[string]interface{}{
+	event := map[string]any{
 		"type": "message_start",
-		"message": map[string]interface{}{
+		"message": map[string]any{
 			"id":            "msg_" + uuid.New().String()[:24],
 			"type":          "message",
 			"role":          "assistant",
-			"content":       []interface{}{},
+			"content":       []any{},
 			"model":         model,
 			"stop_reason":   nil,
 			"stop_sequence": nil,
-			"usage":         map[string]interface{}{"input_tokens": inputTokens, "output_tokens": 0},
+			"usage":         map[string]any{"input_tokens": inputTokens, "output_tokens": 0},
 		},
 	}
 	result, _ := json.Marshal(event)
@@ -31,28 +31,28 @@ func BuildClaudeMessageStartEvent(model string, inputTokens int64) []byte {
 
 // BuildClaudeContentBlockStartEvent creates a content_block_start SSE event
 func BuildClaudeContentBlockStartEvent(index int, blockType, toolUseID, toolName string) []byte {
-	var contentBlock map[string]interface{}
+	var contentBlock map[string]any
 	switch blockType {
 	case "tool_use":
-		contentBlock = map[string]interface{}{
+		contentBlock = map[string]any{
 			"type":  "tool_use",
 			"id":    toolUseID,
 			"name":  toolName,
-			"input": map[string]interface{}{},
+			"input": map[string]any{},
 		}
 	case "thinking":
-		contentBlock = map[string]interface{}{
+		contentBlock = map[string]any{
 			"type":     "thinking",
 			"thinking": "",
 		}
 	default:
-		contentBlock = map[string]interface{}{
+		contentBlock = map[string]any{
 			"type": "text",
 			"text": "",
 		}
 	}
 
-	event := map[string]interface{}{
+	event := map[string]any{
 		"type":          "content_block_start",
 		"index":         index,
 		"content_block": contentBlock,
@@ -63,10 +63,10 @@ func BuildClaudeContentBlockStartEvent(index int, blockType, toolUseID, toolName
 
 // BuildClaudeStreamEvent creates a text_delta content_block_delta SSE event
 func BuildClaudeStreamEvent(contentDelta string, index int) []byte {
-	event := map[string]interface{}{
+	event := map[string]any{
 		"type":  "content_block_delta",
 		"index": index,
-		"delta": map[string]interface{}{
+		"delta": map[string]any{
 			"type": "text_delta",
 			"text": contentDelta,
 		},
@@ -77,10 +77,10 @@ func BuildClaudeStreamEvent(contentDelta string, index int) []byte {
 
 // BuildClaudeInputJsonDeltaEvent creates an input_json_delta event for tool use streaming
 func BuildClaudeInputJsonDeltaEvent(partialJSON string, index int) []byte {
-	event := map[string]interface{}{
+	event := map[string]any{
 		"type":  "content_block_delta",
 		"index": index,
-		"delta": map[string]interface{}{
+		"delta": map[string]any{
 			"type":         "input_json_delta",
 			"partial_json": partialJSON,
 		},
@@ -91,7 +91,7 @@ func BuildClaudeInputJsonDeltaEvent(partialJSON string, index int) []byte {
 
 // BuildClaudeContentBlockStopEvent creates a content_block_stop SSE event
 func BuildClaudeContentBlockStopEvent(index int) []byte {
-	event := map[string]interface{}{
+	event := map[string]any{
 		"type":  "content_block_stop",
 		"index": index,
 	}
@@ -101,7 +101,7 @@ func BuildClaudeContentBlockStopEvent(index int) []byte {
 
 // BuildClaudeThinkingBlockStopEvent creates a content_block_stop SSE event for thinking blocks.
 func BuildClaudeThinkingBlockStopEvent(index int) []byte {
-	event := map[string]interface{}{
+	event := map[string]any{
 		"type":  "content_block_stop",
 		"index": index,
 	}
@@ -111,13 +111,13 @@ func BuildClaudeThinkingBlockStopEvent(index int) []byte {
 
 // BuildClaudeMessageDeltaEvent creates the message_delta event with stop_reason and usage
 func BuildClaudeMessageDeltaEvent(stopReason string, usageInfo usage.Detail) []byte {
-	deltaEvent := map[string]interface{}{
+	deltaEvent := map[string]any{
 		"type": "message_delta",
-		"delta": map[string]interface{}{
+		"delta": map[string]any{
 			"stop_reason":   stopReason,
 			"stop_sequence": nil,
 		},
-		"usage": map[string]interface{}{
+		"usage": map[string]any{
 			"input_tokens":  usageInfo.InputTokens,
 			"output_tokens": usageInfo.OutputTokens,
 		},
@@ -128,7 +128,7 @@ func BuildClaudeMessageDeltaEvent(stopReason string, usageInfo usage.Detail) []b
 
 // BuildClaudeMessageStopOnlyEvent creates only the message_stop event
 func BuildClaudeMessageStopOnlyEvent() []byte {
-	stopEvent := map[string]interface{}{
+	stopEvent := map[string]any{
 		"type": "message_stop",
 	}
 	stopResult, _ := json.Marshal(stopEvent)
@@ -138,9 +138,9 @@ func BuildClaudeMessageStopOnlyEvent() []byte {
 // BuildClaudePingEventWithUsage creates a ping event with embedded usage information.
 // This is used for real-time usage estimation during streaming.
 func BuildClaudePingEventWithUsage(inputTokens, outputTokens int64) []byte {
-	event := map[string]interface{}{
+	event := map[string]any{
 		"type": "ping",
-		"usage": map[string]interface{}{
+		"usage": map[string]any{
 			"input_tokens":  inputTokens,
 			"output_tokens": outputTokens,
 			"total_tokens":  inputTokens + outputTokens,
@@ -154,10 +154,10 @@ func BuildClaudePingEventWithUsage(inputTokens, outputTokens int64) []byte {
 // BuildClaudeThinkingDeltaEvent creates a thinking_delta event for Claude API compatibility.
 // This is used when streaming thinking content wrapped in <thinking> tags.
 func BuildClaudeThinkingDeltaEvent(thinkingDelta string, index int) []byte {
-	event := map[string]interface{}{
+	event := map[string]any{
 		"type":  "content_block_delta",
 		"index": index,
-		"delta": map[string]interface{}{
+		"delta": map[string]any{
 			"type":     "thinking_delta",
 			"thinking": thinkingDelta,
 		},
@@ -173,10 +173,7 @@ func PendingTagSuffix(buffer, tag string) int {
 	if buffer == "" || tag == "" {
 		return 0
 	}
-	maxLen := len(buffer)
-	if maxLen > len(tag)-1 {
-		maxLen = len(tag) - 1
-	}
+	maxLen := min(len(buffer), len(tag)-1)
 	for length := maxLen; length > 0; length-- {
 		if len(buffer) >= length && buffer[len(buffer)-length:] == tag[:length] {
 			return length
@@ -198,14 +195,14 @@ func GenerateSearchIndicatorEvents(
 	events := make([][]byte, 0, 5)
 
 	// 1. content_block_start (server_tool_use)
-	event1 := map[string]interface{}{
+	event1 := map[string]any{
 		"type":  "content_block_start",
 		"index": startIndex,
-		"content_block": map[string]interface{}{
+		"content_block": map[string]any{
 			"id":    toolUseID,
 			"type":  "server_tool_use",
 			"name":  "web_search",
-			"input": map[string]interface{}{},
+			"input": map[string]any{},
 		},
 	}
 	data1, _ := json.Marshal(event1)
@@ -213,10 +210,10 @@ func GenerateSearchIndicatorEvents(
 
 	// 2. content_block_delta (input_json_delta)
 	inputJSON, _ := json.Marshal(map[string]string{"query": query})
-	event2 := map[string]interface{}{
+	event2 := map[string]any{
 		"type":  "content_block_delta",
 		"index": startIndex,
-		"delta": map[string]interface{}{
+		"delta": map[string]any{
 			"type":         "input_json_delta",
 			"partial_json": string(inputJSON),
 		},
@@ -225,7 +222,7 @@ func GenerateSearchIndicatorEvents(
 	events = append(events, []byte("event: content_block_delta\ndata: "+string(data2)+"\n\n"))
 
 	// 3. content_block_stop (server_tool_use)
-	event3 := map[string]interface{}{
+	event3 := map[string]any{
 		"type":  "content_block_stop",
 		"index": startIndex,
 	}
@@ -233,14 +230,14 @@ func GenerateSearchIndicatorEvents(
 	events = append(events, []byte("event: content_block_stop\ndata: "+string(data3)+"\n\n"))
 
 	// 4. content_block_start (web_search_tool_result)
-	searchContent := make([]map[string]interface{}, 0)
+	searchContent := make([]map[string]any, 0)
 	if searchResults != nil {
 		for _, r := range searchResults.Results {
 			snippet := ""
 			if r.Snippet != nil {
 				snippet = *r.Snippet
 			}
-			searchContent = append(searchContent, map[string]interface{}{
+			searchContent = append(searchContent, map[string]any{
 				"type":              "web_search_result",
 				"title":             r.Title,
 				"url":               r.URL,
@@ -249,10 +246,10 @@ func GenerateSearchIndicatorEvents(
 			})
 		}
 	}
-	event4 := map[string]interface{}{
+	event4 := map[string]any{
 		"type":  "content_block_start",
 		"index": startIndex + 1,
-		"content_block": map[string]interface{}{
+		"content_block": map[string]any{
 			"type":        "web_search_tool_result",
 			"tool_use_id": toolUseID,
 			"content":     searchContent,
@@ -262,7 +259,7 @@ func GenerateSearchIndicatorEvents(
 	events = append(events, []byte("event: content_block_start\ndata: "+string(data4)+"\n\n"))
 
 	// 5. content_block_stop (web_search_tool_result)
-	event5 := map[string]interface{}{
+	event5 := map[string]any{
 		"type":  "content_block_stop",
 		"index": startIndex + 1,
 	}

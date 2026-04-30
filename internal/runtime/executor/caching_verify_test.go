@@ -2,6 +2,7 @@ package executor
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -114,26 +115,27 @@ func TestEnsureCacheControl(t *testing.T) {
 	// Test case 6: Many tools (Claude Code scenario)
 	t.Run("Many Tools (Claude Code Scenario)", func(t *testing.T) {
 		// Simulate Claude Code with many tools
-		toolsJSON := `[`
-		for i := 0; i < 50; i++ {
+		var toolsJSON strings.Builder
+		toolsJSON.WriteString(`[`)
+		for i := range 50 {
 			if i > 0 {
-				toolsJSON += ","
+				toolsJSON.WriteString(",")
 			}
-			toolsJSON += fmt.Sprintf(`{"name": "tool%d", "description": "Tool %d", "input_schema": {"type": "object"}}`, i, i)
+			toolsJSON.WriteString(fmt.Sprintf(`{"name": "tool%d", "description": "Tool %d", "input_schema": {"type": "object"}}`, i, i))
 		}
-		toolsJSON += `]`
+		toolsJSON.WriteString(`]`)
 
-		input := []byte(fmt.Sprintf(`{
+		input := fmt.Appendf(nil, `{
 			"model": "claude-3-5-sonnet",
 			"tools": %s,
 			"system": [{"type": "text", "text": "You are Claude Code"}],
 			"messages": [{"role": "user", "content": "Hello"}]
-		}`, toolsJSON))
+		}`, toolsJSON.String())
 
 		output := ensureCacheControl(input)
 
 		// Only the last tool (index 49) should have cache_control
-		for i := 0; i < 49; i++ {
+		for i := range 49 {
 			path := fmt.Sprintf("tools.%d.cache_control", i)
 			if gjson.GetBytes(output, path).Exists() {
 				t.Errorf("tool %d should NOT have cache_control", i)

@@ -36,7 +36,7 @@ func MergeAdjacentMessages(messages []gjson.Result) []gjson.Result {
 		if currentRole == lastRole {
 			// Merge content from current message into last message
 			mergedContent := mergeMessageContent(lastMsg, msg)
-			var mergedToolCalls []interface{}
+			var mergedToolCalls []any
 			if currentRole == "assistant" {
 				// Preserve assistant tool_calls when adjacent assistant messages are merged.
 				mergedToolCalls = mergeToolCalls(lastMsg.Get("tool_calls"), msg.Get("tool_calls"))
@@ -60,14 +60,14 @@ func mergeMessageContent(msg1, msg2 gjson.Result) string {
 	content2 := msg2.Get("content")
 
 	// Extract content blocks from both messages
-	var blocks1, blocks2 []map[string]interface{}
+	var blocks1, blocks2 []map[string]any
 
 	if content1.IsArray() {
 		for _, block := range content1.Array() {
 			blocks1 = append(blocks1, blockToMap(block))
 		}
 	} else if content1.Type == gjson.String {
-		blocks1 = append(blocks1, map[string]interface{}{
+		blocks1 = append(blocks1, map[string]any{
 			"type": "text",
 			"text": content1.String(),
 		})
@@ -78,7 +78,7 @@ func mergeMessageContent(msg1, msg2 gjson.Result) string {
 			blocks2 = append(blocks2, blockToMap(block))
 		}
 	} else if content2.Type == gjson.String {
-		blocks2 = append(blocks2, map[string]interface{}{
+		blocks2 = append(blocks2, map[string]any{
 			"type": "text",
 			"text": content2.String(),
 		})
@@ -104,13 +104,13 @@ func mergeMessageContent(msg1, msg2 gjson.Result) string {
 }
 
 // blockToMap converts a gjson.Result block to a map[string]interface{}
-func blockToMap(block gjson.Result) map[string]interface{} {
-	result := make(map[string]interface{})
+func blockToMap(block gjson.Result) map[string]any {
+	result := make(map[string]any)
 	block.ForEach(func(key, value gjson.Result) bool {
 		if value.IsObject() {
 			result[key.String()] = blockToMap(value)
 		} else if value.IsArray() {
-			var arr []interface{}
+			var arr []any
 			for _, item := range value.Array() {
 				if item.IsObject() {
 					arr = append(arr, blockToMap(item))
@@ -129,8 +129,8 @@ func blockToMap(block gjson.Result) map[string]interface{} {
 
 // createMergedMessage creates a JSON string for a merged message.
 // toolCalls is optional and only emitted for assistant role.
-func createMergedMessage(role string, content string, toolCalls []interface{}) string {
-	msg := map[string]interface{}{
+func createMergedMessage(role string, content string, toolCalls []any) string {
+	msg := map[string]any{
 		"role":    role,
 		"content": json.RawMessage(content),
 	}
@@ -142,8 +142,8 @@ func createMergedMessage(role string, content string, toolCalls []interface{}) s
 }
 
 // mergeToolCalls combines tool_calls from two assistant messages while preserving order.
-func mergeToolCalls(tc1, tc2 gjson.Result) []interface{} {
-	var merged []interface{}
+func mergeToolCalls(tc1, tc2 gjson.Result) []any {
+	var merged []any
 
 	if tc1.IsArray() {
 		for _, tc := range tc1.Array() {

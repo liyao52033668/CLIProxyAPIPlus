@@ -3137,7 +3137,6 @@ func getTestModels() []*registry.ModelInfo {
 // runThinkingTests runs thinking test cases using the real data flow path.
 func runThinkingTests(t *testing.T, cases []thinkingTestCase) {
 	for _, tc := range cases {
-		tc := tc
 		testName := fmt.Sprintf("Case%s_%s->%s_%s", tc.name, tc.from, tc.to, tc.model)
 		t.Run(testName, func(t *testing.T) {
 			suffixResult := thinking.ParseSuffix(tc.model)

@@ -61,7 +61,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 			appendSystemText(systemsResult.String())
 		} else if systemsResult.IsArray() {
 			systemResults := systemsResult.Array()
-			for i := 0; i < len(systemResults); i++ {
+			for i := range systemResults {
 				systemResult := systemResults[i]
 				if systemResult.Get("type").String() == "text" {
 					appendSystemText(systemResult.Get("text").String())
@@ -79,7 +79,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	if messagesResult.IsArray() {
 		messageResults := messagesResult.Array()
 
-		for i := 0; i < len(messageResults); i++ {
+		for i := range messageResults {
 			messageResult := messageResults[i]
 			messageRole := messageResult.Get("role").String()
 
@@ -123,7 +123,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 			messageContentsResult := messageResult.Get("content")
 			if messageContentsResult.IsArray() {
 				messageContentResults := messageContentsResult.Array()
-				for j := 0; j < len(messageContentResults); j++ {
+				for j := range messageContentResults {
 					messageContentResult := messageContentResults[j]
 					contentType := messageContentResult.Get("type").String()
 
@@ -175,7 +175,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 							toolResultContentIndex := 0
 							toolResultContent := []byte(`[]`)
 							contentResults := contentResult.Array()
-							for k := 0; k < len(contentResults); k++ {
+							for k := range contentResults {
 								toolResultContentType := contentResults[k].Get("type").String()
 								if toolResultContentType == "image" {
 									sourceResult := contentResults[k].Get("source")
@@ -234,14 +234,14 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		toolResults := toolsResult.Array()
 		// Build short name map from declared tools
 		var names []string
-		for i := 0; i < len(toolResults); i++ {
+		for i := range toolResults {
 			n := toolResults[i].Get("name").String()
 			if n != "" {
 				names = append(names, n)
 			}
 		}
 		shortMap := buildShortNameMap(names)
-		for i := 0; i < len(toolResults); i++ {
+		for i := range toolResults {
 			toolResult := toolResults[i]
 			// Special handling: map Claude web search tool to Codex web_search
 			if toolResult.Get("type").String() == "web_search_20250305" {
@@ -367,10 +367,7 @@ func buildShortNameMap(names []string) map[string]string {
 		base := cand
 		for i := 1; ; i++ {
 			suffix := "_" + strconv.Itoa(i)
-			allowed := limit - len(suffix)
-			if allowed < 0 {
-				allowed = 0
-			}
+			allowed := max(limit-len(suffix), 0)
 			tmp := base
 			if len(tmp) > allowed {
 				tmp = tmp[:allowed]
@@ -400,7 +397,7 @@ func buildReverseMapFromClaudeOriginalToShort(original []byte) map[string]string
 	}
 	var names []string
 	arr := tools.Array()
-	for i := 0; i < len(arr); i++ {
+	for i := range arr {
 		n := arr[i].Get("name").String()
 		if n != "" {
 			names = append(names, n)

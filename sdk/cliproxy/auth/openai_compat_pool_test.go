@@ -257,7 +257,7 @@ func TestManagerExecute_OpenAICompatAliasPoolRotatesWithinAuth(t *testing.T) {
 		{Name: "glm-5", Alias: alias},
 	}, executor)
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		resp, err := m.Execute(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
 		if err != nil {
 			t.Fatalf("execute %d: %v", i, err)
@@ -518,7 +518,7 @@ func TestManagerExecute_OpenAICompatAliasPoolSkipsSuspendedUpstreamOnLaterReques
 		{Name: "glm-5", Alias: alias},
 	}, executor)
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		resp, err := m.Execute(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
 		if err != nil {
 			t.Fatalf("execute %d: %v", i, err)
@@ -555,7 +555,7 @@ func TestManagerExecuteStream_OpenAICompatAliasPoolSkipsSuspendedUpstreamOnLater
 		{Name: "glm-5", Alias: alias},
 	}, executor)
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		streamResult, err := m.ExecuteStream(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
 		if err != nil {
 			t.Fatalf("execute stream %d: %v", i, err)
@@ -588,7 +588,7 @@ func TestManagerExecuteCount_OpenAICompatAliasPoolRotatesWithinAuth(t *testing.T
 		{Name: "glm-5", Alias: alias},
 	}, executor)
 
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		resp, err := m.ExecuteCount(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
 		if err != nil {
 			t.Fatalf("execute count %d: %v", i, err)
@@ -622,7 +622,7 @@ func TestManagerExecuteCount_OpenAICompatAliasPoolSkipsSuspendedUpstreamOnLaterR
 		{Name: "glm-5", Alias: alias},
 	}, executor)
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		resp, err := m.ExecuteCount(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
 		if err != nil {
 			t.Fatalf("execute count %d: %v", i, err)

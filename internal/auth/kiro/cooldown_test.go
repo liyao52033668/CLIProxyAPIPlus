@@ -173,11 +173,11 @@ func TestCooldownManager_ConcurrentAccess(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(numGoroutines)
 
-	for i := 0; i < numGoroutines; i++ {
+	for i := range numGoroutines {
 		go func(id int) {
 			defer wg.Done()
 			tokenKey := "token" + string(rune('a'+id%10))
-			for j := 0; j < numOperations; j++ {
+			for j := range numOperations {
 				switch j % 6 {
 				case 0:
 					cm.SetCooldown(tokenKey, time.Duration(j)*time.Millisecond, CooldownReason429)

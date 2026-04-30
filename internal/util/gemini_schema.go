@@ -3,6 +3,7 @@ package util
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -179,7 +180,7 @@ func convertConstToEnum(jsonStr string) string {
 		}
 		enumPath := trimSuffix(p, ".const") + ".enum"
 		if !gjson.Get(jsonStr, enumPath).Exists() {
-			updated, _ := sjson.SetBytes([]byte(jsonStr), enumPath, []interface{}{val.Value()})
+			updated, _ := sjson.SetBytes([]byte(jsonStr), enumPath, []any{val.Value()})
 			jsonStr = string(updated)
 		}
 	}
@@ -720,12 +721,7 @@ func getStrings(jsonStr, path string) []string {
 }
 
 func contains(slice []string, item string) bool {
-	for _, s := range slice {
-		if s == item {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(slice, item)
 }
 
 func orDefault(val, def string) string {

@@ -71,7 +71,7 @@ func TestRegisterClientForAuthCodeWithIDC(t *testing.T) {
 		Method  string
 		Path    string
 		Headers http.Header
-		Body    map[string]interface{}
+		Body    map[string]any
 	}
 
 	mockResp := RegisterClientResponse{
@@ -154,7 +154,7 @@ func TestRegisterClientForAuthCodeWithIDC(t *testing.T) {
 	}
 
 	// Verify scopes array
-	scopesRaw, ok := capturedReq.Body["scopes"].([]interface{})
+	scopesRaw, ok := capturedReq.Body["scopes"].([]any)
 	if !ok || len(scopesRaw) != 5 {
 		t.Fatalf("scopes: got %v, want 5-element array", capturedReq.Body["scopes"])
 	}
@@ -170,7 +170,7 @@ func TestRegisterClientForAuthCodeWithIDC(t *testing.T) {
 	}
 
 	// Verify grantTypes
-	grantTypesRaw, ok := capturedReq.Body["grantTypes"].([]interface{})
+	grantTypesRaw, ok := capturedReq.Body["grantTypes"].([]any)
 	if !ok || len(grantTypesRaw) != 2 {
 		t.Fatalf("grantTypes: got %v, want 2-element array", capturedReq.Body["grantTypes"])
 	}
@@ -179,7 +179,7 @@ func TestRegisterClientForAuthCodeWithIDC(t *testing.T) {
 	}
 
 	// Verify redirectUris
-	redirectRaw, ok := capturedReq.Body["redirectUris"].([]interface{})
+	redirectRaw, ok := capturedReq.Body["redirectUris"].([]any)
 	if !ok || len(redirectRaw) != 1 {
 		t.Fatalf("redirectUris: got %v, want 1-element array", capturedReq.Body["redirectUris"])
 	}

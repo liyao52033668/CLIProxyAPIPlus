@@ -325,7 +325,7 @@ func (h *OAuthWebHandler) saveTokenToFile(tokenData *CodeArtsTokenData) {
 
 	// Save in the same format as the file synthesizer expects:
 	// { "type": "codearts", ... }
-	storage := map[string]interface{}{
+	storage := map[string]any{
 		"type":           "codearts",
 		"ak":             tokenData.AK,
 		"sk":             tokenData.SK,

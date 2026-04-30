@@ -526,7 +526,7 @@ func (h *OpenAIResponsesAPIHandler) websocketUpstreamSupportsIncrementalInputFor
 	registryRef := registry.GetGlobalRegistry()
 	now := time.Now()
 	auths := h.AuthManager.List()
-	for i := 0; i < len(auths); i++ {
+	for i := range auths {
 		auth := auths[i]
 		if auth == nil {
 			continue
@@ -601,7 +601,7 @@ func writeResponsesWebsocketSyntheticPrewarm(
 	if errPayloads != nil {
 		return errPayloads
 	}
-	for i := 0; i < len(payloads); i++ {
+	for i := range payloads {
 		markAPIResponseTimestamp(c)
 		// log.Infof(
 		// 	"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",

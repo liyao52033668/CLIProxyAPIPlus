@@ -3,6 +3,7 @@ package misc
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"strings"
 
@@ -33,9 +34,7 @@ func MergeMetadata(source any, metadata map[string]any) (map[string]any, error) 
 	// Fast path: if source is already a map, just copy it to avoid mutation of original
 	if srcMap, ok := source.(map[string]any); ok {
 		data = make(map[string]any, len(srcMap)+len(metadata))
-		for k, v := range srcMap {
-			data[k] = v
-		}
+		maps.Copy(data, srcMap)
 	} else {
 		// Slow path: marshal to JSON and back to map to respect JSON tags
 		temp, err := json.Marshal(source)
@@ -52,9 +51,7 @@ func MergeMetadata(source any, metadata map[string]any) (map[string]any, error) 
 		if data == nil {
 			data = make(map[string]any)
 		}
-		for k, v := range metadata {
-			data[k] = v
-		}
+		maps.Copy(data, metadata)
 	}
 
 	return data, nil

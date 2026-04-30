@@ -657,7 +657,7 @@ func TestGetCodeWhispererLegacyEndpoint(t *testing.T) {
 func TestExtractRegionFromMetadata(t *testing.T) {
 	tests := []struct {
 		name     string
-		metadata map[string]interface{}
+		metadata map[string]any
 		expected string
 	}{
 		{
@@ -667,12 +667,12 @@ func TestExtractRegionFromMetadata(t *testing.T) {
 		},
 		{
 			name:     "Empty metadata - defaults to us-east-1",
-			metadata: map[string]interface{}{},
+			metadata: map[string]any{},
 			expected: "us-east-1",
 		},
 		{
 			name: "Priority 1: api_region override",
-			metadata: map[string]interface{}{
+			metadata: map[string]any{
 				"api_region":  "eu-west-1",
 				"profile_arn": "arn:aws:codewhisperer:us-east-1:123456789012:profile/ABC",
 			},
@@ -680,7 +680,7 @@ func TestExtractRegionFromMetadata(t *testing.T) {
 		},
 		{
 			name: "Priority 2: profile_arn when api_region is empty",
-			metadata: map[string]interface{}{
+			metadata: map[string]any{
 				"api_region":  "",
 				"profile_arn": "arn:aws:codewhisperer:ap-southeast-1:123456789012:profile/ABC",
 			},
@@ -688,35 +688,35 @@ func TestExtractRegionFromMetadata(t *testing.T) {
 		},
 		{
 			name: "Priority 2: profile_arn when api_region is missing",
-			metadata: map[string]interface{}{
+			metadata: map[string]any{
 				"profile_arn": "arn:aws:codewhisperer:eu-central-1:123456789012:profile/ABC",
 			},
 			expected: "eu-central-1",
 		},
 		{
 			name: "Fallback: default when profile_arn is invalid",
-			metadata: map[string]interface{}{
+			metadata: map[string]any{
 				"profile_arn": "invalid-arn",
 			},
 			expected: "us-east-1",
 		},
 		{
 			name: "Fallback: default when profile_arn is empty",
-			metadata: map[string]interface{}{
+			metadata: map[string]any{
 				"profile_arn": "",
 			},
 			expected: "us-east-1",
 		},
 		{
 			name: "OIDC region is NOT used for API region",
-			metadata: map[string]interface{}{
+			metadata: map[string]any{
 				"region": "ap-northeast-2", // OIDC region - should be ignored
 			},
 			expected: "us-east-1",
 		},
 		{
 			name: "api_region takes precedence over OIDC region",
-			metadata: map[string]interface{}{
+			metadata: map[string]any{
 				"api_region": "us-west-2",
 				"region":     "ap-northeast-2", // OIDC region - should be ignored
 			},
@@ -724,7 +724,7 @@ func TestExtractRegionFromMetadata(t *testing.T) {
 		},
 		{
 			name: "Non-string api_region is ignored",
-			metadata: map[string]interface{}{
+			metadata: map[string]any{
 				"api_region":  123, // wrong type
 				"profile_arn": "arn:aws:codewhisperer:ap-south-1:123456789012:profile/ABC",
 			},
@@ -732,7 +732,7 @@ func TestExtractRegionFromMetadata(t *testing.T) {
 		},
 		{
 			name: "Non-string profile_arn is ignored",
-			metadata: map[string]interface{}{
+			metadata: map[string]any{
 				"profile_arn": 123, // wrong type
 			},
 			expected: "us-east-1",

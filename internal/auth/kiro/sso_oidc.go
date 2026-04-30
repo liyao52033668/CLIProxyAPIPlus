@@ -151,7 +151,7 @@ func promptSelect(prompt string, options []string) int {
 func (c *SSOOIDCClient) RegisterClientWithRegion(ctx context.Context, region string) (*RegisterClientResponse, error) {
 	endpoint := getOIDCEndpoint(region)
 
-	payload := map[string]interface{}{
+	payload := map[string]any{
 		"clientName": "Kiro IDE",
 		"clientType": "public",
 		"scopes":     []string{"codewhisperer:completions", "codewhisperer:analysis", "codewhisperer:conversations", "codewhisperer:transformations", "codewhisperer:taskassist"},
@@ -566,7 +566,7 @@ func (c *SSOOIDCClient) LoginWithIDCAndOptions(ctx context.Context, startURL, re
 
 // RegisterClient registers a new OIDC client with AWS.
 func (c *SSOOIDCClient) RegisterClient(ctx context.Context) (*RegisterClientResponse, error) {
-	payload := map[string]interface{}{
+	payload := map[string]any{
 		"clientName": "Kiro IDE",
 		"clientType": "public",
 		"scopes":     []string{"codewhisperer:completions", "codewhisperer:analysis", "codewhisperer:conversations", "codewhisperer:transformations", "codewhisperer:taskassist"},
@@ -1008,7 +1008,7 @@ func (c *SSOOIDCClient) tryListAvailableProfiles(ctx context.Context, accessToke
 }
 
 func (c *SSOOIDCClient) tryListProfilesLegacy(ctx context.Context, accessToken string) string {
-	payload := map[string]interface{}{
+	payload := map[string]any{
 		"origin": "AI_EDITOR",
 	}
 
@@ -1068,7 +1068,7 @@ func (c *SSOOIDCClient) tryListProfilesLegacy(ctx context.Context, accessToken s
 
 // RegisterClientForAuthCode registers a new OIDC client for authorization code flow.
 func (c *SSOOIDCClient) RegisterClientForAuthCode(ctx context.Context, redirectURI string) (*RegisterClientResponse, error) {
-	payload := map[string]interface{}{
+	payload := map[string]any{
 		"clientName":   "Kiro IDE",
 		"clientType":   "public",
 		"scopes":       []string{"codewhisperer:completions", "codewhisperer:analysis", "codewhisperer:conversations", "codewhisperer:transformations", "codewhisperer:taskassist"},
@@ -1115,7 +1115,7 @@ func (c *SSOOIDCClient) RegisterClientForAuthCode(ctx context.Context, redirectU
 func (c *SSOOIDCClient) RegisterClientForAuthCodeWithIDC(ctx context.Context, redirectURI, issuerUrl, region string) (*RegisterClientResponse, error) {
 	endpoint := getOIDCEndpoint(region)
 
-	payload := map[string]interface{}{
+	payload := map[string]any{
 		"clientName":   "Kiro IDE",
 		"clientType":   "public",
 		"scopes":       []string{"codewhisperer:completions", "codewhisperer:analysis", "codewhisperer:conversations", "codewhisperer:transformations", "codewhisperer:taskassist"},

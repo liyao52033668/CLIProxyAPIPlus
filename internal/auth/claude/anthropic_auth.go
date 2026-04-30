@@ -156,7 +156,7 @@ func (o *ClaudeAuth) ExchangeCodeForTokens(ctx context.Context, code, state stri
 	newCode, newState := o.parseCodeAndState(code)
 
 	// Prepare token exchange request
-	reqBody := map[string]interface{}{
+	reqBody := map[string]any{
 		"code":          newCode,
 		"state":         state,
 		"grant_type":    "authorization_code",
@@ -243,7 +243,7 @@ func (o *ClaudeAuth) RefreshTokens(ctx context.Context, refreshToken string) (*C
 		return nil, fmt.Errorf("refresh token is required")
 	}
 
-	reqBody := map[string]interface{}{
+	reqBody := map[string]any{
 		"client_id":     ClientID,
 		"grant_type":    "refresh_token",
 		"refresh_token": refreshToken,
@@ -331,7 +331,7 @@ func (o *ClaudeAuth) CreateTokenStorage(bundle *ClaudeAuthBundle) *ClaudeTokenSt
 func (o *ClaudeAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken string, maxRetries int) (*ClaudeTokenData, error) {
 	var lastErr error
 
-	for attempt := 0; attempt < maxRetries; attempt++ {
+	for attempt := range maxRetries {
 		if attempt > 0 {
 			// Wait before retry
 			select {

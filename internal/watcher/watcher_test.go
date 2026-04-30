@@ -313,8 +313,7 @@ func TestStartFailsWhenConfigMissing(t *testing.T) {
 	}
 	defer w.Stop()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	if err := w.Start(ctx); err == nil {
 		t.Fatal("expected Start to fail for missing config file")
@@ -514,7 +513,6 @@ func TestAuthSliceToMap(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			got := authSliceToMap(tc.in)
@@ -817,7 +815,7 @@ func TestDispatchAuthUpdatesFlushesQueue(t *testing.T) {
 	})
 
 	got := make([]AuthUpdate, 0, 2)
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		select {
 		case u := <-queue:
 			got = append(got, u)
@@ -867,8 +865,7 @@ func TestProcessEventsHandlesEventErrorAndChannelClose(t *testing.T) {
 		authDir:    "auth",
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	done := make(chan struct{})
 	go func() {
@@ -900,8 +897,7 @@ func TestProcessEventsReturnsWhenErrorsChannelClosed(t *testing.T) {
 
 	close(w.watcher.Errors)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	done := make(chan struct{})
 	go func() {
@@ -1167,7 +1163,7 @@ func TestNormalizeAuthPathAndDebounceCleanup(t *testing.T) {
 	w.clientsMutex.Lock()
 	w.lastRemoveTimes = make(map[string]time.Time, 140)
 	old := time.Now().Add(-3 * authRemoveDebounceWindow)
-	for i := 0; i < 129; i++ {
+	for i := range 129 {
 		w.lastRemoveTimes[fmt.Sprintf("old-%d", i)] = old
 	}
 	w.clientsMutex.Unlock()
@@ -1457,8 +1453,7 @@ func TestStartFailsWhenAuthDirMissing(t *testing.T) {
 	defer w.Stop()
 	w.SetConfig(&config.Config{AuthDir: authDir})
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	if err := w.Start(ctx); err == nil {
 		t.Fatal("expected Start to fail for missing auth dir")

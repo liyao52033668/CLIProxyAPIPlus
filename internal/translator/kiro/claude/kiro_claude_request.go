@@ -109,7 +109,7 @@ type KiroToolSpecification struct {
 
 // KiroInputSchema wraps the JSON schema for tool input
 type KiroInputSchema struct {
-	JSON interface{} `json:"json"`
+	JSON any `json:"json"`
 }
 
 // KiroAssistantResponseMessage represents an assistant message
@@ -120,11 +120,11 @@ type KiroAssistantResponseMessage struct {
 
 // KiroToolUse represents a tool invocation by the assistant
 type KiroToolUse struct {
-	ToolUseID      string                 `json:"toolUseId"`
-	Name           string                 `json:"name"`
-	Input          map[string]interface{} `json:"input"`
-	IsTruncated    bool                   `json:"-"` // Internal flag, not serialized
-	TruncationInfo *TruncationInfo        `json:"-"` // Truncation details, not serialized
+	ToolUseID      string          `json:"toolUseId"`
+	Name           string          `json:"name"`
+	Input          map[string]any  `json:"input"`
+	IsTruncated    bool            `json:"-"` // Internal flag, not serialized
+	TruncationInfo *TruncationInfo `json:"-"` // Truncation details, not serialized
 }
 
 // ConvertClaudeRequestToKiro converts a Claude API request to Kiro format.
@@ -535,13 +535,13 @@ func shortenToolNameIfNeeded(name string) string {
 	return name[:limit]
 }
 
-func ensureKiroInputSchema(parameters interface{}) interface{} {
+func ensureKiroInputSchema(parameters any) any {
 	if parameters != nil {
 		return parameters
 	}
-	return map[string]interface{}{
+	return map[string]any{
 		"type":       "object",
-		"properties": map[string]interface{}{},
+		"properties": map[string]any{},
 	}
 }
 
@@ -556,7 +556,7 @@ func convertClaudeToolsToKiro(tools gjson.Result) []KiroToolWrapper {
 		name := tool.Get("name").String()
 		description := tool.Get("description").String()
 		inputSchemaResult := tool.Get("input_schema")
-		var inputSchema interface{}
+		var inputSchema any
 		if inputSchemaResult.Exists() && inputSchemaResult.Type != gjson.Null {
 			inputSchema = inputSchemaResult.Value()
 		}
@@ -916,9 +916,9 @@ func BuildAssistantMessageStruct(msg gjson.Result) KiroAssistantResponseMessage 
 				toolName := part.Get("name").String()
 				toolInput := part.Get("input")
 
-				var inputMap map[string]interface{}
+				var inputMap map[string]any
 				if toolInput.IsObject() {
-					inputMap = make(map[string]interface{})
+					inputMap = make(map[string]any)
 					toolInput.ForEach(func(key, value gjson.Result) bool {
 						inputMap[key.String()] = value.Value()
 						return true

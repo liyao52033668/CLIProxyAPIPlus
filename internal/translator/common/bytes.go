@@ -48,7 +48,7 @@ func AppendSSEEventString(out []byte, event, payload string, trailingNewlines in
 	out = append(out, '\n')
 	out = append(out, "data: "...)
 	out = append(out, payload...)
-	for i := 0; i < trailingNewlines; i++ {
+	for range trailingNewlines {
 		out = append(out, '\n')
 	}
 	return out
@@ -60,7 +60,7 @@ func AppendSSEEventBytes(out []byte, event string, payload []byte, trailingNewli
 	out = append(out, '\n')
 	out = append(out, "data: "...)
 	out = append(out, payload...)
-	for i := 0; i < trailingNewlines; i++ {
+	for range trailingNewlines {
 		out = append(out, '\n')
 	}
 	return out

@@ -330,7 +330,7 @@ func extractExcludedModelsFromMetadata(metadata map[string]any) []string {
 	switch v := raw.(type) {
 	case []string:
 		stringSlice = v
-	case []interface{}:
+	case []any:
 		stringSlice = make([]string, 0, len(v))
 		for _, item := range v {
 			if s, ok := item.(string); ok {

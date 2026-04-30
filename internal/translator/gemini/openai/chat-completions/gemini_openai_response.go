@@ -151,7 +151,7 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 
 			if partsResult.IsArray() {
 				partResults := partsResult.Array()
-				for i := 0; i < len(partResults); i++ {
+				for i := range partResults {
 					partResult := partResults[i]
 					partTextResult := partResult.Get("text")
 					functionCallResult := partResult.Get("functionCall")
@@ -338,7 +338,7 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 			hasFunctionCall := false
 			if partsResult.IsArray() {
 				partsResults := partsResult.Array()
-				for i := 0; i < len(partsResults); i++ {
+				for i := range partsResults {
 					partResult := partsResults[i]
 					partTextResult := partResult.Get("text")
 					functionCallResult := partResult.Get("functionCall")

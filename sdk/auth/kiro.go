@@ -213,6 +213,7 @@ func (a *KiroAuthenticator) LoginWithAuthCode(ctx context.Context, cfg *config.C
 	idPart := extractKiroIdentifier(tokenData.Email, tokenData.ProfileArn, tokenData.ClientID)
 
 	now := time.Now()
+	// Use format: provider-email.json
 	fileName := fmt.Sprintf("kiro-aws-%s.json", idPart)
 
 	record := &coreauth.Auth{
@@ -294,13 +295,13 @@ func (a *KiroAuthenticator) ImportFromKiroIDE(ctx context.Context, cfg *config.C
 	}
 
 	now := time.Now()
-	fileName := fmt.Sprintf("kiro-%s-%s.json", provider, idPart)
+	fileName := fmt.Sprintf("kiro-aws-%s-%s.json", provider, idPart)
 
 	record := &coreauth.Auth{
 		ID:        fileName,
 		Provider:  "kiro",
 		FileName:  fileName,
-		Label:     fmt.Sprintf("kiro-%s", provider),
+		Label:     fmt.Sprintf("kiro-aws-%s", provider),
 		Status:    coreauth.StatusActive,
 		CreatedAt: now,
 		UpdatedAt: now,

@@ -43,7 +43,7 @@ func FormatSSEEvent(data []byte) string {
 
 // BuildOpenAISSETextDelta creates an SSE event for text content delta
 func BuildOpenAISSETextDelta(state *OpenAIStreamState, textDelta string) string {
-	delta := map[string]interface{}{
+	delta := map[string]any{
 		"content": textDelta,
 	}
 
@@ -61,18 +61,18 @@ func BuildOpenAISSETextDelta(state *OpenAIStreamState, textDelta string) string 
 
 // BuildOpenAISSEToolCallStart creates an SSE event for tool call start
 func BuildOpenAISSEToolCallStart(state *OpenAIStreamState, toolUseID, toolName string) string {
-	toolCall := map[string]interface{}{
+	toolCall := map[string]any{
 		"index": state.ToolCallIndex,
 		"id":    toolUseID,
 		"type":  "function",
-		"function": map[string]interface{}{
+		"function": map[string]any{
 			"name":      toolName,
 			"arguments": "",
 		},
 	}
 
-	delta := map[string]interface{}{
-		"tool_calls": []map[string]interface{}{toolCall},
+	delta := map[string]any{
+		"tool_calls": []map[string]any{toolCall},
 	}
 
 	// Include role in first chunk if not sent yet
@@ -89,15 +89,15 @@ func BuildOpenAISSEToolCallStart(state *OpenAIStreamState, toolUseID, toolName s
 
 // BuildOpenAISSEToolCallArgumentsDelta creates an SSE event for tool call arguments delta
 func BuildOpenAISSEToolCallArgumentsDelta(state *OpenAIStreamState, argumentsDelta string, toolIndex int) string {
-	toolCall := map[string]interface{}{
+	toolCall := map[string]any{
 		"index": toolIndex,
-		"function": map[string]interface{}{
+		"function": map[string]any{
 			"arguments": argumentsDelta,
 		},
 	}
 
-	delta := map[string]interface{}{
-		"tool_calls": []map[string]interface{}{toolCall},
+	delta := map[string]any{
+		"tool_calls": []map[string]any{toolCall},
 	}
 
 	chunk := buildBaseChunk(state, delta, nil)
@@ -108,7 +108,7 @@ func BuildOpenAISSEToolCallArgumentsDelta(state *OpenAIStreamState, argumentsDel
 
 // BuildOpenAISSEFinish creates an SSE event with finish_reason
 func BuildOpenAISSEFinish(state *OpenAIStreamState, finishReason string) string {
-	chunk := buildBaseChunk(state, map[string]interface{}{}, &finishReason)
+	chunk := buildBaseChunk(state, map[string]any{}, &finishReason)
 	result, _ := json.Marshal(chunk)
 	state.ChunkIndex++
 	return FormatSSEEvent(result)
@@ -116,13 +116,13 @@ func BuildOpenAISSEFinish(state *OpenAIStreamState, finishReason string) string 
 
 // BuildOpenAISSEUsage creates an SSE event with usage information
 func BuildOpenAISSEUsage(state *OpenAIStreamState, usageInfo usage.Detail) string {
-	chunk := map[string]interface{}{
+	chunk := map[string]any{
 		"id":      state.ResponseID,
 		"object":  "chat.completion.chunk",
 		"created": state.Created,
 		"model":   state.Model,
-		"choices": []map[string]interface{}{},
-		"usage": map[string]interface{}{
+		"choices": []map[string]any{},
+		"usage": map[string]any{
 			"prompt_tokens":     usageInfo.InputTokens,
 			"completion_tokens": usageInfo.OutputTokens,
 			"total_tokens":      usageInfo.InputTokens + usageInfo.OutputTokens,
@@ -141,8 +141,8 @@ func BuildOpenAISSEDone() string {
 }
 
 // buildBaseChunk creates a base chunk structure for streaming
-func buildBaseChunk(state *OpenAIStreamState, delta map[string]interface{}, finishReason *string) map[string]interface{} {
-	choice := map[string]interface{}{
+func buildBaseChunk(state *OpenAIStreamState, delta map[string]any, finishReason *string) map[string]any {
+	choice := map[string]any{
 		"index": 0,
 		"delta": delta,
 	}
@@ -153,19 +153,19 @@ func buildBaseChunk(state *OpenAIStreamState, delta map[string]interface{}, fini
 		choice["finish_reason"] = nil
 	}
 
-	return map[string]interface{}{
+	return map[string]any{
 		"id":      state.ResponseID,
 		"object":  "chat.completion.chunk",
 		"created": state.Created,
 		"model":   state.Model,
-		"choices": []map[string]interface{}{choice},
+		"choices": []map[string]any{choice},
 	}
 }
 
 // BuildOpenAISSEReasoningDelta creates an SSE event for reasoning content delta
 // This is used for o1/o3 style models that expose reasoning tokens
 func BuildOpenAISSEReasoningDelta(state *OpenAIStreamState, reasoningDelta string) string {
-	delta := map[string]interface{}{
+	delta := map[string]any{
 		"reasoning_content": reasoningDelta,
 	}
 
@@ -183,7 +183,7 @@ func BuildOpenAISSEReasoningDelta(state *OpenAIStreamState, reasoningDelta strin
 
 // BuildOpenAISSEFirstChunk creates the first chunk with role only
 func BuildOpenAISSEFirstChunk(state *OpenAIStreamState) string {
-	delta := map[string]interface{}{
+	delta := map[string]any{
 		"role":    "assistant",
 		"content": "",
 	}

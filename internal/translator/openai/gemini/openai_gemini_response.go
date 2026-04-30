@@ -506,7 +506,7 @@ func captureBracketed(runes []rune, i int) (string, int) {
 }
 
 // tryParseNumber attempts to parse a string as an int or float.
-func tryParseNumber(s string) (interface{}, bool) {
+func tryParseNumber(s string) (any, bool) {
 	if s == "" {
 		return nil, false
 	}

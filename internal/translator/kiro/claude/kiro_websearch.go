@@ -236,13 +236,13 @@ func ReplaceWebSearchToolDescription(body []byte) ([]byte, error) {
 
 		if isWebSearchTool(name, toolType) {
 			// Replace with a minimal web_search tool definition
-			minimalTool := map[string]interface{}{
+			minimalTool := map[string]any{
 				"name":        "web_search",
 				"description": "Search the web for information. Use this when the previous search results are insufficient or when you need additional information on a different aspect of the query. Provide a refined or different search query.",
-				"input_schema": map[string]interface{}{
+				"input_schema": map[string]any{
 					"type": "object",
-					"properties": map[string]interface{}{
-						"query": map[string]interface{}{
+					"properties": map[string]any{
+						"query": map[string]any{
 							"type":        "string",
 							"description": "The search query to execute",
 						},
@@ -323,22 +323,22 @@ func FormatToolResultText(results *WebSearchResults) string {
 // IMPORTANT: The web_search tool must remain in the "tools" array for this to work.
 // Use ReplaceWebSearchToolDescription to keep the tool available with a minimal description.
 func InjectToolResultsClaude(claudePayload []byte, toolUseId, query string, results *WebSearchResults) ([]byte, error) {
-	var payload map[string]interface{}
+	var payload map[string]any
 	if err := json.Unmarshal(claudePayload, &payload); err != nil {
 		return claudePayload, fmt.Errorf("failed to parse claude payload: %w", err)
 	}
 
-	messages, _ := payload["messages"].([]interface{})
+	messages, _ := payload["messages"].([]any)
 
 	// 1. Append assistant message with tool_use (matches HAR: assistantResponseMessage.toolUses)
-	assistantMsg := map[string]interface{}{
+	assistantMsg := map[string]any{
 		"role": "assistant",
-		"content": []interface{}{
-			map[string]interface{}{
+		"content": []any{
+			map[string]any{
 				"type":  "tool_use",
 				"id":    toolUseId,
 				"name":  "web_search",
-				"input": map[string]interface{}{"query": query},
+				"input": map[string]any{"query": query},
 			},
 		},
 	}
@@ -365,15 +365,15 @@ Then you MUST use the web_search tool again with a refined query. Try:
 Do NOT apologize for bad results without first attempting a re-search.
 </search_guidance>`, now.Format("January 2, 2006"), now.Format("Monday"))
 
-	userMsg := map[string]interface{}{
+	userMsg := map[string]any{
 		"role": "user",
-		"content": []interface{}{
-			map[string]interface{}{
+		"content": []any{
+			map[string]any{
 				"type":        "tool_result",
 				"tool_use_id": toolUseId,
 				"content":     FormatToolResultText(results),
 			},
-			map[string]interface{}{
+			map[string]any{
 				"type": "text",
 				"text": searchGuidance,
 			},
@@ -405,34 +405,34 @@ func InjectSearchIndicatorsInResponse(responsePayload []byte, searches []SearchI
 		return responsePayload, nil
 	}
 
-	var resp map[string]interface{}
+	var resp map[string]any
 	if err := json.Unmarshal(responsePayload, &resp); err != nil {
 		return responsePayload, fmt.Errorf("failed to parse response: %w", err)
 	}
 
-	existingContent, _ := resp["content"].([]interface{})
+	existingContent, _ := resp["content"].([]any)
 
 	// Build new content: search indicators first, then existing content
-	newContent := make([]interface{}, 0, len(searches)*2+len(existingContent))
+	newContent := make([]any, 0, len(searches)*2+len(existingContent))
 
 	for _, s := range searches {
 		// server_tool_use block
-		newContent = append(newContent, map[string]interface{}{
+		newContent = append(newContent, map[string]any{
 			"type":  "server_tool_use",
 			"id":    s.ToolUseID,
 			"name":  "web_search",
-			"input": map[string]interface{}{"query": s.Query},
+			"input": map[string]any{"query": s.Query},
 		})
 
 		// web_search_tool_result block
-		searchContent := make([]map[string]interface{}, 0)
+		searchContent := make([]map[string]any, 0)
 		if s.Results != nil {
 			for _, r := range s.Results.Results {
 				snippet := ""
 				if r.Snippet != nil {
 					snippet = *r.Snippet
 				}
-				searchContent = append(searchContent, map[string]interface{}{
+				searchContent = append(searchContent, map[string]any{
 					"type":              "web_search_result",
 					"title":             r.Title,
 					"url":               r.URL,
@@ -441,7 +441,7 @@ func InjectSearchIndicatorsInResponse(responsePayload []byte, searches []SearchI
 				})
 			}
 		}
-		newContent = append(newContent, map[string]interface{}{
+		newContent = append(newContent, map[string]any{
 			"type":        "web_search_tool_result",
 			"tool_use_id": s.ToolUseID,
 			"content":     searchContent,
