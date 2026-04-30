@@ -54,22 +54,31 @@ main:
             NOTES=$(git log ${RANGE} --pretty=format:"- %s (%h)" --no-merges)
             echo "${NOTES}"
 
-            # Build JSON payload safely with jq and create release via CNB API
-            PAYLOAD=$(jq -n \
-              --arg tag_name "${TAG}" \
-              --arg name "${TAG}" \
-              --arg body "${NOTES}" \
-              '{tag_name: $tag_name, name: $name, body: $body, draft: false, prerelease: false}')
-
-            curl --fail --silent --show-error \
-              --request POST \
-              --url "https://api.cnb.cool/liyao52033/CLIProxyAPIPlus/-/releases" \
+            # 先检查 Release 是否已存在
+            EXIST_RELEASE=$(curl --silent --fail --request GET \
+              --url "https://api.cnb.cool/liyao52033/CLIProxyAPIPlus/-/releases/${TAG}" \
               --header "Accept: application/vnd.cnb.api+json" \
-              --header "Authorization: ${CNB_TOKEN}" \
-              --header "Content-Type: application/json" \
-              --data "${PAYLOAD}"
+              --header "Authorization: ${CNB_TOKEN}" || echo "")
 
-            echo "✅ Release ${TAG} created successfully"
+            if [ -n "${EXIST_RELEASE}" ]; then
+              echo "Release ${TAG} already exists, skip creation"
+            else
+              PAYLOAD=$(jq -n \
+                --arg tag_name "${TAG}" \
+                --arg name "${TAG}" \
+                --arg body "${NOTES}" \
+                '{tag_name: $tag_name, name: $name, body: $body, draft: false, prerelease: false}')
+              
+              curl --fail --silent --show-error \
+                --request POST \
+                --url "https://api.cnb.cool/liyao52033/CLIProxyAPIPlus/-/releases" \
+                --header "Accept: application/vnd.cnb.api+json" \
+                --header "Authorization: ${CNB_TOKEN}" \
+                --header "Content-Type: application/json" \
+                --data "${PAYLOAD}"
+              
+              echo "✅ Release ${TAG} created successfully"
+            fi
         - name: prepare build args
           script: |
               VERSION="${CNB_TAG:-$(git tag --sort=-v:refname | grep -v "^${TAG}$" | head -n 1 || echo "")}"
