@@ -36,6 +36,40 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+// stdToCustom maps standard base64 characters to Qoder's custom base64 alphabet.
+// Used by customBase64Encode to translate standard base64 output to Qoder's custom alphabet.
+var stdToCustom [256]byte
+
+func init() {
+	for i := range stdToCustom {
+		stdToCustom[i] = 0xFF
+	}
+	for i := 0; i < 64; i++ {
+		stdToCustom[qoder.StdAlphabet[i]] = qoder.CustomAlphabet[i]
+	}
+	stdToCustom['='] = qoder.CustomPad
+}
+
+// customBase64Encode encodes data using Qoder's custom base64 scheme.
+// Process: standard base64 encode → segment rearrangement (split at n/3) → alphabet substitution.
+func customBase64Encode(data []byte) string {
+	std := base64.StdEncoding.EncodeToString(data)
+	n := len(std)
+	a := n / 3
+	// Rearrange: last_third + middle_third + first_third
+	rearranged := std[n-a:] + std[a:n-a] + std[:a]
+	result := make([]byte, n)
+	for i, c := range []byte(rearranged) {
+		mapped := stdToCustom[c]
+		if mapped == 0xFF {
+			log.Errorf("qoder executor: char out of standard base64 alphabet: %c", c)
+			return ""
+		}
+		result[i] = mapped
+	}
+	return string(result)
+}
+
 // QoderExecutor handles request execution against the Qoder upstream API.
 type QoderExecutor struct {
 	cfg *config.Config
@@ -398,9 +432,11 @@ func (e *QoderExecutor) buildCosyRequest(ctx context.Context, auth *cliproxyauth
 		return nil, fmt.Errorf("qoder executor: missing access token")
 	}
 
-	// For streaming, send plain JSON
-	bodyForSig := string(body)
-	bodyBytes := body
+	// Encode body using Qoder's custom base64 scheme (required by upstream API)
+	encodedBody := customBase64Encode(body)
+	if encodedBody == "" {
+		return nil, fmt.Errorf("qoder executor: failed to encode body")
+	}
 
 	// Parse path for signature — match Python: path = "/" + url.split("://")[1].split("/", 1)[1]
 	sigPath := ""
@@ -440,12 +476,12 @@ func (e *QoderExecutor) buildCosyRequest(ctx context.Context, auth *cliproxyauth
 	})
 	payloadB64 := base64.StdEncoding.EncodeToString(payload)
 
-	sigInput := fmt.Sprintf("%s\n%s\n%s\n%s\n%s", payloadB64, key, timestamp, bodyForSig, sigPath)
+	sigInput := fmt.Sprintf("%s\n%s\n%s\n%s\n%s", payloadB64, key, timestamp, encodedBody, sigPath)
 	sigMD5 := fmt.Sprintf("%x", md5.Sum([]byte(sigInput)))
 
-	bodyHash := fmt.Sprintf("%x", md5.Sum(bodyBytes))
+	bodyHash := fmt.Sprintf("%x", md5.Sum([]byte(encodedBody)))
 
-	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(bodyBytes))
+	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, strings.NewReader(encodedBody))
 	if errReq != nil {
 		return nil, fmt.Errorf("qoder executor: create request: %w", errReq)
 	}
@@ -457,14 +493,14 @@ func (e *QoderExecutor) buildCosyRequest(ctx context.Context, auth *cliproxyauth
 	httpReq.Header.Set("Cosy-Machinetoken", creds.machineID)
 	httpReq.Header.Set("Cosy-Machinetype", "d19de69691ac029caa")
 	httpReq.Header.Set("Cosy-Machineos", "x86_64_windows")
-	httpReq.Header.Set("Cosy-Clienttype", "0")
+	httpReq.Header.Set("Cosy-Clienttype", "5")
 	httpReq.Header.Set("Cosy-Clientip", "127.0.0.1")
 	httpReq.Header.Set("Login-Version", "v2")
 	httpReq.Header.Set("Cosy-User", creds.uid)
 	httpReq.Header.Set("Cosy-Key", key)
 	httpReq.Header.Set("Cosy-Date", timestamp)
 	httpReq.Header.Set("Cosy-Bodyhash", bodyHash)
-	httpReq.Header.Set("Cosy-Bodylength", fmt.Sprintf("%d", len(bodyBytes)))
+	httpReq.Header.Set("Cosy-Bodylength", fmt.Sprintf("%d", len(encodedBody)))
 	httpReq.Header.Set("Cosy-Sigpath", sigPath)
 	httpReq.Header.Set("Cosy-Data-Policy", "AGREE")
 	httpReq.Header.Set("Cosy-Organization-Id", "")
