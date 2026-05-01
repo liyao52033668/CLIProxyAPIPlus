@@ -157,6 +157,12 @@ type Config struct {
 	// from your current session. Default: false.
 	IncognitoBrowser bool `yaml:"incognito-browser" json:"incognito-browser"`
 
+	// DisabledAutoModels lists auto-resolved models that are temporarily disabled due to failures.
+	// Models in this list will be skipped during auto model selection. Users can manually
+	// remove entries from this list (or via the Management API) to re-enable models.
+	// Format for each entry: "modelID:authID" (e.g., "claude-3-5-sonnet:auth-abc123")
+	DisabledAutoModels []string `yaml:"disabled-auto-models,omitempty" json:"disabled-auto-models,omitempty"`
+
 	legacyMigrationPending bool `yaml:"-" json:"-"`
 }
 

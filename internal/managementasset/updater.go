@@ -55,6 +55,15 @@ func SetCurrentConfig(cfg *config.Config) {
 	currentConfigPtr.Store(cfg)
 }
 
+// SaveCurrentConfig saves the current in-memory config to disk.
+func SaveCurrentConfig(configFilePath string) error {
+	cfg := currentConfigPtr.Load()
+	if cfg == nil {
+		return errors.New("no current config to save")
+	}
+	return config.SaveConfigPreserveComments(configFilePath, cfg)
+}
+
 // StartAutoUpdater launches a background goroutine that periodically ensures the management asset is up to date.
 // It respects the disable-control-panel flag on every iteration and supports hot-reloaded configurations.
 func StartAutoUpdater(ctx context.Context, configFilePath string) {

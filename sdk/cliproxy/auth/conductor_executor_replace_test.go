@@ -16,6 +16,11 @@ type replaceAwareExecutor struct {
 	closedSessionIDs []string
 }
 
+// HttpRequest implements [ProviderExecutor].
+func (e *replaceAwareExecutor) HttpRequest(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error) {
+	panic("unimplemented")
+}
+
 func (e *replaceAwareExecutor) Identifier() string {
 	return e.id
 }
@@ -38,7 +43,7 @@ func (e *replaceAwareExecutor) CountTokens(context.Context, *Auth, cliproxyexecu
 	return cliproxyexecutor.Response{}, nil
 }
 
-func (e *replaceAwareExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+func (e *replaceAwareExecutor) HTTPRequestWithContext(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error) {
 	return nil, nil
 }
 

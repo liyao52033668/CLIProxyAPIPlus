@@ -10,10 +10,13 @@ import (
 
 	configaccess "github.com/router-for-me/CLIProxyAPI/v6/internal/access/config_access"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	log "github.com/sirupsen/logrus"
 )
 
 // Builder constructs a Service instance with customizable providers.
@@ -243,6 +246,16 @@ func (b *Builder) Build() (*Service, error) {
 	coreManager.SetRoundTripperProvider(newDefaultRoundTripperProvider())
 	coreManager.SetConfig(b.cfg)
 	coreManager.SetOAuthModelAlias(b.cfg.OAuthModelAlias)
+
+	if b.cfg != nil && len(b.cfg.DisabledAutoModels) > 0 {
+		registry.GetGlobalRegistry().LoadDisabledAutoModels(b.cfg.DisabledAutoModels)
+	}
+	registry.GetGlobalRegistry().SetDisabledPersistFunc(func(models []string) {
+		b.cfg.DisabledAutoModels = models
+		if err := managementasset.SaveCurrentConfig(b.configPath); err != nil {
+			log.Warnf("failed to persist disabled auto models: %v", err)
+		}
+	})
 
 	service := &Service{
 		cfg:            b.cfg,
