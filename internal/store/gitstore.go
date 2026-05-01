@@ -18,6 +18,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/go-git/go-git/v6/plumbing/transport"
 	"github.com/go-git/go-git/v6/plumbing/transport/http"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
@@ -682,8 +683,8 @@ func resolveRemoteDefaultBranch(repo *git.Repository, authMethod transport.AuthM
 				}
 			}
 			s := r.String()
-			if idx := strings.Index(s, "->"); idx != -1 {
-				if target, ok := normalizeRemoteBranchReference(plumbing.ReferenceName(strings.TrimSpace(s[idx+2:]))); ok {
+			if _, after, ok := strings.Cut(s, "->"); ok {
+				if target, ok := normalizeRemoteBranchReference(plumbing.ReferenceName(strings.TrimSpace(after))); ok {
 					return resolvedRemoteBranch{name: target}, nil
 				}
 			}
@@ -934,6 +935,82 @@ func (s *GitTokenStore) PersistConfig(_ context.Context) error {
 		return err
 	}
 	return s.commitAndPushLocked("Update config", rel)
+}
+
+const usageStatsFile = "usage-stats.json"
+
+// LoadUsage reads usage statistics from the git repo.
+func (s *GitTokenStore) LoadUsage(_ context.Context) (*usage.StatisticsSnapshot, error) {
+	if err := s.EnsureRepository(); err != nil {
+		return nil, err
+	}
+	repoDir := s.repoDirSnapshot()
+	if repoDir == "" {
+		return nil, nil
+	}
+	path := filepath.Join(repoDir, usageStatsFile)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("git token store: read usage stats: %w", err)
+	}
+	var snapshot usage.StatisticsSnapshot
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		return nil, fmt.Errorf("git token store: parse usage stats: %w", err)
+	}
+	return &snapshot, nil
+}
+
+// SaveUsage commits and pushes usage statistics to git after merging with existing data.
+func (s *GitTokenStore) SaveUsage(ctx context.Context, snapshot *usage.StatisticsSnapshot) error {
+	if snapshot == nil {
+		return nil
+	}
+	if err := s.EnsureRepository(); err != nil {
+		return err
+	}
+
+	// 先加载现有数据
+	existing, err := s.LoadUsage(ctx)
+	if err != nil {
+		return err
+	}
+
+	// 创建临时统计结构，合并两个快照
+	finalStats := usage.NewRequestStatistics()
+	if existing != nil {
+		finalStats.MergeSnapshot(*existing)
+	}
+	finalStats.MergeSnapshot(*snapshot)
+
+	// 保存合并后的快照
+	mergedSnapshot := finalStats.Snapshot()
+
+	data, err := json.Marshal(&mergedSnapshot)
+	if err != nil {
+		return fmt.Errorf("git token store: marshal usage stats: %w", err)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	repoDir := s.repoDirSnapshot()
+	if repoDir == "" {
+		return fmt.Errorf("git token store: repository path not configured")
+	}
+
+	path := filepath.Join(repoDir, usageStatsFile)
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return fmt.Errorf("git token store: write usage stats: %w", err)
+	}
+
+	rel, err := s.relativeToRepo(path)
+	if err != nil {
+		return err
+	}
+	return s.commitAndPushLocked("Update usage stats", rel)
 }
 
 func ensureEmptyFile(path string) error {

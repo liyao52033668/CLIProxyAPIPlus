@@ -175,7 +175,7 @@ func fetchModels(ctx context.Context, auth *coreauth.Auth) []modelEntry {
 		var payload []byte
 		if auth != nil && auth.Metadata != nil {
 			if pid, ok := auth.Metadata["project_id"].(string); ok && strings.TrimSpace(pid) != "" {
-				payload = []byte(fmt.Sprintf(`{"project": "%s"}`, strings.TrimSpace(pid)))
+				payload = fmt.Appendf(nil, `{"project": "%s"}`, strings.TrimSpace(pid))
 			}
 		}
 		if len(payload) == 0 {
@@ -259,7 +259,7 @@ func fetchModels(ctx context.Context, auth *coreauth.Auth) []modelEntry {
 	return nil
 }
 
-func metaStringValue(m map[string]interface{}, key string) string {
+func metaStringValue(m map[string]any, key string) string {
 	if m == nil {
 		return ""
 	}

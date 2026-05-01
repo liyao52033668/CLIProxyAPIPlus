@@ -86,7 +86,7 @@ func PollForAuth(ctx context.Context, uuid, verifier string) (*TokenPair, error)
 
 	client := &http.Client{Timeout: 10 * time.Second}
 
-	for attempt := 0; attempt < pollMaxAttempts; attempt++ {
+	for range pollMaxAttempts {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()

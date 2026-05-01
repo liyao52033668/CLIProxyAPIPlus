@@ -47,7 +47,7 @@ debug: false
 # Enable pprof HTTP debug server (host:port). Keep it bound to localhost for safety.
 pprof:
   enable: false
-  addr: '127.0.0.1:8316'
+  addr: 'localhost:8316'
 
 # When true, disable high-overhead HTTP middleware features to reduce per-request memory usage under high concurrency.
 commercial-mode: false

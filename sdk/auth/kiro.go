@@ -213,6 +213,7 @@ func (a *KiroAuthenticator) LoginWithAuthCode(ctx context.Context, cfg *config.C
 	idPart := extractKiroIdentifier(tokenData.Email, tokenData.ProfileArn, tokenData.ClientID)
 
 	now := time.Now()
+	// Use format: provider-email.json
 	fileName := fmt.Sprintf("kiro-aws-%s.json", idPart)
 
 	record := &coreauth.Auth{
@@ -257,14 +258,14 @@ func (a *KiroAuthenticator) LoginWithAuthCode(ctx context.Context, cfg *config.C
 // NOTE: Google login is not available for third-party applications due to AWS Cognito restrictions.
 // Please use AWS Builder ID or import your token from Kiro IDE.
 func (a *KiroAuthenticator) LoginWithGoogle(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {
-	return nil, fmt.Errorf("Google login is not available for third-party applications due to AWS Cognito restrictions.\n\nAlternatives:\n  1. Use AWS Builder ID: cliproxy kiro --builder-id\n  2. Import token from Kiro IDE: cliproxy kiro --import\n\nTo get a token from Kiro IDE:\n  1. Open Kiro IDE and login with Google\n  2. Find: ~/.kiro/kiro-auth-token.json\n  3. Run: cliproxy kiro --import")
+	return nil, fmt.Errorf("google login is not available for third-party applications due to AWS Cognito restrictions.\n\nAlternatives:\n  1. Use AWS Builder ID: cliproxy kiro --builder-id\n  2. Import token from Kiro IDE: cliproxy kiro --import\n\nTo get a token from Kiro IDE:\n  1. Open Kiro IDE and login with Google\n  2. Find: ~/.kiro/kiro-auth-token.json\n  3. Run: cliproxy kiro --import")
 }
 
 // LoginWithGitHub performs OAuth login for Kiro with GitHub.
 // NOTE: GitHub login is not available for third-party applications due to AWS Cognito restrictions.
 // Please use AWS Builder ID or import your token from Kiro IDE.
 func (a *KiroAuthenticator) LoginWithGitHub(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {
-	return nil, fmt.Errorf("GitHub login is not available for third-party applications due to AWS Cognito restrictions.\n\nAlternatives:\n  1. Use AWS Builder ID: cliproxy kiro --builder-id\n  2. Import token from Kiro IDE: cliproxy kiro --import\n\nTo get a token from Kiro IDE:\n  1. Open Kiro IDE and login with GitHub\n  2. Find: ~/.kiro/kiro-auth-token.json\n  3. Run: cliproxy kiro --import")
+	return nil, fmt.Errorf("github login is not available for third-party applications due to AWS Cognito restrictions.\n\nAlternatives:\n  1. Use AWS Builder ID: cliproxy kiro --builder-id\n  2. Import token from Kiro IDE: cliproxy kiro --import\n\nTo get a token from Kiro IDE:\n  1. Open Kiro IDE and login with GitHub\n  2. Find: ~/.kiro/kiro-auth-token.json\n  3. Run: cliproxy kiro --import")
 }
 
 // ImportFromKiroIDE imports token from Kiro IDE's token file.
@@ -294,13 +295,13 @@ func (a *KiroAuthenticator) ImportFromKiroIDE(ctx context.Context, cfg *config.C
 	}
 
 	now := time.Now()
-	fileName := fmt.Sprintf("kiro-%s-%s.json", provider, idPart)
+	fileName := fmt.Sprintf("kiro-aws-%s-%s.json", provider, idPart)
 
 	record := &coreauth.Auth{
 		ID:        fileName,
 		Provider:  "kiro",
 		FileName:  fileName,
-		Label:     fmt.Sprintf("kiro-%s", provider),
+		Label:     fmt.Sprintf("kiro-aws-%s", provider),
 		Status:    coreauth.StatusActive,
 		CreatedAt: now,
 		UpdatedAt: now,

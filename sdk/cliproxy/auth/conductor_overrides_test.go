@@ -314,7 +314,6 @@ func TestManager_MaxRetryCredentials_LimitsCrossCredentialRetries(t *testing.T) 
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			limitedManager, limitedExecutor := newCredentialRetryLimitTestManager(t, 1)
 			if errInvoke := tc.invoke(limitedManager); errInvoke == nil {
@@ -368,7 +367,7 @@ func TestManager_ModelSupportBadRequest_FallsBackAndSuspendsAuth(t *testing.T) {
 	}
 
 	request := cliproxyexecutor.Request{Model: model}
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		resp, errExecute := m.Execute(context.Background(), []string{"claude"}, request, cliproxyexecutor.Options{})
 		if errExecute != nil {
 			t.Fatalf("execute %d error = %v, want success", i, errExecute)
@@ -438,7 +437,7 @@ func TestManagerExecuteStream_ModelSupportBadRequestFallsBackAndSuspendsAuth(t *
 	}
 
 	request := cliproxyexecutor.Request{Model: model}
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		streamResult, errExecute := m.ExecuteStream(context.Background(), []string{"claude"}, request, cliproxyexecutor.Options{})
 		if errExecute != nil {
 			t.Fatalf("execute stream %d error = %v, want success", i, errExecute)

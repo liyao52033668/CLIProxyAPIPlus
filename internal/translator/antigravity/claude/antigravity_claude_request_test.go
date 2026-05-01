@@ -14,7 +14,7 @@ import (
 func testAnthropicNativeSignature(t *testing.T) string {
 	t.Helper()
 
-	payload := buildClaudeSignaturePayload(t, 12, uint64Ptr(2), "claude-sonnet-4-6", true)
+	payload := buildClaudeSignaturePayload(t, 12, new(uint64(2)), "claude-sonnet-4-6", true)
 	signature := base64.StdEncoding.EncodeToString(payload)
 	if len(signature) < cache.MinValidSignatureLen {
 		t.Fatalf("test signature too short: %d", len(signature))
@@ -66,8 +66,9 @@ func buildClaudeSignaturePayload(t *testing.T, channelID uint64, field2 *uint64,
 	return payload
 }
 
+//go:fix inline
 func uint64Ptr(v uint64) *uint64 {
-	return &v
+	return new(v)
 }
 
 func testNonAnthropicRawSignature(t *testing.T) string {
@@ -378,7 +379,6 @@ func TestValidateBypassMode_RejectsInvalidBase64(t *testing.T) {
 		{"R invalid", "R$$$invalid$$$"},
 	}
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			inputJSON := []byte(`{
 				"messages": [{"role": "assistant", "content": [
@@ -407,7 +407,6 @@ func TestValidateBypassMode_RejectsPrefixStrippedToEmpty(t *testing.T) {
 		{"hash only", "#"},
 	}
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			inputJSON := []byte(`{
 				"messages": [{"role": "assistant", "content": [
@@ -452,7 +451,6 @@ func TestValidateBypassMode_HandlesWhitespace(t *testing.T) {
 		{"leading tab", "\t" + rawSignature},
 	}
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			inputJSON := []byte(`{
 				"messages": [{"role": "assistant", "content": [
@@ -492,7 +490,7 @@ func TestValidateBypassMode_StrictAcceptsSignatureBetween16KiBAnd32MiB(t *testin
 		cache.SetSignatureBypassStrictMode(previous)
 	})
 
-	payload := buildClaudeSignaturePayload(t, 12, uint64Ptr(2), strings.Repeat("m", 20000), true)
+	payload := buildClaudeSignaturePayload(t, 12, new(uint64(2)), strings.Repeat("m", 20000), true)
 	sig := base64.StdEncoding.EncodeToString(payload)
 	if len(sig) <= 1<<14 {
 		t.Fatalf("test setup: signature should exceed previous 16KiB guardrail, got %d", len(sig))
@@ -620,7 +618,7 @@ func TestConvertClaudeRequestToAntigravity_BypassModePreservesShortValidSignatur
 
 func TestInspectClaudeSignaturePayload_ExtractsSpecTree(t *testing.T) {
 	t.Parallel()
-	payload := buildClaudeSignaturePayload(t, 12, uint64Ptr(2), "claude-sonnet-4-6", true)
+	payload := buildClaudeSignaturePayload(t, 12, new(uint64(2)), "claude-sonnet-4-6", true)
 
 	tree, err := inspectClaudeSignaturePayload(payload, 1)
 	if err != nil {
@@ -642,7 +640,7 @@ func TestInspectClaudeSignaturePayload_ExtractsSpecTree(t *testing.T) {
 
 func TestInspectDoubleLayerSignature_TracksEncodingLayers(t *testing.T) {
 	t.Parallel()
-	inner := base64.StdEncoding.EncodeToString(buildClaudeSignaturePayload(t, 11, uint64Ptr(2), "", false))
+	inner := base64.StdEncoding.EncodeToString(buildClaudeSignaturePayload(t, 11, new(uint64(2)), "", false))
 	outer := base64.StdEncoding.EncodeToString([]byte(inner))
 
 	tree, err := inspectDoubleLayerSignature(outer)

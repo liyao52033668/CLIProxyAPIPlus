@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -652,9 +653,7 @@ func updateGeminiCLITokenMetadata(auth *cliproxyauth.Auth, base map[string]any, 
 	if auth.Metadata == nil {
 		auth.Metadata = make(map[string]any)
 	}
-	for k, v := range fields {
-		auth.Metadata[k] = v
-	}
+	maps.Copy(auth.Metadata, fields)
 }
 
 func buildGeminiTokenMap(base map[string]any, tok *oauth2.Token) map[string]any {
@@ -665,9 +664,7 @@ func buildGeminiTokenMap(base map[string]any, tok *oauth2.Token) map[string]any 
 	if raw, err := json.Marshal(tok); err == nil {
 		var tokenMap map[string]any
 		if err = json.Unmarshal(raw, &tokenMap); err == nil {
-			for k, v := range tokenMap {
-				merged[k] = v
-			}
+			maps.Copy(merged, tokenMap)
 		}
 	}
 	return merged
@@ -726,9 +723,7 @@ func cloneMap(in map[string]any) map[string]any {
 		return nil
 	}
 	out := make(map[string]any, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
+	maps.Copy(out, in)
 	return out
 }
 
@@ -810,9 +805,9 @@ func fixGeminiCLIImageAspectRatio(modelName string, rawJSON []byte) []byte {
 			if len(contentArray) > 0 {
 				hasInlineData := false
 			loopContent:
-				for i := 0; i < len(contentArray); i++ {
+				for i := range contentArray {
 					parts := contentArray[i].Get("parts").Array()
-					for j := 0; j < len(parts); j++ {
+					for j := range parts {
 						if parts[j].Get("inlineData").Exists() {
 							hasInlineData = true
 							break loopContent
@@ -829,7 +824,7 @@ func fixGeminiCLIImageAspectRatio(modelName string, rawJSON []byte) []byte {
 					newPartsJson, _ = sjson.SetRawBytes(newPartsJson, "-1", emptyImagePart)
 
 					parts := contentArray[0].Get("parts").Array()
-					for j := 0; j < len(parts); j++ {
+					for j := range parts {
 						newPartsJson, _ = sjson.SetRawBytes(newPartsJson, "-1", []byte(parts[j].Raw))
 					}
 
@@ -898,7 +893,8 @@ func parseRetryDelay(errorBody []byte) (*time.Duration, error) {
 		if matches := re.FindStringSubmatch(message); len(matches) > 1 {
 			seconds, err := strconv.Atoi(matches[1])
 			if err == nil {
-				return new(time.Duration(seconds) * time.Second), nil
+				d := time.Duration(seconds) * time.Second
+				return &d, nil
 			}
 		}
 	}

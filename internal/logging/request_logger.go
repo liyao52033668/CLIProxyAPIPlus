@@ -774,7 +774,7 @@ func writeAPISection(w io.Writer, sectionHeader string, sectionPrefix string, pa
 }
 
 func writeAPIErrorResponses(w io.Writer, apiResponseErrors []*interfaces.ErrorMessage) error {
-	for i := 0; i < len(apiResponseErrors); i++ {
+	for i := range apiResponseErrors {
 		if apiResponseErrors[i] == nil {
 			continue
 		}
@@ -930,7 +930,7 @@ func (l *FileRequestLogger) formatLogContent(url, method string, headers map[str
 		content.WriteString("\n")
 	}
 
-	for i := 0; i < len(apiResponseErrors); i++ {
+	for i := range apiResponseErrors {
 		content.WriteString("=== API ERROR RESPONSE ===\n")
 		content.WriteString(fmt.Sprintf("HTTP Status: %d\n", apiResponseErrors[i].StatusCode))
 		content.WriteString(apiResponseErrors[i].Error.Error())

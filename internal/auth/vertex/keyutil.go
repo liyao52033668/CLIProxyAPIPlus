@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"maps"
 	"strings"
 )
 
@@ -47,9 +48,7 @@ func NormalizeServiceAccountMap(sa map[string]any) (map[string]any, error) {
 		return nil, err
 	}
 	clone := make(map[string]any, len(sa))
-	for k, v := range sa {
-		clone[k] = v
-	}
+	maps.Copy(clone, sa)
 	clone["private_key"] = normalized
 	return clone, nil
 }

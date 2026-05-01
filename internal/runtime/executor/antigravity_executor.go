@@ -726,7 +726,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	attempts := antigravityRetryAttempts(auth, e.cfg)
 
 attemptLoop:
-	for attempt := 0; attempt < attempts; attempt++ {
+	for attempt := range attempts {
 		var lastStatus int
 		var lastBody []byte
 		var lastErr error
@@ -941,7 +941,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	attempts := antigravityRetryAttempts(auth, e.cfg)
 
 attemptLoop:
-	for attempt := 0; attempt < attempts; attempt++ {
+	for attempt := range attempts {
 		var lastStatus int
 		var lastBody []byte
 		var lastErr error
@@ -1167,7 +1167,7 @@ func (e *AntigravityExecutor) convertStreamToNonStream(stream []byte) []byte {
 	var responseID string
 	var role string
 	var usageRaw string
-	parts := make([]map[string]interface{}, 0)
+	parts := make([]map[string]any, 0)
 	var pendingKind string
 	var pendingText strings.Builder
 	var pendingThoughtSig string
@@ -1185,7 +1185,7 @@ func (e *AntigravityExecutor) convertStreamToNonStream(stream []byte) []byte {
 				pendingThoughtSig = ""
 				return
 			}
-			parts = append(parts, map[string]interface{}{"text": text})
+			parts = append(parts, map[string]any{"text": text})
 		case "thought":
 			if strings.TrimSpace(text) == "" && pendingThoughtSig == "" {
 				pendingKind = ""
@@ -1193,7 +1193,7 @@ func (e *AntigravityExecutor) convertStreamToNonStream(stream []byte) []byte {
 				pendingThoughtSig = ""
 				return
 			}
-			part := map[string]interface{}{"thought": true}
+			part := map[string]any{"thought": true}
 			part["text"] = text
 			if pendingThoughtSig != "" {
 				part["thoughtSignature"] = pendingThoughtSig
@@ -1205,11 +1205,11 @@ func (e *AntigravityExecutor) convertStreamToNonStream(stream []byte) []byte {
 		pendingThoughtSig = ""
 	}
 
-	normalizePart := func(partResult gjson.Result) map[string]interface{} {
-		var m map[string]interface{}
+	normalizePart := func(partResult gjson.Result) map[string]any {
+		var m map[string]any
 		_ = json.Unmarshal([]byte(partResult.Raw), &m)
 		if m == nil {
-			m = map[string]interface{}{}
+			m = map[string]any{}
 		}
 		sig := partResult.Get("thoughtSignature").String()
 		if sig == "" {
@@ -1226,7 +1226,7 @@ func (e *AntigravityExecutor) convertStreamToNonStream(stream []byte) []byte {
 		return m
 	}
 
-	for _, line := range bytes.Split(stream, []byte("\n")) {
+	for line := range bytes.SplitSeq(stream, []byte("\n")) {
 		trimmed := bytes.TrimSpace(line)
 		if len(trimmed) == 0 || !gjson.ValidBytes(trimmed) {
 			continue
@@ -1406,7 +1406,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	attempts := antigravityRetryAttempts(auth, e.cfg)
 
 attemptLoop:
-	for attempt := 0; attempt < attempts; attempt++ {
+	for attempt := range attempts {
 		var lastStatus int
 		var lastBody []byte
 		var lastErr error
@@ -2224,10 +2224,7 @@ func antigravitySoftRateLimitDelay(attempt int) time.Duration {
 	if attempt < 0 {
 		attempt = 0
 	}
-	base := time.Duration(attempt+1) * 500 * time.Millisecond
-	if base > 3*time.Second {
-		base = 3 * time.Second
-	}
+	base := min(time.Duration(attempt+1)*500*time.Millisecond, 3*time.Second)
 	return base
 }
 
@@ -2277,10 +2274,7 @@ func antigravityNoCapacityRetryDelay(attempt int) time.Duration {
 	if attempt < 0 {
 		attempt = 0
 	}
-	delay := time.Duration(attempt+1) * 250 * time.Millisecond
-	if delay > 2*time.Second {
-		delay = 2 * time.Second
-	}
+	delay := min(time.Duration(attempt+1)*250*time.Millisecond, 2*time.Second)
 	return delay
 }
 
@@ -2288,10 +2282,7 @@ func antigravityTransient429RetryDelay(attempt int) time.Duration {
 	if attempt < 0 {
 		attempt = 0
 	}
-	delay := time.Duration(attempt+1) * 100 * time.Millisecond
-	if delay > 500*time.Millisecond {
-		delay = 500 * time.Millisecond
-	}
+	delay := min(time.Duration(attempt+1)*100*time.Millisecond, 500*time.Millisecond)
 	return delay
 }
 

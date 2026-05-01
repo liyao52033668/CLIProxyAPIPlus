@@ -1,14 +1,14 @@
 package handlers
 
 import (
+	context0 "context"
 	"testing"
 
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
-	"golang.org/x/net/context"
 )
 
 func TestRequestExecutionMetadataIncludesExecutionSessionWithoutIdempotencyKey(t *testing.T) {
-	ctx := WithExecutionSessionID(context.Background(), "session-1")
+	ctx := WithExecutionSessionID(context0.Background(), "session-1")
 
 	meta := requestExecutionMetadata(ctx)
 	if got := meta[coreexecutor.ExecutionSessionMetadataKey]; got != "session-1" {

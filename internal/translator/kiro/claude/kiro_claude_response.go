@@ -39,7 +39,7 @@ var (
 // Supports thinking blocks - parses <thinking> tags and converts to Claude thinking content blocks.
 // stopReason is passed from upstream; fallback logic applied if empty.
 func BuildClaudeResponse(content string, toolUses []KiroToolUse, model string, usageInfo usage.Detail, stopReason string) []byte {
-	var contentBlocks []map[string]interface{}
+	var contentBlocks []map[string]any
 
 	// Extract thinking blocks and text from content
 	if content != "" {
@@ -61,7 +61,7 @@ func BuildClaudeResponse(content string, toolUses []KiroToolUse, model string, u
 			log.Warnf("kiro: buildClaudeResponse skipping truncated tool: %s (ID: %s)", toolUse.Name, toolUse.ToolUseID)
 			continue
 		}
-		contentBlocks = append(contentBlocks, map[string]interface{}{
+		contentBlocks = append(contentBlocks, map[string]any{
 			"type":  "tool_use",
 			"id":    toolUse.ToolUseID,
 			"name":  toolUse.Name,
@@ -71,7 +71,7 @@ func BuildClaudeResponse(content string, toolUses []KiroToolUse, model string, u
 
 	// Ensure at least one content block (Claude API requires non-empty content)
 	if len(contentBlocks) == 0 {
-		contentBlocks = append(contentBlocks, map[string]interface{}{
+		contentBlocks = append(contentBlocks, map[string]any{
 			"type": "text",
 			"text": "",
 		})
@@ -92,14 +92,14 @@ func BuildClaudeResponse(content string, toolUses []KiroToolUse, model string, u
 		log.Warnf("kiro: response truncated due to max_tokens limit (buildClaudeResponse)")
 	}
 
-	response := map[string]interface{}{
+	response := map[string]any{
 		"id":          "msg_" + uuid.New().String()[:24],
 		"type":        "message",
 		"role":        "assistant",
 		"model":       model,
 		"content":     contentBlocks,
 		"stop_reason": stopReason,
-		"usage": map[string]interface{}{
+		"usage": map[string]any{
 			"input_tokens":  usageInfo.InputTokens,
 			"output_tokens": usageInfo.OutputTokens,
 		},
@@ -111,8 +111,8 @@ func BuildClaudeResponse(content string, toolUses []KiroToolUse, model string, u
 // ExtractThinkingFromContent parses content to extract thinking blocks and text.
 // Returns a list of content blocks in the order they appear in the content.
 // Handles interleaved thinking and text blocks correctly.
-func ExtractThinkingFromContent(content string) []map[string]interface{} {
-	var blocks []map[string]interface{}
+func ExtractThinkingFromContent(content string) []map[string]any {
+	var blocks []map[string]any
 
 	if content == "" {
 		return blocks
@@ -121,7 +121,7 @@ func ExtractThinkingFromContent(content string) []map[string]interface{} {
 	// Check if content contains thinking tags at all
 	if !strings.Contains(content, thinkingStartTag) {
 		// No thinking tags, return as plain text
-		return []map[string]interface{}{
+		return []map[string]any{
 			{
 				"type": "text",
 				"text": content,
@@ -140,7 +140,7 @@ func ExtractThinkingFromContent(content string) []map[string]interface{} {
 		if startIdx == -1 {
 			// No more thinking tags, add remaining as text
 			if strings.TrimSpace(remaining) != "" {
-				blocks = append(blocks, map[string]interface{}{
+				blocks = append(blocks, map[string]any{
 					"type": "text",
 					"text": remaining,
 				})
@@ -152,7 +152,7 @@ func ExtractThinkingFromContent(content string) []map[string]interface{} {
 		if startIdx > 0 {
 			textBefore := remaining[:startIdx]
 			if strings.TrimSpace(textBefore) != "" {
-				blocks = append(blocks, map[string]interface{}{
+				blocks = append(blocks, map[string]any{
 					"type": "text",
 					"text": textBefore,
 				})
@@ -170,7 +170,7 @@ func ExtractThinkingFromContent(content string) []map[string]interface{} {
 			if strings.TrimSpace(remaining) != "" {
 				// Generate signature for thinking content (required by Claude API)
 				signature := generateThinkingSignature(remaining)
-				blocks = append(blocks, map[string]interface{}{
+				blocks = append(blocks, map[string]any{
 					"type":      "thinking",
 					"thinking":  remaining,
 					"signature": signature,
@@ -185,7 +185,7 @@ func ExtractThinkingFromContent(content string) []map[string]interface{} {
 		if strings.TrimSpace(thinkContent) != "" {
 			// Generate signature for thinking content (required by Claude API)
 			signature := generateThinkingSignature(thinkContent)
-			blocks = append(blocks, map[string]interface{}{
+			blocks = append(blocks, map[string]any{
 				"type":      "thinking",
 				"thinking":  thinkContent,
 				"signature": signature,
@@ -199,7 +199,7 @@ func ExtractThinkingFromContent(content string) []map[string]interface{} {
 
 	// If no blocks were created (all whitespace), return empty text block
 	if len(blocks) == 0 {
-		blocks = append(blocks, map[string]interface{}{
+		blocks = append(blocks, map[string]any{
 			"type": "text",
 			"text": "",
 		})

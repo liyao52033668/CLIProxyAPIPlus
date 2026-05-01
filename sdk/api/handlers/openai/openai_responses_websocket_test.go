@@ -684,7 +684,7 @@ func TestForwardResponsesWebsocketPreservesCompletedEvent(t *testing.T) {
 		completedOutput, err := (*OpenAIResponsesAPIHandler)(nil).forwardResponsesWebsocket(
 			ctx,
 			conn,
-			func(...interface{}) {},
+			func(...any) {},
 			data,
 			errCh,
 			&timelineLog,
@@ -763,7 +763,7 @@ func TestForwardResponsesWebsocketLogsAttemptedResponseOnWriteFailure(t *testing
 		_, err = (*OpenAIResponsesAPIHandler)(nil).forwardResponsesWebsocket(
 			ctx,
 			conn,
-			func(...interface{}) {},
+			func(...any) {},
 			data,
 			errCh,
 			&timelineLog,

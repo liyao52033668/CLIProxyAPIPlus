@@ -487,14 +487,14 @@ func (h *OpenAIResponsesAPIHandler) websocketUpstreamSupportsIncrementalInputFor
 	resolvedModelName := modelName
 	initialSuffix := thinking.ParseSuffix(modelName)
 	if initialSuffix.ModelName == "auto" {
-		resolvedBase := util.ResolveAutoModel(initialSuffix.ModelName)
+		resolvedBase, _ := util.ResolveAutoModel(initialSuffix.ModelName)
 		if initialSuffix.HasSuffix {
 			resolvedModelName = fmt.Sprintf("%s(%s)", resolvedBase, initialSuffix.RawSuffix)
 		} else {
 			resolvedModelName = resolvedBase
 		}
 	} else {
-		resolvedModelName = util.ResolveAutoModel(modelName)
+		resolvedModelName, _ = util.ResolveAutoModel(modelName)
 	}
 
 	parsed := thinking.ParseSuffix(resolvedModelName)
@@ -526,7 +526,7 @@ func (h *OpenAIResponsesAPIHandler) websocketUpstreamSupportsIncrementalInputFor
 	registryRef := registry.GetGlobalRegistry()
 	now := time.Now()
 	auths := h.AuthManager.List()
-	for i := 0; i < len(auths); i++ {
+	for i := range auths {
 		auth := auths[i]
 		if auth == nil {
 			continue
@@ -601,7 +601,7 @@ func writeResponsesWebsocketSyntheticPrewarm(
 	if errPayloads != nil {
 		return errPayloads
 	}
-	for i := 0; i < len(payloads); i++ {
+	for i := range payloads {
 		markAPIResponseTimestamp(c)
 		// log.Infof(
 		// 	"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",

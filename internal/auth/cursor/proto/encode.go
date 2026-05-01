@@ -55,6 +55,10 @@ func newMsg(name string) *dynamicpb.Message {
 	return dynamicpb.NewMessage(Msg(name))
 }
 
+func NewMsg(name string) *dynamicpb.Message {
+	return newMsg(name)
+}
+
 func field(msg *dynamicpb.Message, name string) protoreflect.FieldDescriptor {
 	return msg.Descriptor().Fields().ByName(protoreflect.Name(name))
 }
@@ -625,7 +629,7 @@ func jsonToProtobufValueBytes(jsonData json.RawMessage) []byte {
 	if len(jsonData) == 0 {
 		return nil
 	}
-	var v interface{}
+	var v any
 	if err := json.Unmarshal(jsonData, &v); err != nil {
 		return jsonData // fallback to raw JSON if parsing fails
 	}
@@ -642,7 +646,7 @@ func jsonToProtobufValueBytes(jsonData json.RawMessage) []byte {
 
 // ProtobufValueBytesToJSON converts protobuf Value binary back to JSON.
 // This mirrors the TS pattern: toJson(ValueSchema, fromBinary(ValueSchema, value))
-func ProtobufValueBytesToJSON(data []byte) (interface{}, error) {
+func ProtobufValueBytesToJSON(data []byte) (any, error) {
 	val := &structpb.Value{}
 	if err := proto.Unmarshal(data, val); err != nil {
 		return nil, err

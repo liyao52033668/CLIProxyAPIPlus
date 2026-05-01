@@ -74,7 +74,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 			// Collect original tool names
 			var names []string
 			arr := tools.Array()
-			for i := 0; i < len(arr); i++ {
+			for i := range arr {
 				t := arr[i]
 				if t.Get("type").String() == "function" {
 					fn := t.Get("function")
@@ -113,7 +113,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 	out, _ = sjson.SetRawBytes(out, "input", []byte(`[]`))
 	if messages.IsArray() {
 		arr := messages.Array()
-		for i := 0; i < len(arr); i++ {
+		for i := range arr {
 			m := arr[i]
 			role := m.Get("role").String()
 
@@ -156,7 +156,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 					msg, _ = sjson.SetRawBytes(msg, "content.-1", part)
 				} else if c.Exists() && c.IsArray() {
 					items := c.Array()
-					for j := 0; j < len(items); j++ {
+					for j := range items {
 						it := items[j]
 						t := it.Get("type").String()
 						switch t {
@@ -209,7 +209,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 					toolCalls := m.Get("tool_calls")
 					if toolCalls.Exists() && toolCalls.IsArray() {
 						toolCallsArr := toolCalls.Array()
-						for j := 0; j < len(toolCallsArr); j++ {
+						for j := range toolCallsArr {
 							tc := toolCallsArr[j]
 							if tc.Get("type").String() == "function" {
 								// Create function_call as top-level object
@@ -285,7 +285,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 	if tools.IsArray() && len(tools.Array()) > 0 {
 		out, _ = sjson.SetRawBytes(out, "tools", []byte(`[]`))
 		arr := tools.Array()
-		for i := 0; i < len(arr); i++ {
+		for i := range arr {
 			t := arr[i]
 			toolType := t.Get("type").String()
 			// Pass through built-in tools (e.g. {"type":"web_search"}) directly for the Responses API.
@@ -413,10 +413,7 @@ func buildShortNameMap(names []string) map[string]string {
 		base := cand
 		for i := 1; ; i++ {
 			suffix := "_" + strconv.Itoa(i)
-			allowed := limit - len(suffix)
-			if allowed < 0 {
-				allowed = 0
-			}
+			allowed := max(limit-len(suffix), 0)
 			tmp := base
 			if len(tmp) > allowed {
 				tmp = tmp[:allowed]

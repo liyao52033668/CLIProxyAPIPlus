@@ -441,11 +441,11 @@ func FilterSSEUsageMetadata(payload []byte) []byte {
 			continue
 		}
 		foundData = true
-		dataIdx := bytes.Index(line, []byte("data:"))
-		if dataIdx < 0 {
+		before, after, ok := bytes.Cut(line, []byte("data:"))
+		if !ok {
 			continue
 		}
-		rawJSON := bytes.TrimSpace(line[dataIdx+5:])
+		rawJSON := bytes.TrimSpace(after)
 		traceID := gjson.GetBytes(rawJSON, "traceId").String()
 		if isStopChunkWithoutUsage(rawJSON) && traceID != "" {
 			rememberStopWithoutUsage(traceID)
@@ -463,7 +463,7 @@ func FilterSSEUsageMetadata(payload []byte) []byte {
 			continue
 		}
 		var rebuilt []byte
-		rebuilt = append(rebuilt, line[:dataIdx]...)
+		rebuilt = append(rebuilt, before...)
 		rebuilt = append(rebuilt, []byte("data:")...)
 		if len(cleaned) > 0 {
 			rebuilt = append(rebuilt, ' ')

@@ -285,8 +285,8 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	if stream {
-		lines := bytes.Split(data, []byte("\n"))
-		for _, line := range lines {
+		lines := bytes.SplitSeq(data, []byte("\n"))
+		for line := range lines {
 			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 				reporter.Publish(ctx, detail)
 			}
@@ -812,8 +812,8 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 		}
 		return pb, nil
 	}
-	encodings := strings.Split(contentEncoding, ",")
-	for _, raw := range encodings {
+	encodings := strings.SplitSeq(contentEncoding, ",")
+	for raw := range encodings {
 		encoding := strings.TrimSpace(strings.ToLower(raw))
 		switch encoding {
 		case "", "identity":
@@ -929,7 +929,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	// Merge extra betas from request body and request flags.
 	if len(extraBetas) > 0 || hasClaude1MHeader {
 		existingSet := make(map[string]bool)
-		for _, b := range strings.Split(baseBetas, ",") {
+		for b := range strings.SplitSeq(baseBetas, ",") {
 			betaName := strings.TrimSpace(b)
 			if betaName != "" {
 				existingSet[betaName] = true
@@ -2160,7 +2160,7 @@ func injectMessagesCacheControl(payload []byte) []byte {
 	} else if content.Type == gjson.String {
 		// Convert string content to array with cache_control
 		text := content.String()
-		newContent := []map[string]interface{}{
+		newContent := []map[string]any{
 			{
 				"type": "text",
 				"text": text,
@@ -2258,7 +2258,7 @@ func injectSystemCacheControl(payload []byte) []byte {
 		// Convert string system prompt to array with cache_control
 		// "system": "text" -> "system": [{"type": "text", "text": "text", "cache_control": {"type": "ephemeral"}}]
 		text := system.String()
-		newSystem := []map[string]interface{}{
+		newSystem := []map[string]any{
 			{
 				"type": "text",
 				"text": text,

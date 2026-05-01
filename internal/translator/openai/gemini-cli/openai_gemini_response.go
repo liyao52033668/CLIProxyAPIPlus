@@ -27,7 +27,7 @@ import (
 func ConvertOpenAIResponseToGeminiCLI(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
 	outputs := ConvertOpenAIResponseToGemini(ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param)
 	newOutputs := make([][]byte, 0, len(outputs))
-	for i := 0; i < len(outputs); i++ {
+	for i := range outputs {
 		newOutputs = append(newOutputs, translatorcommon.WrapGeminiCLIResponse(outputs[i]))
 	}
 	return newOutputs

@@ -365,10 +365,10 @@ func convertChatCompletionsResponseToCompletions(rawJSON []byte) []byte {
 	}
 
 	// Convert choices from chat completions to completions format
-	var choices []interface{}
+	var choices []any
 	if chatChoices := root.Get("choices"); chatChoices.Exists() && chatChoices.IsArray() {
 		chatChoices.ForEach(func(_, choice gjson.Result) bool {
-			completionsChoice := map[string]interface{}{
+			completionsChoice := map[string]any{
 				"index": choice.Get("index").Int(),
 			}
 
@@ -461,10 +461,10 @@ func convertChatCompletionsStreamChunkToCompletions(chunkData []byte) []byte {
 	}
 
 	// Convert choices from chat completions delta to completions format
-	var choices []interface{}
+	var choices []any
 	if chatChoices := root.Get("choices"); chatChoices.Exists() && chatChoices.IsArray() {
 		chatChoices.ForEach(func(_, choice gjson.Result) bool {
-			completionsChoice := map[string]interface{}{
+			completionsChoice := map[string]any{
 				"index": choice.Get("index").Int(),
 			}
 

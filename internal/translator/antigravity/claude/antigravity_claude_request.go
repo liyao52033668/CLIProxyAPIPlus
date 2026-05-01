@@ -96,7 +96,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	if systemResult.IsArray() {
 		systemResults := systemResult.Array()
 		systemInstructionJSON = []byte(`{"role":"user","parts":[]}`)
-		for i := 0; i < len(systemResults); i++ {
+		for i := range systemResults {
 			systemPromptResult := systemResults[i]
 			systemTypePromptResult := systemPromptResult.Get("type")
 			if systemTypePromptResult.Type == gjson.String && systemTypePromptResult.String() == "text" {
@@ -130,7 +130,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	if messagesResult.IsArray() {
 		messageResults := messagesResult.Array()
 		numMessages := len(messageResults)
-		for i := 0; i < numMessages; i++ {
+		for i := range numMessages {
 			messageResult := messageResults[i]
 			roleResult := messageResult.Get("role")
 			if roleResult.Type != gjson.String {
@@ -148,7 +148,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				contentResults := contentsResult.Array()
 				numContents := len(contentResults)
 				var currentMessageThinkingSignature string
-				for j := 0; j < numContents; j++ {
+				for j := range numContents {
 					contentResult := contentResults[j]
 					contentTypeResult := contentResult.Get("type")
 					if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "thinking" {
@@ -390,7 +390,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 									regularParts = append(regularParts, part)
 								}
 							}
-							var newParts []interface{}
+							var newParts []any
 							for _, p := range thinkingParts {
 								newParts = append(newParts, p.Value())
 							}
@@ -435,7 +435,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	if toolsResult.IsArray() {
 		toolsJSON = []byte(`[{"functionDeclarations":[]}]`)
 		toolsResults := toolsResult.Array()
-		for i := 0; i < len(toolsResults); i++ {
+		for i := range toolsResults {
 			toolResult := toolsResults[i]
 			inputSchemaResult := toolResult.Get("input_schema")
 			if inputSchemaResult.Exists() && inputSchemaResult.IsObject() {

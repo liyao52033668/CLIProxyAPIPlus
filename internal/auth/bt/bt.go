@@ -29,7 +29,7 @@ func md5Hash(s string) string {
 
 func generateStableSID(phone string) string {
 	macSeed := md5Hash(phone + ":mac")
-	hostname := "bt-server-" + md5Hash(phone+":hostname")[:8]
+	hostname := "bt-server-" + md5Hash(phone + ":hostname")[:8]
 	cpu := "Intel Xeon Platinum 8480+"
 	return md5Hash(macSeed+hostname) + md5Hash(cpu)
 }
@@ -90,7 +90,7 @@ func Login(phone, passwordBase64 string) (*BTTokenStorage, error) {
 		return nil, fmt.Errorf("bt login read body failed: %w", err)
 	}
 
-	var result map[string]interface{}
+	var result map[string]any
 	if err := json.Unmarshal(body, &result); err != nil {
 		return nil, fmt.Errorf("bt login parse response failed: %w", err)
 	}
@@ -114,7 +114,7 @@ func Login(phone, passwordBase64 string) (*BTTokenStorage, error) {
 		return nil, fmt.Errorf("bt login unescape failed: %w", err)
 	}
 
-	var data map[string]interface{}
+	var data map[string]any
 	if err := json.Unmarshal([]byte(unescaped), &data); err != nil {
 		return nil, fmt.Errorf("bt login parse data failed: %w", err)
 	}

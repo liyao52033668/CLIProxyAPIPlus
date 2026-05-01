@@ -834,10 +834,7 @@ func (u *cursorTokenUsage) setInputEstimate(payloadBytes int) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	// Rough estimate: ~4 bytes per token for mixed content
-	u.inputTokensEst = int64(payloadBytes / 4)
-	if u.inputTokensEst < 1 {
-		u.inputTokensEst = 1
-	}
+	u.inputTokensEst = max(int64(payloadBytes/4), 1)
 }
 
 func (u *cursorTokenUsage) get() (input, output int64) {
@@ -1357,11 +1354,11 @@ func newH2Client() *http.Client {
 
 // extractCCH extracts the cch value from the system prompt's billing header.
 func extractCCH(systemPrompt string) string {
-	idx := strings.Index(systemPrompt, "cch=")
-	if idx < 0 {
+	_, after, ok := strings.Cut(systemPrompt, "cch=")
+	if !ok {
 		return ""
 	}
-	rest := systemPrompt[idx+4:]
+	rest := after
 	end := strings.IndexAny(rest, "; \n")
 	if end < 0 {
 		return rest
@@ -1458,14 +1455,14 @@ func decodeMcpArgsToJSON(args map[string][]byte) string {
 	if len(args) == 0 {
 		return "{}"
 	}
-	result := make(map[string]interface{})
+	result := make(map[string]any)
 	for k, v := range args {
 		// Try protobuf Value decoding first (matches TS: toJson(ValueSchema, fromBinary(ValueSchema, value)))
 		if decoded, err := cursorproto.ProtobufValueBytesToJSON(v); err == nil {
 			result[k] = decoded
 		} else {
 			// Fallback: try raw JSON
-			var jsonVal interface{}
+			var jsonVal any
 			if err := json.Unmarshal(v, &jsonVal); err == nil {
 				result[k] = jsonVal
 			} else {

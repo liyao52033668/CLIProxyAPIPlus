@@ -273,7 +273,7 @@ func TestConvertGeminiResponseToOpenAIResponses_FunctionCallEventOrder(t *testin
 	if posCompleted == -1 {
 		t.Fatalf("missing response.completed event")
 	}
-	for idx := 0; idx < 3; idx++ {
+	for idx := range 3 {
 		if posAdded[idx] == -1 || posArgsDelta[idx] == -1 || posArgsDone[idx] == -1 || posItemDone[idx] == -1 {
 			t.Fatalf("missing function call events for output_index %d: added=%d argsDelta=%d argsDone=%d itemDone=%d", idx, posAdded[idx], posArgsDelta[idx], posArgsDone[idx], posItemDone[idx])
 		}

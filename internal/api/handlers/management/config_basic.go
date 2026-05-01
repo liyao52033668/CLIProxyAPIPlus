@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	log "github.com/sirupsen/logrus"
@@ -19,7 +20,7 @@ import (
 )
 
 const (
-	latestReleaseURL       = "https://api.github.com/repos/router-for-me/CLIProxyAPIPlus/releases/latest"
+	latestReleaseURL       = "https://api.cnb.cool/liyao52033/CLIProxyAPIPlus/-/releases/latest"
 	latestReleaseUserAgent = "CLIProxyAPIPlus"
 )
 
@@ -28,7 +29,7 @@ func (h *Handler) GetConfig(c *gin.Context) {
 		c.JSON(200, gin.H{})
 		return
 	}
-	c.JSON(200, new(*h.cfg))
+	c.JSON(200, h.cfg)
 }
 
 type releaseInfo struct {
@@ -53,8 +54,17 @@ func (h *Handler) GetLatestVersion(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "request_create_failed", "message": err.Error()})
 		return
 	}
-	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Accept", "application/vnd.cnb.api+json")
 	req.Header.Set("User-Agent", latestReleaseUserAgent)
+
+	// Add CNB token if configured (env CNB_TOKEN takes priority over config)
+	cnbToken := strings.TrimSpace(os.Getenv("CNB_TOKEN"))
+	if cnbToken == "" {
+		cnbToken = strings.TrimSpace(h.cfg.CNBToken)
+	}
+	if cnbToken != "" {
+		req.Header.Set("Authorization", cnbToken)
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -181,11 +191,11 @@ func (h *Handler) GetConfigYAML(c *gin.Context) {
 	_, _ = c.Writer.Write(data)
 }
 
-// Debug
+// GetDebug returns whether debug mode is enabled.
 func (h *Handler) GetDebug(c *gin.Context) { c.JSON(200, gin.H{"debug": h.cfg.Debug}) }
 func (h *Handler) PutDebug(c *gin.Context) { h.updateBoolField(c, func(v bool) { h.cfg.Debug = v }) }
 
-// UsageStatisticsEnabled
+// GetUsageStatisticsEnabled returns whether usage statistics collection is enabled.
 func (h *Handler) GetUsageStatisticsEnabled(c *gin.Context) {
 	c.JSON(200, gin.H{"usage-statistics-enabled": h.cfg.UsageStatisticsEnabled})
 }
@@ -193,7 +203,7 @@ func (h *Handler) PutUsageStatisticsEnabled(c *gin.Context) {
 	h.updateBoolField(c, func(v bool) { h.cfg.UsageStatisticsEnabled = v })
 }
 
-// UsageStatisticsEnabled
+// GetLoggingToFile returns whether logging to file is enabled.
 func (h *Handler) GetLoggingToFile(c *gin.Context) {
 	c.JSON(200, gin.H{"logging-to-file": h.cfg.LoggingToFile})
 }
@@ -201,7 +211,7 @@ func (h *Handler) PutLoggingToFile(c *gin.Context) {
 	h.updateBoolField(c, func(v bool) { h.cfg.LoggingToFile = v })
 }
 
-// LogsMaxTotalSizeMB
+// GetLogsMaxTotalSizeMB returns the maximum total size of log files in MB.
 func (h *Handler) GetLogsMaxTotalSizeMB(c *gin.Context) {
 	c.JSON(200, gin.H{"logs-max-total-size-mb": h.cfg.LogsMaxTotalSizeMB})
 }
@@ -213,15 +223,12 @@ func (h *Handler) PutLogsMaxTotalSizeMB(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
-	value := *body.Value
-	if value < 0 {
-		value = 0
-	}
+	value := max(*body.Value, 0)
 	h.cfg.LogsMaxTotalSizeMB = value
 	h.persist(c)
 }
 
-// ErrorLogsMaxFiles
+// GetErrorLogsMaxFiles returns the maximum number of error log files.
 func (h *Handler) GetErrorLogsMaxFiles(c *gin.Context) {
 	c.JSON(200, gin.H{"error-logs-max-files": h.cfg.ErrorLogsMaxFiles})
 }
@@ -241,13 +248,13 @@ func (h *Handler) PutErrorLogsMaxFiles(c *gin.Context) {
 	h.persist(c)
 }
 
-// Request log
+// GetRequestLog returns whether request logging is enabled.
 func (h *Handler) GetRequestLog(c *gin.Context) { c.JSON(200, gin.H{"request-log": h.cfg.RequestLog}) }
 func (h *Handler) PutRequestLog(c *gin.Context) {
 	h.updateBoolField(c, func(v bool) { h.cfg.RequestLog = v })
 }
 
-// Websocket auth
+// GetWebsocketAuth returns whether websocket authentication is enabled.
 func (h *Handler) GetWebsocketAuth(c *gin.Context) {
 	c.JSON(200, gin.H{"ws-auth": h.cfg.WebsocketAuth})
 }
@@ -255,7 +262,7 @@ func (h *Handler) PutWebsocketAuth(c *gin.Context) {
 	h.updateBoolField(c, func(v bool) { h.cfg.WebsocketAuth = v })
 }
 
-// Request retry
+// GetRequestRetry returns whether request retry is enabled.
 func (h *Handler) GetRequestRetry(c *gin.Context) {
 	c.JSON(200, gin.H{"request-retry": h.cfg.RequestRetry})
 }
@@ -263,7 +270,7 @@ func (h *Handler) PutRequestRetry(c *gin.Context) {
 	h.updateIntField(c, func(v int) { h.cfg.RequestRetry = v })
 }
 
-// Max retry interval
+// GetMaxRetryInterval returns the maximum retry interval in seconds.
 func (h *Handler) GetMaxRetryInterval(c *gin.Context) {
 	c.JSON(200, gin.H{"max-retry-interval": h.cfg.MaxRetryInterval})
 }
@@ -271,7 +278,7 @@ func (h *Handler) PutMaxRetryInterval(c *gin.Context) {
 	h.updateIntField(c, func(v int) { h.cfg.MaxRetryInterval = v })
 }
 
-// ForceModelPrefix
+// GetForceModelPrefix returns whether force model prefix is enabled.
 func (h *Handler) GetForceModelPrefix(c *gin.Context) {
 	c.JSON(200, gin.H{"force-model-prefix": h.cfg.ForceModelPrefix})
 }
@@ -291,7 +298,7 @@ func normalizeRoutingStrategy(strategy string) (string, bool) {
 	}
 }
 
-// RoutingStrategy
+// GetRoutingStrategy returns the current routing strategy.
 func (h *Handler) GetRoutingStrategy(c *gin.Context) {
 	strategy, ok := normalizeRoutingStrategy(h.cfg.Routing.Strategy)
 	if !ok {
@@ -317,7 +324,7 @@ func (h *Handler) PutRoutingStrategy(c *gin.Context) {
 	h.persist(c)
 }
 
-// Proxy URL
+// GetProxyURL returns the proxy URL.
 func (h *Handler) GetProxyURL(c *gin.Context) { c.JSON(200, gin.H{"proxy-url": h.cfg.ProxyURL}) }
 func (h *Handler) PutProxyURL(c *gin.Context) {
 	h.updateStringField(c, func(v string) { h.cfg.ProxyURL = v })
@@ -325,4 +332,72 @@ func (h *Handler) PutProxyURL(c *gin.Context) {
 func (h *Handler) DeleteProxyURL(c *gin.Context) {
 	h.cfg.ProxyURL = ""
 	h.persist(c)
+}
+
+// GetDisabledAutoModels returns the list of temporarily disabled auto models.
+func (h *Handler) GetDisabledAutoModels(c *gin.Context) {
+	c.JSON(200, gin.H{"disabled-auto-models": h.cfg.DisabledAutoModels})
+}
+
+// PutDisabledAutoModels replaces the entire list of disabled auto models.
+func (h *Handler) PutDisabledAutoModels(c *gin.Context) {
+	var body struct {
+		Models []string `json:"models"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	h.cfg.DisabledAutoModels = body.Models
+	if h.persist(c) {
+		registry.GetGlobalRegistry().LoadDisabledAutoModels(body.Models)
+	}
+}
+
+// DeleteDisabledAutoModel removes a specific model from the disabled list.
+// The model key should be in "modelID:authID" format.
+func (h *Handler) DeleteDisabledAutoModel(c *gin.Context) {
+	modelKey := strings.TrimSpace(c.Param("modelKey"))
+	if modelKey == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing model key"})
+		return
+	}
+	parts := strings.SplitN(modelKey, ":", 2)
+	if len(parts) != 2 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid model key format, expected modelID:authID"})
+		return
+	}
+	modelID, authID := parts[0], parts[1]
+
+	h.cfg.DisabledAutoModels = removeFromSlice(h.cfg.DisabledAutoModels, modelKey)
+	if h.persist(c) {
+		registry.GetGlobalRegistry().EnableAutoModel(modelID, authID)
+	}
+}
+
+func removeFromSlice(slice []string, item string) []string {
+	result := make([]string, 0, len(slice))
+	for _, s := range slice {
+		if s != item {
+			result = append(result, s)
+		}
+	}
+	return result
+}
+
+type modelSelectionCounts struct {
+	HandlerType string           `json:"handler_type"`
+	Counts      map[string]int64 `json:"counts"`
+}
+
+// GetModelSelectionCounts returns selection counts for all models or specific handler type.
+// Query param: handler_type (optional, e.g., "openai", "claude", "gemini")
+// If not provided, returns counts for all handler types.
+func (h *Handler) GetModelSelectionCounts(c *gin.Context) {
+	handlerType := strings.TrimSpace(c.Query("handler_type"))
+	counts := registry.GetGlobalRegistry().GetModelSelectionCounts(handlerType)
+	c.JSON(200, modelSelectionCounts{
+		HandlerType: handlerType,
+		Counts:      counts,
+	})
 }

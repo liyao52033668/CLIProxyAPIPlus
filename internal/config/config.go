@@ -21,7 +21,7 @@ import (
 
 const (
 	DefaultPanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
-	DefaultPprofAddr             = "127.0.0.1:8316"
+	DefaultPprofAddr             = "localhost:8316"
 )
 
 // Config represents the application's configuration, loaded from a YAML file.
@@ -156,6 +156,12 @@ type Config struct {
 	// This is useful when you want to login with a different account without logging out
 	// from your current session. Default: false.
 	IncognitoBrowser bool `yaml:"incognito-browser" json:"incognito-browser"`
+
+	// DisabledAutoModels lists auto-resolved models that are temporarily disabled due to failures.
+	// Models in this list will be skipped during auto model selection. Users can manually
+	// remove entries from this list (or via the Management API) to re-enable models.
+	// Format for each entry: "modelID:authID" (e.g., "claude-3-5-sonnet:auth-abc123")
+	DisabledAutoModels []string `yaml:"disabled-auto-models,omitempty" json:"disabled-auto-models,omitempty"`
 
 	legacyMigrationPending bool `yaml:"-" json:"-"`
 }
@@ -1424,11 +1430,8 @@ func mergeNodePreserve(dst, src *yaml.Node, path ...[]string) {
 		}
 		reorderSequenceForMerge(dst, src)
 		// Update elements in place
-		minContent := len(dst.Content)
-		if len(src.Content) < minContent {
-			minContent = len(src.Content)
-		}
-		for i := 0; i < minContent; i++ {
+		minContent := min(len(src.Content), len(dst.Content))
+		for i := range minContent {
 			if dst.Content[i] == nil {
 				dst.Content[i] = deepCopyNode(src.Content[i])
 				continue

@@ -1,6 +1,8 @@
 package openai
 
 import (
+	"slices"
+
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 )
@@ -37,10 +39,5 @@ func resolveEndpointOverride(modelName, requestedEndpoint string) (string, bool)
 }
 
 func endpointListContains(items []string, value string) bool {
-	for _, item := range items {
-		if item == value {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(items, value)
 }

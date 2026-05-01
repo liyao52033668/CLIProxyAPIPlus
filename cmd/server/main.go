@@ -43,6 +43,45 @@ var (
 	DefaultConfigPath = ""
 )
 
+// pgUsagePersister adapts PostgresStore to usage.UsagePersister.
+type pgUsagePersister struct {
+	*store.PostgresStore
+}
+
+func (p *pgUsagePersister) LoadUsage() (*usage.StatisticsSnapshot, error) {
+	return p.PostgresStore.LoadUsage(context.Background())
+}
+
+func (p *pgUsagePersister) SaveUsage(snapshot *usage.StatisticsSnapshot) error {
+	return p.PostgresStore.SaveUsage(context.Background(), snapshot)
+}
+
+// objUsagePersister adapts ObjectTokenStore to usage.UsagePersister.
+type objUsagePersister struct {
+	*store.ObjectTokenStore
+}
+
+func (o *objUsagePersister) LoadUsage() (*usage.StatisticsSnapshot, error) {
+	return o.ObjectTokenStore.LoadUsage(context.Background())
+}
+
+func (o *objUsagePersister) SaveUsage(snapshot *usage.StatisticsSnapshot) error {
+	return o.ObjectTokenStore.SaveUsage(context.Background(), snapshot)
+}
+
+// gitUsagePersister adapts GitTokenStore to usage.UsagePersister.
+type gitUsagePersister struct {
+	*store.GitTokenStore
+}
+
+func (g *gitUsagePersister) LoadUsage() (*usage.StatisticsSnapshot, error) {
+	return g.GitTokenStore.LoadUsage(context.Background())
+}
+
+func (g *gitUsagePersister) SaveUsage(snapshot *usage.StatisticsSnapshot) error {
+	return g.GitTokenStore.SaveUsage(context.Background(), snapshot)
+}
+
 // init initializes the shared logger setup.
 func init() {
 	logging.SetupBaseLogger()
@@ -375,13 +414,15 @@ func main() {
 			return
 		}
 		examplePath := filepath.Join(wd, "config.example.yaml")
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		log.Infof("Starting object store bootstrap (timeout: 5 minutes)...")
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 		if errBootstrap := objectStoreInst.Bootstrap(ctx, examplePath); errBootstrap != nil {
 			cancel()
 			log.Errorf("failed to bootstrap object-backed config: %v", errBootstrap)
 			return
 		}
 		cancel()
+		log.Infof("Object store bootstrap completed successfully")
 		configFilePath = objectStoreInst.ConfigPath()
 		cfg, err = config.LoadConfigOptional(configFilePath, isCloudDeploy)
 		if err == nil {
@@ -475,7 +516,35 @@ func main() {
 			configFileExists = true
 		}
 	}
-	usage.SetStatisticsEnabled(cfg.UsageStatisticsEnabled)
+	if cfg.UsageStatisticsEnabled {
+		usage.SetStatisticsEnabled(cfg.UsageStatisticsEnabled)
+		var persister usage.UsagePersister
+		switch {
+		case usePostgresStore && pgStoreInst != nil:
+			if err := pgStoreInst.EnsureUsageTable(context.Background()); err != nil {
+				log.WithError(err).Warn("failed to ensure usage stats table, will use file fallback")
+				persister = store.NewUsageStore(pgStoreInst.WorkDir())
+			} else {
+				persister = &pgUsagePersister{pgStoreInst}
+			}
+		case useObjectStore && objectStoreInst != nil:
+			persister = &objUsagePersister{objectStoreInst}
+		case useGitStore && gitStoreInst != nil:
+			if err := gitStoreInst.EnsureRepository(); err != nil {
+				log.WithError(err).Warn("git store ensure repo, will use file fallback")
+				persister = store.NewUsageStore(gitStoreRoot)
+			} else {
+				persister = &gitUsagePersister{gitStoreInst}
+			}
+		default:
+			if cfg.AuthDir == "" {
+				persister = store.NewUsageStore("/CLIProxyAPI/data")
+			} else {
+				persister = store.NewUsageStore(cfg.AuthDir)
+			}
+		}
+		usage.StartPersistence(persister, 0)
+	}
 	coreauth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 
 	if err = logging.ConfigureLogOutput(cfg); err != nil {
@@ -647,7 +716,7 @@ func main() {
 				client := tui.NewClient(cfg.Port, password)
 				ready := false
 				backoff := 100 * time.Millisecond
-				for i := 0; i < 30; i++ {
+				for range 30 {
 					if _, errGetConfig := client.GetConfig(); errGetConfig == nil {
 						ready = true
 						break

@@ -1,3 +1,4 @@
+// Package auth provides authentication management, scheduling, and session handling for CLIProxyAPI.
 package auth
 
 import (
@@ -31,10 +32,7 @@ func newAuthAutoRefreshLoop(manager *Manager, interval time.Duration, concurrenc
 	if concurrency <= 0 {
 		concurrency = refreshMaxConcurrency
 	}
-	jobBuffer := concurrency * 4
-	if jobBuffer < 64 {
-		jobBuffer = 64
-	}
+	jobBuffer := max(concurrency*4, 64)
 	return &authAutoRefreshLoop{
 		manager:     manager,
 		interval:    interval,
@@ -162,10 +160,7 @@ func (l *authAutoRefreshLoop) resetTimer(timer *time.Timer, timerCh *<-chan time
 		return
 	}
 
-	wait := next.Sub(now)
-	if wait < 0 {
-		wait = 0
-	}
+	wait := max(next.Sub(now), 0)
 	if !timer.Stop() {
 		select {
 		case <-timer.C:

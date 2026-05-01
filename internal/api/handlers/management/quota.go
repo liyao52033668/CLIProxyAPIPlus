@@ -2,7 +2,7 @@ package management
 
 import "github.com/gin-gonic/gin"
 
-// Quota exceeded toggles
+// GetSwitchProject returns whether project switching is enabled when quota is exceeded.
 func (h *Handler) GetSwitchProject(c *gin.Context) {
 	c.JSON(200, gin.H{"switch-project": h.cfg.QuotaExceeded.SwitchProject})
 }

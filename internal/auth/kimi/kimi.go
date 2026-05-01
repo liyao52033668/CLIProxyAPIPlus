@@ -221,10 +221,7 @@ func (c *DeviceFlowClient) PollForToken(ctx context.Context, deviceCode *DeviceC
 		return nil, fmt.Errorf("kimi: device code is nil")
 	}
 
-	interval := time.Duration(deviceCode.Interval) * time.Second
-	if interval < defaultPollInterval {
-		interval = defaultPollInterval
-	}
+	interval := max(time.Duration(deviceCode.Interval)*time.Second, defaultPollInterval)
 
 	deadline := time.Now().Add(maxPollDuration)
 	if deviceCode.ExpiresIn > 0 {

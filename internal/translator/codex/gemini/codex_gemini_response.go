@@ -319,7 +319,7 @@ func buildReverseMapFromGeminiOriginal(original []byte) map[string]string {
 	}
 	var names []string
 	tarr := tools.Array()
-	for i := 0; i < len(tarr); i++ {
+	for i := range tarr {
 		fns := tarr[i].Get("functionDeclarations")
 		if !fns.IsArray() {
 			continue

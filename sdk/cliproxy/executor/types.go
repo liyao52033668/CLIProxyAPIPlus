@@ -49,6 +49,8 @@ type Options struct {
 	SourceFormat sdktranslator.Format
 	// Metadata carries extra execution hints shared across selection and executors.
 	Metadata map[string]any
+	// IsAuto indicates this request used auto model resolution.
+	IsAuto bool
 }
 
 // Response wraps either a full provider response or metadata for streaming flows.

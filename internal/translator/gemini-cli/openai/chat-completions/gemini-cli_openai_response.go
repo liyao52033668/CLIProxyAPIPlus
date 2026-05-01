@@ -125,7 +125,7 @@ func ConvertCliResponseToOpenAI(_ context.Context, _ string, originalRequestRawJ
 	hasFunctionCall := false
 	if partsResult.IsArray() {
 		partResults := partsResult.Array()
-		for i := 0; i < len(partResults); i++ {
+		for i := range partResults {
 			partResult := partResults[i]
 			partTextResult := partResult.Get("text")
 			functionCallResult := partResult.Get("functionCall")

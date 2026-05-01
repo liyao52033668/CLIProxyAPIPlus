@@ -725,8 +725,8 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 	}
 	if includeReasoning {
 		rid := id
-		if strings.HasPrefix(rid, "resp_") {
-			rid = strings.TrimPrefix(rid, "resp_")
+		if after, ok := strings.CutPrefix(rid, "resp_"); ok {
+			rid = after
 		}
 		// Prefer summary_text from reasoning_content; encrypted_content is optional
 		reasoningItem := []byte(`{"id":"","type":"reasoning","encrypted_content":"","summary":[]}`)

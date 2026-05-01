@@ -90,10 +90,17 @@ func (s *oauthSessionStore) SetError(state, message string) {
 	s.purgeExpiredLocked(now)
 	session, ok := s.sessions[state]
 	if !ok {
-		return
+		// Create session if it doesn't exist to ensure error message is stored
+		session = oauthSession{
+			Provider:  "",
+			Status:    message,
+			CreatedAt: now,
+			ExpiresAt: now.Add(s.ttl),
+		}
+	} else {
+		session.Status = message
+		session.ExpiresAt = now.Add(s.ttl)
 	}
-	session.Status = message
-	session.ExpiresAt = now.Add(s.ttl)
 	s.sessions[state] = session
 }
 
@@ -158,9 +165,7 @@ func (s *oauthSessionStore) IsPending(state, provider string) bool {
 		return false
 	}
 	if session.Status != "" {
-		if !strings.EqualFold(session.Provider, "kiro") {
-			return false
-		}
+		// Allow special status prefixes for polling-based auth flows
 		if !strings.HasPrefix(session.Status, "device_code|") && !strings.HasPrefix(session.Status, "auth_url|") {
 			return false
 		}
@@ -249,9 +254,10 @@ type oauthCallbackFilePayload struct {
 	Code  string `json:"code"`
 	State string `json:"state"`
 	Error string `json:"error"`
+	Auth  string `json:"auth"`
 }
 
-func WriteOAuthCallbackFile(authDir, provider, state, code, errorMessage string) (string, error) {
+func WriteOAuthCallbackFile(authDir, provider, state, code, errorMessage, auth string) (string, error) {
 	if strings.TrimSpace(authDir) == "" {
 		return "", fmt.Errorf("auth dir is empty")
 	}
@@ -259,8 +265,10 @@ func WriteOAuthCallbackFile(authDir, provider, state, code, errorMessage string)
 	if err != nil {
 		return "", err
 	}
-	if err := ValidateOAuthState(state); err != nil {
-		return "", err
+	if canonicalProvider != "qoder" {
+		if err := ValidateOAuthState(state); err != nil {
+			return "", err
+		}
 	}
 
 	fileName := fmt.Sprintf(".oauth-%s-%s.oauth", canonicalProvider, state)
@@ -269,6 +277,7 @@ func WriteOAuthCallbackFile(authDir, provider, state, code, errorMessage string)
 		Code:  strings.TrimSpace(code),
 		State: strings.TrimSpace(state),
 		Error: strings.TrimSpace(errorMessage),
+		Auth:  strings.TrimSpace(auth),
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -281,12 +290,16 @@ func WriteOAuthCallbackFile(authDir, provider, state, code, errorMessage string)
 }
 
 func WriteOAuthCallbackFileForPendingSession(authDir, provider, state, code, errorMessage string) (string, error) {
+	return WriteOAuthCallbackFileForPendingSessionWithAuth(authDir, provider, state, code, errorMessage, "")
+}
+
+func WriteOAuthCallbackFileForPendingSessionWithAuth(authDir, provider, state, code, errorMessage, auth string) (string, error) {
 	canonicalProvider, err := NormalizeOAuthProvider(provider)
 	if err != nil {
 		return "", err
 	}
-	if !IsOAuthSessionPending(state, canonicalProvider) {
+	if canonicalProvider != "qoder" && !IsOAuthSessionPending(state, canonicalProvider) {
 		return "", errOAuthSessionNotPending
 	}
-	return WriteOAuthCallbackFile(authDir, canonicalProvider, state, code, errorMessage)
+	return WriteOAuthCallbackFile(authDir, canonicalProvider, state, code, errorMessage, auth)
 }

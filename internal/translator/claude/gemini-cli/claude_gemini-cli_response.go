@@ -28,7 +28,7 @@ func ConvertClaudeResponseToGeminiCLI(ctx context.Context, modelName string, ori
 	outputs := ConvertClaudeResponseToGemini(ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param)
 	// Wrap each converted response in a "response" object to match Gemini CLI API structure
 	newOutputs := make([][]byte, 0, len(outputs))
-	for i := 0; i < len(outputs); i++ {
+	for i := range outputs {
 		newOutputs = append(newOutputs, translatorcommon.WrapGeminiCLIResponse(outputs[i]))
 	}
 	return newOutputs
