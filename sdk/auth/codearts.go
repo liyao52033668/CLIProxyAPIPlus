@@ -61,6 +61,10 @@ func (a CodeArtsAuthenticator) Login(ctx context.Context, cfg *config.Config, op
 			Identifier: identifier,
 			Redirect:   redirect,
 		}
+		if redirect != "" {
+			http.Redirect(w, r, redirect, http.StatusTemporaryRedirect)
+			return
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write([]byte(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>CodeArts Login</title></head>` +
 			`<body style="display:flex;justify-content:center;align-items:center;height:100vh;` +
