@@ -298,7 +298,7 @@ type iFlowAPIKeyResponse struct {
 	Code    string       `json:"code"`
 	Message string       `json:"message"`
 	Data    iFlowKeyData `json:"data"`
-	Extra   interface{}  `json:"extra"`
+	Extra   any          `json:"extra"`
 }
 
 // iFlowKeyData contains the API key information

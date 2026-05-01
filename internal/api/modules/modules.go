@@ -77,7 +77,7 @@ type RouteModuleV2 interface {
 //	if err := modules.RegisterModule(ctx, ampModule); err != nil {
 //	    log.Errorf("Failed to register module: %v", err)
 //	}
-func RegisterModule(ctx Context, mod interface{}) error {
+func RegisterModule(ctx Context, mod any) error {
 	// Try V2 interface first (preferred)
 	if v2, ok := mod.(RouteModuleV2); ok {
 		return v2.Register(ctx)

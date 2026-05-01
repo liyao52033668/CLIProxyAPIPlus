@@ -258,11 +258,11 @@ func TestRateLimiter_ConcurrentAccess(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(numGoroutines)
 
-	for i := 0; i < numGoroutines; i++ {
+	for i := range numGoroutines {
 		go func(id int) {
 			defer wg.Done()
 			tokenKey := "token" + string(rune('a'+id%10))
-			for j := 0; j < numOperations; j++ {
+			for j := range numOperations {
 				switch j % 6 {
 				case 0:
 					rl.IsTokenAvailable(tokenKey)
@@ -295,7 +295,7 @@ func TestCalculateInterval_WithinRange(t *testing.T) {
 	minAllowed := 7 * time.Second
 	maxAllowed := 40 * time.Second
 
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		interval := rl.calculateInterval()
 		if interval < minAllowed || interval > maxAllowed {
 			t.Errorf("interval %v outside expected range [%v, %v]", interval, minAllowed, maxAllowed)

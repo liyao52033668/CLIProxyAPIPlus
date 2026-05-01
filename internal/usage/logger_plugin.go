@@ -6,6 +6,7 @@ package usage
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -260,9 +261,7 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 	}
 
 	result.RequestsByDay = make(map[string]int64, len(s.requestsByDay))
-	for k, v := range s.requestsByDay {
-		result.RequestsByDay[k] = v
-	}
+	maps.Copy(result.RequestsByDay, s.requestsByDay)
 
 	result.RequestsByHour = make(map[string]int64, len(s.requestsByHour))
 	for hour, v := range s.requestsByHour {
@@ -271,9 +270,7 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 	}
 
 	result.TokensByDay = make(map[string]int64, len(s.tokensByDay))
-	for k, v := range s.tokensByDay {
-		result.TokensByDay[k] = v
-	}
+	maps.Copy(result.TokensByDay, s.tokensByDay)
 
 	result.TokensByHour = make(map[string]int64, len(s.tokensByHour))
 	for hour, v := range s.tokensByHour {
@@ -356,10 +353,7 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 }
 
 func (s *RequestStatistics) recordImported(apiName, modelName string, stats *apiStats, detail RequestDetail) {
-	totalTokens := detail.Tokens.TotalTokens
-	if totalTokens < 0 {
-		totalTokens = 0
-	}
+	totalTokens := max(detail.Tokens.TotalTokens, 0)
 
 	s.totalRequests++
 	if detail.Failed {

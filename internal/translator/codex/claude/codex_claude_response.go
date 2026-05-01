@@ -418,7 +418,7 @@ func buildReverseMapFromClaudeOriginalShortToOriginal(original []byte) map[strin
 	}
 	var names []string
 	arr := tools.Array()
-	for i := 0; i < len(arr); i++ {
+	for i := range arr {
 		n := arr[i].Get("name").String()
 		if n != "" {
 			names = append(names, n)

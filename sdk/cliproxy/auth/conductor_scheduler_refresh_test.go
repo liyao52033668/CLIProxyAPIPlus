@@ -66,7 +66,6 @@ func TestManager_RefreshSchedulerEntry_RebuildsSupportedModelSetAfterModelRegist
 	}
 
 	for _, testCase := range testCases {
-		testCase := testCase
 		t.Run(testCase.name, func(t *testing.T) {
 			manager := NewManager(nil, &RoundRobinSelector{}, nil)
 			auth := &Auth{

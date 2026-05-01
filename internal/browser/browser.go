@@ -518,8 +518,8 @@ func IsAvailable() bool {
 //
 // Returns:
 //   - A map with platform-specific browser support information.
-func GetPlatformInfo() map[string]interface{} {
-	info := map[string]interface{}{
+func GetPlatformInfo() map[string]any {
+	info := map[string]any{
 		"os":        runtime.GOOS,
 		"arch":      runtime.GOARCH,
 		"available": IsAvailable(),

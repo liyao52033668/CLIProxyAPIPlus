@@ -465,7 +465,7 @@ func TestReverseProxy_MappedSecret_FallsBackToDefault(t *testing.T) {
 
 func TestReverseProxy_ErrorHandler(t *testing.T) {
 	// Point proxy to a non-routable address to trigger error
-	proxy, err := createReverseProxy("http://127.0.0.1:1", NewStaticSecretSource(""))
+	proxy, err := createReverseProxy("http://localhost:1", NewStaticSecretSource(""))
 	if err != nil {
 		t.Fatal(err)
 	}

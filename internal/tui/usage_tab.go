@@ -125,10 +125,7 @@ func (m usageTabModel) renderContent() string {
 	// ━━━ Overview Cards ━━━
 	cardWidth := 20
 	if m.width > 0 {
-		cardWidth = (m.width - 6) / 4
-		if cardWidth < 16 {
-			cardWidth = 16
-		}
+		cardWidth = max((m.width-6)/4, 16)
 	}
 	cardStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -391,10 +388,7 @@ func renderBarChart(data map[string]any, maxBarWidth int, barColor lipgloss.Colo
 	var sb strings.Builder
 
 	labelWidth := 12
-	barAvail := maxBarWidth - labelWidth - 12
-	if barAvail < 5 {
-		barAvail = 5
-	}
+	barAvail := max(maxBarWidth-labelWidth-12, 5)
 
 	for _, k := range keys {
 		v := getFloat(data, k)

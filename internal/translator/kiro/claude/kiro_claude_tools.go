@@ -96,7 +96,7 @@ func ParseEmbeddedToolCalls(text string, processedIDs map[string]bool) (string, 
 
 		// Repair and parse JSON
 		repairedJSON := RepairJSON(jsonStr)
-		var inputMap map[string]interface{}
+		var inputMap map[string]any
 		if err := json.Unmarshal([]byte(repairedJSON), &inputMap); err != nil {
 			log.Debugf("kiro: failed to parse embedded tool call JSON: %v, raw: %s", err, jsonStr)
 			continue
@@ -208,7 +208,7 @@ func RepairJSON(jsonString string) string {
 	}
 
 	// CONSERVATIVE STRATEGY: First try to parse directly
-	var testParse interface{}
+	var testParse any
 	if err := json.Unmarshal([]byte(str), &testParse); err == nil {
 		log.Debugf("kiro: repairJSON - JSON is already valid, returning unchanged")
 		return str
@@ -380,12 +380,12 @@ func escapeNewlinesInStrings(raw string) string {
 // ProcessToolUseEvent handles a toolUseEvent from the Kiro stream.
 // It accumulates input fragments and emits tool_use blocks when complete.
 // Returns events to emit and updated state.
-func ProcessToolUseEvent(event map[string]interface{}, currentToolUse *ToolUseState, processedIDs map[string]bool) ([]KiroToolUse, *ToolUseState) {
+func ProcessToolUseEvent(event map[string]any, currentToolUse *ToolUseState, processedIDs map[string]bool) ([]KiroToolUse, *ToolUseState) {
 	var toolUses []KiroToolUse
 
 	// Extract from nested toolUseEvent or direct format
 	tu := event
-	if nested, ok := event["toolUseEvent"].(map[string]interface{}); ok {
+	if nested, ok := event["toolUseEvent"].(map[string]any); ok {
 		tu = nested
 	}
 
@@ -398,13 +398,13 @@ func ProcessToolUseEvent(event map[string]interface{}, currentToolUse *ToolUseSt
 
 	// Get input - can be string (fragment) or object (complete)
 	var inputFragment string
-	var inputMap map[string]interface{}
+	var inputMap map[string]any
 
 	if inputRaw, ok := tu["input"]; ok {
 		switch v := inputRaw.(type) {
 		case string:
 			inputFragment = v
-		case map[string]interface{}:
+		case map[string]any:
 			inputMap = v
 		}
 	}
@@ -423,10 +423,10 @@ func ProcessToolUseEvent(event map[string]interface{}, currentToolUse *ToolUseSt
 					raw := currentToolUse.InputBuffer.String()
 					repaired := RepairJSON(raw)
 
-					var input map[string]interface{}
+					var input map[string]any
 					if err := json.Unmarshal([]byte(repaired), &input); err != nil {
 						log.Warnf("kiro: failed to parse interleaved tool input: %v, raw: %s", err, raw)
-						input = make(map[string]interface{})
+						input = make(map[string]any)
 					}
 					incomplete.Input = input
 				}
@@ -469,10 +469,10 @@ func ProcessToolUseEvent(event map[string]interface{}, currentToolUse *ToolUseSt
 
 		// Repair and parse the accumulated JSON
 		repairedJSON := RepairJSON(fullInput)
-		var finalInput map[string]interface{}
+		var finalInput map[string]any
 		if err := json.Unmarshal([]byte(repairedJSON), &finalInput); err != nil {
 			log.Warnf("kiro: failed to parse accumulated tool input: %v, raw: %s", err, fullInput)
-			finalInput = make(map[string]interface{})
+			finalInput = make(map[string]any)
 		}
 
 		// Detect truncation for all tools

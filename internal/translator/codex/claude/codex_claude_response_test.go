@@ -31,7 +31,7 @@ func TestConvertCodexResponseToClaude_StreamThinkingIncludesSignature(t *testing
 	stopFound := false
 
 	for _, out := range outputs {
-		for _, line := range strings.Split(string(out), "\n") {
+		for line := range strings.SplitSeq(string(out), "\n") {
 			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}
@@ -90,7 +90,7 @@ func TestConvertCodexResponseToClaude_StreamThinkingWithoutReasoningItemStillInc
 	signatureDeltaFound := false
 
 	for _, out := range outputs {
-		for _, line := range strings.Split(string(out), "\n") {
+		for line := range strings.SplitSeq(string(out), "\n") {
 			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}
@@ -141,7 +141,7 @@ func TestConvertCodexResponseToClaude_StreamThinkingFinalizesPendingBlockBeforeN
 	startCount := 0
 	stopCount := 0
 	for _, out := range outputs {
-		for _, line := range strings.Split(string(out), "\n") {
+		for line := range strings.SplitSeq(string(out), "\n") {
 			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}
@@ -186,7 +186,7 @@ func TestConvertCodexResponseToClaude_StreamThinkingRetainsSignatureAcrossMultip
 
 	signatureDeltaCount := 0
 	for _, out := range outputs {
-		for _, line := range strings.Split(string(out), "\n") {
+		for line := range strings.SplitSeq(string(out), "\n") {
 			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}
@@ -224,7 +224,7 @@ func TestConvertCodexResponseToClaude_StreamThinkingUsesEarlyCapturedSignatureWh
 
 	signatureDeltaCount := 0
 	for _, out := range outputs {
-		for _, line := range strings.Split(string(out), "\n") {
+		for line := range strings.SplitSeq(string(out), "\n") {
 			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}
@@ -299,7 +299,7 @@ func TestConvertCodexResponseToClaude_StreamEmptyOutputUsesOutputItemDoneMessage
 
 	foundText := false
 	for _, out := range outputs {
-		for _, line := range strings.Split(string(out), "\n") {
+		for line := range strings.SplitSeq(string(out), "\n") {
 			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}

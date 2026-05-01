@@ -330,8 +330,8 @@ func extractModelFromRequest(body []byte, c *gin.Context) string {
 	// Example: /publishers/google/models/gemini-3-pro-preview:streamGenerateContent
 	if path := c.Param("path"); path != "" {
 		// Look for /models/{model}:method pattern
-		if idx := strings.Index(path, "/models/"); idx >= 0 {
-			modelPart := path[idx+8:] // Skip "/models/"
+		if _, after, ok := strings.Cut(path, "/models/"); ok {
+			modelPart := after // Skip "/models/"
 			// Split by colon to get model name
 			if colonIdx := strings.Index(modelPart, ":"); colonIdx > 0 {
 				return modelPart[:colonIdx]

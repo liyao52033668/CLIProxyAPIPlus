@@ -1,6 +1,4 @@
 # Binaries
-cli-proxy-api
-cliproxy
 /server
 *.exe
 
@@ -36,6 +34,7 @@ CLAUDE.md
 GEMINI.md
 
 # Tooling metadata
+.trae/*
 .vscode/*
 .worktrees/
 .codex/*
@@ -59,6 +58,8 @@ _bmad-output/*
 # Opencode
 .beads/
 .opencode/
-.cli-proxy-api/
 .venv/
 *.bak
+
+
+

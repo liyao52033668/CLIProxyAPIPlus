@@ -4,6 +4,8 @@ WORKDIR /app
 
 COPY go.mod go.sum ./
 
+ENV GOPROXY=https://goproxy.cn,direct
+ENV GOSUMDB=sum.golang.google.cn
 RUN go mod download
 
 COPY . .
@@ -18,13 +20,18 @@ FROM alpine:3.22.0
 
 RUN apk add --no-cache tzdata
 
+ARG CNB_TOKEN
+ENV CNB_TOKEN=${CNB_TOKEN}
+
 RUN mkdir /CLIProxyAPI
 
-COPY --from=builder ./app/CLIProxyAPIPlus /CLIProxyAPI/CLIProxyAPIPlus
+COPY --from=builder /app/CLIProxyAPIPlus /CLIProxyAPI/CLIProxyAPIPlus
 
 COPY config.example.yaml /CLIProxyAPI/config.example.yaml
 
 WORKDIR /CLIProxyAPI
+
+VOLUME ["/CLIProxyAPI/data"]
 
 EXPOSE 8317
 

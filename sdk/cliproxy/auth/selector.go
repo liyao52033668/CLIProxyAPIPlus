@@ -1,3 +1,4 @@
+// Package auth provides authentication management, scheduling, and session handling for CLIProxyAPI.
 package auth
 
 import (
@@ -70,10 +71,7 @@ func (e *modelCooldownError) Error() string {
 	if e.provider != "" {
 		message = fmt.Sprintf("%s via provider %s", message, e.provider)
 	}
-	resetSeconds := int(math.Ceil(e.resetIn.Seconds()))
-	if resetSeconds < 0 {
-		resetSeconds = 0
-	}
+	resetSeconds := max(int(math.Ceil(e.resetIn.Seconds())), 0)
 	displayDuration := e.resetIn
 	if displayDuration > 0 && displayDuration < time.Second {
 		displayDuration = time.Second
@@ -105,10 +103,7 @@ func (e *modelCooldownError) StatusCode() int {
 func (e *modelCooldownError) Headers() http.Header {
 	headers := make(http.Header)
 	headers.Set("Content-Type", "application/json")
-	resetSeconds := int(math.Ceil(e.resetIn.Seconds()))
-	if resetSeconds < 0 {
-		resetSeconds = 0
-	}
+	resetSeconds := max(int(math.Ceil(e.resetIn.Seconds())), 0)
 	headers.Set("Retry-After", strconv.Itoa(resetSeconds))
 	return headers
 }
@@ -185,7 +180,7 @@ func preferCodexWebsocketAuths(ctx context.Context, provider string, available [
 	}
 
 	wsEnabled := make([]*Auth, 0, len(available))
-	for i := 0; i < len(available); i++ {
+	for i := range available {
 		candidate := available[i]
 		if authWebsocketsEnabled(candidate) {
 			wsEnabled = append(wsEnabled, candidate)
@@ -199,7 +194,7 @@ func preferCodexWebsocketAuths(ctx context.Context, provider string, available [
 
 func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (available map[int][]*Auth, cooldownCount int, earliest time.Time) {
 	available = make(map[int][]*Auth)
-	for i := 0; i < len(auths); i++ {
+	for i := range auths {
 		candidate := auths[i]
 		blocked, reason, next := isAuthBlockedForModel(candidate, model, now)
 		if !blocked {
@@ -229,10 +224,7 @@ func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]
 			if providerForError == "mixed" {
 				providerForError = ""
 			}
-			resetIn := earliest.Sub(now)
-			if resetIn < 0 {
-				resetIn = 0
-			}
+			resetIn := max(earliest.Sub(now), 0)
 			return nil, newModelCooldownError(model, providerForError, resetIn)
 		}
 		return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
@@ -480,7 +472,7 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 // that may be supported by different auth credentials, and to avoid cross-provider conflicts.
 func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	entry := selectorLogEntry(ctx)
-	primaryID, fallbackID := extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	primaryID, fallbackID := extractSessionIDs(opts.Headers, opts.OriginalRequest, nil)
 	if primaryID == "" {
 		entry.Debugf("session-affinity: no session ID extracted, falling back to default selector | provider=%s model=%s", provider, model)
 		return s.fallback.Pick(ctx, provider, model, opts, auths)
@@ -573,15 +565,15 @@ func (s *SessionAffinitySelector) InvalidateAuth(authID string) {
 //  3. metadata.user_id (non-Claude Code format)
 //  4. conversation_id field in request body
 //  5. Stable hash from first few messages content (fallback)
-func ExtractSessionID(headers http.Header, payload []byte, metadata map[string]any) string {
-	primary, _ := extractSessionIDs(headers, payload, metadata)
+func ExtractSessionID(headers http.Header, payload []byte, _ map[string]any) string {
+	primary, _ := extractSessionIDs(headers, payload, nil)
 	return primary
 }
 
 // extractSessionIDs returns (primaryID, fallbackID) for session affinity.
 // primaryID: full hash including assistant response (stable after first turn)
 // fallbackID: short hash without assistant (used to inherit binding from first turn)
-func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]any) (string, string) {
+func extractSessionIDs(headers http.Header, payload []byte, _ map[string]any) (string, string) {
 	// 1. metadata.user_id with Claude Code session format (highest priority)
 	if len(payload) > 0 {
 		userID := gjson.GetBytes(payload, "metadata.user_id").String()

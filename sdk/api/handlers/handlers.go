@@ -5,6 +5,7 @@ package handlers
 
 import (
 	"bytes"
+	context0 "context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,7 +23,6 @@ import (
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
-	"golang.org/x/net/context"
 )
 
 // ErrorResponse represents a standard error response format for the API.
@@ -57,38 +57,38 @@ type selectedAuthCallbackContextKey struct{}
 type executionSessionContextKey struct{}
 
 // WithPinnedAuthID returns a child context that requests execution on a specific auth ID.
-func WithPinnedAuthID(ctx context.Context, authID string) context.Context {
+func WithPinnedAuthID(ctx context0.Context, authID string) context0.Context {
 	authID = strings.TrimSpace(authID)
 	if authID == "" {
 		return ctx
 	}
 	if ctx == nil {
-		ctx = context.Background()
+		ctx = context0.Background()
 	}
-	return context.WithValue(ctx, pinnedAuthContextKey{}, authID)
+	return context0.WithValue(ctx, pinnedAuthContextKey{}, authID)
 }
 
 // WithSelectedAuthIDCallback returns a child context that receives the selected auth ID.
-func WithSelectedAuthIDCallback(ctx context.Context, callback func(string)) context.Context {
+func WithSelectedAuthIDCallback(ctx context0.Context, callback func(string)) context0.Context {
 	if callback == nil {
 		return ctx
 	}
 	if ctx == nil {
-		ctx = context.Background()
+		ctx = context0.Background()
 	}
-	return context.WithValue(ctx, selectedAuthCallbackContextKey{}, callback)
+	return context0.WithValue(ctx, selectedAuthCallbackContextKey{}, callback)
 }
 
 // WithExecutionSessionID returns a child context tagged with a long-lived execution session ID.
-func WithExecutionSessionID(ctx context.Context, sessionID string) context.Context {
+func WithExecutionSessionID(ctx context0.Context, sessionID string) context0.Context {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		return ctx
 	}
 	if ctx == nil {
-		ctx = context.Background()
+		ctx = context0.Background()
 	}
-	return context.WithValue(ctx, executionSessionContextKey{}, sessionID)
+	return context0.WithValue(ctx, executionSessionContextKey{}, sessionID)
 }
 
 // BuildErrorResponseBody builds an OpenAI-compatible JSON error response body.
@@ -136,7 +136,7 @@ func BuildErrorResponseBody(status int, errText string) []byte {
 		},
 	})
 	if err != nil {
-		return []byte(fmt.Sprintf(`{"error":{"message":%q,"type":"server_error","code":"internal_server_error"}}`, errText))
+		return fmt.Appendf(nil, `{"error":{"message":%q,"type":"server_error","code":"internal_server_error"}}`, errText)
 	}
 	return payload
 }
@@ -185,7 +185,7 @@ func PassthroughHeadersEnabled(cfg *config.SDKConfig) bool {
 	return cfg != nil && cfg.PassthroughHeaders
 }
 
-func requestExecutionMetadata(ctx context.Context) map[string]any {
+func requestExecutionMetadata(ctx context0.Context) map[string]any {
 	// Idempotency-Key is an optional client-supplied header used to correlate retries.
 	// Only include it if the client explicitly provides it.
 	key := ""
@@ -211,7 +211,7 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	return meta
 }
 
-func pinnedAuthIDFromContext(ctx context.Context) string {
+func pinnedAuthIDFromContext(ctx context0.Context) string {
 	if ctx == nil {
 		return ""
 	}
@@ -226,7 +226,7 @@ func pinnedAuthIDFromContext(ctx context.Context) string {
 	}
 }
 
-func selectedAuthIDCallbackFromContext(ctx context.Context) func(string) {
+func selectedAuthIDCallbackFromContext(ctx context0.Context) func(string) {
 	if ctx == nil {
 		return nil
 	}
@@ -237,7 +237,7 @@ func selectedAuthIDCallbackFromContext(ctx context.Context) func(string) {
 	return nil
 }
 
-func executionSessionIDFromContext(ctx context.Context) string {
+func executionSessionIDFromContext(ctx context0.Context) string {
 	if ctx == nil {
 		return ""
 	}
@@ -321,13 +321,13 @@ func (h *BaseAPIHandler) GetAlt(c *gin.Context) string {
 // Returns:
 //   - context.Context: The new context with cancellation and embedded values.
 //   - APIHandlerCancelFunc: A function to cancel the context and log the response.
-func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *gin.Context, ctx context.Context) (context.Context, APIHandlerCancelFunc) {
+func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *gin.Context, ctx context0.Context) (context0.Context, APIHandlerCancelFunc) {
 	parentCtx := ctx
 	if parentCtx == nil {
-		parentCtx = context.Background()
+		parentCtx = context0.Background()
 	}
 
-	var requestCtx context.Context
+	var requestCtx context0.Context
 	if c != nil && c.Request != nil {
 		requestCtx = c.Request.Context()
 	}
@@ -339,7 +339,7 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 			parentCtx = logging.WithRequestID(parentCtx, requestID)
 		}
 	}
-	newCtx, cancel := context.WithCancel(parentCtx)
+	newCtx, cancel := context0.WithCancel(parentCtx)
 	cancelCtx := newCtx
 	if requestCtx != nil && requestCtx != parentCtx {
 		go func() {
@@ -350,9 +350,9 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 			}
 		}()
 	}
-	newCtx = context.WithValue(newCtx, "gin", c)
-	newCtx = context.WithValue(newCtx, "handler", handler)
-	return newCtx, func(params ...interface{}) {
+	newCtx = context0.WithValue(newCtx, "gin", c)
+	newCtx = context0.WithValue(newCtx, "handler", handler)
+	return newCtx, func(params ...any) {
 		if h.Cfg.RequestLog && len(params) == 1 {
 			if existing, exists := c.Get("API_RESPONSE"); exists {
 				if existingBytes, ok := existing.([]byte); ok && len(bytes.TrimSpace(existingBytes)) > 0 {
@@ -395,7 +395,7 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 
 // StartNonStreamingKeepAlive emits blank lines every 5 seconds while waiting for a non-streaming response.
 // It returns a stop function that must be called before writing the final response.
-func (h *BaseAPIHandler) StartNonStreamingKeepAlive(c *gin.Context, ctx context.Context) func() {
+func (h *BaseAPIHandler) StartNonStreamingKeepAlive(c *gin.Context, ctx context0.Context) func() {
 	if h == nil || c == nil {
 		return func() {}
 	}
@@ -408,15 +408,13 @@ func (h *BaseAPIHandler) StartNonStreamingKeepAlive(c *gin.Context, ctx context.
 		return func() {}
 	}
 	if ctx == nil {
-		ctx = context.Background()
+		ctx = context0.Background()
 	}
 
 	stopChan := make(chan struct{})
 	var stopOnce sync.Once
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
@@ -430,7 +428,7 @@ func (h *BaseAPIHandler) StartNonStreamingKeepAlive(c *gin.Context, ctx context.
 				flusher.Flush()
 			}
 		}
-	}()
+	})
 
 	return func() {
 		stopOnce.Do(func() {
@@ -469,8 +467,8 @@ func appendAPIResponse(c *gin.Context, data []byte) {
 
 // ExecuteWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
-func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
-	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
+func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context0.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
+	providers, normalizedModel, isAuto, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
 		return nil, nil, errMsg
 	}
@@ -489,6 +487,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 		Alt:             alt,
 		OriginalRequest: rawJSON,
 		SourceFormat:    sdktranslator.FromString(handlerType),
+		IsAuto:          isAuto,
 	}
 	opts.Metadata = reqMeta
 	resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
@@ -516,8 +515,8 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 
 // ExecuteCountWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
-func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
-	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
+func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context0.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
+	providers, normalizedModel, isAuto, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
 		return nil, nil, errMsg
 	}
@@ -536,6 +535,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 		Alt:             alt,
 		OriginalRequest: rawJSON,
 		SourceFormat:    sdktranslator.FromString(handlerType),
+		IsAuto:          isAuto,
 	}
 	opts.Metadata = reqMeta
 	resp, err := h.AuthManager.ExecuteCount(ctx, providers, req, opts)
@@ -564,8 +564,8 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 // ExecuteStreamWithAuthManager executes a streaming request via the core auth manager.
 // This path is the only supported execution route.
 // The returned http.Header carries upstream response headers captured before streaming begins.
-func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
-	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
+func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context0.Context, handlerType, modelName string, rawJSON []byte, alt string) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
+	providers, normalizedModel, isAuto, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		errChan <- errMsg
@@ -587,6 +587,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		Alt:             alt,
 		OriginalRequest: rawJSON,
 		SourceFormat:    sdktranslator.FromString(handlerType),
+		IsAuto:          isAuto,
 	}
 	opts.Metadata = reqMeta
 	streamResult, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
@@ -739,7 +740,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 }
 
 func validateSSEDataJSON(chunk []byte) error {
-	for _, line := range bytes.Split(chunk, []byte("\n")) {
+	for line := range bytes.SplitSeq(chunk, []byte("\n")) {
 		line = bytes.TrimSpace(line)
 		if len(line) == 0 {
 			continue
@@ -779,18 +780,20 @@ func statusFromError(err error) int {
 	return 0
 }
 
-func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
+func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string, normalizedModel string, isAuto bool, err *interfaces.ErrorMessage) {
 	resolvedModelName := modelName
+	isAuto = false
 	initialSuffix := thinking.ParseSuffix(modelName)
 	if initialSuffix.ModelName == "auto" {
-		resolvedBase := util.ResolveAutoModel(initialSuffix.ModelName)
+		resolvedBase, autoFlag := util.ResolveAutoModel(initialSuffix.ModelName)
+		isAuto = autoFlag
 		if initialSuffix.HasSuffix {
 			resolvedModelName = fmt.Sprintf("%s(%s)", resolvedBase, initialSuffix.RawSuffix)
 		} else {
 			resolvedModelName = resolvedBase
 		}
 	} else {
-		resolvedModelName = util.ResolveAutoModel(modelName)
+		resolvedModelName, _ = util.ResolveAutoModel(modelName)
 	}
 
 	parsed := thinking.ParseSuffix(resolvedModelName)
@@ -807,12 +810,12 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	}
 
 	if len(providers) == 0 {
-		return nil, "", &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("unknown provider for model %s", modelName)}
+		return nil, "", false, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("unknown provider for model %s", modelName)}
 	}
 
 	// The thinking suffix is preserved in the model name itself, so no
 	// metadata-based configuration passing is needed.
-	return providers, resolvedModelName, nil
+	return providers, resolvedModelName, isAuto, nil
 }
 
 func cloneBytes(src []byte) []byte {
@@ -942,7 +945,7 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 	_, _ = c.Writer.Write(body)
 }
 
-func (h *BaseAPIHandler) LoggingAPIResponseError(ctx context.Context, err *interfaces.ErrorMessage) {
+func (h *BaseAPIHandler) LoggingAPIResponseError(ctx context0.Context, err *interfaces.ErrorMessage) {
 	if h.Cfg.RequestLog {
 		if ginContext, ok := ctx.Value("gin").(*gin.Context); ok {
 			if apiResponseErrors, isExist := ginContext.Get("API_RESPONSE_ERROR"); isExist {
@@ -960,4 +963,4 @@ func (h *BaseAPIHandler) LoggingAPIResponseError(ctx context.Context, err *inter
 
 // APIHandlerCancelFunc is a function type for canceling an API handler's context.
 // It can optionally accept parameters, which are used for logging the response.
-type APIHandlerCancelFunc func(params ...interface{})
+type APIHandlerCancelFunc func(params ...any)

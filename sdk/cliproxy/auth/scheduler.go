@@ -1,7 +1,10 @@
+// Package auth provides authentication management, scheduling, and session handling for CLIProxyAPI.
+// It includes round-robin and fill-first scheduling strategies, cooldown management, and OAuth support.
 package auth
 
 import (
 	"context"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -222,20 +225,6 @@ func (s *authScheduler) upsertAuth(auth *Auth) {
 	s.upsertAuthLocked(auth, time.Now())
 }
 
-// removeAuth deletes one auth from every scheduler shard that references it.
-func (s *authScheduler) removeAuth(authID string) {
-	if s == nil {
-		return
-	}
-	authID = strings.TrimSpace(authID)
-	if authID == "" {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.removeAuthLocked(authID)
-}
-
 // pickSingle returns the next auth for a single provider/model request using scheduler state.
 func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, error) {
 	if s == nil {
@@ -404,7 +393,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 	}
 
 	slot := startSlot
-	for offset := 0; offset < len(normalized); offset++ {
+	for offset := range normalized {
 		providerIndex := (startProviderIndex + offset) % len(normalized)
 		if weights[providerIndex] == 0 {
 			continue
@@ -453,10 +442,7 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 		return &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	if cooldownCount == total && !earliest.IsZero() {
-		resetIn := earliest.Sub(now)
-		if resetIn < 0 {
-			resetIn = 0
-		}
+		resetIn := max(earliest.Sub(now), 0)
 		return newModelCooldownError(model, "", resetIn)
 	}
 	return &Error{Code: "auth_unavailable", Message: "no auth available"}
@@ -496,12 +482,7 @@ func normalizeProviderKeys(providers []string) []string {
 
 // containsProvider reports whether provider is present in the normalized provider list.
 func containsProvider(providers []string, provider string) bool {
-	for _, candidate := range providers {
-		if candidate == provider {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(providers, provider)
 }
 
 // upsertAuthLocked updates one auth in-place while the scheduler mutex is held.
@@ -857,10 +838,7 @@ func (m *modelScheduler) unavailableErrorLocked(provider, model string, predicat
 		if providerForError == "mixed" {
 			providerForError = ""
 		}
-		resetIn := earliest.Sub(now)
-		if resetIn < 0 {
-			resetIn = 0
-		}
+		resetIn := max(earliest.Sub(now), 0)
 		return newModelCooldownError(model, providerForError, resetIn)
 	}
 	return &Error{Code: "auth_unavailable", Message: "no auth available"}

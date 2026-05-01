@@ -1,6 +1,8 @@
 // Package qoder provides OAuth2 authentication functionality for the Qoder provider.
 package qoder
 
+import "time"
+
 // Qoder login configuration
 const (
 	CallbackPort = 51122
@@ -8,7 +10,7 @@ const (
 	CenterBase   = "https://center.qoder.sh"
 	ChatBase     = "https://api3.qoder.sh"
 	OpenAPIBase  = "https://openapi.qoder.sh"
-	IDEVersion   = "0.14.2"
+	IDEVersion   = "0.1.43"
 	CosyVersion  = "1.0.0"
 	RedirectURI  = "qoder://aicoding.aicoding-agent/login-success"
 )
@@ -34,8 +36,17 @@ const (
 // Chat endpoint path
 const (
 	ChatPath       = "/algo/api/v2/service/pro/sse/agent_chat_generation"
-	ChatQueryExtra = "FetchKeys=llm_model_result&AgentId=agent_common"
+	ChatQueryExtra = "FetchKeys=llm_model_result&AgentId=agent_common&Encode=1"
 	ModelListPath  = "/algo/api/v2/model/list"
 	UserPlanPath   = "/algo/api/v2/user/plan"
 	UserStatusPath = "/api/v3/user/status"
+)
+
+// Polling configuration
+const (
+	PollBaseDelay        = 3 * time.Second
+	PollMaxDelay         = 30 * time.Second
+	PollBackoffMultiply  = 1.5
+	PollMaxAttempts      = 100
+	MaxConsecutiveErrors = 5
 )

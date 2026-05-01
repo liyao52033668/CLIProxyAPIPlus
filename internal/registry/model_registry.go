@@ -101,6 +101,8 @@ type ModelRegistration struct {
 	Providers map[string]int
 	// SuspendedClients tracks temporarily disabled clients keyed by client ID
 	SuspendedClients map[string]string
+	// SelectionCount tracks how many times this model has been selected
+	SelectionCount int64
 }
 
 // ModelRegistryHook provides optional callbacks for external integrations to track model list changes.
@@ -127,6 +129,24 @@ type ModelRegistry struct {
 	availableModelsCache map[string]availableModelsCacheEntry
 	// hook is an optional callback sink for model registration changes
 	hook ModelRegistryHook
+	// roundRobinIndex tracks the last selected model index for round-robin selection
+	roundRobinIndex int
+	// stickyState tracks per-handler-type sticky session state
+	stickyState map[string]*stickySessionState
+	// disabledAutoModels tracks temporarily disabled auto-resolved models.
+	// Format: "modelID:authID". Managed via config.yaml and Management API.
+	disabledAutoModels map[string]struct{}
+	// disabledPersistFunc is called to persist disabled auto models to config.
+	// If nil, no persistence is performed.
+	disabledPersistFunc func(models []string)
+}
+
+// stickySessionState tracks the sticky model for a handler type
+type stickySessionState struct {
+	ModelID      string // Current sticky model ID
+	IsAuto       bool   // Whether this was an auto resolution
+	Success      bool   // Whether the model is currently succeeding
+	SelectionIdx int    // Round-robin selection index when this sticky started
 }
 
 // Global model registry instance
@@ -143,6 +163,7 @@ func GetGlobalRegistry() *ModelRegistry {
 			clientProviders:      make(map[string]string),
 			availableModelsCache: make(map[string]availableModelsCacheEntry),
 			mutex:                &sync.RWMutex{},
+			disabledAutoModels:   make(map[string]struct{}),
 		}
 	})
 	return globalRegistry
@@ -324,10 +345,7 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 			if oldCount == 0 {
 				continue
 			}
-			toRemove := newCount
-			if oldCount < toRemove {
-				toRemove = oldCount
-			}
+			toRemove := min(oldCount, newCount)
 			if reg, ok := r.models[id]; ok && reg.Providers != nil {
 				if count, okProv := reg.Providers[oldProvider]; okProv {
 					if count <= toRemove {
@@ -346,7 +364,7 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 	// Apply removals first to keep counters accurate.
 	for _, id := range removed {
 		oldCount := oldCounts[id]
-		for i := 0; i < oldCount; i++ {
+		for range oldCount {
 			r.removeModelRegistration(clientID, id, oldProvider, now)
 		}
 	}
@@ -357,7 +375,7 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 			continue
 		}
 		overage := oldCount - newCount
-		for i := 0; i < overage; i++ {
+		for range overage {
 			r.removeModelRegistration(clientID, id, oldProvider, now)
 		}
 	}
@@ -370,7 +388,7 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 		}
 		model := newModels[id]
 		diff := newCount - oldCount
-		for i := 0; i < diff; i++ {
+		for range diff {
 			r.addModelRegistration(id, provider, model, now)
 		}
 	}
@@ -818,10 +836,7 @@ func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.
 			}
 		}
 
-		effectiveClients := availableClients - expiredClients - otherSuspended
-		if effectiveClients < 0 {
-			effectiveClients = 0
-		}
+		effectiveClients := max(availableClients-expiredClients-otherSuspended, 0)
 
 		if effectiveClients > 0 || (availableClients > 0 && (expiredClients > 0 || cooldownSuspended > 0) && otherSuspended == 0) {
 			model := r.convertModelToMap(registration.Info, handlerType)
@@ -976,10 +991,7 @@ func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelIn
 		}
 
 		availableClients := entry.count
-		effectiveClients := availableClients - expiredClients - otherSuspended
-		if effectiveClients < 0 {
-			effectiveClients = 0
-		}
+		effectiveClients := max(availableClients-expiredClients-otherSuspended, 0)
 
 		if effectiveClients > 0 || (availableClients > 0 && (expiredClients > 0 || cooldownSuspended > 0) && otherSuspended == 0) {
 			if entry.info != nil {
@@ -1004,7 +1016,10 @@ func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelIn
 func (r *ModelRegistry) GetModelCount(modelID string) int {
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
+	return r.getModelCountLocked(modelID)
+}
 
+func (r *ModelRegistry) getModelCountLocked(modelID string) int {
 	if registration, exists := r.models[modelID]; exists {
 		now := time.Now()
 
@@ -1264,8 +1279,8 @@ func (r *ModelRegistry) CleanupExpiredQuotas() {
 }
 
 // GetFirstAvailableModel returns the first available model for the given handler type.
-// It prioritizes models by their creation timestamp (newest first) and checks if they have
-// available clients that are not suspended or over quota.
+// It uses sticky session selection: once a model succeeds, it keeps being selected until failure.
+// Failed models are skipped until they recover.
 //
 // Parameters:
 //   - handlerType: The API handler type (e.g., "openai", "claude", "gemini")
@@ -1281,27 +1296,279 @@ func (r *ModelRegistry) GetFirstAvailableModel(handlerType string) (string, erro
 		return "", fmt.Errorf("no models available for handler type: %s", handlerType)
 	}
 
-	// Sort models by creation timestamp (newest first)
-	sort.Slice(models, func(i, j int) bool {
-		// Extract created timestamps from map
-		createdI, okI := models[i]["created"].(int64)
-		createdJ, okJ := models[j]["created"].(int64)
-		if !okI || !okJ {
-			return false
-		}
-		return createdI > createdJ
-	})
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
 
-	// Find the first model with available clients
-	for _, model := range models {
-		if modelID, ok := model["id"].(string); ok {
-			if count := r.GetModelCount(modelID); count > 0 {
-				return modelID, nil
-			}
+	// Initialize sticky state map if needed
+	if r.stickyState == nil {
+		r.stickyState = make(map[string]*stickySessionState)
+	}
+
+	// Get or create sticky state for this handler type
+	state, exists := r.stickyState[handlerType]
+	if !exists {
+		state = &stickySessionState{}
+		r.stickyState[handlerType] = state
+	}
+
+	// Check if current sticky model is still succeeding
+	if state.ModelID != "" && state.Success {
+		if count := r.getModelCountLocked(state.ModelID); count > 0 && !r.isModelDisabledForAnyAuthLocked(state.ModelID) {
+			r.incrementSelectionCountLocked(state.ModelID)
+			return state.ModelID, nil
+		}
+		// Sticky model no longer available or disabled, will switch
+		state.Success = false
+	}
+
+	// Find next available model starting from round-robin index
+	startIndex := r.roundRobinIndex
+	for attempt := 0; attempt < len(models); attempt++ {
+		index := (startIndex + attempt) % len(models)
+		model := models[index]
+		modelID, ok := model["id"].(string)
+		if !ok {
+			continue
+		}
+		if count := r.getModelCountLocked(modelID); count > 0 && !r.isModelDisabledForAnyAuthLocked(modelID) {
+			r.roundRobinIndex = (index + 1) % len(models)
+			state.ModelID = modelID
+			state.IsAuto = true
+			state.Success = true
+			state.SelectionIdx = r.roundRobinIndex
+			r.incrementSelectionCountLocked(modelID)
+			return modelID, nil
 		}
 	}
 
 	return "", fmt.Errorf("no available clients for any model in handler type: %s", handlerType)
+}
+
+// RecordModelResult records the result of a model execution.
+// This affects sticky session behavior for auto-resolved models only:
+// successful results keep the model sticky, failed results trigger model switching on next request.
+//
+// Parameters:
+//   - handlerType: The API handler type (e.g., "openai", "claude", "gemini")
+//   - modelID: The resolved model ID that was used
+//   - authID: The auth ID that was used for this execution
+//   - success: Whether the execution succeeded
+func (r *ModelRegistry) RecordModelResult(handlerType, modelID, authID string, success bool) {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+
+	if r.stickyState == nil {
+		return
+	}
+
+	state, exists := r.stickyState[handlerType]
+	if !exists || state.ModelID != modelID || !state.IsAuto {
+		return
+	}
+
+	if !success {
+		state.Success = false
+		log.Debugf("handler %s: auto model %s marked as failing, will switch on next auto-select", handlerType, modelID)
+		r.disableAutoModelLocked(modelID, authID)
+	} else {
+		r.enableAutoModelLocked(modelID, authID)
+	}
+}
+
+// DisableAutoModel adds a model to the disabled list, preventing it from being selected.
+// The model will be excluded from auto model selection until explicitly re-enabled.
+// Format: "modelID:authID"
+//
+// Parameters:
+//   - modelID: The model ID to disable
+//   - authID: The auth ID associated with this model
+func (r *ModelRegistry) DisableAutoModel(modelID, authID string) {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	r.disableAutoModelLocked(modelID, authID)
+	r.persistDisabledAutoModelsLocked()
+}
+
+func (r *ModelRegistry) disableAutoModelLocked(modelID, authID string) {
+	if r.disabledAutoModels == nil {
+		r.disabledAutoModels = make(map[string]struct{})
+	}
+	key := modelID + ":" + authID
+	r.disabledAutoModels[key] = struct{}{}
+	log.Debugf("auto model disabled: %s", key)
+}
+
+func (r *ModelRegistry) isModelDisabledForAnyAuthLocked(modelID string) bool {
+	if r.disabledAutoModels == nil || len(r.disabledAutoModels) == 0 {
+		return false
+	}
+	prefix := modelID + ":"
+	for key := range r.disabledAutoModels {
+		if strings.HasPrefix(key, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *ModelRegistry) enableAutoModelLocked(modelID, authID string) {
+	if r.disabledAutoModels == nil {
+		return
+	}
+	key := modelID + ":" + authID
+	if _, exists := r.disabledAutoModels[key]; exists {
+		delete(r.disabledAutoModels, key)
+		log.Debugf("auto model enabled: %s", key)
+		r.persistDisabledAutoModelsLocked()
+	}
+}
+
+func (r *ModelRegistry) persistDisabledAutoModelsLocked() {
+	if r.disabledPersistFunc == nil {
+		return
+	}
+	models := make([]string, 0, len(r.disabledAutoModels))
+	for key := range r.disabledAutoModels {
+		models = append(models, key)
+	}
+	r.disabledPersistFunc(models)
+}
+
+// SetDisabledPersistFunc sets the function to persist disabled auto models.
+func (r *ModelRegistry) SetDisabledPersistFunc(f func(models []string)) {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	r.disabledPersistFunc = f
+}
+
+// EnableAutoModel removes a model from the disabled list, allowing it to be selected again.
+// Format: "modelID:authID"
+//
+// Parameters:
+//   - modelID: The model ID to enable
+//   - authID: The auth ID associated with this model
+func (r *ModelRegistry) EnableAutoModel(modelID, authID string) {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	if r.disabledAutoModels == nil {
+		return
+	}
+	key := modelID + ":" + authID
+	delete(r.disabledAutoModels, key)
+	log.Debugf("auto model enabled: %s", key)
+	r.persistDisabledAutoModelsLocked()
+}
+
+// IsAutoModelDisabled checks if a model is currently disabled.
+//
+// Parameters:
+//   - modelID: The model ID to check
+//   - authID: The auth ID associated with this model
+//
+// Returns:
+//   - bool: True if the model is disabled, false otherwise
+func (r *ModelRegistry) IsAutoModelDisabled(modelID, authID string) bool {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+	if r.disabledAutoModels == nil {
+		return false
+	}
+	key := modelID + ":" + authID
+	_, disabled := r.disabledAutoModels[key]
+	return disabled
+}
+
+// GetDisabledAutoModels returns a list of all currently disabled auto models.
+//
+// Returns:
+//   - []string: List of disabled model keys in "modelID:authID" format
+func (r *ModelRegistry) GetDisabledAutoModels() []string {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+	if r.disabledAutoModels == nil || len(r.disabledAutoModels) == 0 {
+		return nil
+	}
+	result := make([]string, 0, len(r.disabledAutoModels))
+	for key := range r.disabledAutoModels {
+		result = append(result, key)
+	}
+	return result
+}
+
+// LoadDisabledAutoModels loads the disabled auto models list from config.
+// This replaces any existing disabled models with the ones from config.
+//
+// Parameters:
+//   - models: List of disabled model keys in "modelID:authID" format
+func (r *ModelRegistry) LoadDisabledAutoModels(models []string) {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	r.disabledAutoModels = make(map[string]struct{})
+	for _, key := range models {
+		if key != "" {
+			r.disabledAutoModels[key] = struct{}{}
+		}
+	}
+}
+
+func (r *ModelRegistry) incrementSelectionCount(modelID string) {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	r.incrementSelectionCountLocked(modelID)
+}
+
+func (r *ModelRegistry) incrementSelectionCountLocked(modelID string) {
+	if reg, ok := r.models[modelID]; ok && reg != nil {
+		reg.SelectionCount++
+	}
+}
+
+// GetModelSelectionCount returns the number of times a model has been selected.
+// Parameters:
+//   - modelID: The model ID to check
+//
+// Returns:
+//   - int64: The selection count
+func (r *ModelRegistry) GetModelSelectionCount(modelID string) int64 {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+	if reg, ok := r.models[modelID]; ok && reg != nil {
+		return reg.SelectionCount
+	}
+	return 0
+}
+
+// GetModelSelectionCounts returns selection counts for all models.
+// Parameters:
+//   - handlerType: The API handler type to filter models (empty for all)
+//
+// Returns:
+//   - map[string]int64: Map of model ID to selection count
+func (r *ModelRegistry) GetModelSelectionCounts(handlerType string) map[string]int64 {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	counts := make(map[string]int64)
+	if handlerType == "" {
+		for modelID, reg := range r.models {
+			if reg != nil {
+				counts[modelID] = reg.SelectionCount
+			}
+		}
+		return counts
+	}
+
+	models := r.GetAvailableModels(handlerType)
+	for _, model := range models {
+		modelID, ok := model["id"].(string)
+		if !ok {
+			continue
+		}
+		if reg, ok := r.models[modelID]; ok && reg != nil {
+			counts[modelID] = reg.SelectionCount
+		}
+	}
+	return counts
 }
 
 // GetModelsForClient returns the models registered for a specific client.

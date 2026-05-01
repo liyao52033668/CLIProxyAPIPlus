@@ -419,10 +419,7 @@ func (m oauthTabModel) renderRemoteMode() string {
 
 	// Wrap URL to fit terminal width
 	urlStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
-	maxURLWidth := m.width - 6
-	if maxURLWidth < 40 {
-		maxURLWidth = 40
-	}
+	maxURLWidth := max(m.width-6, 40)
 	wrappedURL := wrapText(m.authURL, maxURLWidth)
 	for _, line := range wrappedURL {
 		sb.WriteString("  " + urlStyle.Render(line) + "\n")

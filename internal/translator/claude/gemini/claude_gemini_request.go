@@ -63,7 +63,7 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	userID := fmt.Sprintf("user_%s_account_%s_session_%s", user, account, session)
 
 	// Base Claude message payload
-	out := []byte(fmt.Sprintf(`{"model":"","max_tokens":32000,"messages":[],"metadata":{"user_id":"%s"}}`, userID))
+	out := fmt.Appendf(nil, `{"model":"","max_tokens":32000,"messages":[],"metadata":{"user_id":"%s"}}`, userID)
 
 	root := gjson.ParseBytes(rawJSON)
 
@@ -73,7 +73,7 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 		const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 		var b strings.Builder
 		// 24 chars random suffix for uniqueness
-		for i := 0; i < 24; i++ {
+		for range 24 {
 			n, _ := rand.Int(rand.Reader, big.NewInt(int64(len(letters))))
 			b.WriteByte(letters[n.Int64()])
 		}
@@ -346,7 +346,7 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 
 	// Tools mapping: Gemini functionDeclarations -> Claude Code tools
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
-		var anthropicTools []interface{}
+		var anthropicTools []any
 
 		tools.ForEach(func(_, tool gjson.Result) bool {
 			if funcDecls := tool.Get("functionDeclarations"); funcDecls.Exists() && funcDecls.IsArray() {

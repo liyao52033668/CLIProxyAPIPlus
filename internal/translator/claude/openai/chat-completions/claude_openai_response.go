@@ -283,8 +283,8 @@ func mapAnthropicStopReasonToOpenAI(anthropicReason string) string {
 func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
 	chunks := make([][]byte, 0)
 
-	lines := bytes.Split(rawJSON, []byte("\n"))
-	for _, line := range lines {
+	lines := bytes.SplitSeq(rawJSON, []byte("\n"))
+	for line := range lines {
 		if !bytes.HasPrefix(line, dataTag) {
 			continue
 		}

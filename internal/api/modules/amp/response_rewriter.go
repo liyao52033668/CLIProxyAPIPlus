@@ -38,7 +38,7 @@ const maxBufferedResponseBytes = 2 * 1024 * 1024 // 2MB safety cap
 func looksLikeSSEChunk(data []byte) bool {
 	// Fallback detection: some upstreams may omit/lie about Content-Type, causing SSE to be buffered.
 	// We conservatively detect SSE by checking for "data:" / "event:" at the start of any line.
-	for _, line := range bytes.Split(data, []byte("\n")) {
+	for line := range bytes.SplitSeq(data, []byte("\n")) {
 		trimmed := bytes.TrimSpace(line)
 		if bytes.HasPrefix(trimmed, []byte("data:")) ||
 			bytes.HasPrefix(trimmed, []byte("event:")) {
@@ -257,8 +257,8 @@ func (rw *ResponseRewriter) rewriteStreamChunk(chunk []byte) []byte {
 		}
 
 		// Case 2: standalone "data:" line (no preceding event: in this chunk)
-		if bytes.HasPrefix(trimmed, []byte("data: ")) {
-			jsonData := bytes.TrimPrefix(trimmed, []byte("data: "))
+		if after, ok := bytes.CutPrefix(trimmed, []byte("data: ")); ok {
+			jsonData := after
 			if len(jsonData) > 0 && jsonData[0] == '{' {
 				rewritten := rw.rewriteStreamEvent(jsonData)
 				if rewritten != nil {
@@ -319,7 +319,7 @@ func SanitizeAmpRequestBody(body []byte) []byte {
 			continue
 		}
 
-		var keepBlocks []interface{}
+		var keepBlocks []any
 		contentModified := false
 
 		for _, block := range content.Array() {
@@ -347,7 +347,7 @@ func SanitizeAmpRequestBody(body []byte) []byte {
 			contentPath := fmt.Sprintf("messages.%d.content", msgIdx)
 			var err error
 			if len(keepBlocks) == 0 {
-				body, err = sjson.SetBytes(body, contentPath, []interface{}{})
+				body, err = sjson.SetBytes(body, contentPath, []any{})
 			} else {
 				body, err = sjson.SetBytes(body, contentPath, keepBlocks)
 			}

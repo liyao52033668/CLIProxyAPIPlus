@@ -1,6 +1,7 @@
 package diff
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -100,10 +101,8 @@ func TestSummarizeVertexModels(t *testing.T) {
 
 func expectContains(t *testing.T, list []string, target string) {
 	t.Helper()
-	for _, entry := range list {
-		if entry == target {
-			return
-		}
+	if slices.Contains(list, target) {
+		return
 	}
 	t.Fatalf("expected list to contain %q, got %#v", target, list)
 }

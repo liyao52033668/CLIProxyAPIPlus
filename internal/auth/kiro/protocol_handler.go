@@ -99,7 +99,7 @@ func (h *ProtocolHandler) Start(ctx context.Context) (int, error) {
 	portRange := []int{DefaultHandlerPort, DefaultHandlerPort + 1, DefaultHandlerPort + 2, DefaultHandlerPort + 3, DefaultHandlerPort + 4}
 
 	for _, port := range portRange {
-		listener, err = net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		listener, err = net.Listen("tcp", fmt.Sprintf("localhost:%d", port))
 		if err == nil {
 			break
 		}
@@ -346,9 +346,9 @@ fi
 CLI_OK=0
 for PORT in %d %d %d %d %d; do
     if [ -n "$ERROR" ]; then
-        curl -sf --connect-timeout 1 "http://127.0.0.1:$PORT/oauth/callback?error=$ERROR" && CLI_OK=1 && break
+        curl -sf --connect-timeout 1 "http://localhost:$PORT/oauth/callback?error=$ERROR" && CLI_OK=1 && break
     elif [ -n "$CODE" ] && [ -n "$STATE" ]; then
-        curl -sf --connect-timeout 1 "http://127.0.0.1:$PORT/oauth/callback?code=$CODE&state=$STATE" && CLI_OK=1 && break
+        curl -sf --connect-timeout 1 "http://localhost:$PORT/oauth/callback?code=$CODE&state=$STATE" && CLI_OK=1 && break
     fi
 done
 
@@ -448,7 +448,7 @@ $success = $false
 
 foreach ($port in $ports) {
     if ($success) { break }
-    $callbackUrl = "http://127.0.0.1:$port/oauth/callback"
+    $callbackUrl = "http://localhost:$port/oauth/callback"
     try {
         if ($errorParam) {
             $fullUrl = $callbackUrl + "?error=" + $errorParam
@@ -592,9 +592,9 @@ fi
 # Try multiple ports (default + dynamic range)
 for PORT in %d %d %d %d %d; do
     if [ -n "$ERROR" ]; then
-        /usr/bin/curl -sf --connect-timeout 1 "http://127.0.0.1:$PORT/oauth/callback?error=$ERROR" && exit 0
+        /usr/bin/curl -sf --connect-timeout 1 "http://localhost:$PORT/oauth/callback?error=$ERROR" && exit 0
     elif [ -n "$CODE" ] && [ -n "$STATE" ]; then
-        /usr/bin/curl -sf --connect-timeout 1 "http://127.0.0.1:$PORT/oauth/callback?code=$CODE&state=$STATE" && exit 0
+        /usr/bin/curl -sf --connect-timeout 1 "http://localhost:$PORT/oauth/callback?code=$CODE&state=$STATE" && exit 0
     fi
 done
 `, handlerPort, handlerPort+1, handlerPort+2, handlerPort+3, handlerPort+4)

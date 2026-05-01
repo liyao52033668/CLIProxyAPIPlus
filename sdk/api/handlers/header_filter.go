@@ -76,7 +76,7 @@ func FilterUpstreamHeaders(src http.Header) http.Header {
 func connectionScopedHeaders(src http.Header) map[string]struct{} {
 	scoped := make(map[string]struct{})
 	for _, rawValue := range src.Values("Connection") {
-		for _, token := range strings.Split(rawValue, ",") {
+		for token := range strings.SplitSeq(rawValue, ",") {
 			headerName := strings.TrimSpace(token)
 			if headerName == "" {
 				continue

@@ -6,6 +6,7 @@ package middleware
 import (
 	"bytes"
 	"io"
+	"maps"
 	"net/http"
 	"strings"
 	"time"
@@ -121,9 +122,7 @@ func captureRequestInfo(c *gin.Context, captureBody bool) (*RequestInfo, error) 
 
 	// Capture headers
 	headers := make(map[string][]string)
-	for key, values := range c.Request.Header {
-		headers[key] = values
-	}
+	maps.Copy(headers, c.Request.Header)
 
 	// Capture request body
 	var body []byte

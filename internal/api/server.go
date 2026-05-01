@@ -7,10 +7,10 @@ package api
 import (
 	"context"
 	"crypto/subtle"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -180,6 +180,9 @@ type Server struct {
 	keepAliveOnTimeout func()
 	keepAliveHeartbeat chan struct{}
 	keepAliveStop      chan struct{}
+
+	// codeArtsOAuthHandler handles CodeArts OAuth web login flow.
+	codeArtsOAuthHandler *codearts.OAuthWebHandler
 }
 
 // NewServer creates and initializes a new API server instance.
@@ -312,8 +315,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	log.Info("Kiro OAuth Web routes registered at /v0/oauth/kiro/*")
 
 	// === CLIProxyAPIPlus 扩展: 注册 CodeArts OAuth Web 路由 ===
-	codeArtsOAuthHandler := codearts.NewOAuthWebHandler(cfg)
-	codeArtsOAuthHandler.RegisterRoutes(engine)
+	s.codeArtsOAuthHandler = codearts.NewOAuthWebHandler(cfg)
+	s.codeArtsOAuthHandler.RegisterRoutes(engine)
+	s.mgmt.SetCodeArtsOAuthHandler(s.codeArtsOAuthHandler)
 	log.Info("CodeArts OAuth Web routes registered at /v0/oauth/codearts/*")
 
 	if optionState.keepAliveEnabled {
@@ -465,8 +469,35 @@ func (s *Server) setupRoutes() {
 		if errStr == "" {
 			errStr = c.Query("error_description")
 		}
+		authField := c.Query("auth")
 		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "kiro", state, code, errStr)
+			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSessionWithAuth(s.cfg.AuthDir, "kiro", state, code, errStr, authField)
+		}
+		c.Header("Content-Type", "text/html; charset=utf-8")
+		c.String(http.StatusOK, oauthCallbackSuccessHTML)
+	})
+
+	s.engine.GET("/forward", func(c *gin.Context) {
+		rawURL := c.Query("url")
+		// VBS double-encodes the URL, need to unquote first
+		rawURL, _ = url.QueryUnescape(rawURL)
+		prefix := "qoder://aicoding.aicoding-agent/login-success?"
+		if strings.HasPrefix(rawURL, prefix) {
+			qs := rawURL[len(prefix):]
+			parsed, errParse := url.ParseQuery(qs)
+			if errParse == nil {
+				state := parsed.Get("state")
+				token := parsed.Get("tokenString")
+				if token == "" {
+					token = parsed.Get("token")
+				}
+				authField := parsed.Get("auth")
+				errStr := parsed.Get("error")
+				if state != "" && (token != "" || errStr != "") {
+					// Write token/auth into the callback file using standard function
+					_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSessionWithAuth(s.cfg.AuthDir, "qoder", state, token, errStr, authField)
+				}
+			}
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
@@ -481,18 +512,8 @@ func (s *Server) setupRoutes() {
 		authField := c.Query("auth")
 		errStr := c.Query("error")
 		if state != "" && (token != "" || errStr != "") {
-			// Write token/auth into the callback file for the pending session
-			payload := map[string]string{
-				"token": token,
-				"auth":  authField,
-				"state": state,
-				"error": errStr,
-			}
-			payloadJSON, _ := json.Marshal(payload)
-			if managementHandlers.IsOAuthSessionPending(state, "qoder") {
-				waitFile := filepath.Join(s.cfg.AuthDir, fmt.Sprintf(".oauth-qoder-%s.oauth", state))
-				_ = os.WriteFile(waitFile, payloadJSON, 0o600)
-			}
+			// Write token/auth into the callback file using standard function
+			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSessionWithAuth(s.cfg.AuthDir, "qoder", state, token, errStr, authField)
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
@@ -583,6 +604,12 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/proxy-url", s.mgmt.PutProxyURL)
 		mgmt.PATCH("/proxy-url", s.mgmt.PutProxyURL)
 		mgmt.DELETE("/proxy-url", s.mgmt.DeleteProxyURL)
+
+		mgmt.GET("/auto-model-disabled", s.mgmt.GetDisabledAutoModels)
+		mgmt.PUT("/auto-model-disabled", s.mgmt.PutDisabledAutoModels)
+		mgmt.DELETE("/auto-model-disabled/:modelKey", s.mgmt.DeleteDisabledAutoModel)
+
+		mgmt.GET("/model-selection-counts", s.mgmt.GetModelSelectionCounts)
 
 		mgmt.POST("/api-call", s.mgmt.APICall)
 
@@ -702,19 +729,24 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/gitlab-auth-url", s.mgmt.RequestGitLabToken)
 		mgmt.POST("/gitlab-auth-url", s.mgmt.RequestGitLabPATToken)
 		mgmt.GET("/gemini-cli-auth-url", s.mgmt.RequestGeminiCLIToken)
-			mgmt.GET("/antigravity-auth-url", s.mgmt.RequestAntigravityToken)
-			mgmt.GET("/kilo-auth-url", s.mgmt.RequestKiloToken)
-			mgmt.GET("/kimi-auth-url", s.mgmt.RequestKimiToken)
-			mgmt.GET("/iflow-auth-url", s.mgmt.RequestIFlowToken)
-			mgmt.POST("/iflow-auth-url", s.mgmt.RequestIFlowCookieToken)
-			mgmt.GET("/kiro-auth-url", s.mgmt.RequestKiroToken)
-			mgmt.GET("/cursor-auth-url", s.mgmt.RequestCursorToken)
-			mgmt.GET("/github-auth-url", s.mgmt.RequestGitHubToken)
-			mgmt.GET("/qoder-auth-url", s.mgmt.RequestQoderToken)
-			mgmt.POST("/oauth-callback", s.mgmt.PostOAuthCallback)
-			mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
-		}
+		mgmt.GET("/antigravity-auth-url", s.mgmt.RequestAntigravityToken)
+		mgmt.GET("/kilo-auth-url", s.mgmt.RequestKiloToken)
+		mgmt.GET("/kimi-auth-url", s.mgmt.RequestKimiToken)
+		mgmt.GET("/iflow-auth-url", s.mgmt.RequestIFlowToken)
+		mgmt.POST("/iflow-auth-url", s.mgmt.RequestIFlowCookieToken)
+		mgmt.GET("/kiro-auth-url", s.mgmt.RequestKiroToken)
+		mgmt.GET("/cursor-auth-url", s.mgmt.RequestCursorToken)
+		mgmt.GET("/github-auth-url", s.mgmt.RequestGitHubToken)
+		mgmt.GET("/qoder-auth-url", s.mgmt.RequestQoderToken)
+		mgmt.GET("/codebuddy-auth-url", s.mgmt.RequestCodeBuddyToken)
+		mgmt.GET("/codebuddy-ai-auth-url", s.mgmt.RequestCodeBuddyAIToken)
+		mgmt.GET("/codearts-auth-url", s.mgmt.RequestCodeArtsToken)
+		mgmt.GET("/bt-auth-url", s.mgmt.RequestBTToken)
+		mgmt.POST("/bt-auth-url", s.mgmt.RequestBTToken)
+		mgmt.POST("/oauth-callback", s.mgmt.PostOAuthCallback)
+		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
 	}
+}
 
 func (s *Server) managementAvailabilityMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {

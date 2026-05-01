@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"strings"
@@ -95,9 +96,7 @@ func (h *GeminiCLIAPIHandler) CLIHandler(c *gin.Context) {
 			})
 			return
 		}
-		for key, value := range c.Request.Header {
-			req.Header[key] = value
-		}
+		maps.Copy(req.Header, c.Request.Header)
 
 		httpClient := util.SetProxy(h.Cfg, &http.Client{})
 
@@ -204,7 +203,8 @@ func (h *GeminiCLIAPIHandler) handleInternalGenerateContent(c *gin.Context, rawJ
 func (h *GeminiCLIAPIHandler) forwardCLIStream(c *gin.Context, flusher http.Flusher, alt string, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
 	var keepAliveInterval *time.Duration
 	if alt != "" {
-		keepAliveInterval = new(time.Duration(0))
+		keepAliveInterval = new(time.Duration)
+		*keepAliveInterval = 0
 	}
 
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{

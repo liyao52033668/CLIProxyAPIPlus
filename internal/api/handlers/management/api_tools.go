@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"strings"
@@ -104,12 +105,12 @@ type apiCallResponse struct {
 //
 // Example:
 //
-//	curl -sS -X POST "http://127.0.0.1:8317/v0/management/api-call" \
+//	curl -sS -X POST "http://localhost:8317/v0/management/api-call" \
 //	  -H "Authorization: Bearer <MANAGEMENT_KEY>" \
 //	  -H "Content-Type: application/json" \
 //	  -d '{"auth_index":"<AUTH_INDEX>","method":"GET","url":"https://api.example.com/v1/ping","header":{"Authorization":"Bearer $TOKEN$"}}'
 //
-//	curl -sS -X POST "http://127.0.0.1:8317/v0/management/api-call" \
+//	curl -sS -X POST "http://localhost:8317/v0/management/api-call" \
 //	  -H "Authorization: Bearer 831227" \
 //	  -H "Content-Type: application/json" \
 //	  -d '{"auth_index":"<AUTH_INDEX>","method":"POST","url":"https://api.example.com/v1/fetchAvailableModels","header":{"Authorization":"Bearer $TOKEN$","Content-Type":"application/json","User-Agent":"cliproxyapi"},"data":"{}"}'
@@ -567,9 +568,7 @@ func geminiOAuthMetadata(auth *coreauth.Auth) (map[string]any, func(map[string]a
 		if auth.Metadata == nil {
 			auth.Metadata = make(map[string]any)
 		}
-		for k, v := range fields {
-			auth.Metadata[k] = v
-		}
+		maps.Copy(auth.Metadata, fields)
 	}
 }
 
@@ -588,9 +587,7 @@ func cloneMap(in map[string]any) map[string]any {
 		return nil
 	}
 	out := make(map[string]any, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
+	maps.Copy(out, in)
 	return out
 }
 
@@ -605,9 +602,7 @@ func buildOAuthTokenMap(base map[string]any, tok *oauth2.Token) map[string]any {
 	if raw, errMarshal := json.Marshal(tok); errMarshal == nil {
 		var tokenMap map[string]any
 		if errUnmarshal := json.Unmarshal(raw, &tokenMap); errUnmarshal == nil {
-			for k, v := range tokenMap {
-				merged[k] = v
-			}
+			maps.Copy(merged, tokenMap)
 		}
 	}
 	return merged
@@ -958,16 +953,10 @@ type CopilotUsageResponse struct {
 	CanSignupForLimited   bool           `json:"can_signup_for_limited"`
 	ChatEnabled           bool           `json:"chat_enabled"`
 	CopilotPlan           string         `json:"copilot_plan"`
-	OrganizationLoginList []interface{}  `json:"organization_login_list"`
-	OrganizationList      []interface{}  `json:"organization_list"`
+	OrganizationLoginList []any          `json:"organization_login_list"`
+	OrganizationList      []any          `json:"organization_list"`
 	QuotaResetDate        string         `json:"quota_reset_date"`
 	QuotaSnapshots        QuotaSnapshots `json:"quota_snapshots"`
-}
-
-type copilotQuotaRequest struct {
-	AuthIndexSnake  *string `json:"auth_index"`
-	AuthIndexCamel  *string `json:"authIndex"`
-	AuthIndexPascal *string `json:"AuthIndex"`
 }
 
 // GetCopilotQuota fetches GitHub Copilot quota information from the /copilot_internal/user endpoint.
@@ -987,7 +976,7 @@ type copilotQuotaRequest struct {
 //
 // Example:
 //
-//	curl -sS -X GET "http://127.0.0.1:8317/v0/management/copilot-quota?auth_index=<AUTH_INDEX>" \
+//	curl -sS -X GET "http://localhost:8317/v0/management/copilot-quota?auth_index=<AUTH_INDEX>" \
 //	  -H "Authorization: Bearer <MANAGEMENT_KEY>"
 func (h *Handler) GetCopilotQuota(c *gin.Context) {
 	authIndex := strings.TrimSpace(c.Query("auth_index"))
@@ -1107,7 +1096,7 @@ func (h *Handler) enrichCopilotTokenResponse(ctx context.Context, response apiCa
 	}
 
 	// Parse the token response to check if it's enterprise (null limited_user_quotas)
-	var tokenResp map[string]interface{}
+	var tokenResp map[string]any
 	if err := json.Unmarshal([]byte(response.Body), &tokenResp); err != nil {
 		log.WithError(err).Debug("enrichCopilotTokenResponse: failed to parse copilot token response")
 		return response
@@ -1178,7 +1167,7 @@ func (h *Handler) enrichCopilotTokenResponse(ctx context.Context, response apiCa
 
 	// Check if this is an enterprise account by looking for quota_snapshots in the response
 	// Enterprise accounts have quota_snapshots, non-enterprise have limited_user_quotas
-	var quotaRaw map[string]interface{}
+	var quotaRaw map[string]any
 	if err := json.Unmarshal(quotaBody, &quotaRaw); err == nil {
 		if _, hasQuotaSnapshots := quotaRaw["quota_snapshots"]; hasQuotaSnapshots {
 			// Enterprise account - has quota_snapshots
@@ -1197,8 +1186,8 @@ func (h *Handler) enrichCopilotTokenResponse(ctx context.Context, response apiCa
 			var quotaSnapshots QuotaSnapshots
 
 			// Get monthly quotas (total entitlement) and limited_user_quotas (remaining)
-			monthlyQuotas, hasMonthly := quotaRaw["monthly_quotas"].(map[string]interface{})
-			limitedQuotas, hasLimited := quotaRaw["limited_user_quotas"].(map[string]interface{})
+			monthlyQuotas, hasMonthly := quotaRaw["monthly_quotas"].(map[string]any)
+			limitedQuotas, hasLimited := quotaRaw["limited_user_quotas"].(map[string]any)
 
 			// Process chat quota
 			if hasMonthly && hasLimited {

@@ -49,7 +49,7 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	userID := fmt.Sprintf("user_%s_account_%s_session_%s", user, account, session)
 
 	// Base Claude message payload
-	out := []byte(fmt.Sprintf(`{"model":"","max_tokens":32000,"messages":[],"metadata":{"user_id":"%s"}}`, userID))
+	out := fmt.Appendf(nil, `{"model":"","max_tokens":32000,"messages":[],"metadata":{"user_id":"%s"}}`, userID)
 
 	root := gjson.ParseBytes(rawJSON)
 
@@ -106,7 +106,7 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	genToolCallID := func() string {
 		const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 		var b strings.Builder
-		for i := 0; i < 24; i++ {
+		for range 24 {
 			n, _ := rand.Int(rand.Reader, big.NewInt(int64(len(letters))))
 			b.WriteByte(letters[n.Int64()])
 		}
@@ -209,8 +209,8 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 							}
 							if url != "" {
 								var contentPart []byte
-								if strings.HasPrefix(url, "data:") {
-									trimmed := strings.TrimPrefix(url, "data:")
+								if after, ok := strings.CutPrefix(url, "data:"); ok {
+									trimmed := after
 									mediaAndData := strings.SplitN(trimmed, ";base64,", 2)
 									mediaType := "application/octet-stream"
 									data := ""
@@ -242,8 +242,8 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 							if fileData != "" {
 								mediaType := "application/octet-stream"
 								data := fileData
-								if strings.HasPrefix(fileData, "data:") {
-									trimmed := strings.TrimPrefix(fileData, "data:")
+								if after, ok := strings.CutPrefix(fileData, "data:"); ok {
+									trimmed := after
 									mediaAndData := strings.SplitN(trimmed, ";base64,", 2)
 									if len(mediaAndData) == 2 {
 										if mediaAndData[0] != "" {

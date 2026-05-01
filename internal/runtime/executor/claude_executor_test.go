@@ -742,11 +742,11 @@ func TestApplyClaudeToolPrefix_ToolChoiceBuiltin(t *testing.T) {
 func TestApplyClaudeToolPrefix_KnownFallbackBuiltinsRemainUnprefixed(t *testing.T) {
 	for _, builtin := range []string{"web_search", "code_execution", "text_editor", "computer"} {
 		t.Run(builtin, func(t *testing.T) {
-			input := []byte(fmt.Sprintf(`{
+			input := fmt.Appendf(nil, `{
 				"tools":[{"name":"Read"}],
 				"tool_choice":{"type":"tool","name":%q},
 				"messages":[{"role":"assistant","content":[{"type":"tool_use","name":%q,"id":"toolu_1","input":{}},{"type":"tool_reference","tool_name":%q},{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"tool_reference","tool_name":%q}]}]}]
-			}`, builtin, builtin, builtin, builtin))
+			}`, builtin, builtin, builtin, builtin)
 			out := applyClaudeToolPrefix(input, "proxy_")
 
 			if got := gjson.GetBytes(out, "tool_choice.name").String(); got != builtin {
@@ -911,7 +911,7 @@ func TestClaudeExecutor_GeneratesNewUserIDByDefault(t *testing.T) {
 
 	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
 
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		if _, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
 			Model:   "claude-3-5-sonnet",
 			Payload: payload,

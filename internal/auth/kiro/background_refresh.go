@@ -99,9 +99,7 @@ func WithOnTokenRefreshed(callback func(tokenID string, tokenData *KiroTokenData
 }
 
 func (r *BackgroundRefresher) Start(ctx context.Context) {
-	r.wg.Add(1)
-	go func() {
-		defer r.wg.Done()
+	r.wg.Go(func() {
 		ticker := time.NewTicker(r.interval)
 		defer ticker.Stop()
 
@@ -117,7 +115,7 @@ func (r *BackgroundRefresher) Start(ctx context.Context) {
 				r.refreshBatch(ctx)
 			}
 		}
-	}()
+	})
 }
 
 func (r *BackgroundRefresher) Stop() {

@@ -2,6 +2,7 @@
 package qoder
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -60,12 +62,31 @@ func GeneratePKCE() (nonce, challenge, verifier string, err error) {
 
 // BuildAuthURL constructs the Qoder login URL for browser-based authentication.
 func BuildAuthURL(nonce, challenge, machineID string) string {
+	return BuildAuthURLWithRedirect(nonce, challenge, machineID, RedirectURI)
+}
+
+// BuildAuthURLWithRedirect constructs the Qoder login URL with a custom redirect URI.
+func BuildAuthURLWithRedirect(nonce, challenge, machineID, redirectURI string) string {
 	params := url.Values{}
 	params.Set("nonce", nonce)
 	params.Set("challenge", challenge)
 	params.Set("challenge_method", "S256")
-	params.Set("redirect_uri", RedirectURI)
+	params.Set("redirect_uri", redirectURI)
 	params.Set("machine_id", machineID)
+	return AuthBase + SelectAccountsPath + "?" + params.Encode()
+}
+
+// BuildAuthURLWithRedirectAndState constructs the Qoder login URL with a custom redirect URI and state.
+func BuildAuthURLWithRedirectAndState(nonce, challenge, machineID, redirectURI, state string) string {
+	params := url.Values{}
+	params.Set("nonce", nonce)
+	params.Set("challenge", challenge)
+	params.Set("challenge_method", "S256")
+	params.Set("redirect_uri", redirectURI)
+	params.Set("machine_id", machineID)
+	if state != "" {
+		params.Set("state", state)
+	}
 	return AuthBase + SelectAccountsPath + "?" + params.Encode()
 }
 
@@ -120,7 +141,7 @@ func DecodeAuthField(authStr string) (map[string]any, error) {
 		return nil, fmt.Errorf("qoder: empty auth field")
 	}
 
-	// Reverse custom alphabet to standard base64
+	// Reverse custom alphabet to standard base64, skipping unknown characters
 	var b64 strings.Builder
 	for _, c := range authStr {
 		ch := string(c)
@@ -130,8 +151,6 @@ func DecodeAuthField(authStr string) (map[string]any, error) {
 			idx := strings.Index(CustomAlphabet, ch)
 			if idx >= 0 {
 				b64.WriteByte(StdAlphabet[idx])
-			} else {
-				b64.WriteString(ch)
 			}
 		}
 	}
@@ -139,14 +158,14 @@ func DecodeAuthField(authStr string) (map[string]any, error) {
 	decoded := b64.String()
 
 	// Find the base64-encoded JSON payload starting with "eyJ"
-	eqPos := strings.Index(decoded, "=")
+	before, after, ok := strings.Cut(decoded, "=")
 	var head, tail string
-	if eqPos < 0 {
+	if !ok {
 		head = decoded
 		tail = ""
 	} else {
-		tail = decoded[:eqPos]
-		head = decoded[eqPos+1:]
+		tail = before
+		head = after
 	}
 
 	eyjPos := strings.Index(head, "eyJ")
@@ -187,11 +206,84 @@ func GenerateMachineID(hostname, macAddr, system, machine string) string {
 	encoded := base64.RawURLEncoding.EncodeToString(digest[:])
 	var parts []string
 	for i := 0; i < len(encoded); i += 22 {
-		end := i + 22
-		if end > len(encoded) {
-			end = len(encoded)
-		}
+		end := min(i+22, len(encoded))
 		parts = append(parts, encoded[i:end])
 	}
 	return strings.Join(parts, "-")
+}
+
+// PollResponse represents the response from the poll endpoint.
+type PollResponse struct {
+	Token  string `json:"token"`
+	Auth   string `json:"auth"`
+	Status string `json:"status"`
+	Error  string `json:"error"`
+}
+
+// PollForToken polls the Qoder device endpoint until authentication completes.
+func PollForToken(ctx context.Context, machineID, challenge string) (*PollResponse, error) {
+	delay := PollBaseDelay
+	consecutiveErrors := 0
+
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	for range PollMaxAttempts {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(delay):
+		}
+
+		params := url.Values{}
+		params.Set("machine_id", machineID)
+		params.Set("challenge", challenge)
+
+		reqURL := CenterBase + "/device/token?" + params.Encode()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("qoder poll: create request: %w", err)
+		}
+
+		resp, err := client.Do(req)
+		if err != nil {
+			consecutiveErrors++
+			if consecutiveErrors >= MaxConsecutiveErrors {
+				return nil, fmt.Errorf("qoder poll: too many consecutive errors: %w", err)
+			}
+			delay = min(time.Duration(float64(delay)*PollBackoffMultiply), PollMaxDelay)
+			continue
+		}
+
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusUnauthorized {
+			consecutiveErrors = 0
+			delay = min(time.Duration(float64(delay)*PollBackoffMultiply), PollMaxDelay)
+			continue
+		}
+
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			var pollResp PollResponse
+			if err := json.Unmarshal(body, &pollResp); err != nil {
+				return nil, fmt.Errorf("qoder poll: parse response: %w", err)
+			}
+			if pollResp.Status == "pending" {
+				consecutiveErrors = 0
+				delay = min(time.Duration(float64(delay)*PollBackoffMultiply), PollMaxDelay)
+				continue
+			}
+			if pollResp.Token != "" {
+				return &pollResp, nil
+			}
+			if pollResp.Error != "" {
+				return nil, fmt.Errorf("qoder poll: %s", pollResp.Error)
+			}
+			return nil, fmt.Errorf("qoder poll: unexpected response")
+		}
+
+		return nil, fmt.Errorf("qoder poll: request failed: status %d: %s", resp.StatusCode, string(body))
+	}
+
+	return nil, fmt.Errorf("qoder poll: max attempts reached")
 }

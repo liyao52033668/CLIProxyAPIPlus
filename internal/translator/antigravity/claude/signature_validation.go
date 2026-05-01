@@ -136,13 +136,13 @@ func ValidateClaudeBypassSignatures(inputRawJSON []byte) error {
 	}
 
 	messageResults := messages.Array()
-	for i := 0; i < len(messageResults); i++ {
+	for i := range messageResults {
 		contentResults := messageResults[i].Get("content")
 		if !contentResults.IsArray() {
 			continue
 		}
 		parts := contentResults.Array()
-		for j := 0; j < len(parts); j++ {
+		for j := range parts {
 			part := parts[j]
 			if part.Get("type").String() != "thinking" {
 				continue

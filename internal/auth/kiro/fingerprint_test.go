@@ -3,6 +3,7 @@ package kiro
 import (
 	"net/http"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -92,16 +93,10 @@ func TestBuildUserAgent(t *testing.T) {
 func TestGetFingerprint_OSVersionMatchesOSType(t *testing.T) {
 	fm := NewFingerprintManager()
 
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		fp := fm.GetFingerprint("token" + string(rune('a'+i)))
 		validVersions := osVersions[fp.OSType]
-		found := false
-		for _, v := range validVersions {
-			if v == fp.OSVersion {
-				found = true
-				break
-			}
-		}
+		found := slices.Contains(validVersions, fp.OSVersion)
 		if !found {
 			t.Errorf("OS version %s not valid for OS type %s", fp.OSVersion, fp.OSType)
 		}

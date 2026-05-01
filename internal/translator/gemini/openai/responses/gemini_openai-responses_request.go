@@ -213,8 +213,8 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 							if imageURL != "" {
 								mimeType := "application/octet-stream"
 								data := ""
-								if strings.HasPrefix(imageURL, "data:") {
-									trimmed := strings.TrimPrefix(imageURL, "data:")
+								if after, ok := strings.CutPrefix(imageURL, "data:"); ok {
+									trimmed := after
 									mediaAndData := strings.SplitN(trimmed, ";base64,", 2)
 									if len(mediaAndData) == 2 {
 										if mediaAndData[0] != "" {

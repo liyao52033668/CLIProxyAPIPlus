@@ -391,7 +391,7 @@ func TestFilterOrphanedToolResults_RemovesHistoryAndCurrentOrphans(t *testing.T)
 			AssistantResponseMessage: &KiroAssistantResponseMessage{
 				Content: "assistant",
 				ToolUses: []KiroToolUse{
-					{ToolUseID: "keep-1", Name: "Read", Input: map[string]interface{}{}},
+					{ToolUseID: "keep-1", Name: "Read", Input: map[string]any{}},
 				},
 			},
 		},

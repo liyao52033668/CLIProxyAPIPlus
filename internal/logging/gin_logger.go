@@ -112,7 +112,7 @@ func isAIAPIPath(path string) bool {
 // Returns:
 //   - gin.HandlerFunc: A middleware handler for panic recovery
 func GinLogrusRecovery() gin.HandlerFunc {
-	return gin.CustomRecovery(func(c *gin.Context, recovered interface{}) {
+	return gin.CustomRecovery(func(c *gin.Context, recovered any) {
 		if err, ok := recovered.(error); ok && errors.Is(err, http.ErrAbortHandler) {
 			// Let net/http handle ErrAbortHandler so the connection is aborted without noisy stack logs.
 			panic(http.ErrAbortHandler)

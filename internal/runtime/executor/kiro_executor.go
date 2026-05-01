@@ -700,7 +700,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 	endpointConfigs := getKiroEndpointConfigs(auth)
 	var last429Err error
 
-	for endpointIdx := 0; endpointIdx < len(endpointConfigs); endpointIdx++ {
+	for endpointIdx := range endpointConfigs {
 		endpointConfig := endpointConfigs[endpointIdx]
 		url := endpointConfig.URL
 		// Use this endpoint's compatible Origin (critical for avoiding 403 errors)
@@ -839,10 +839,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 					continue
 				} else if attempt < maxRetries {
 					// Fallback for other 5xx errors (500, 501, etc.)
-					backoff := time.Duration(1<<attempt) * time.Second
-					if backoff > 30*time.Second {
-						backoff = 30 * time.Second
-					}
+					backoff := min(time.Duration(1<<attempt)*time.Second, 30*time.Second)
 					log.Warnf("kiro: server error %d, retrying in %v (attempt %d/%d)", httpResp.StatusCode, backoff, attempt+1, maxRetries)
 					time.Sleep(backoff)
 					continue
@@ -1142,7 +1139,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 	endpointConfigs := getKiroEndpointConfigs(auth)
 	var last429Err error
 
-	for endpointIdx := 0; endpointIdx < len(endpointConfigs); endpointIdx++ {
+	for endpointIdx := range endpointConfigs {
 		endpointConfig := endpointConfigs[endpointIdx]
 		url := endpointConfig.URL
 		// Use this endpoint's compatible Origin (critical for avoiding 403 errors)
@@ -1268,10 +1265,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 					continue
 				} else if attempt < maxRetries {
 					// Fallback for other 5xx errors (500, 501, etc.)
-					backoff := time.Duration(1<<attempt) * time.Second
-					if backoff > 30*time.Second {
-						backoff = 30 * time.Second
-					}
+					backoff := min(time.Duration(1<<attempt)*time.Second, 30*time.Second)
 					log.Warnf("kiro: stream server error %d, retrying in %v (attempt %d/%d)", httpResp.StatusCode, backoff, attempt+1, maxRetries)
 					time.Sleep(backoff)
 					continue
@@ -1593,10 +1587,10 @@ func findRealThinkingEndTag(content string, alreadyInCodeBlock, alreadyInInlineC
 		// Real end tags don't have text immediately after on the same line
 		if len(textAfterEnd) > 0 && charAfterTag != '\n' && charAfterTag != 0 {
 			// Find the next newline
-			nextNewline := strings.Index(textAfterEnd, "\n")
+			before, _, ok := strings.Cut(textAfterEnd, "\n")
 			var textOnSameLine string
-			if nextNewline >= 0 {
-				textOnSameLine = textAfterEnd[:nextNewline]
+			if ok {
+				textOnSameLine = before
 			} else {
 				textOnSameLine = textAfterEnd
 			}
@@ -1610,8 +1604,8 @@ func findRealThinkingEndTag(content string, alreadyInCodeBlock, alreadyInInlineC
 
 		// Check 6: Is there another <thinking> tag after this </thinking>?
 		if strings.Contains(textAfterEnd, kirocommon.ThinkingStartTag) {
-			nextStartIdx := strings.Index(textAfterEnd, kirocommon.ThinkingStartTag)
-			textBeforeNextStart := textAfterEnd[:nextStartIdx]
+			before, _, _ := strings.Cut(textAfterEnd, kirocommon.ThinkingStartTag)
+			textBeforeNextStart := before
 			nextBacktickCount := strings.Count(textBeforeNextStart, "`")
 			nextFenceCount := strings.Count(textBeforeNextStart, "```")
 			nextAltFenceCount := strings.Count(textBeforeNextStart, "~~~")
@@ -1820,7 +1814,7 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 			continue
 		}
 
-		var event map[string]interface{}
+		var event map[string]any
 		if err := json.Unmarshal(payload, &event); err != nil {
 			log.Debugf("kiro: skipping malformed event: %v", err)
 			continue
@@ -1842,7 +1836,7 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 			errMsg := ""
 			if msg, ok := event["message"].(string); ok {
 				errMsg = msg
-			} else if errObj, ok := event["error"].(map[string]interface{}); ok {
+			} else if errObj, ok := event["error"].(map[string]any); ok {
 				if msg, ok := errObj["message"].(string); ok {
 					errMsg = msg
 				}
@@ -1870,7 +1864,7 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 			continue
 
 		case "assistantResponseEvent":
-			if assistantResp, ok := event["assistantResponseEvent"].(map[string]interface{}); ok {
+			if assistantResp, ok := event["assistantResponseEvent"].(map[string]any); ok {
 				if contentText, ok := assistantResp["content"].(string); ok {
 					content.WriteString(contentText)
 				}
@@ -1884,9 +1878,9 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 					log.Debugf("kiro: parseEventStream found stopReason in assistantResponseEvent: %s", stopReason)
 				}
 				// Extract tool uses from response
-				if toolUsesRaw, ok := assistantResp["toolUses"].([]interface{}); ok {
+				if toolUsesRaw, ok := assistantResp["toolUses"].([]any); ok {
 					for _, tuRaw := range toolUsesRaw {
-						if tu, ok := tuRaw.(map[string]interface{}); ok {
+						if tu, ok := tuRaw.(map[string]any); ok {
 							toolUseID := kirocommon.GetStringValue(tu, "toolUseId")
 							// Check for duplicate
 							if processedIDs[toolUseID] {
@@ -1899,7 +1893,7 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 								ToolUseID: toolUseID,
 								Name:      kirocommon.GetStringValue(tu, "name"),
 							}
-							if input, ok := tu["input"].(map[string]interface{}); ok {
+							if input, ok := tu["input"].(map[string]any); ok {
 								toolUse.Input = input
 							}
 							toolUses = append(toolUses, toolUse)
@@ -1912,9 +1906,9 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 				content.WriteString(contentText)
 			}
 			// Direct tool uses
-			if toolUsesRaw, ok := event["toolUses"].([]interface{}); ok {
+			if toolUsesRaw, ok := event["toolUses"].([]any); ok {
 				for _, tuRaw := range toolUsesRaw {
-					if tu, ok := tuRaw.(map[string]interface{}); ok {
+					if tu, ok := tuRaw.(map[string]any); ok {
 						toolUseID := kirocommon.GetStringValue(tu, "toolUseId")
 						// Check for duplicate
 						if processedIDs[toolUseID] {
@@ -1927,7 +1921,7 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 							ToolUseID: toolUseID,
 							Name:      kirocommon.GetStringValue(tu, "name"),
 						}
-						if input, ok := tu["input"].(map[string]interface{}); ok {
+						if input, ok := tu["input"].(map[string]any); ok {
 							toolUse.Input = input
 						}
 						toolUses = append(toolUses, toolUse)
@@ -1963,17 +1957,17 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 		case "messageMetadataEvent", "metadataEvent":
 			// Handle message metadata events which contain token counts
 			// Official format: { tokenUsage: { outputTokens, totalTokens, uncachedInputTokens, cacheReadInputTokens, cacheWriteInputTokens, contextUsagePercentage } }
-			var metadata map[string]interface{}
-			if m, ok := event["messageMetadataEvent"].(map[string]interface{}); ok {
+			var metadata map[string]any
+			if m, ok := event["messageMetadataEvent"].(map[string]any); ok {
 				metadata = m
-			} else if m, ok := event["metadataEvent"].(map[string]interface{}); ok {
+			} else if m, ok := event["metadataEvent"].(map[string]any); ok {
 				metadata = m
 			} else {
 				metadata = event // event itself might be the metadata
 			}
 
 			// Check for nested tokenUsage object (official format)
-			if tokenUsage, ok := metadata["tokenUsage"].(map[string]interface{}); ok {
+			if tokenUsage, ok := metadata["tokenUsage"].(map[string]any); ok {
 				// outputTokens - precise output token count
 				if outputTokens, ok := tokenUsage["outputTokens"].(float64); ok {
 					usageInfo.OutputTokens = int64(outputTokens)
@@ -2041,7 +2035,7 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 				log.Debugf("kiro: parseEventStream found totalTokens in usageEvent: %d", usageInfo.TotalTokens)
 			}
 			// Also check nested usage object
-			if usageObj, ok := event["usage"].(map[string]interface{}); ok {
+			if usageObj, ok := event["usage"].(map[string]any); ok {
 				if inputTokens, ok := usageObj["input_tokens"].(float64); ok {
 					usageInfo.InputTokens = int64(inputTokens)
 				} else if inputTokens, ok := usageObj["prompt_tokens"].(float64); ok {
@@ -2061,7 +2055,7 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 
 		case "metricsEvent":
 			// Handle metrics events which may contain usage data
-			if metrics, ok := event["metricsEvent"].(map[string]interface{}); ok {
+			if metrics, ok := event["metricsEvent"].(map[string]any); ok {
 				if inputTokens, ok := metrics["inputTokens"].(float64); ok {
 					usageInfo.InputTokens = int64(inputTokens)
 				}
@@ -2075,7 +2069,7 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 		case "meteringEvent":
 			// Handle metering events from Kiro API (usage billing information)
 			// Official format: { unit: string, unitPlural: string, usage: number }
-			if metering, ok := event["meteringEvent"].(map[string]interface{}); ok {
+			if metering, ok := event["meteringEvent"].(map[string]any); ok {
 				unit := ""
 				if u, ok := metering["unit"].(string); ok {
 					unit = u
@@ -2105,7 +2099,7 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 		case "contextUsageEvent":
 			// Handle context usage events from Kiro API
 			// Format: {"contextUsageEvent": {"contextUsagePercentage": 0.53}}
-			if ctxUsage, ok := event["contextUsageEvent"].(map[string]interface{}); ok {
+			if ctxUsage, ok := event["contextUsageEvent"].(map[string]any); ok {
 				if ctxPct, ok := ctxUsage["contextUsagePercentage"].(float64); ok {
 					upstreamContextPercentage = ctxPct
 					log.Debugf("kiro: parseEventStream received contextUsageEvent: %.2f%%", ctxPct*100)
@@ -2126,14 +2120,14 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 			// Try to extract error message from various formats
 			if msg, ok := event["message"].(string); ok {
 				errMsg = msg
-			} else if errObj, ok := event[eventType].(map[string]interface{}); ok {
+			} else if errObj, ok := event[eventType].(map[string]any); ok {
 				if msg, ok := errObj["message"].(string); ok {
 					errMsg = msg
 				}
 				if t, ok := errObj["type"].(string); ok {
 					errType = t
 				}
-			} else if errObj, ok := event["error"].(map[string]interface{}); ok {
+			} else if errObj, ok := event["error"].(map[string]any); ok {
 				if msg, ok := errObj["message"].(string); ok {
 					errMsg = msg
 				}
@@ -2186,7 +2180,7 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 
 		// Check for usage object in any event (OpenAI format)
 		if usageInfo.InputTokens == 0 || usageInfo.OutputTokens == 0 {
-			if usageObj, ok := event["usage"].(map[string]interface{}); ok {
+			if usageObj, ok := event["usage"].(map[string]any); ok {
 				if usageInfo.InputTokens == 0 {
 					if inputTokens, ok := usageObj["input_tokens"].(float64); ok {
 						usageInfo.InputTokens = int64(inputTokens)
@@ -2212,7 +2206,7 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 		}
 
 		// Also check nested supplementaryWebLinksEvent
-		if usageEvent, ok := event["supplementaryWebLinksEvent"].(map[string]interface{}); ok {
+		if usageEvent, ok := event["supplementaryWebLinksEvent"].(map[string]any); ok {
 			if inputTokens, ok := usageEvent["inputTokens"].(float64); ok {
 				usageInfo.InputTokens = int64(inputTokens)
 			}
@@ -2567,10 +2561,10 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 				log.Warnf("kiro: flushing incomplete tool use at EOF: %s (ID: %s)", currentToolUse.Name, currentToolUse.ToolUseID)
 				fullInput := currentToolUse.InputBuffer.String()
 				repairedJSON := kiroclaude.RepairJSON(fullInput)
-				var finalInput map[string]interface{}
+				var finalInput map[string]any
 				if err := json.Unmarshal([]byte(repairedJSON), &finalInput); err != nil {
 					log.Warnf("kiro: failed to parse incomplete tool input at EOF: %v", err)
-					finalInput = make(map[string]interface{})
+					finalInput = make(map[string]any)
 				}
 
 				processedIDs[currentToolUse.ToolUseID] = true
@@ -2616,7 +2610,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 		}
 		appendAPIResponseChunk(ctx, e.cfg, payload)
 
-		var event map[string]interface{}
+		var event map[string]any
 		if err := json.Unmarshal(payload, &event); err != nil {
 			log.Warnf("kiro: failed to unmarshal event payload: %v, raw: %s", err, string(payload))
 			continue
@@ -2639,7 +2633,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 			errMsg := ""
 			if msg, ok := event["message"].(string); ok {
 				errMsg = msg
-			} else if errObj, ok := event["error"].(map[string]interface{}); ok {
+			} else if errObj, ok := event["error"].(map[string]any); ok {
 				if msg, ok := errObj["message"].(string); ok {
 					errMsg = msg
 				}
@@ -2690,7 +2684,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 		case "meteringEvent":
 			// Handle metering events from Kiro API (usage billing information)
 			// Official format: { unit: string, unitPlural: string, usage: number }
-			if metering, ok := event["meteringEvent"].(map[string]interface{}); ok {
+			if metering, ok := event["meteringEvent"].(map[string]any); ok {
 				unit := ""
 				if u, ok := metering["unit"].(string); ok {
 					unit = u
@@ -2716,7 +2710,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 		case "contextUsageEvent":
 			// Handle context usage events from Kiro API
 			// Format: {"contextUsageEvent": {"contextUsagePercentage": 0.53}}
-			if ctxUsage, ok := event["contextUsageEvent"].(map[string]interface{}); ok {
+			if ctxUsage, ok := event["contextUsageEvent"].(map[string]any); ok {
 				if ctxPct, ok := ctxUsage["contextUsagePercentage"].(float64); ok {
 					upstreamContextPercentage = ctxPct
 					log.Debugf("kiro: streamToChannel received contextUsageEvent: %.2f%%", ctxPct*100)
@@ -2737,14 +2731,14 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 			// Try to extract error message from various formats
 			if msg, ok := event["message"].(string); ok {
 				errMsg = msg
-			} else if errObj, ok := event[eventType].(map[string]interface{}); ok {
+			} else if errObj, ok := event[eventType].(map[string]any); ok {
 				if msg, ok := errObj["message"].(string); ok {
 					errMsg = msg
 				}
 				if t, ok := errObj["type"].(string); ok {
 					errType = t
 				}
-			} else if errObj, ok := event["error"].(map[string]interface{}); ok {
+			} else if errObj, ok := event["error"].(map[string]any); ok {
 				if msg, ok := errObj["message"].(string); ok {
 					errMsg = msg
 				}
@@ -2765,7 +2759,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 			errMsg := ""
 			if msg, ok := event["message"].(string); ok {
 				errMsg = msg
-			} else if stateEvent, ok := event["invalidStateEvent"].(map[string]interface{}); ok {
+			} else if stateEvent, ok := event["invalidStateEvent"].(map[string]any); ok {
 				if msg, ok := stateEvent["message"].(string); ok {
 					errMsg = msg
 				}
@@ -2806,7 +2800,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 			}
 
 			// Check for usage object in unknown events (OpenAI/Claude format)
-			if usageObj, ok := event["usage"].(map[string]interface{}); ok {
+			if usageObj, ok := event["usage"].(map[string]any); ok {
 				if inputTokens, ok := usageObj["input_tokens"].(float64); ok {
 					totalUsage.InputTokens = int64(inputTokens)
 					hasUpstreamUsage = true
@@ -2835,9 +2829,9 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 
 		case "assistantResponseEvent":
 			var contentDelta string
-			var toolUses []map[string]interface{}
+			var toolUses []map[string]any
 
-			if assistantResp, ok := event["assistantResponseEvent"].(map[string]interface{}); ok {
+			if assistantResp, ok := event["assistantResponseEvent"].(map[string]any); ok {
 				if c, ok := assistantResp["content"].(string); ok {
 					contentDelta = c
 				}
@@ -2851,9 +2845,9 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 					log.Debugf("kiro: streamToChannel found stopReason in assistantResponseEvent: %s", upstreamStopReason)
 				}
 				// Extract tool uses from response
-				if tus, ok := assistantResp["toolUses"].([]interface{}); ok {
+				if tus, ok := assistantResp["toolUses"].([]any); ok {
 					for _, tuRaw := range tus {
-						if tu, ok := tuRaw.(map[string]interface{}); ok {
+						if tu, ok := tuRaw.(map[string]any); ok {
 							toolUses = append(toolUses, tu)
 						}
 					}
@@ -2865,9 +2859,9 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 				}
 			}
 			// Direct tool uses
-			if tus, ok := event["toolUses"].([]interface{}); ok {
+			if tus, ok := event["toolUses"].([]any); ok {
 				for _, tuRaw := range tus {
-					if tu, ok := tuRaw.(map[string]interface{}); ok {
+					if tu, ok := tuRaw.(map[string]any); ok {
 						toolUses = append(toolUses, tu)
 					}
 				}
@@ -3144,7 +3138,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 				}
 
 				// Send input_json_delta with the tool input
-				if input, ok := tu["input"].(map[string]interface{}); ok {
+				if input, ok := tu["input"].(map[string]any); ok {
 					inputJSON, err := json.Marshal(input)
 					if err != nil {
 						log.Debugf("kiro: failed to marshal tool input: %v", err)
@@ -3173,7 +3167,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 			var thinkingText string
 			var signature string
 
-			if re, ok := event["reasoningContentEvent"].(map[string]interface{}); ok {
+			if re, ok := event["reasoningContentEvent"].(map[string]any); ok {
 				if text, ok := re["text"].(string); ok {
 					thinkingText = text
 				}
@@ -3299,17 +3293,17 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 		case "messageMetadataEvent", "metadataEvent":
 			// Handle message metadata events which contain token counts
 			// Official format: { tokenUsage: { outputTokens, totalTokens, uncachedInputTokens, cacheReadInputTokens, cacheWriteInputTokens, contextUsagePercentage } }
-			var metadata map[string]interface{}
-			if m, ok := event["messageMetadataEvent"].(map[string]interface{}); ok {
+			var metadata map[string]any
+			if m, ok := event["messageMetadataEvent"].(map[string]any); ok {
 				metadata = m
-			} else if m, ok := event["metadataEvent"].(map[string]interface{}); ok {
+			} else if m, ok := event["metadataEvent"].(map[string]any); ok {
 				metadata = m
 			} else {
 				metadata = event // event itself might be the metadata
 			}
 
 			// Check for nested tokenUsage object (official format)
-			if tokenUsage, ok := metadata["tokenUsage"].(map[string]interface{}); ok {
+			if tokenUsage, ok := metadata["tokenUsage"].(map[string]any); ok {
 				// outputTokens - precise output token count
 				if outputTokens, ok := tokenUsage["outputTokens"].(float64); ok {
 					totalUsage.OutputTokens = int64(outputTokens)
@@ -3382,7 +3376,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 				log.Debugf("kiro: streamToChannel found totalTokens in usageEvent: %d", totalUsage.TotalTokens)
 			}
 			// Also check nested usage object
-			if usageObj, ok := event["usage"].(map[string]interface{}); ok {
+			if usageObj, ok := event["usage"].(map[string]any); ok {
 				if inputTokens, ok := usageObj["input_tokens"].(float64); ok {
 					totalUsage.InputTokens = int64(inputTokens)
 				} else if inputTokens, ok := usageObj["prompt_tokens"].(float64); ok {
@@ -3402,7 +3396,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 
 		case "metricsEvent":
 			// Handle metrics events which may contain usage data
-			if metrics, ok := event["metricsEvent"].(map[string]interface{}); ok {
+			if metrics, ok := event["metricsEvent"].(map[string]any); ok {
 				if inputTokens, ok := metrics["inputTokens"].(float64); ok {
 					totalUsage.InputTokens = int64(inputTokens)
 				}
@@ -3415,7 +3409,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 		}
 
 		// Check nested usage event
-		if usageEvent, ok := event["supplementaryWebLinksEvent"].(map[string]interface{}); ok {
+		if usageEvent, ok := event["supplementaryWebLinksEvent"].(map[string]any); ok {
 			if inputTokens, ok := usageEvent["inputTokens"].(float64); ok {
 				totalUsage.InputTokens = int64(inputTokens)
 			}
@@ -3440,7 +3434,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 
 		// Check for usage object in any event (OpenAI format)
 		if totalUsage.InputTokens == 0 || totalUsage.OutputTokens == 0 {
-			if usageObj, ok := event["usage"].(map[string]interface{}); ok {
+			if usageObj, ok := event["usage"].(map[string]any); ok {
 				if totalUsage.InputTokens == 0 {
 					if inputTokens, ok := usageObj["input_tokens"].(float64); ok {
 						totalUsage.InputTokens = int64(inputTokens)
@@ -3584,7 +3578,7 @@ func (e *KiroExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth,
 			estimatedTokens = 1
 		}
 		return cliproxyexecutor.Response{
-			Payload: []byte(fmt.Sprintf(`{"count":%d}`, estimatedTokens)),
+			Payload: fmt.Appendf(nil, `{"count":%d}`, estimatedTokens),
 		}, nil
 	}
 
@@ -3611,7 +3605,7 @@ func (e *KiroExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth,
 	}
 
 	return cliproxyexecutor.Response{
-		Payload: []byte(fmt.Sprintf(`{"count":%d}`, totalTokens)),
+		Payload: fmt.Appendf(nil, `{"count":%d}`, totalTokens),
 	}, nil
 }
 
@@ -4205,10 +4199,7 @@ func (h *webSearchHandler) callMcpAPI(request *kiroclaude.McpRequest) (*kiroclau
 	var lastErr error
 	for attempt := 0; attempt <= mcpMaxRetries; attempt++ {
 		if attempt > 0 {
-			backoff := time.Duration(1<<attempt) * time.Second
-			if backoff > 10*time.Second {
-				backoff = 10 * time.Second
-			}
+			backoff := min(time.Duration(1<<attempt)*time.Second, 10*time.Second)
 			log.Warnf("kiro/websearch: MCP retry %d/%d after %v (last error: %v)", attempt, mcpMaxRetries, backoff, lastErr)
 			select {
 			case <-h.ctx.Done():
@@ -4381,7 +4372,7 @@ func (e *KiroExecutor) handleWebSearchStream(
 		// Generate toolUseId for the first iteration (Claude Code already decided to search)
 		currentToolUseId := fmt.Sprintf("srvtoolu_%s", kiroclaude.GenerateToolUseID())
 
-		for iteration := 0; iteration < maxWebSearchIterations; iteration++ {
+		for iteration := range maxWebSearchIterations {
 			log.Infof("kiro/websearch: search iteration %d/%d",
 				iteration+1, maxWebSearchIterations)
 

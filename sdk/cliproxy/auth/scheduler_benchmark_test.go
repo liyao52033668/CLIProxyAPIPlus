@@ -48,7 +48,7 @@ func benchmarkManagerSetup(b *testing.B, total int, mixed bool, withPriority boo
 
 	reg := registry.GetGlobalRegistry()
 	model := "bench-model"
-	for index := 0; index < total; index++ {
+	for index := range total {
 		provider := providers[0]
 		if mixed && index%2 == 1 {
 			provider = providers[1]
@@ -69,7 +69,7 @@ func benchmarkManagerSetup(b *testing.B, total int, mixed bool, withPriority boo
 	}
 	manager.syncScheduler()
 	b.Cleanup(func() {
-		for index := 0; index < total; index++ {
+		for index := range total {
 			provider := providers[0]
 			if mixed && index%2 == 1 {
 				provider = providers[1]

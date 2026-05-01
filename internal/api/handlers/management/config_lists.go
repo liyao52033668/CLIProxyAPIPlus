@@ -104,7 +104,7 @@ func (h *Handler) deleteFromStringList(c *gin.Context, target *[]string, after f
 	c.JSON(400, gin.H{"error": "missing index or value"})
 }
 
-// api-keys
+// GetAPIKeys returns the list of API keys.
 func (h *Handler) GetAPIKeys(c *gin.Context) { c.JSON(200, gin.H{"api-keys": h.cfg.APIKeys}) }
 func (h *Handler) PutAPIKeys(c *gin.Context) {
 	h.putStringList(c, func(v []string) {
@@ -118,7 +118,7 @@ func (h *Handler) DeleteAPIKeys(c *gin.Context) {
 	h.deleteFromStringList(c, &h.cfg.APIKeys, func() {})
 }
 
-// gemini-api-key: []GeminiKey
+// GetGeminiKeys returns the list of Gemini keys.
 func (h *Handler) GetGeminiKeys(c *gin.Context) {
 	c.JSON(200, gin.H{"gemini-api-key": h.cfg.GeminiKey})
 }
@@ -268,7 +268,7 @@ func (h *Handler) DeleteGeminiKey(c *gin.Context) {
 	c.JSON(400, gin.H{"error": "missing api-key or index"})
 }
 
-// claude-api-key: []ClaudeKey
+// GetClaudeKeys returns the list of Claude keys.
 func (h *Handler) GetClaudeKeys(c *gin.Context) {
 	c.JSON(200, gin.H{"claude-api-key": h.cfg.ClaudeKey})
 }
@@ -412,7 +412,7 @@ func (h *Handler) DeleteClaudeKey(c *gin.Context) {
 	c.JSON(400, gin.H{"error": "missing api-key or index"})
 }
 
-// openai-compatibility: []OpenAICompatibility
+// GetOpenAICompat returns the list of OpenAI compatibility entries.
 func (h *Handler) GetOpenAICompat(c *gin.Context) {
 	c.JSON(200, gin.H{"openai-compatibility": normalizedOpenAICompatibilityEntries(h.cfg.OpenAICompatibility)})
 }
@@ -538,7 +538,7 @@ func (h *Handler) DeleteOpenAICompat(c *gin.Context) {
 	c.JSON(400, gin.H{"error": "missing name or index"})
 }
 
-// vertex-api-key: []VertexCompatKey
+// GetVertexCompatKeys returns the list of Vertex API keys.
 func (h *Handler) GetVertexCompatKeys(c *gin.Context) {
 	c.JSON(200, gin.H{"vertex-api-key": h.cfg.VertexCompatAPIKey})
 }
@@ -702,7 +702,7 @@ func (h *Handler) DeleteVertexCompatKey(c *gin.Context) {
 	c.JSON(400, gin.H{"error": "missing api-key or index"})
 }
 
-// oauth-excluded-models: map[string][]string
+// GetOAuthExcludedModels returns the map of OAuth excluded models.
 func (h *Handler) GetOAuthExcludedModels(c *gin.Context) {
 	c.JSON(200, gin.H{"oauth-excluded-models": config.NormalizeOAuthExcludedModels(h.cfg.OAuthExcludedModels)})
 }
@@ -787,7 +787,7 @@ func (h *Handler) DeleteOAuthExcludedModels(c *gin.Context) {
 	h.persist(c)
 }
 
-// oauth-model-alias: map[string][]OAuthModelAlias
+// GetOAuthModelAlias returns the map of OAuth model aliases.
 func (h *Handler) GetOAuthModelAlias(c *gin.Context) {
 	c.JSON(200, gin.H{"oauth-model-alias": sanitizedOAuthModelAlias(h.cfg.OAuthModelAlias)})
 }
@@ -888,7 +888,7 @@ func (h *Handler) DeleteOAuthModelAlias(c *gin.Context) {
 	h.persist(c)
 }
 
-// codex-api-key: []CodexKey
+// GetCodexKeys returns the list of Codex API keys.
 func (h *Handler) GetCodexKeys(c *gin.Context) {
 	c.JSON(200, gin.H{"codex-api-key": h.cfg.CodexKey})
 }

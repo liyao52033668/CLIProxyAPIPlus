@@ -10,7 +10,7 @@ import (
 // sseEvent represents a Server-Sent Event
 type sseEvent struct {
 	Event string
-	Data  interface{}
+	Data  any
 }
 
 // ToSSEString converts the event to SSE wire format
@@ -31,7 +31,7 @@ func AdjustStreamIndices(data []byte, offset int) ([]byte, bool) {
 	}
 
 	// Quick check: parse the JSON
-	var event map[string]interface{}
+	var event map[string]any
 	if err := json.Unmarshal(data, &event); err != nil {
 		// Not valid JSON, pass through
 		return data, true
@@ -79,8 +79,8 @@ func AdjustSSEChunk(chunk []byte, offset int) ([]byte, bool) {
 	for i := 0; i < len(lines); i++ {
 		line := lines[i]
 
-		if strings.HasPrefix(line, "data: ") {
-			dataPayload := strings.TrimPrefix(line, "data: ")
+		if after, ok := strings.CutPrefix(line, "data: "); ok {
+			dataPayload := after
 			dataPayload = strings.TrimSpace(dataPayload)
 
 			if dataPayload == "[DONE]" {
@@ -104,7 +104,7 @@ func AdjustSSEChunk(chunk []byte, offset int) ([]byte, bool) {
 				dataPayload := strings.TrimPrefix(lines[i+1], "data: ")
 				dataPayload = strings.TrimSpace(dataPayload)
 
-				var event map[string]interface{}
+				var event map[string]any
 				if err := json.Unmarshal([]byte(dataPayload), &event); err == nil {
 					if eventType, ok := event["type"].(string); ok && eventType == "message_start" {
 						// Skip both the event: and data: lines
@@ -156,8 +156,8 @@ func AnalyzeBufferedStream(chunks [][]byte) BufferedStreamResult {
 
 	for _, chunk := range chunks {
 		chunkStr := string(chunk)
-		lines := strings.Split(chunkStr, "\n")
-		for _, line := range lines {
+		lines := strings.SplitSeq(chunkStr, "\n")
+		for line := range lines {
 			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}
@@ -167,7 +167,7 @@ func AnalyzeBufferedStream(chunks [][]byte) BufferedStreamResult {
 				continue
 			}
 
-			var event map[string]interface{}
+			var event map[string]any
 			if err := json.Unmarshal([]byte(dataPayload), &event); err != nil {
 				continue
 			}
@@ -177,7 +177,7 @@ func AnalyzeBufferedStream(chunks [][]byte) BufferedStreamResult {
 			switch eventType {
 			case "message_delta":
 				// Extract stop_reason from message_delta
-				if delta, ok := event["delta"].(map[string]interface{}); ok {
+				if delta, ok := event["delta"].(map[string]any); ok {
 					if sr, ok := delta["stop_reason"].(string); ok && sr != "" {
 						result.StopReason = sr
 					}
@@ -185,7 +185,7 @@ func AnalyzeBufferedStream(chunks [][]byte) BufferedStreamResult {
 
 			case "content_block_start":
 				// Detect tool_use content blocks
-				if cb, ok := event["content_block"].(map[string]interface{}); ok {
+				if cb, ok := event["content_block"].(map[string]any); ok {
 					if cbType, ok := cb["type"].(string); ok && cbType == "tool_use" {
 						if name, ok := cb["name"].(string); ok {
 							currentToolName = strings.ToLower(name)
@@ -204,7 +204,7 @@ func AnalyzeBufferedStream(chunks [][]byte) BufferedStreamResult {
 			case "content_block_delta":
 				// Accumulate tool input JSON
 				if currentToolName != "" {
-					if delta, ok := event["delta"].(map[string]interface{}); ok {
+					if delta, ok := event["delta"].(map[string]any); ok {
 						if deltaType, ok := delta["type"].(string); ok && deltaType == "input_json_delta" {
 							if partial, ok := delta["partial_json"].(string); ok {
 								toolInputBuilder.WriteString(partial)
@@ -256,8 +256,8 @@ func FilterChunksForClient(chunks [][]byte, wsToolIndex int, indexOffset int) []
 		for i := 0; i < len(lines); i++ {
 			line := lines[i]
 
-			if strings.HasPrefix(line, "data: ") {
-				dataPayload := strings.TrimPrefix(line, "data: ")
+			if after, ok := strings.CutPrefix(line, "data: "); ok {
+				dataPayload := after
 				dataPayload = strings.TrimSpace(dataPayload)
 
 				if dataPayload == "[DONE]" {
@@ -265,7 +265,7 @@ func FilterChunksForClient(chunks [][]byte, wsToolIndex int, indexOffset int) []
 					continue
 				}
 
-				var event map[string]interface{}
+				var event map[string]any
 				if err := json.Unmarshal([]byte(dataPayload), &event); err != nil {
 					resultBuilder.WriteString(line + "\n")
 					hasContent = true
@@ -316,7 +316,7 @@ func FilterChunksForClient(chunks [][]byte, wsToolIndex int, indexOffset int) []
 					nextData := strings.TrimPrefix(lines[i+1], "data: ")
 					nextData = strings.TrimSpace(nextData)
 
-					var nextEvent map[string]interface{}
+					var nextEvent map[string]any
 					if err := json.Unmarshal([]byte(nextData), &nextEvent); err == nil {
 						nextType, _ := nextEvent["type"].(string)
 						if nextType == "message_start" || nextType == "message_delta" || nextType == "message_stop" {

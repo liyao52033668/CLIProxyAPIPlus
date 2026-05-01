@@ -164,10 +164,7 @@ func LoadKiroIDETokenWithRetry(maxAttempts int, baseDelay time.Duration) (*KiroT
 		}
 
 		// Exponential backoff: delay * 2^attempt, capped at 500ms
-		delay := baseDelay * time.Duration(1<<uint(attempt))
-		if delay > 500*time.Millisecond {
-			delay = 500 * time.Millisecond
-		}
+		delay := min(baseDelay*time.Duration(1<<uint(attempt)), 500*time.Millisecond)
 		time.Sleep(delay)
 	}
 
@@ -643,7 +640,7 @@ func ExtractRegionFromProfileArn(profileArn string) string {
 
 // ExtractRegionFromMetadata extracts API region from auth metadata.
 // Priority: api_region > profile_arn > DefaultKiroRegion
-func ExtractRegionFromMetadata(metadata map[string]interface{}) string {
+func ExtractRegionFromMetadata(metadata map[string]any) string {
 	if metadata == nil {
 		return DefaultKiroRegion
 	}

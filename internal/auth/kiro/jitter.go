@@ -149,10 +149,7 @@ func ExponentialBackoffWithJitter(attempt int, baseDelay, maxDelay time.Duration
 	}
 
 	// Calculate exponential backoff: baseDelay * 2^attempt
-	backoff := baseDelay * time.Duration(1<<uint(attempt))
-	if backoff > maxDelay {
-		backoff = maxDelay
-	}
+	backoff := min(baseDelay*time.Duration(1<<uint(attempt)), maxDelay)
 
 	// Add ±30% jitter
 	return JitterDelay(backoff, JitterPercent)

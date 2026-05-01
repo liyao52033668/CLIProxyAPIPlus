@@ -9,6 +9,9 @@ type SDKConfig struct {
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 
+	// CNBToken is the authorization token for CNB API requests (e.g., fetching latest release version).
+	CNBToken string `yaml:"cnb-token" json:"cnb-token"`
+
 	// EnableGeminiCLIEndpoint controls whether Gemini CLI internal endpoints (/v1internal:*) are enabled.
 	// Default is false for safety; when false, /v1internal:* requests are rejected.
 	EnableGeminiCLIEndpoint bool `yaml:"enable-gemini-cli-endpoint" json:"enable-gemini-cli-endpoint"`

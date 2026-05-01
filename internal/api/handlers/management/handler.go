@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codearts"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
@@ -35,19 +36,20 @@ const attemptMaxIdleTime = 2 * time.Hour
 
 // Handler aggregates config reference, persistence path and helpers.
 type Handler struct {
-	cfg                 *config.Config
-	configFilePath      string
-	mu                  sync.Mutex
-	attemptsMu          sync.Mutex
-	failedAttempts      map[string]*attemptInfo // keyed by client IP
-	authManager         *coreauth.Manager
-	usageStats          *usage.RequestStatistics
-	tokenStore          coreauth.Store
-	localPassword       string
-	allowRemoteOverride bool
-	envSecret           string
-	logDir              string
-	postAuthHook        coreauth.PostAuthHook
+	cfg                  *config.Config
+	configFilePath       string
+	mu                   sync.Mutex
+	attemptsMu           sync.Mutex
+	failedAttempts       map[string]*attemptInfo // keyed by client IP
+	authManager          *coreauth.Manager
+	usageStats           *usage.RequestStatistics
+	tokenStore           coreauth.Store
+	localPassword        string
+	allowRemoteOverride  bool
+	envSecret            string
+	logDir               string
+	postAuthHook         coreauth.PostAuthHook
+	codeArtsOAuthHandler *codearts.OAuthWebHandler
 }
 
 // NewHandler creates a new management handler instance.
@@ -99,7 +101,7 @@ func (h *Handler) purgeStaleAttempts() {
 	}
 }
 
-// NewHandler creates a new management handler instance.
+// NewHandlerWithoutConfigFilePath creates a new management handler instance without a config file path.
 func NewHandlerWithoutConfigFilePath(cfg *config.Config, manager *coreauth.Manager) *Handler {
 	return NewHandler(cfg, "", manager)
 }
@@ -115,6 +117,17 @@ func (h *Handler) SetUsageStatistics(stats *usage.RequestStatistics) { h.usageSt
 
 // SetLocalPassword configures the runtime-local password accepted for localhost requests.
 func (h *Handler) SetLocalPassword(password string) { h.localPassword = password }
+
+// SetCodeArtsOAuthHandler sets the CodeArts OAuth web handler.
+func (h *Handler) SetCodeArtsOAuthHandler(handler *codearts.OAuthWebHandler) {
+	h.codeArtsOAuthHandler = handler
+	if handler != nil {
+		handler.SetAuthSuccessCallback(func(stateID string) {
+			CompleteOAuthSession(stateID)
+			CompleteOAuthSessionsByProvider("codearts")
+		})
+	}
+}
 
 // SetLogDirectory updates the directory where main.log should be looked up.
 func (h *Handler) SetLogDirectory(dir string) {
