@@ -74,20 +74,34 @@ func GetProviderName(modelName string) []string {
 //
 // Returns:
 //   - string: The resolved model name, or the original if not "auto" or resolution fails
-func ResolveAutoModel(modelName string) string {
+//   - bool: True if this was an auto resolution (modelName was "auto"), false otherwise
+func ResolveAutoModel(modelName string) (string, bool) {
 	if modelName != "auto" {
-		return modelName
+		return modelName, false
 	}
 
 	// Use empty string as handler type to get any available model
 	firstModel, err := registry.GetGlobalRegistry().GetFirstAvailableModel("")
 	if err != nil {
 		log.Warnf("Failed to resolve 'auto' model: %v, falling back to original model name", err)
-		return modelName
+		return modelName, true
 	}
 
 	log.Infof("Resolved 'auto' model to: %s", firstModel)
-	return firstModel
+	return firstModel, true
+}
+
+// MarkAutoModelResult records the result of an auto-resolved model execution.
+// Call this when an auto-resolved model fails so the registry can disable the model.
+// Only affects auto-resolved models; non-auto models are ignored.
+//
+// Parameters:
+//   - handlerType: The API handler type (e.g., "openai", "claude", "gemini")
+//   - modelID: The resolved model ID that was used
+//   - authID: The auth ID that was used for this execution
+//   - success: Whether the execution succeeded
+func MarkAutoModelResult(handlerType, modelID, authID string, success bool) {
+	registry.GetGlobalRegistry().RecordModelResult(handlerType, modelID, authID, success)
 }
 
 // IsOpenAICompatibilityAlias checks if the given model name is an alias
@@ -171,7 +185,7 @@ func HideAPIKey(apiKey string) string {
 	return apiKey
 }
 
-// maskAuthorizationHeader masks the Authorization header value while preserving the auth type prefix.
+// MaskAuthorizationHeader masks the Authorization header value while preserving the auth type prefix.
 // Common formats: "Bearer <token>", "Basic <credentials>", "ApiKey <key>", etc.
 // It preserves the prefix (e.g., "Bearer ") and only masks the token/credential part.
 //

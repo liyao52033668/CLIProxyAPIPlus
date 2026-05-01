@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	log "github.com/sirupsen/logrus"
@@ -331,4 +332,72 @@ func (h *Handler) PutProxyURL(c *gin.Context) {
 func (h *Handler) DeleteProxyURL(c *gin.Context) {
 	h.cfg.ProxyURL = ""
 	h.persist(c)
+}
+
+// GetDisabledAutoModels returns the list of temporarily disabled auto models.
+func (h *Handler) GetDisabledAutoModels(c *gin.Context) {
+	c.JSON(200, gin.H{"disabled-auto-models": h.cfg.DisabledAutoModels})
+}
+
+// PutDisabledAutoModels replaces the entire list of disabled auto models.
+func (h *Handler) PutDisabledAutoModels(c *gin.Context) {
+	var body struct {
+		Models []string `json:"models"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	h.cfg.DisabledAutoModels = body.Models
+	if h.persist(c) {
+		registry.GetGlobalRegistry().LoadDisabledAutoModels(body.Models)
+	}
+}
+
+// DeleteDisabledAutoModel removes a specific model from the disabled list.
+// The model key should be in "modelID:authID" format.
+func (h *Handler) DeleteDisabledAutoModel(c *gin.Context) {
+	modelKey := strings.TrimSpace(c.Param("modelKey"))
+	if modelKey == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing model key"})
+		return
+	}
+	parts := strings.SplitN(modelKey, ":", 2)
+	if len(parts) != 2 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid model key format, expected modelID:authID"})
+		return
+	}
+	modelID, authID := parts[0], parts[1]
+
+	h.cfg.DisabledAutoModels = removeFromSlice(h.cfg.DisabledAutoModels, modelKey)
+	if h.persist(c) {
+		registry.GetGlobalRegistry().EnableAutoModel(modelID, authID)
+	}
+}
+
+func removeFromSlice(slice []string, item string) []string {
+	result := make([]string, 0, len(slice))
+	for _, s := range slice {
+		if s != item {
+			result = append(result, s)
+		}
+	}
+	return result
+}
+
+type modelSelectionCounts struct {
+	HandlerType string           `json:"handler_type"`
+	Counts      map[string]int64 `json:"counts"`
+}
+
+// GetModelSelectionCounts returns selection counts for all models or specific handler type.
+// Query param: handler_type (optional, e.g., "openai", "claude", "gemini")
+// If not provided, returns counts for all handler types.
+func (h *Handler) GetModelSelectionCounts(c *gin.Context) {
+	handlerType := strings.TrimSpace(c.Query("handler_type"))
+	counts := registry.GetGlobalRegistry().GetModelSelectionCounts(handlerType)
+	c.JSON(200, modelSelectionCounts{
+		HandlerType: handlerType,
+		Counts:      counts,
+	})
 }

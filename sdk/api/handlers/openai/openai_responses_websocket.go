@@ -487,14 +487,14 @@ func (h *OpenAIResponsesAPIHandler) websocketUpstreamSupportsIncrementalInputFor
 	resolvedModelName := modelName
 	initialSuffix := thinking.ParseSuffix(modelName)
 	if initialSuffix.ModelName == "auto" {
-		resolvedBase := util.ResolveAutoModel(initialSuffix.ModelName)
+		resolvedBase, _ := util.ResolveAutoModel(initialSuffix.ModelName)
 		if initialSuffix.HasSuffix {
 			resolvedModelName = fmt.Sprintf("%s(%s)", resolvedBase, initialSuffix.RawSuffix)
 		} else {
 			resolvedModelName = resolvedBase
 		}
 	} else {
-		resolvedModelName = util.ResolveAutoModel(modelName)
+		resolvedModelName, _ = util.ResolveAutoModel(modelName)
 	}
 
 	parsed := thinking.ParseSuffix(resolvedModelName)

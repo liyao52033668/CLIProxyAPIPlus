@@ -605,6 +605,12 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/proxy-url", s.mgmt.PutProxyURL)
 		mgmt.DELETE("/proxy-url", s.mgmt.DeleteProxyURL)
 
+		mgmt.GET("/auto-model-disabled", s.mgmt.GetDisabledAutoModels)
+		mgmt.PUT("/auto-model-disabled", s.mgmt.PutDisabledAutoModels)
+		mgmt.DELETE("/auto-model-disabled/:modelKey", s.mgmt.DeleteDisabledAutoModel)
+
+		mgmt.GET("/model-selection-counts", s.mgmt.GetModelSelectionCounts)
+
 		mgmt.POST("/api-call", s.mgmt.APICall)
 
 		mgmt.GET("/quota-exceeded/switch-project", s.mgmt.GetSwitchProject)
