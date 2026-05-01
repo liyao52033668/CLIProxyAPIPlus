@@ -282,6 +282,14 @@ func (e *CodeBuddyExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 			if !bytes.HasPrefix(line, []byte("data:")) {
 				continue
 			}
+			raw := bytes.TrimSpace(line[5:])
+			if len(raw) > 0 && !bytes.Equal(raw, []byte("[DONE]")) {
+				if cleaned := cleanDeltaChunk(raw); cleaned == nil {
+					continue
+				} else if !bytes.Equal(cleaned, raw) {
+					line = append([]byte("data: "), cleaned...)
+				}
+			}
 			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, bytes.Clone(line), &param)
 			for i := range chunks {
 				out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
@@ -352,9 +360,10 @@ func (e *CodeBuddyExecutor) applyHeaders(req *http.Request, accessToken, userID,
 	req.Header.Set("X-User-Id", userID)
 	req.Header.Set("X-Domain", domain)
 	req.Header.Set("X-Product", "SaaS")
-	req.Header.Set("X-IDE-Type", "CLI")
-	req.Header.Set("X-IDE-Name", "CLI")
-	req.Header.Set("X-IDE-Version", "2.63.2")
+	req.Header.Set("X-IDE-Type", "CodeBuddyIDE")
+	req.Header.Set("X-IDE-Name", "CodeBuddyIDE")
+	req.Header.Set("X-IDE-Version", "4.9.7")
+	req.Header.Set("X-Product-Version", "4.9.7")
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
 }
 
@@ -552,6 +561,48 @@ func aggregateOpenAIChatCompletionStream(raw []byte) ([]byte, usage.Detail, erro
 	return out, usageDetail, nil
 }
 
+// filterEmptyDelta returns nil if the SSE JSON chunk contains a delta with no
+// meaningful content (both content and reasoning_content are empty/null).
+// This prevents clients from interpreting empty reasoning_content deltas as
+// interruptions in the thinking chain. Non-delta chunks (usage, finish_reason)
+// are passed through.
+// cleanDeltaChunk processes a single SSE JSON chunk for CodeBuddy streaming.
+// It returns:
+//   - nil: chunk should be dropped (no meaningful content)
+//   - modified bytes: chunk cleaned up (e.g. empty reasoning_content removed)
+//   - original bytes: chunk passed through as-is
+//
+// The CodeBuddy upstream sends reasoning_content:"" alongside non-empty content
+// during the thinking-to-content transition. Many clients interpret
+// reasoning_content:"" as "thinking ended", then see the next chunk's
+// reasoning_content:"" again and think "thinking restarted". By stripping the
+// empty reasoning_content field, the client never sees spurious thinking
+// transitions.
+func cleanDeltaChunk(raw []byte) []byte {
+	delta := gjson.GetBytes(raw, "choices.0.delta")
+	if !delta.Exists() {
+		return raw
+	}
+	finishReason := gjson.GetBytes(raw, "choices.0.finish_reason").String()
+	if finishReason == "stop" || finishReason == "tool_calls" {
+		return raw
+	}
+	content := delta.Get("content").String()
+	reasoning := delta.Get("reasoning_content").String()
+	hasRole := delta.Get("role").Exists()
+	toolCalls := delta.Get("tool_calls")
+	hasToolCalls := toolCalls.Exists() && len(toolCalls.Array()) > 0
+	if content == "" && reasoning == "" && !hasRole && !hasToolCalls {
+		return nil
+	}
+	if reasoning == "" && content != "" {
+		if cleaned, err := sjson.DeleteBytes(raw, "choices.0.delta.reasoning_content"); err == nil {
+			return cleaned
+		}
+	}
+	return raw
+}
+
 var codeBuddyInternalModelPrefixes = []string{
 	"completion-",
 	"codewise-",
@@ -559,20 +610,28 @@ var codeBuddyInternalModelPrefixes = []string{
 	"hunyuan-7b",
 	"nes-",
 	"default-",
-	"deepseek-r1-0528",
-	"deepseek-v3-0324-taco-",
 	"chat-",
-	"glm-4.6",
-	"glm-4.6v",
+	"hunyuan-image-",
 }
 
 var codeBuddyAllowedInternalModels = map[string]bool{
 	"deepseek-r1-0528":                 true,
+	"deepseek-r1-0528-lkeap":           true,
 	"deepseek-v3-0324":                 true,
+	"deepseek-v3-0324-lkeap":           true,
 	"deepseek-v3-0324-taco-completion": true,
 	"hunyuan-2.0-instruct":             true,
 	"hunyuan-chat":                     true,
+	"glm-4.6":                          true,
+	"glm-4.6v":                         true,
 	"glm-4.7":                          true,
+	"glm-5.0":                          true,
+	"deepseek-v3-1":                    true,
+	"deepseek-v3-1-lkeap":              true,
+	"deepseek-v3-1-volc":               true,
+	"kimi-k2-instruct-taiji":           true,
+	"kimi-k2-thinking":                 true,
+	"minimax-m2.5":                     true,
 }
 
 func isCodeBuddyInternalModel(id string) bool {
@@ -603,10 +662,16 @@ func FetchCodeBuddyModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *con
 	req.Header.Set("User-Agent", codebuddy.UserAgent)
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	req.Header.Set("X-IDE-Type", "CodeBuddyIDE")
+	req.Header.Set("X-IDE-Name", "CodeBuddyIDE")
+	req.Header.Set("X-IDE-Version", "4.9.7")
+	req.Header.Set("X-Product-Version", "4.9.7")
+	req.Header.Set("X-Env-ID", "production")
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("X-User-Id", userID)
 	req.Header.Set("X-Domain", domain)
 	req.Header.Set("X-Product", "SaaS")
+	req.Header.Set("Connection", "close")
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
