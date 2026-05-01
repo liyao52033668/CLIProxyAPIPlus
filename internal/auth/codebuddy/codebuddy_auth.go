@@ -22,7 +22,7 @@ import (
 const (
 	BaseURL       = "https://copilot.tencent.com"
 	DefaultDomain = "www.codebuddy.cn"
-	UserAgent     = "CLI/2.63.2 CodeBuddy/2.63.2"
+	UserAgent     = "CodeBuddyIDE/4.9.7 CodeBuddy/4.9.7"
 
 	codeBuddyStatePath   = "/v2/plugin/auth/state"
 	codeBuddyTokenPath   = "/v2/plugin/auth/token"
