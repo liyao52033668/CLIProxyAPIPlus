@@ -18,7 +18,7 @@ import (
 // - Single-step HMAC (no derived key)
 // - Path must end with "/"
 // - Algorithm name is "SDK-HMAC-SHA256"
-func SignRequest(req *http.Request, ak, sk, securityToken string) {
+func SignRequest(req *http.Request, body []byte, ak, sk, securityToken string) {
 	now := time.Now().UTC()
 	timeStr := now.Format("20060102T150405Z")
 
@@ -72,7 +72,7 @@ func SignRequest(req *http.Request, ak, sk, securityToken string) {
 	signedHeadersStr := strings.Join(signedHeaderKeys, ";")
 
 	// Body hash (empty for GET, or use existing hash)
-	bodyHash := sha256Hex([]byte(""))
+	bodyHash := sha256Hex(body)
 
 	canonicalReq := fmt.Sprintf("%s\n%s\n%s\n%s\n%s\n%s",
 		method, path, canonicalQuery,
