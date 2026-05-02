@@ -5,8 +5,12 @@
   <p> (Please do not report CPA+ issues in Linux.do) <a href="https://linux.do">Linux.do</a> </p>
 </div>
 
+---
+<div align="center">
+  <img src="https://github.com/Ve-ria/CLIProxyAPIPlus/actions/workflows/release-stable.yaml/badge.svg"><img src="https://github.com/Ve-ria/CLIProxyAPIPlus/actions/workflows/docker-image.yml/badge.svg?branch=main">
+</div>
 
-
+---
 
 This is the Plus version of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI), adding support for third-party providers on top of the mainline project.
 
