@@ -47,7 +47,7 @@ func init() {
 	for i := 0; i < 64; i++ {
 		stdToCustom[qoder.StdAlphabet[i]] = qoder.CustomAlphabet[i]
 	}
-	stdToCustom['='] = qoder.CustomPad
+	stdToCustom['='] = byte(qoder.CustomPad)
 }
 
 // customBase64Encode encodes data using Qoder's custom base64 scheme.
@@ -383,8 +383,8 @@ func (e *QoderExecutor) buildQoderRequestBody(openaiBody []byte, modelKey string
 		}
 		// Create new user message with contents array (matching Java's logic)
 		newUserMsg := map[string]any{
-			"role":                          "user",
-			"content":                       "",
+			"role":    "user",
+			"content": "",
 			"contents": []map[string]any{{
 				"type": "text",
 				"text": lastUser,
@@ -392,9 +392,9 @@ func (e *QoderExecutor) buildQoderRequestBody(openaiBody []byte, modelKey string
 			"response_meta": map[string]any{
 				"id": "",
 				"usage": map[string]any{
-					"prompt_tokens":      0,
-					"completion_tokens":  0,
-					"total_tokens":       0,
+					"prompt_tokens":     0,
+					"completion_tokens": 0,
+					"total_tokens":      0,
 					"completion_tokens_details": map[string]any{
 						"reasoning_tokens": 0,
 					},
@@ -409,11 +409,11 @@ func (e *QoderExecutor) buildQoderRequestBody(openaiBody []byte, modelKey string
 	}
 
 	body := map[string]any{
-		"request_id":        uuid.NewString(),
-		"request_set_id":    uuid.NewString(),
-		"chat_record_id":    uuid.NewString(),
-		"stream":            stream,
-		"chat_task":         "FREE_INPUT",
+		"request_id":     uuid.NewString(),
+		"request_set_id": uuid.NewString(),
+		"chat_record_id": uuid.NewString(),
+		"stream":         stream,
+		"chat_task":      "FREE_INPUT",
 		"chat_context": map[string]any{
 			"chatPrompt": "",
 			"extra": map[string]any{
@@ -421,21 +421,21 @@ func (e *QoderExecutor) buildQoderRequestBody(openaiBody []byte, modelKey string
 				"modelConfig":     map[string]any{"key": modelKey, "is_reasoning": false},
 				"originalContent": map[string]any{"type": "text", "text": lastUser},
 			},
-			"features":    []any{},
-			"imageUrls":   nil,
-			"text":        map[string]any{"type": "text", "text": lastUser},
+			"features":  []any{},
+			"imageUrls": nil,
+			"text":      map[string]any{"type": "text", "text": lastUser},
 		},
 		"image_urls":       nil,
 		"is_reply":         true, // must be true to match Java
 		"is_retry":         false,
-		"session_id":        uuid.NewString(),
-		"code_language":     "",
+		"session_id":       uuid.NewString(),
+		"code_language":    "",
 		"source":           1,
 		"version":          "3",
-		"chat_prompt":       "",
+		"chat_prompt":      "",
 		"parameters":       map[string]any{"max_tokens": 32768},
 		"aliyun_user_type": "personal_standard",
-		"session_type":      "qodercli",
+		"session_type":     "qodercli",
 		"agent_id":         "agent_common",
 		"task_id":          "common",
 		"messages":         rebuiltMessages,
@@ -445,7 +445,7 @@ func (e *QoderExecutor) buildQoderRequestBody(openaiBody []byte, modelKey string
 			"display_name":     modelKey,
 			"model":            "",
 			"format":           "openai",
-			"is_vl":            false, 
+			"is_vl":            false,
 			"is_reasoning":     false,
 			"api_key":          "",
 			"url":              "",
