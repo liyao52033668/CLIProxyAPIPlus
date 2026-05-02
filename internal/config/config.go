@@ -929,6 +929,9 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 	if !hasChannel("kiro") {
 		cfg.OAuthModelAlias["kiro"] = defaultKiroAliases()
 	}
+	// if !hasChannel("qoder") {
+	// 	cfg.OAuthModelAlias["qoder"] = defaultQoderAliases()
+	// }
 	if !hasChannel("github-copilot") {
 		cfg.OAuthModelAlias["github-copilot"] = defaultGitHubCopilotAliases()
 	}

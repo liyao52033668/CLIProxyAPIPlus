@@ -16,10 +16,15 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
+	"math"
+	mrand "math/rand"
+	"net"
 	"net/http"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -36,8 +41,109 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// stdToCustom maps standard base64 characters to Qoder's custom base64 alphabet.
-// Used by customBase64Encode to translate standard base64 output to Qoder's custom alphabet.
+const (
+	qoderMaxRetries     = 3
+	qoderBaseRetryDelay = 1 * time.Second
+	qoderMaxRetryDelay  = 30 * time.Second
+)
+
+var qoderRetryableHTTPStatus = map[int]bool{
+	http.StatusBadGateway:         true,
+	http.StatusServiceUnavailable: true,
+	http.StatusGatewayTimeout:     true,
+}
+
+type qoderRetryConfig struct {
+	MaxRetries      int
+	BaseDelay       time.Duration
+	MaxDelay        time.Duration
+	RetryableErrors []string
+}
+
+func qoderDefaultRetryConfig() qoderRetryConfig {
+	return qoderRetryConfig{
+		MaxRetries: qoderMaxRetries,
+		BaseDelay:  qoderBaseRetryDelay,
+		MaxDelay:   qoderMaxRetryDelay,
+		RetryableErrors: []string{
+			"connection reset",
+			"broken pipe",
+			"temporary failure",
+			"no such host",
+			"network is unreachable",
+			"i/o timeout",
+			"unexpected eof",
+			"eof",
+		},
+	}
+}
+
+func qoderIsRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		if netErr.Timeout() {
+			log.Debugf("qoder executor: isRetryableError: network timeout detected")
+			return true
+		}
+	}
+	var syscallErr syscall.Errno
+	if errors.As(err, &syscallErr) {
+		switch syscallErr {
+		case syscall.ECONNRESET, syscall.ECONNREFUSED, syscall.EPIPE, syscall.ETIMEDOUT, syscall.ENETUNREACH, syscall.EHOSTUNREACH:
+			log.Debugf("qoder executor: isRetryableError: syscall error %v detected", syscallErr)
+			return true
+		}
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		log.Debugf("qoder executor: isRetryableError: net.OpError detected, op=%s", opErr.Op)
+		if opErr.Err != nil {
+			return qoderIsRetryableError(opErr.Err)
+		}
+		return true
+	}
+	errMsg := strings.ToLower(err.Error())
+	cfg := qoderDefaultRetryConfig()
+	for _, pattern := range cfg.RetryableErrors {
+		if strings.Contains(errMsg, pattern) {
+			log.Debugf("qoder executor: isRetryableError: pattern '%s' matched in error: %s", pattern, errMsg)
+			return true
+		}
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		log.Debugf("qoder executor: isRetryableError: EOF/UnexpectedEOF detected")
+		return true
+	}
+	return false
+}
+
+func qoderIsRetryableHTTPStatus(statusCode int) bool {
+	return qoderRetryableHTTPStatus[statusCode]
+}
+
+func qoderCalculateRetryDelay(attempt int, cfg qoderRetryConfig) time.Duration {
+	delay := float64(cfg.BaseDelay) * math.Pow(2, float64(attempt))
+	if delay > float64(cfg.MaxDelay) {
+		delay = float64(cfg.MaxDelay)
+	}
+	jitter := delay * 0.3 * (2*mrand.Float64() - 1)
+	delay += jitter
+	if delay < 0 {
+		delay = float64(cfg.BaseDelay)
+	}
+	return time.Duration(delay)
+}
+
+func qoderLogRetryAttempt(attempt, maxRetries int, reason string, delay time.Duration) {
+	log.Debugf("qoder executor: retry attempt %d/%d, reason: %s, next retry in %v", attempt+1, maxRetries, reason, delay)
+}
+
 var stdToCustom [256]byte
 
 func init() {
@@ -172,18 +278,56 @@ func (e *QoderExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		AuthValue: authValue,
 	})
 
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, errDo := httpClient.Do(httpReq)
-	if errDo != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
-		return resp, errDo
+	retryCfg := qoderDefaultRetryConfig()
+	var httpResp *http.Response
+	var lastErr error
+
+	for attempt := 0; attempt < retryCfg.MaxRetries; attempt++ {
+		if attempt > 0 {
+			delay := qoderCalculateRetryDelay(attempt-1, retryCfg)
+			qoderLogRetryAttempt(attempt-1, retryCfg.MaxRetries, lastErr.Error(), delay)
+			time.Sleep(delay)
+			httpReq, errReq = e.buildCosyRequest(ctx, auth, url, qoderBodyJSON, false, baseModel)
+			if errReq != nil {
+				return resp, errReq
+			}
+			util.ApplyCustomHeadersFromAttrs(httpReq, auth.Attributes)
+		}
+
+		httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+		httpResp, lastErr = httpClient.Do(httpReq)
+		if lastErr != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, lastErr)
+			if qoderIsRetryableError(lastErr) {
+				continue
+			}
+			return resp, lastErr
+		}
+
+		helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+		if httpResp.StatusCode >= 500 && qoderIsRetryableHTTPStatus(httpResp.StatusCode) {
+			b, _ := io.ReadAll(httpResp.Body)
+			_ = httpResp.Body.Close()
+			helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+			lastErr = statusErr{code: httpResp.StatusCode, msg: string(b)}
+			continue
+		}
+		break
 	}
+
+	if lastErr != nil {
+		return resp, lastErr
+	}
+	if httpResp == nil {
+		return resp, fmt.Errorf("qoder executor: unexpected nil response after retries")
+	}
+
 	defer func() {
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("qoder executor: close response body error: %v", errClose)
 		}
 	}()
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
@@ -272,13 +416,50 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		AuthValue: authValue,
 	})
 
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, errDo := httpClient.Do(httpReq)
-	if errDo != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
-		return nil, errDo
+	retryCfg := qoderDefaultRetryConfig()
+	var httpResp *http.Response
+	var lastErr error
+
+	for attempt := 0; attempt < retryCfg.MaxRetries; attempt++ {
+		if attempt > 0 {
+			delay := qoderCalculateRetryDelay(attempt-1, retryCfg)
+			qoderLogRetryAttempt(attempt-1, retryCfg.MaxRetries, lastErr.Error(), delay)
+			time.Sleep(delay)
+			httpReq, errReq = e.buildCosyRequest(ctx, auth, url, qoderBodyJSON, true, baseModel)
+			if errReq != nil {
+				return nil, errReq
+			}
+			util.ApplyCustomHeadersFromAttrs(httpReq, auth.Attributes)
+		}
+
+		httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+		httpResp, lastErr = httpClient.Do(httpReq)
+		if lastErr != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, lastErr)
+			if qoderIsRetryableError(lastErr) {
+				continue
+			}
+			return nil, lastErr
+		}
+
+		helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+		if httpResp.StatusCode >= 500 && qoderIsRetryableHTTPStatus(httpResp.StatusCode) {
+			b, _ := io.ReadAll(httpResp.Body)
+			_ = httpResp.Body.Close()
+			helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+			lastErr = statusErr{code: httpResp.StatusCode, msg: string(b)}
+			continue
+		}
+		break
 	}
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	if httpResp == nil {
+		return nil, fmt.Errorf("qoder executor: unexpected nil response after retries")
+	}
+
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)

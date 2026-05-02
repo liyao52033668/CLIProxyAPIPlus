@@ -38,6 +38,13 @@ func defaultGitHubCopilotAliases() []OAuthModelAlias {
 	}
 }
 
+// func defaultQoderAliases() []OAuthModelAlias {
+// 	return []OAuthModelAlias{
+// 		{Name: "auto", Alias: "qoder-auto", Fork: true},
+// 		{Name: "qmodel", Alias: "qoder-Qwen3.6-Plus", Fork: true},
+// 	}
+// }
+
 // GitHubCopilotAliasesFromModels generates oauth-model-alias entries from a dynamic
 // list of model IDs fetched from the Copilot API. It auto-creates aliases for
 // models whose ID contains a dot (e.g. "claude-opus-4.6" → "claude-opus-4-6"),
