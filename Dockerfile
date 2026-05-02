@@ -31,8 +31,6 @@ COPY config.example.yaml /CLIProxyAPI/config.example.yaml
 
 WORKDIR /CLIProxyAPI
 
-VOLUME ["/CLIProxyAPI/data"]
-
 EXPOSE 8317
 
 ENV TZ=Asia/Shanghai
