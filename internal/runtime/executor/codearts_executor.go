@@ -82,6 +82,9 @@ func (e *CodeArtsExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.
 	req.Header.Set("X-Snap-Traceid", traceID)
 
 	codearts.SignRequest(req, bodyBytes, ak, sk, securityToken)
+
+	log.Debugf("codearts: signing request url=%s, body_len=%d, ak=%s, headers=%v",
+		req.URL.String(), len(bodyBytes), ak[:min(4, len(ak))]+"...", req.Header)
 	return nil
 }
 
@@ -129,6 +132,8 @@ func (e *CodeArtsExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 		return resp, err
 	}
 	defer httpResp.Body.Close()
+
+	log.Debugf("codearts: Execute response status=%d, content_type=%s", httpResp.StatusCode, httpResp.Header.Get("Content-Type"))
 
 	if httpResp.StatusCode != 200 {
 		body, _ := io.ReadAll(httpResp.Body)
@@ -228,11 +233,15 @@ func (e *CodeArtsExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 	if httpResp.StatusCode != 200 {
 		body, _ := io.ReadAll(httpResp.Body)
 		httpResp.Body.Close()
+		log.Debugf("codearts: non-200 response status=%d, body=%s", httpResp.StatusCode, string(body))
 		return nil, statusErr{
 			code: httpResp.StatusCode,
 			msg:  fmt.Sprintf("codearts: API returned %d: %s", httpResp.StatusCode, string(body)),
 		}
 	}
+
+	log.Debugf("codearts: stream response status=%d, content_type=%s, content_length=%d",
+		httpResp.StatusCode, httpResp.Header.Get("Content-Type"), httpResp.ContentLength)
 
 	chunks := make(chan cliproxyexecutor.StreamChunk, 64)
 
@@ -244,26 +253,34 @@ func (e *CodeArtsExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 		to := sdktranslator.FromString("codearts")
 		var streamParam any
 		var totalPromptTokens, totalCompletionTokens int64
+		var lineCount int
+		var dataLineCount int
+		var firstNonEmptyLine string
 
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
 		for scanner.Scan() {
 			line := scanner.Text()
+			lineCount++
 			if strings.HasPrefix(line, ":heartbeat") || line == "" {
 				continue
 			}
-			if !strings.HasPrefix(line, "data: ") {
+			if firstNonEmptyLine == "" {
+				firstNonEmptyLine = line
+			}
+			var data string
+			if strings.HasPrefix(line, "data: ") {
+				data = strings.TrimPrefix(line, "data: ")
+			} else if strings.HasPrefix(line, "data:") {
+				data = strings.TrimPrefix(line, "data:")
+			} else {
+				log.Debugf("codearts: unexpected SSE line %d: %q", lineCount, line)
 				continue
 			}
-			data := strings.TrimPrefix(line, "data: ")
-			if data == "[DONE]" {
+			if data == "[DONE]" || (gjson.Get(data, "text").String() == "[DONE]") {
 				break
 			}
-
-			openAIChunk := convertCodeArtsSSEToOpenAI(data, req.Model)
-			if openAIChunk == nil {
-				continue
-			}
+			dataLineCount++
 
 			if pt := gjson.Get(data, "prompt_tokens").Int(); pt > 0 {
 				totalPromptTokens = pt
@@ -272,12 +289,21 @@ func (e *CodeArtsExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 				totalCompletionTokens = ct
 			}
 
+			openAIChunk := convertCodeArtsSSEToOpenAI(data, req.Model)
+			if openAIChunk == nil {
+				continue
+			}
+
 			translatedChunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, req.Payload, openAIChunk, &streamParam)
 			for _, tc := range translatedChunks {
 				if len(tc) > 0 {
 					chunks <- cliproxyexecutor.StreamChunk{Payload: tc}
 				}
 			}
+		}
+
+		if dataLineCount == 0 {
+			log.Warnf("codearts: stream ended with no data lines (total_lines=%d, first_non_empty=%q)", lineCount, firstNonEmptyLine)
 		}
 
 		if err := scanner.Err(); err != nil {
@@ -516,7 +542,28 @@ func convertCodeArtsSSEToOpenAI(data string, model string) []byte {
 	reasoningContent := delta.Get("reasoning_content").String()
 
 	if content == "" && reasoningContent == "" {
-		return nil
+		role := delta.Get("role").String()
+		if role == "" {
+			return nil
+		}
+		deltaMap := map[string]interface{}{"role": role}
+		chunk := map[string]interface{}{
+			"id":      "chatcmpl-codearts",
+			"object":  "chat.completion.chunk",
+			"created": time.Now().Unix(),
+			"model":   model,
+			"choices": []map[string]interface{}{
+				{
+					"index": 0,
+					"delta": deltaMap,
+				},
+			},
+		}
+		result, err := json.Marshal(chunk)
+		if err != nil {
+			return nil
+		}
+		return result
 	}
 
 	deltaMap := make(map[string]interface{})
@@ -545,7 +592,7 @@ func convertCodeArtsSSEToOpenAI(data string, model string) []byte {
 		return nil
 	}
 
-	return append([]byte("data: "), result...)
+	return result
 }
 
 // buildOpenAINonStreamResponse builds a complete OpenAI non-stream response.
