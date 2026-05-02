@@ -12,16 +12,6 @@ jobs:
         with:
           fetch-depth: 0   
 
-      - name: Remove binary files before push
-        run: |
-          rm -rf assets/*.png
-          rm -rf asset/ad/*.png
-          git rm -r --cached assets/*.png || true
-          git rm -r --cached asset/ad/*.png || true
-          git config user.name "hf-bot"
-          git config user.email "bot@users.noreply.github.com"
-          git commit -m "clean binary for hf push" || true
-
       - name: Setup Git LFS
         run: |
           git lfs install
