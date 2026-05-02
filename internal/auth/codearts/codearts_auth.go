@@ -237,7 +237,7 @@ func (a *CodeArtsAuth) RefreshToken(ctx context.Context, token *CodeArtsTokenDat
 	req.Header.Set("Access-Key", token.AK)
 
 	// Sign with SDK-HMAC-SHA256
-	SignRequest(req, token.AK, token.SK, token.SecurityToken)
+	SignRequest(req, body, token.AK, token.SK, token.SecurityToken)
 
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
