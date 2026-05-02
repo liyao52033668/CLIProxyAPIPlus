@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	codearts "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codearts"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codearts"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
@@ -55,14 +57,34 @@ func (e *CodeArtsExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.
 		return fmt.Errorf("codearts: missing AK/SK credentials")
 	}
 
+	var bodyBytes []byte
+	if req.Body != nil {
+		bodyBytes, _ = io.ReadAll(req.Body)
+		req.Body.Close()
+		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		req.ContentLength = int64(len(bodyBytes))
+	}
+
+	traceID := generateTraceID()
+
 	req.Header.Set("User-Agent", codeArtsUserAgent)
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Agent-Type", "ChatAgent")
 	req.Header.Set("Client-Version", "Vscode_26.3.5")
+	req.Header.Set("Heartbeat-Enable", "true")
+	req.Header.Set("Ide-Name", "CodeArts Agent")
+	req.Header.Set("Ide-Version", "1.96.4")
+	req.Header.Set("Is-Confidential", "false")
 	req.Header.Set("Plugin-Name", "snap_vscode")
 	req.Header.Set("Plugin-Version", "26.3.5")
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Language", "zh-cn")
+	req.Header.Set("X-Snap-Traceid", traceID)
 
-	codearts.SignRequest(req, ak, sk, securityToken)
+	codearts.SignRequest(req, bodyBytes, ak, sk, securityToken)
+
+	log.Debugf("codearts: signing request url=%s, body_len=%d, ak=%s, headers=%v",
+		req.URL.String(), len(bodyBytes), ak[:min(4, len(ak))]+"...", req.Header)
 	return nil
 }
 
@@ -96,7 +118,9 @@ func (e *CodeArtsExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 		}
 	}
 
-	payload := buildCodeArtsPayload(req.Payload, baseModel, agentID, opts)
+	userID := extractUserID(auth)
+
+	payload := buildCodeArtsPayload(req.Payload, baseModel, agentID, userID, opts)
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", codeartsChatURL, bytes.NewReader(payload))
 	if err != nil {
@@ -109,11 +133,13 @@ func (e *CodeArtsExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 	}
 	defer httpResp.Body.Close()
 
+	log.Debugf("codearts: Execute response status=%d, content_type=%s", httpResp.StatusCode, httpResp.Header.Get("Content-Type"))
+
 	if httpResp.StatusCode != 200 {
 		body, _ := io.ReadAll(httpResp.Body)
 		return resp, statusErr{
 			code: httpResp.StatusCode,
-			msg: fmt.Sprintf("codearts: API returned %d: %s", httpResp.StatusCode, string(body)),
+			msg:  fmt.Sprintf("codearts: API returned %d: %s", httpResp.StatusCode, string(body)),
 		}
 	}
 
@@ -190,7 +216,9 @@ func (e *CodeArtsExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 		}
 	}
 
-	payload := buildCodeArtsPayload(req.Payload, baseModel, agentID, opts)
+	userID := extractUserID(auth)
+
+	payload := buildCodeArtsPayload(req.Payload, baseModel, agentID, userID, opts)
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", codeartsChatURL, bytes.NewReader(payload))
 	if err != nil {
@@ -205,11 +233,15 @@ func (e *CodeArtsExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 	if httpResp.StatusCode != 200 {
 		body, _ := io.ReadAll(httpResp.Body)
 		httpResp.Body.Close()
+		log.Debugf("codearts: non-200 response status=%d, body=%s", httpResp.StatusCode, string(body))
 		return nil, statusErr{
 			code: httpResp.StatusCode,
-			msg: fmt.Sprintf("codearts: API returned %d: %s", httpResp.StatusCode, string(body)),
+			msg:  fmt.Sprintf("codearts: API returned %d: %s", httpResp.StatusCode, string(body)),
 		}
 	}
+
+	log.Debugf("codearts: stream response status=%d, content_type=%s, content_length=%d",
+		httpResp.StatusCode, httpResp.Header.Get("Content-Type"), httpResp.ContentLength)
 
 	chunks := make(chan cliproxyexecutor.StreamChunk, 64)
 
@@ -221,26 +253,34 @@ func (e *CodeArtsExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 		to := sdktranslator.FromString("codearts")
 		var streamParam any
 		var totalPromptTokens, totalCompletionTokens int64
+		var lineCount int
+		var dataLineCount int
+		var firstNonEmptyLine string
 
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
 		for scanner.Scan() {
 			line := scanner.Text()
+			lineCount++
 			if strings.HasPrefix(line, ":heartbeat") || line == "" {
 				continue
 			}
-			if !strings.HasPrefix(line, "data: ") {
+			if firstNonEmptyLine == "" {
+				firstNonEmptyLine = line
+			}
+			var data string
+			if strings.HasPrefix(line, "data: ") {
+				data = strings.TrimPrefix(line, "data: ")
+			} else if strings.HasPrefix(line, "data:") {
+				data = strings.TrimPrefix(line, "data:")
+			} else {
+				log.Debugf("codearts: unexpected SSE line %d: %q", lineCount, line)
 				continue
 			}
-			data := strings.TrimPrefix(line, "data: ")
-			if data == "[DONE]" {
+			if data == "[DONE]" || (gjson.Get(data, "text").String() == "[DONE]") {
 				break
 			}
-
-			openAIChunk := convertCodeArtsSSEToOpenAI(data, req.Model)
-			if openAIChunk == nil {
-				continue
-			}
+			dataLineCount++
 
 			if pt := gjson.Get(data, "prompt_tokens").Int(); pt > 0 {
 				totalPromptTokens = pt
@@ -249,12 +289,21 @@ func (e *CodeArtsExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 				totalCompletionTokens = ct
 			}
 
+			openAIChunk := convertCodeArtsSSEToOpenAI(data, req.Model)
+			if openAIChunk == nil {
+				continue
+			}
+
 			translatedChunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, req.Payload, openAIChunk, &streamParam)
 			for _, tc := range translatedChunks {
 				if len(tc) > 0 {
 					chunks <- cliproxyexecutor.StreamChunk{Payload: tc}
 				}
 			}
+		}
+
+		if dataLineCount == 0 {
+			log.Warnf("codearts: stream ended with no data lines (total_lines=%d, first_non_empty=%q)", lineCount, firstNonEmptyLine)
 		}
 
 		if err := scanner.Err(); err != nil {
@@ -356,8 +405,36 @@ func metadataStr(m map[string]any, key string) string {
 	return ""
 }
 
+func extractUserID(auth *cliproxyauth.Auth) string {
+	if auth.Metadata != nil {
+		if uid, ok := auth.Metadata["user_id"].(string); ok {
+			return uid
+		}
+		if did, ok := auth.Metadata["domain_id"].(string); ok {
+			return did
+		}
+	}
+	return ""
+}
+
+func generateTraceID() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("%032d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b)
+}
+
+func generateChatID() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("%032d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b)
+}
+
 // buildCodeArtsPayload converts the OpenAI-format payload to CodeArts format.
-func buildCodeArtsPayload(openaiPayload []byte, modelName, agentID string, opts cliproxyexecutor.Options) []byte {
+func buildCodeArtsPayload(openaiPayload []byte, modelName, agentID, userID string, opts cliproxyexecutor.Options) []byte {
 	messages := gjson.GetBytes(openaiPayload, "messages")
 	if !messages.Exists() {
 		log.Warn("codearts: no messages found in payload")
@@ -374,37 +451,76 @@ func buildCodeArtsPayload(openaiPayload []byte, modelName, agentID string, opts 
 		case "system":
 			formattedContent = "[System]\n" + content
 		case "assistant":
-			formattedContent = "[Assistant]\n" + content
-		case "user":
-			formattedContent = content
+			toolCalls := msg.Get("tool_calls")
+			if toolCalls.Exists() && len(toolCalls.Array()) > 0 {
+				var parts []string
+				parts = append(parts, "[Assistant]\n"+content)
+				for _, tc := range toolCalls.Array() {
+					name := tc.Get("function.name").String()
+					id := tc.Get("id").String()
+					args := tc.Get("function.arguments").String()
+					parts = append(parts, fmt.Sprintf("[Tool Call: %s] (id: %s)\n%s", name, id, args))
+				}
+				formattedContent = strings.Join(parts, "\n")
+			} else {
+				formattedContent = "[Assistant]\n" + content
+			}
 		case "tool":
 			toolName := msg.Get("name").String()
+			toolID := msg.Get("tool_call_id").String()
 			if toolName == "" {
 				toolName = "unknown"
 			}
-			formattedContent = fmt.Sprintf("[Tool Result: %s]\n%s", toolName, content)
+			formattedContent = fmt.Sprintf("[Tool Result: %s] (id: %s)\n%s", toolName, toolID, content)
+		case "user":
+			formattedContent = content
 		default:
 			formattedContent = content
 		}
 
 		codeArtsMessages = append(codeArtsMessages, map[string]string{
-			"role":    role,
+			"type":    "text",
 			"content": formattedContent,
 		})
 	}
 
-	request := map[string]interface{}{
-		"messages": codeArtsMessages,
-		"model":    modelName,
-		"agent_id": agentID,
-		"stream":   true,
+	taskParameters := map[string]interface{}{
+		"is_intent_recognition":   false,
+		"W3_Search":               false,
+		"codebase_search":         false,
+		"related_question":        true,
+		"preferred_language":      "zh-cn",
+		"enable_code_interpreter": false,
+		"projectLevelPrompt":      "",
+		"contexts":                []interface{}{},
+		"expert_rules":            []interface{}{},
+		"ide":                     "CodeArts Agent",
+		"routerVersion":           "v2",
+		"isNewClient":             true,
+		"features":                map[string]interface{}{"support_end_tag": true},
 	}
 
-	if maxTokens := gjson.GetBytes(openaiPayload, "max_tokens"); maxTokens.Exists() {
-		request["max_tokens"] = maxTokens.Value()
+	if tools := gjson.GetBytes(openaiPayload, "tools"); tools.Exists() {
+		taskParameters["tools"] = tools.Value()
 	}
 	if temp := gjson.GetBytes(openaiPayload, "temperature"); temp.Exists() {
-		request["temperature"] = temp.Value()
+		taskParameters["temperature"] = temp.Value()
+	}
+
+	chatID := generateChatID()
+
+	request := map[string]interface{}{
+		"chat_id":               chatID,
+		"messages":              codeArtsMessages,
+		"client":                "IDE",
+		"task":                  "chat",
+		"task_parameters":       taskParameters,
+		"batch_task_parameters": []interface{}{},
+		"attempt":               1,
+		"user_id":               userID,
+		"parent_message_id":     "",
+		"is_delta_response":     true,
+		"model_id":              modelName,
 	}
 
 	result, err := json.Marshal(request)
@@ -426,7 +542,28 @@ func convertCodeArtsSSEToOpenAI(data string, model string) []byte {
 	reasoningContent := delta.Get("reasoning_content").String()
 
 	if content == "" && reasoningContent == "" {
-		return nil
+		role := delta.Get("role").String()
+		if role == "" {
+			return nil
+		}
+		deltaMap := map[string]interface{}{"role": role}
+		chunk := map[string]interface{}{
+			"id":      "chatcmpl-codearts",
+			"object":  "chat.completion.chunk",
+			"created": time.Now().Unix(),
+			"model":   model,
+			"choices": []map[string]interface{}{
+				{
+					"index": 0,
+					"delta": deltaMap,
+				},
+			},
+		}
+		result, err := json.Marshal(chunk)
+		if err != nil {
+			return nil
+		}
+		return result
 	}
 
 	deltaMap := make(map[string]interface{})
@@ -455,7 +592,7 @@ func convertCodeArtsSSEToOpenAI(data string, model string) []byte {
 		return nil
 	}
 
-	return append([]byte("data: "), result...)
+	return result
 }
 
 // buildOpenAINonStreamResponse builds a complete OpenAI non-stream response.

@@ -22,11 +22,11 @@ import (
 type sessionStatus string
 
 const (
-	sPending    sessionStatus = "pending"
-	sWaitingCB  sessionStatus = "waiting_callback"
-	sPolling    sessionStatus = "polling"
-	sSuccess    sessionStatus = "success"
-	sFailed     sessionStatus = "failed"
+	sPending   sessionStatus = "pending"
+	sWaitingCB sessionStatus = "waiting_callback"
+	sPolling   sessionStatus = "polling"
+	sSuccess   sessionStatus = "success"
+	sFailed    sessionStatus = "failed"
 )
 
 type webSession struct {
@@ -301,17 +301,17 @@ func (h *OAuthWebHandler) saveTokenToFile(tokenData *CodeArtsTokenData) {
 	// Save in the same format as the file synthesizer expects:
 	// { "type": "codearts", ... }
 	storage := map[string]interface{}{
-		"type":            "codearts",
-		"ak":              tokenData.AK,
-		"sk":              tokenData.SK,
-		"security_token":  tokenData.SecurityToken,
-		"x_auth_token":    tokenData.XAuthToken,
-		"expires_at":      tokenData.ExpiresAt.Format(time.RFC3339),
-		"user_id":         tokenData.UserID,
-		"user_name":       tokenData.UserName,
-		"domain_id":       tokenData.DomainID,
-		"email":           tokenData.Email,
-		"last_refresh":    time.Now().Format(time.RFC3339),
+		"type":           "codearts",
+		"ak":             tokenData.AK,
+		"sk":             tokenData.SK,
+		"security_token": tokenData.SecurityToken,
+		"x_auth_token":   tokenData.XAuthToken,
+		"expires_at":     tokenData.ExpiresAt.Format(time.RFC3339),
+		"user_id":        tokenData.UserID,
+		"user_name":      tokenData.UserName,
+		"domain_id":      tokenData.DomainID,
+		"email":          tokenData.Email,
+		"last_refresh":   time.Now().Format(time.RFC3339),
 	}
 
 	data, err := json.MarshalIndent(storage, "", "  ")
