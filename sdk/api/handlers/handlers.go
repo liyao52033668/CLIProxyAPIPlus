@@ -22,6 +22,7 @@ import (
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/context"
 )
 
@@ -797,6 +798,7 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	baseModel := strings.TrimSpace(parsed.ModelName)
 
 	providers = util.GetProviderName(baseModel)
+	log.Debugf("getRequestDetails: modelName=%q, resolvedModelName=%q, baseModel=%q, providers=%v", modelName, resolvedModelName, baseModel, providers)
 	// Fallback: if baseModel has no provider but differs from resolvedModelName,
 	// try using the full model name. This handles edge cases where custom models
 	// may be registered with their full suffixed name (e.g., "my-model(8192)").
