@@ -259,3 +259,15 @@ func TestSanitizeOAuthModelAlias_InjectsDefaultKiroWhenEmpty(t *testing.T) {
 		t.Fatal("expected default kiro aliases to be injected when OAuthModelAlias is nil")
 	}
 }
+
+func TestSanitizeOAuthModelAlias_InjectsDefaultQoderWhenEmpty(t *testing.T) {
+	// When OAuthModelAlias is nil, qoder defaults should still be injected
+	cfg := &Config{}
+
+	cfg.SanitizeOAuthModelAlias()
+
+	qoderAliases := cfg.OAuthModelAlias["qoder"]
+	if len(qoderAliases) == 0 {
+		t.Fatal("expected default qoder aliases to be injected when OAuthModelAlias is nil")
+	}
+}

@@ -4,6 +4,7 @@
 
 
 # Configuration
+CLIProxyAPI/*
 config.yaml
 .env
 .mcp.json
