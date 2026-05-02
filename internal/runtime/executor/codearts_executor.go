@@ -13,8 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
-	codearts "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codearts"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codearts"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
@@ -400,6 +399,14 @@ func generateTraceID() string {
 	return hex.EncodeToString(b)
 }
 
+func generateChatID() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("%032d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b)
+}
+
 // buildCodeArtsPayload converts the OpenAI-format payload to CodeArts format.
 func buildCodeArtsPayload(openaiPayload []byte, modelName, agentID, userID string, opts cliproxyexecutor.Options) []byte {
 	messages := gjson.GetBytes(openaiPayload, "messages")
@@ -474,8 +481,10 @@ func buildCodeArtsPayload(openaiPayload []byte, modelName, agentID, userID strin
 		taskParameters["temperature"] = temp.Value()
 	}
 
+	chatID := generateChatID()
+
 	request := map[string]interface{}{
-		"chat_id":               uuid.New().String(),
+		"chat_id":               chatID,
 		"messages":              codeArtsMessages,
 		"client":                "IDE",
 		"task":                  "chat",

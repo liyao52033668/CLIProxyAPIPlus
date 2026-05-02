@@ -12,22 +12,16 @@ import (
 	"time"
 )
 
-// SignRequest signs an HTTP request using SDK-HMAC-SHA256.
-// This is HuaweiCloud's signing algorithm (NOT AWS SigV4).
-// Key differences from AWS SigV4:
-// - Single-step HMAC (no derived key)
-// - Path must end with "/"
-// - Algorithm name is "SDK-HMAC-SHA256"
 func SignRequest(req *http.Request, body []byte, ak, sk, securityToken string) {
 	now := time.Now().UTC()
 	timeStr := now.Format("20060102T150405Z")
 
 	req.Header.Set("X-Sdk-Date", timeStr)
+	req.Header.Set("host", req.URL.Host)
 	if securityToken != "" {
 		req.Header.Set("X-Security-Token", securityToken)
 	}
 
-	// Canonical request
 	method := req.Method
 	path := req.URL.Path
 	if path == "" {
@@ -37,33 +31,25 @@ func SignRequest(req *http.Request, body []byte, ak, sk, securityToken string) {
 		path += "/"
 	}
 
-	// Canonical query string
 	canonicalQuery := canonicalQueryString(req.URL.Query())
 
-	// Signed headers
-	signedHeaderKeys := []string{"host", "x-sdk-date"}
-	if securityToken != "" {
-		signedHeaderKeys = append(signedHeaderKeys, "x-security-token")
+	lowerMap := make(map[string]string)
+	for k, v := range req.Header {
+		if len(v) > 0 {
+			lowerMap[strings.ToLower(k)] = v[0]
+		}
 	}
-	// Add content-type if present
-	if ct := req.Header.Get("Content-Type"); ct != "" {
-		signedHeaderKeys = append(signedHeaderKeys, "content-type")
+
+	signedHeaderKeys := make([]string, 0, len(lowerMap))
+	for k := range lowerMap {
+		signedHeaderKeys = append(signedHeaderKeys, k)
 	}
 	sort.Strings(signedHeaderKeys)
 
-	// Canonical headers
 	var canonicalHeaders strings.Builder
 	for _, key := range signedHeaderKeys {
-		var val string
-		if key == "host" {
-			val = req.Host
-			if val == "" {
-				val = req.URL.Host
-			}
-		} else {
-			val = req.Header.Get(key)
-		}
-		canonicalHeaders.WriteString(strings.ToLower(key))
+		val := lowerMap[key]
+		canonicalHeaders.WriteString(key)
 		canonicalHeaders.WriteString(":")
 		canonicalHeaders.WriteString(strings.TrimSpace(val))
 		canonicalHeaders.WriteString("\n")
@@ -71,21 +57,17 @@ func SignRequest(req *http.Request, body []byte, ak, sk, securityToken string) {
 
 	signedHeadersStr := strings.Join(signedHeaderKeys, ";")
 
-	// Body hash (empty for GET, or use existing hash)
 	bodyHash := sha256Hex(body)
 
 	canonicalReq := fmt.Sprintf("%s\n%s\n%s\n%s\n%s\n%s",
 		method, path, canonicalQuery,
 		canonicalHeaders.String(), signedHeadersStr, bodyHash)
 
-	// String to sign
 	stringToSign := fmt.Sprintf("SDK-HMAC-SHA256\n%s\n%s",
 		timeStr, sha256Hex([]byte(canonicalReq)))
 
-	// Signature (single-step HMAC, not derived key)
 	signature := hmacSHA256Hex([]byte(sk), []byte(stringToSign))
 
-	// Authorization header
 	authHeader := fmt.Sprintf("SDK-HMAC-SHA256 Access=%s, SignedHeaders=%s, Signature=%s",
 		ak, signedHeadersStr, signature)
 	req.Header.Set("Authorization", authHeader)
