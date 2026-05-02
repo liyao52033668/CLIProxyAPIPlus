@@ -553,6 +553,8 @@ func (s *Service) Run(ctx context.Context) error {
 
 	// handlers no longer depend on legacy clients; pass nil slice initially
 	s.server = api.NewServer(s.cfg, s.coreManager, s.accessManager, s.configPath, s.serverOptions...)
+	// Set callback to refresh model registrations when OAuthModelAlias is updated
+	s.server.SetOnOAuthModelAliasUpdated(s.RefreshAllModelRegistrations)
 
 	if s.authManager == nil {
 		s.authManager = newDefaultAuthManager()
@@ -1164,6 +1166,23 @@ func (s *Service) latestAuthForModelRegistration(authID string) (*coreauth.Auth,
 		return nil, false
 	}
 	return auth, true
+}
+
+// RefreshAllModelRegistrations re-registers models for all auths to apply any changes
+// in OAuthModelAlias or model catalog.
+func (s *Service) RefreshAllModelRegistrations() {
+	if s == nil || s.coreManager == nil {
+		return
+	}
+	auths := s.coreManager.List()
+	log.Infof("refreshing model registrations for %d auths", len(auths))
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		s.refreshModelRegistrationForAuth(auth)
+	}
+	log.Infof("finished refreshing model registrations for %d auths", len(auths))
 }
 
 func (s *Service) resolveConfigClaudeKey(auth *coreauth.Auth) *config.ClaudeKey {

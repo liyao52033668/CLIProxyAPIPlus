@@ -174,7 +174,7 @@ func (a QoderAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 	name := ""
 	email := ""
 	if authField != "" {
-		authInfo, errDecode := qoder.DecodeAuthField(authField)
+		authInfo, errDecode := qoder.DecodeAuthFieldToJSON(authField)
 		if errDecode != nil {
 			log.Warnf("qoder: failed to decode auth field: %v", errDecode)
 		} else {

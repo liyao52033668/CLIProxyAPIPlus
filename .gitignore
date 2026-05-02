@@ -26,6 +26,7 @@ static/*
 # Authentication data
 auths/*
 !auths/.gitkeep
+qoder2api/*
 
 # Documentation
 docs/*

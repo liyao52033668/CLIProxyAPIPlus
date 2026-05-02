@@ -50,6 +50,7 @@ type Handler struct {
 	logDir               string
 	postAuthHook         coreauth.PostAuthHook
 	codeArtsOAuthHandler *codearts.OAuthWebHandler
+	onOAuthModelAliasUpdated func() // 回调：当 OAuthModelAlias 更新后调用
 }
 
 // NewHandler creates a new management handler instance.
@@ -69,6 +70,13 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 	}
 	h.startAttemptCleanup()
 	return h
+}
+
+// SetOnOAuthModelAliasUpdated 设置 OAuthModelAlias 更新后调用的回调
+func (h *Handler) SetOnOAuthModelAliasUpdated(fn func()) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.onOAuthModelAliasUpdated = fn
 }
 
 // startAttemptCleanup launches a background goroutine that periodically

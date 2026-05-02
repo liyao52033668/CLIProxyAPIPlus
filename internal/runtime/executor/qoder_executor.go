@@ -148,7 +148,7 @@ func (e *QoderExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	}
 
 	// Build COSY authenticated request (plain JSON for non-stream)
-	httpReq, errReq := e.buildCosyRequest(ctx, auth, url, qoderBodyJSON, false)
+	httpReq, errReq := e.buildCosyRequest(ctx, auth, url, qoderBodyJSON, false, baseModel)
 	if errReq != nil {
 		return resp, errReq
 	}
@@ -248,7 +248,7 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 
 	// Build COSY authenticated request (plain JSON for stream)
-	httpReq, errReq := e.buildCosyRequest(ctx, auth, url, qoderBodyJSON, true)
+	httpReq, errReq := e.buildCosyRequest(ctx, auth, url, qoderBodyJSON, true, baseModel)
 	if errReq != nil {
 		return nil, errReq
 	}
@@ -359,8 +359,9 @@ func (e *QoderExecutor) buildQoderRequestBody(openaiBody []byte, modelKey string
 		_ = json.Unmarshal([]byte(msgsRaw.Raw), &messages)
 	}
 
-	// Extract last user message for originalContent
+	// Extract last user message for originalContent and rebuild messages per Java's logic
 	lastUser := ""
+	var rebuiltMessages []any
 	if messages != nil {
 		for i := len(messages) - 1; i >= 0; i-- {
 			if m, ok := messages[i].(map[string]any); ok {
@@ -372,27 +373,47 @@ func (e *QoderExecutor) buildQoderRequestBody(openaiBody []byte, modelKey string
 				}
 			}
 		}
+		// Rebuild messages: filter out user messages, then append new user message with contents
+		for _, msg := range messages {
+			if m, ok := msg.(map[string]any); ok {
+				if role, _ := m["role"].(string); role != "user" {
+					rebuiltMessages = append(rebuiltMessages, m)
+				}
+			}
+		}
+		// Create new user message with contents array (matching Java's logic)
+		newUserMsg := map[string]any{
+			"role":                          "user",
+			"content":                       "",
+			"contents": []map[string]any{{
+				"type": "text",
+				"text": lastUser,
+			}},
+			"response_meta": map[string]any{
+				"id": "",
+				"usage": map[string]any{
+					"prompt_tokens":      0,
+					"completion_tokens":  0,
+					"total_tokens":       0,
+					"completion_tokens_details": map[string]any{
+						"reasoning_tokens": 0,
+					},
+					"prompt_tokens_details": map[string]any{
+						"cached_tokens": 0,
+					},
+				},
+			},
+			"reasoning_content_signature": "",
+		}
+		rebuiltMessages = append(rebuiltMessages, newUserMsg)
 	}
 
 	body := map[string]any{
-		"stream":         stream,
-		"chat_task":      "FREE_INPUT",
-		"is_reply":       false,
-		"is_retry":       false,
-		"code_language":  "",
-		"source":         1,
-		"version":        "3",
-		"chat_prompt":    "",
-		"session_type":   "qodercli",
-		"agent_id":       "agent_common",
-		"task_id":        "common",
-		"messages":       messages,
-		"tools":          []any{},
-		"request_id":     uuid.NewString(),
-		"request_set_id": uuid.NewString(),
-		"chat_record_id": uuid.NewString(),
-		"session_id":     uuid.NewString(),
-		"parameters":     map[string]any{"max_tokens": 32768},
+		"request_id":        uuid.NewString(),
+		"request_set_id":    uuid.NewString(),
+		"chat_record_id":    uuid.NewString(),
+		"stream":            stream,
+		"chat_task":         "FREE_INPUT",
 		"chat_context": map[string]any{
 			"chatPrompt": "",
 			"extra": map[string]any{
@@ -400,15 +421,31 @@ func (e *QoderExecutor) buildQoderRequestBody(openaiBody []byte, modelKey string
 				"modelConfig":     map[string]any{"key": modelKey, "is_reasoning": false},
 				"originalContent": map[string]any{"type": "text", "text": lastUser},
 			},
-			"features": []any{},
-			"text":     map[string]any{"type": "text", "text": lastUser},
+			"features":    []any{},
+			"imageUrls":   nil,
+			"text":        map[string]any{"type": "text", "text": lastUser},
 		},
+		"image_urls":       nil,
+		"is_reply":         true, // must be true to match Java
+		"is_retry":         false,
+		"session_id":        uuid.NewString(),
+		"code_language":     "",
+		"source":           1,
+		"version":          "3",
+		"chat_prompt":       "",
+		"parameters":       map[string]any{"max_tokens": 32768},
+		"aliyun_user_type": "personal_standard",
+		"session_type":      "qodercli",
+		"agent_id":         "agent_common",
+		"task_id":          "common",
+		"messages":         rebuiltMessages,
+		"tools":            []any{},
 		"model_config": map[string]any{
 			"key":              modelKey,
 			"display_name":     modelKey,
 			"model":            "",
 			"format":           "openai",
-			"is_vl":            true,
+			"is_vl":            false, 
 			"is_reasoning":     false,
 			"api_key":          "",
 			"url":              "",
@@ -426,29 +463,32 @@ func (e *QoderExecutor) buildQoderRequestBody(openaiBody []byte, modelKey string
 }
 
 // buildCosyRequest creates an HTTP request with COSY authentication headers.
-func (e *QoderExecutor) buildCosyRequest(ctx context.Context, auth *cliproxyauth.Auth, reqURL string, body []byte, stream bool) (*http.Request, error) {
+func (e *QoderExecutor) buildCosyRequest(ctx context.Context, auth *cliproxyauth.Auth, reqURL string, body []byte, stream bool, modelKey string) (*http.Request, error) {
 	creds := qoderCreds(auth)
 	if creds.accessToken == "" {
 		return nil, fmt.Errorf("qoder executor: missing access token")
 	}
 
 	// Encode body using Qoder's custom base64 scheme (required by upstream API)
+	bodyJSON, _ := json.Marshal(body)
+	log.Debugf("qoder executor: request body JSON: %s", string(bodyJSON))
 	encodedBody := customBase64Encode(body)
 	if encodedBody == "" {
 		return nil, fmt.Errorf("qoder executor: failed to encode body")
 	}
 
-	// Parse path for signature — match Python: path = "/" + url.split("://")[1].split("/", 1)[1]
+	// Parse path for signature — match Java: pathSig = pathQuery.startsWith("/algo") ? pathQuery.substring("/algo".length()) : pathQuery
 	sigPath := ""
 	if _, after, ok := strings.Cut(reqURL, "://"); ok {
-		afterScheme := after // "api3.qoder.sh/algo/api/v2/..."
+		afterScheme := after
 		if slashIdx := strings.Index(afterScheme, "/"); slashIdx >= 0 {
-			sigPath = afterScheme[slashIdx:] // "/algo/api/v2/..."
+			sigPath = afterScheme[slashIdx:]
 		}
 	}
 	if idx := strings.Index(sigPath, "?"); idx >= 0 {
 		sigPath = sigPath[:idx]
 	}
+	// Remove /algo prefix for signature calculation (matches Java implementation)
 	if strings.HasPrefix(sigPath, "/algo") {
 		sigPath = sigPath[len("/algo"):]
 	}
@@ -467,14 +507,16 @@ func (e *QoderExecutor) buildCosyRequest(ctx context.Context, auth *cliproxyauth
 
 	timestamp := fmt.Sprintf("%d", time.Now().Unix())
 
-	payload, _ := json.Marshal(map[string]any{
+	// Build payload with sorted keys to match Java's TreeMap ordering
+	// TreeMap sorts keys alphabetically: cosyVersion, ideVersion, info, requestId, version
+	payloadJSON, _ := json.Marshal(map[string]any{
 		"cosyVersion": qoder.IDEVersion,
 		"ideVersion":  "",
 		"info":        info,
 		"requestId":   uuid.NewString(),
 		"version":     "v1",
 	})
-	payloadB64 := base64.StdEncoding.EncodeToString(payload)
+	payloadB64 := base64.StdEncoding.EncodeToString(payloadJSON)
 
 	sigInput := fmt.Sprintf("%s\n%s\n%s\n%s\n%s", payloadB64, key, timestamp, encodedBody, sigPath)
 	sigMD5 := fmt.Sprintf("%x", md5.Sum([]byte(sigInput)))
@@ -488,7 +530,7 @@ func (e *QoderExecutor) buildCosyRequest(ctx context.Context, auth *cliproxyauth
 
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept-Encoding", "identity")
-	httpReq.Header.Set("Cosy-Version", qoder.IDEVersion)
+	httpReq.Header.Set("Cosy-Version", qoder.IDEVersion) // "0.1.43" to match Java
 	httpReq.Header.Set("Cosy-Machineid", creds.machineID)
 	httpReq.Header.Set("Cosy-Machinetoken", creds.machineID)
 	httpReq.Header.Set("Cosy-Machinetype", "d19de69691ac029caa")
@@ -507,6 +549,8 @@ func (e *QoderExecutor) buildCosyRequest(ctx context.Context, auth *cliproxyauth
 	httpReq.Header.Set("Cosy-Organization-Tags", "")
 	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer COSY.%s.%s", payloadB64, sigMD5))
 	httpReq.Header.Set("X-Request-Id", uuid.NewString())
+	httpReq.Header.Set("x-model-key", modelKey)
+	httpReq.Header.Set("x-model-source", "system")
 
 	if stream {
 		httpReq.Header.Set("Accept", "text/event-stream")
