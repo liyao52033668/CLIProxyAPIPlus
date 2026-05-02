@@ -12,6 +12,16 @@ jobs:
         with:
           fetch-depth: 0   
 
+
+      - name: Clean git history
+        run: |
+          pip install git-filter-repo
+          git filter-repo \
+            --path assets/lingtrue.png \
+            --path asset/ad/chinese.png \
+            --path asset/ad/english.png \
+            --invert-paths
+
       - name: Setup Git LFS
         run: |
           git lfs install
