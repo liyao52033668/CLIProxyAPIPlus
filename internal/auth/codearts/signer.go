@@ -22,46 +22,18 @@ func SignRequest(req *http.Request, body []byte, ak, sk, securityToken string) {
 		req.Header.Set("X-Security-Token", securityToken)
 	}
 
-	method := req.Method
-	path := req.URL.Path
-	if path == "" {
-		path = "/"
-	}
-	if !strings.HasSuffix(path, "/") {
-		path += "/"
-	}
+	signedHeaderKeys := extractSignedHeaders(req.Header)
 
-	canonicalQuery := canonicalQueryString(req.URL.Query())
-
-	lowerMap := make(map[string]string)
-	for k, v := range req.Header {
-		if len(v) > 0 {
-			lowerMap[strings.ToLower(k)] = v[0]
-		}
-	}
-
-	signedHeaderKeys := make([]string, 0, len(lowerMap))
-	for k := range lowerMap {
-		signedHeaderKeys = append(signedHeaderKeys, k)
-	}
-	sort.Strings(signedHeaderKeys)
-
-	var canonicalHeaders strings.Builder
-	for _, key := range signedHeaderKeys {
-		val := lowerMap[key]
-		canonicalHeaders.WriteString(key)
-		canonicalHeaders.WriteString(":")
-		canonicalHeaders.WriteString(strings.TrimSpace(val))
-		canonicalHeaders.WriteString("\n")
-	}
-
+	canonicalURI := buildCanonicalURI(req.URL.Path)
+	canonicalQuery := buildCanonicalQueryString(req.URL.Query())
+	canonicalHdrs := buildCanonicalHeaders(req, signedHeaderKeys)
 	signedHeadersStr := strings.Join(signedHeaderKeys, ";")
 
 	bodyHash := sha256Hex(body)
 
 	canonicalReq := fmt.Sprintf("%s\n%s\n%s\n%s\n%s\n%s",
-		method, path, canonicalQuery,
-		canonicalHeaders.String(), signedHeadersStr, bodyHash)
+		req.Method, canonicalURI, canonicalQuery,
+		canonicalHdrs, signedHeadersStr, bodyHash)
 
 	stringToSign := fmt.Sprintf("SDK-HMAC-SHA256\n%s\n%s",
 		timeStr, sha256Hex([]byte(canonicalReq)))
@@ -73,18 +45,33 @@ func SignRequest(req *http.Request, body []byte, ak, sk, securityToken string) {
 	req.Header.Set("Authorization", authHeader)
 }
 
-func sha256Hex(data []byte) string {
-	h := sha256.Sum256(data)
-	return hex.EncodeToString(h[:])
+func extractSignedHeaders(headers http.Header) []string {
+	var sh []string
+	for key := range headers {
+		lower := strings.ToLower(key)
+		if strings.HasPrefix(lower, "content-type") || strings.Contains(lower, "_") {
+			continue
+		}
+		sh = append(sh, lower)
+	}
+	sort.Strings(sh)
+	return sh
 }
 
-func hmacSHA256Hex(key, data []byte) string {
-	h := hmac.New(sha256.New, key)
-	h.Write(data)
-	return hex.EncodeToString(h.Sum(nil))
+func buildCanonicalURI(rawPath string) string {
+	parts := strings.Split(rawPath, "/")
+	var encoded []string
+	for _, p := range parts {
+		encoded = append(encoded, sdkEscape(p))
+	}
+	path := strings.Join(encoded, "/")
+	if len(path) == 0 || path[len(path)-1] != '/' {
+		path = path + "/"
+	}
+	return path
 }
 
-func canonicalQueryString(query url.Values) string {
+func buildCanonicalQueryString(query url.Values) string {
 	if len(query) == 0 {
 		return ""
 	}
@@ -98,8 +85,75 @@ func canonicalQueryString(query url.Values) string {
 		vals := query[k]
 		sort.Strings(vals)
 		for _, v := range vals {
-			parts = append(parts, url.QueryEscape(k)+"="+url.QueryEscape(v))
+			parts = append(parts, sdkEscape(k)+"="+sdkEscape(v))
 		}
 	}
 	return strings.Join(parts, "&")
+}
+
+func buildCanonicalHeaders(req *http.Request, signedHeaderKeys []string) string {
+	headerMap := make(map[string][]string)
+	for k, v := range req.Header {
+		lower := strings.ToLower(k)
+		if _, ok := headerMap[lower]; !ok {
+			headerMap[lower] = make([]string, 0)
+		}
+		headerMap[lower] = append(headerMap[lower], v...)
+	}
+
+	var lines []string
+	for _, key := range signedHeaderKeys {
+		values := headerMap[key]
+		if key == "host" {
+			values = []string{req.URL.Host}
+		}
+		sort.Strings(values)
+		for _, v := range values {
+			lines = append(lines, key+":"+strings.TrimSpace(v))
+		}
+	}
+	return fmt.Sprintf("%s\n", strings.Join(lines, "\n"))
+}
+
+func sdkEscape(s string) string {
+	hexCount := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if shouldEscape(c) {
+			hexCount++
+		}
+	}
+	if hexCount == 0 {
+		return s
+	}
+	t := make([]byte, len(s)+2*hexCount)
+	j := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if shouldEscape(c) {
+			t[j] = '%'
+			t[j+1] = "0123456789ABCDEF"[c>>4]
+			t[j+2] = "0123456789ABCDEF"[c&15]
+			j += 3
+		} else {
+			t[j] = s[i]
+			j++
+		}
+	}
+	return string(t)
+}
+
+func shouldEscape(c byte) bool {
+	return !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '~' || c == '.')
+}
+
+func sha256Hex(data []byte) string {
+	h := sha256.Sum256(data)
+	return hex.EncodeToString(h[:])
+}
+
+func hmacSHA256Hex(key, data []byte) string {
+	h := hmac.New(sha256.New, key)
+	h.Write(data)
+	return hex.EncodeToString(h.Sum(nil))
 }
