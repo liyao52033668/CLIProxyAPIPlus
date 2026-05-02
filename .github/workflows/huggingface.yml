@@ -12,4 +12,4 @@ jobs:
       - name: Push to HF
         run: |
           git remote add hf https://lliyao52033:${{ secrets.HF_TOKEN }}@huggingface.co/spaces/liyao52033/cpa
-          git push hf main  
+          git push hf main --force
