@@ -9,6 +9,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0   
+
+      - name: Setup Git LFS
+        run: |
+          git lfs install
+
       - name: Push to HF
         run: |
           git remote add hf https://lliyao52033:${{ secrets.HF_TOKEN }}@huggingface.co/spaces/liyao52033/cpa
