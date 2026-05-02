@@ -309,12 +309,12 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		s.registerManagementRoutes()
 	}
 
-	// === CLIProxyAPIPlus 扩展: 注册 Kiro OAuth Web 路由 ===
+	// === CLIProxyAPIPlus extension: Register Kiro OAuth Web routes ===
 	kiroOAuthHandler := kiro.NewOAuthWebHandler(cfg)
 	kiroOAuthHandler.RegisterRoutes(engine)
 	log.Info("Kiro OAuth Web routes registered at /v0/oauth/kiro/*")
 
-	// === CLIProxyAPIPlus 扩展: 注册 CodeArts OAuth Web 路由 ===
+	// === CLIProxyAPIPlus extension: Register CodeArts OAuth Web routes ===
 	s.codeArtsOAuthHandler = codearts.NewOAuthWebHandler(cfg)
 	s.codeArtsOAuthHandler.RegisterRoutes(engine)
 	s.mgmt.SetCodeArtsOAuthHandler(s.codeArtsOAuthHandler)
@@ -743,6 +743,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/codearts-auth-url", s.mgmt.RequestCodeArtsToken)
 		mgmt.GET("/bt-auth-url", s.mgmt.RequestBTToken)
 		mgmt.POST("/bt-auth-url", s.mgmt.RequestBTToken)
+
 		mgmt.POST("/oauth-callback", s.mgmt.PostOAuthCallback)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
 	}
