@@ -1,0 +1,15 @@
+name: Sync to HuggingFace
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Push to HF
+        run: |
+          git remote add hf https://lliyao52033:${{ secrets.HF_TOKEN }}@huggingface.co/lliyao52033/cpa
+          git push hf main  
