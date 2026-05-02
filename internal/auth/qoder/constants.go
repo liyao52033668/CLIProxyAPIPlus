@@ -28,7 +28,7 @@ XcW+ML9FoCI6AOvOzwIDAQAB
 
 // Custom base64 encoding alphabet used by Qoder body encoding.
 const (
-	CustomPad      = "$"
+	CustomPad      = '$'
 	StdAlphabet    = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 	CustomAlphabet = "_doRTgHZBKcGVjlvpC,@aFSx#DPuNJme&i*MzLOEn)sUrthbf%Y^w.(kIQyXqWA!"
 )

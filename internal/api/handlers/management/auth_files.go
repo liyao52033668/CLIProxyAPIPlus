@@ -442,12 +442,14 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 	}
 
 	// Try to find auth ID via authManager
+	var auth *coreauth.Auth
 	var authID string
 	if h.authManager != nil {
 		auths := h.authManager.List()
-		for _, auth := range auths {
-			if auth.FileName == name || auth.ID == name {
-				authID = auth.ID
+		for _, a := range auths {
+			if a.FileName == name || a.ID == name {
+				auth = a
+				authID = a.ID
 				break
 			}
 		}
@@ -463,8 +465,13 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 
 	result := make([]gin.H, 0, len(models))
 	for _, m := range models {
+		modelID := m.ID
+		// Use alias if available
+		if auth != nil && h.authManager != nil {
+			modelID = h.authManager.GetOAuthModelAlias(auth, m.ID)
+		}
 		entry := gin.H{
-			"id": m.ID,
+			"id": modelID,
 		}
 		if m.DisplayName != "" {
 			entry["display_name"] = m.DisplayName
@@ -4974,7 +4981,7 @@ func (h *Handler) RequestQoderToken(c *gin.Context) {
 			log.Infof("qoder: authField before URL decode (len=%d): %s", len(authField), authField[:previewLen])
 			previewLen = min(50, len(authFieldDecoded))
 			log.Infof("qoder: authField after URL decode (len=%d): %s", len(authFieldDecoded), authFieldDecoded[:previewLen])
-			authInfo, errDecode := qoderauth.DecodeAuthField(authFieldDecoded)
+			authInfo, errDecode := qoderauth.DecodeAuthFieldToJSON(authFieldDecoded)
 			if errDecode != nil {
 				previewLen := min(100, len(authField))
 				log.Warnf("qoder: failed to decode auth field: %v, raw authField (first %d chars): %s", errDecode, previewLen, authField[:previewLen])

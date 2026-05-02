@@ -16,6 +16,8 @@ type modelAliasEntry interface {
 type oauthModelAliasTable struct {
 	// reverse maps channel -> alias (lower) -> original upstream model name.
 	reverse map[string]map[string]string
+	// forward maps channel -> original upstream model name (lower) -> alias.
+	forward map[string]map[string]string
 }
 
 func compileOAuthModelAliasTable(aliases map[string][]internalconfig.OAuthModelAlias) *oauthModelAliasTable {
@@ -24,6 +26,7 @@ func compileOAuthModelAliasTable(aliases map[string][]internalconfig.OAuthModelA
 	}
 	out := &oauthModelAliasTable{
 		reverse: make(map[string]map[string]string, len(aliases)),
+		forward: make(map[string]map[string]string, len(aliases)),
 	}
 	for rawChannel, entries := range aliases {
 		channel := strings.ToLower(strings.TrimSpace(rawChannel))
@@ -31,6 +34,7 @@ func compileOAuthModelAliasTable(aliases map[string][]internalconfig.OAuthModelA
 			continue
 		}
 		rev := make(map[string]string, len(entries))
+		fwd := make(map[string]string, len(entries))
 		for _, entry := range entries {
 			name := strings.TrimSpace(entry.Name)
 			alias := strings.TrimSpace(entry.Alias)
@@ -45,13 +49,23 @@ func compileOAuthModelAliasTable(aliases map[string][]internalconfig.OAuthModelA
 				continue
 			}
 			rev[aliasKey] = name
+			nameKey := strings.ToLower(name)
+			if _, exists := fwd[nameKey]; !exists {
+				fwd[nameKey] = alias
+			}
 		}
 		if len(rev) > 0 {
 			out.reverse[channel] = rev
 		}
+		if len(fwd) > 0 {
+			out.forward[channel] = fwd
+		}
 	}
 	if len(out.reverse) == 0 {
 		out.reverse = nil
+	}
+	if len(out.forward) == 0 {
+		out.forward = nil
 	}
 	return out
 }
@@ -290,9 +304,34 @@ func OAuthModelAliasChannel(provider, authKind string) string {
 			return ""
 		}
 		return "codex"
-	case "gemini-cli", "aistudio", "antigravity", "iflow", "kiro", "github-copilot", "kimi", "codearts":
+	case "gemini-cli", "aistudio", "antigravity", "iflow", "kiro", "github-copilot", "kimi", "codearts", "qoder", "bt", "codebuddy", "codebuddy-ai", "cursor", "kilo", "gitlab":
 		return provider
 	default:
 		return ""
 	}
+}
+
+// GetOAuthModelAlias gets the alias for an original upstream model name.
+// Returns the alias if configured, otherwise returns the original name.
+func (m *Manager) GetOAuthModelAlias(auth *Auth, originalModel string) string {
+	return getAliasFromForwardTable(m, auth, originalModel, modelAliasChannel(auth))
+}
+
+func getAliasFromForwardTable(m *Manager, auth *Auth, originalModel, channel string) string {
+	if m == nil || auth == nil || channel == "" {
+		return originalModel
+	}
+	table, ok := m.oauthModelAlias.Load().(*oauthModelAliasTable)
+	if !ok || table == nil || table.forward == nil {
+		return originalModel
+	}
+	fwd, ok := table.forward[channel]
+	if !ok || fwd == nil {
+		return originalModel
+	}
+	modelKey := strings.ToLower(strings.TrimSpace(originalModel))
+	if alias, ok := fwd[modelKey]; ok && alias != "" {
+		return alias
+	}
+	return originalModel
 }

@@ -1127,6 +1127,14 @@ func (s *Server) SetWebsocketAuthChangeHandler(fn func(bool, bool)) {
 	s.wsAuthChanged = fn
 }
 
+// SetOnOAuthModelAliasUpdated sets the callback that will be invoked when OAuthModelAlias is updated
+func (s *Server) SetOnOAuthModelAliasUpdated(fn func()) {
+	if s == nil || s.mgmt == nil {
+		return
+	}
+	s.mgmt.SetOnOAuthModelAliasUpdated(fn)
+}
+
 // (management handlers moved to internal/api/handlers/management)
 
 // AuthMiddleware returns a Gin middleware handler that authenticates requests

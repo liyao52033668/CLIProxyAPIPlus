@@ -136,67 +136,56 @@ func (o *QoderAuth) FetchUserStatus(deviceToken string) (*UserStatusResponse, er
 }
 
 // DecodeAuthField decodes the obfuscated auth callback field to extract user info.
-func DecodeAuthField(authStr string) (map[string]any, error) {
+func DecodeAuthField(authStr string) ([]byte, error) {
 	if strings.TrimSpace(authStr) == "" {
 		return nil, fmt.Errorf("qoder: empty auth field")
 	}
 
-	// Reverse custom alphabet to standard base64, skipping unknown characters
-	var b64 strings.Builder
+	// Reverse custom alphabet to standard base64
+	var stdBuilder strings.Builder
 	for _, c := range authStr {
-		ch := string(c)
-		if ch == CustomPad {
-			b64.WriteByte('=')
+		if c == CustomPad {
+			stdBuilder.WriteByte('=')
 		} else {
-			idx := strings.Index(CustomAlphabet, ch)
+			idx := strings.Index(CustomAlphabet, string(c))
 			if idx >= 0 {
-				b64.WriteByte(StdAlphabet[idx])
+				stdBuilder.WriteByte(StdAlphabet[idx])
+			} else {
+				return nil, fmt.Errorf("qoder: char out of custom alphabet: %c", c)
 			}
 		}
 	}
 
-	decoded := b64.String()
-
-	// Find the base64-encoded JSON payload starting with "eyJ"
-	before, after, ok := strings.Cut(decoded, "=")
-	var head, tail string
-	if !ok {
-		head = decoded
-		tail = ""
-	} else {
-		tail = before
-		head = after
+	stdB64 := stdBuilder.String()
+	n := len(stdB64)
+	if n == 0 {
+		return nil, fmt.Errorf("qoder: empty after alphabet conversion")
 	}
 
-	eyjPos := strings.Index(head, "eyJ")
-	var reconstructed string
-	if eyjPos < 0 {
-		eyjFull := strings.Index(decoded, "eyJ")
-		if eyjFull < 0 {
-			return nil, fmt.Errorf("qoder: no JWT payload found in auth field")
-		}
-		reconstructed = decoded[eyjFull:]
-	} else {
-		reconstructed = head[eyjPos:] + head[:eyjPos] + tail + "="
+	// Reverse the rearrangement: original = last_third + middle_third + first_third
+	// So to recover: first_third + middle_third + last_third
+	a := n / 3
+	if a == 0 {
+		return nil, fmt.Errorf("qoder: string too short to decode")
 	}
 
-	// Try decoding with different padding
-	for _, pad := range []string{"", "=", "==", "==="} {
-		raw, errDec := base64.StdEncoding.DecodeString(reconstructed + pad)
-		if errDec != nil {
-			raw, errDec = base64.RawStdEncoding.DecodeString(reconstructed + pad)
-			if errDec != nil {
-				continue
-			}
-		}
-		var result map[string]any
-		if errJSON := json.Unmarshal(raw, &result); errJSON != nil {
-			continue
-		}
-		return result, nil
-	}
+	// reconstructed = stdB64[n-a:] + stdB64[a:n-a] + stdB64[:a]
+	rearranged := stdB64[n-a:] + stdB64[:a] + stdB64[a:n-a]
 
-	return nil, fmt.Errorf("qoder: failed to decode auth field")
+	return base64.StdEncoding.DecodeString(rearranged)
+}
+
+// DecodeAuthFieldToJSON decodes the auth field and parses the result as JSON.
+func DecodeAuthFieldToJSON(authStr string) (map[string]any, error) {
+	raw, err := DecodeAuthField(authStr)
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]any
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("qoder: failed to parse auth JSON: %w", err)
+	}
+	return result, nil
 }
 
 // GenerateMachineID creates a deterministic machine identifier.

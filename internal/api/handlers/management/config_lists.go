@@ -846,6 +846,7 @@ func (h *Handler) PatchOAuthModelAlias(c *gin.Context) {
 					h.cfg.OAuthModelAlias = nil
 				}
 				h.persist(c)
+				h.triggerOAuthModelAliasUpdated()
 				return
 			}
 		}
@@ -855,6 +856,7 @@ func (h *Handler) PatchOAuthModelAlias(c *gin.Context) {
 		}
 		h.cfg.OAuthModelAlias[channel] = []config.OAuthModelAlias{}
 		h.persist(c)
+		h.triggerOAuthModelAliasUpdated()
 		return
 	}
 	if h.cfg.OAuthModelAlias == nil {
@@ -862,6 +864,16 @@ func (h *Handler) PatchOAuthModelAlias(c *gin.Context) {
 	}
 	h.cfg.OAuthModelAlias[channel] = normalized
 	h.persist(c)
+	h.triggerOAuthModelAliasUpdated()
+}
+
+func (h *Handler) triggerOAuthModelAliasUpdated() {
+	h.mu.Lock()
+	fn := h.onOAuthModelAliasUpdated
+	h.mu.Unlock()
+	if fn != nil {
+		go fn()
+	}
 }
 
 func (h *Handler) DeleteOAuthModelAlias(c *gin.Context) {
@@ -886,6 +898,7 @@ func (h *Handler) DeleteOAuthModelAlias(c *gin.Context) {
 	// re-injecting default aliases (fixes #222).
 	h.cfg.OAuthModelAlias[channel] = nil
 	h.persist(c)
+	h.triggerOAuthModelAliasUpdated()
 }
 
 // GetCodexKeys returns the list of Codex API keys.
