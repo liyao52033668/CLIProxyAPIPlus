@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	DefaultPanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
+	DefaultPanelGitHubRepository = "https://github.com/liyao52033668/Cli-Proxy-API-Management-Center"
 	DefaultPprofAddr             = "localhost:8316"
 )
 
