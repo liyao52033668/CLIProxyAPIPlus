@@ -2623,6 +2623,9 @@ func (h *Handler) RequestGitLabPATToken(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": err.Error()})
 		return
 	}
+	// if direct == nil {
+	// 	log.Warnf("GitLab Duo access not available (paid subscription may be required)")
+	// }
 
 	identifier := gitLabAccountIdentifier(user)
 	fileName := fmt.Sprintf("gitlab-%s-pat.json", sanitizeGitLabFileName(identifier))

@@ -400,6 +400,10 @@ func (c *AuthClient) FetchDirectAccess(ctx context.Context, baseURL, token strin
 		return nil, fmt.Errorf("gitlab direct access response read failed: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if resp.StatusCode == http.StatusForbidden {
+			// log.Warnf("GitLab Duo access forbidden (user may not have paid Duo subscription)")
+			return nil, nil
+		}
 		return nil, fmt.Errorf("gitlab direct access request failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 

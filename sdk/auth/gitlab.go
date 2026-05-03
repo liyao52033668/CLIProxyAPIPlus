@@ -203,6 +203,9 @@ waitForCallback:
 	if err != nil {
 		return nil, err
 	}
+	// if direct == nil {
+	// 	log.Warnf("GitLab Duo access not available (paid subscription may be required)")
+	// }
 
 	identifier := gitLabAccountIdentifier(user)
 	fileName := fmt.Sprintf("gitlab-%s.json", sanitizeGitLabFileName(identifier))
@@ -245,6 +248,9 @@ func (a *GitLabAuthenticator) loginPAT(ctx context.Context, cfg *config.Config, 
 	direct, err := client.FetchDirectAccess(ctx, baseURL, token)
 	if err != nil {
 		return nil, err
+	}
+	if direct == nil {
+		log.Warnf("GitLab Duo access not available (paid subscription may be required)")
 	}
 
 	identifier := gitLabAccountIdentifier(user)

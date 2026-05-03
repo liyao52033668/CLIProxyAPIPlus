@@ -651,8 +651,8 @@ func (e *QoderExecutor) buildCosyRequest(ctx context.Context, auth *cliproxyauth
 	}
 
 	// Encode body using Qoder's custom base64 scheme (required by upstream API)
-	bodyJSON, _ := json.Marshal(body)
-	log.Debugf("qoder executor: request body JSON: %s", string(bodyJSON))
+	// bodyJSON, _ := json.Marshal(body)
+	// log.Debugf("qoder executor: request body JSON: %s", string(bodyJSON))
 	encodedBody := customBase64Encode(body)
 	if encodedBody == "" {
 		return nil, fmt.Errorf("qoder executor: failed to encode body")
