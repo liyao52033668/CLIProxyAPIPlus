@@ -245,37 +245,6 @@ function ProvidersTab() {
     [fetchData, stopPolling]
   );
 
-  const handleLogin = useCallback(
-    (provider: OAuthProvider) => {
-      const webOAuth = WEB_OAUTH_PROVIDERS[provider.key];
-      if (webOAuth) {
-        startWebOAuthFlow(provider, webOAuth);
-        return;
-      }
-
-      const authFn = PROVIDER_AUTH_FN[provider.key];
-      if (!authFn) {
-        if (provider.flow_type === "token") {
-          toast.info(`${provider.display_name} requires manual token configuration via CLI or config file`);
-        } else {
-          toast.error(`No auth flow configured for ${provider.display_name}`);
-        }
-        return;
-      }
-
-      const requiredParams = PROVIDER_PARAMS[provider.key];
-      if (requiredParams?.some((p) => p.required)) {
-        setParamDialogProvider(provider);
-        setParamDialogValues({});
-        setParamDialogOpen(true);
-        return;
-      }
-
-      startAuthFlow(provider);
-    },
-    [startAuthFlow]
-  );
-
   const startWebOAuthFlow = useCallback(
     async (provider: OAuthProvider, config: { startUrl: string; statusUrl: string }) => {
       setAuthenticating(true);
@@ -332,6 +301,37 @@ function ProvidersTab() {
       }
     },
     [fetchData, stopPolling]
+  );
+
+  const handleLogin = useCallback(
+    (provider: OAuthProvider) => {
+      const webOAuth = WEB_OAUTH_PROVIDERS[provider.key];
+      if (webOAuth) {
+        startWebOAuthFlow(provider, webOAuth);
+        return;
+      }
+
+      const authFn = PROVIDER_AUTH_FN[provider.key];
+      if (!authFn) {
+        if (provider.flow_type === "token") {
+          toast.info(`${provider.display_name} requires manual token configuration via CLI or config file`);
+        } else {
+          toast.error(`No auth flow configured for ${provider.display_name}`);
+        }
+        return;
+      }
+
+      const requiredParams = PROVIDER_PARAMS[provider.key];
+      if (requiredParams?.some((p) => p.required)) {
+        setParamDialogProvider(provider);
+        setParamDialogValues({});
+        setParamDialogOpen(true);
+        return;
+      }
+
+      startAuthFlow(provider);
+    },
+    [startAuthFlow, startWebOAuthFlow]
   );
 
   const handleParamSubmit = useCallback(() => {

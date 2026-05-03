@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type AuthFile } from "@/lib/api";
-import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import {
   Upload,
