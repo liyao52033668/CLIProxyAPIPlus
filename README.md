@@ -8,6 +8,7 @@
 ---
 <div align="center">
   <img src="https://github.com/Ve-ria/CLIProxyAPIPlus/actions/workflows/release-stable.yaml/badge.svg"><img src="https://github.com/Ve-ria/CLIProxyAPIPlus/actions/workflows/docker-image.yml/badge.svg?branch=main">
+  <img src="http://actpic-gh.vercel.app/api/Ve-ria/CLIProxyAPIPlus/all?theme=dark&limit=3"></img>
 </div>
 
 ---
