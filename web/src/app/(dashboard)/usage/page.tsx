@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, type UsageStatistics } from "@/lib/api";
+import { api } from "@/lib/api";
 import {
   Card,
   CardContent,

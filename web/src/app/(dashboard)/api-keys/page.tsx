@@ -11,9 +11,7 @@ import {
   type OpenAICompatAPIKeyEntry,
   type AmpModelMapping,
   type AmpUpstreamAPIKeyEntry,
-  type ModelAlias,
 } from "@/lib/api";
-import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import {
   Key,
