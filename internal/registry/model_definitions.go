@@ -76,6 +76,242 @@ func GetAntigravityModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Antigravity)
 }
 
+// GetCodeArtsModels returns the standard CodeArts model definitions.
+// CodeArts is Huawei Cloud's AI development platform providing code assistance.
+func GetCodeArtsModels() []*ModelInfo {
+	now := int64(1748044800) // 2025-05-24
+	return []*ModelInfo{
+		{
+			ID:                  "glm-5-internal",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "huaweicloud",
+			Type:                "codearts",
+			DisplayName:         "GLM-5 Internal",
+			Description:         "GLM-5 Internal via CodeArts",
+			ContextLength:       200000,
+			MaxCompletionTokens: 32768,
+			SupportedEndpoints:  []string{"/chat/completions"},
+		},
+		{
+			ID:                  "codearts-glm-5.1",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "huaweicloud",
+			Type:                "codearts",
+			DisplayName:         "GLM-5.1",
+			Description:         "GLM-5.1 via CodeArts",
+			ContextLength:       200000,
+			MaxCompletionTokens: 48000,
+			SupportedEndpoints:  []string{"/chat/completions"},
+			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
+		},
+		{
+			ID:                  "deepseek-v3.2",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "huaweicloud",
+			Type:                "codearts",
+			DisplayName:         "DeepSeek V3.2",
+			Description:         "DeepSeek V3.2 via CodeArts",
+			ContextLength:       128000,
+			MaxCompletionTokens: 32768,
+			SupportedEndpoints:  []string{"/chat/completions"},
+		},
+		{
+			ID:                  "glm-4-7-internal",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "huaweicloud",
+			Type:                "codearts",
+			DisplayName:         "GLM-4.7 Internal",
+			Description:         "GLM-4.7 Internal via CodeArts",
+			ContextLength:       128000,
+			MaxCompletionTokens: 32768,
+			SupportedEndpoints:  []string{"/chat/completions"},
+		},
+		{
+			ID:                  "GLM-4-7-SFT-Harmony",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "huaweicloud",
+			Type:                "codearts",
+			DisplayName:         "GLM-4.7 SFT Harmony",
+			Description:         "GLM-4.7 SFT Harmony via CodeArts",
+			ContextLength:       128000,
+			MaxCompletionTokens: 32768,
+			SupportedEndpoints:  []string{"/chat/completions"},
+		},
+	}
+}
+
+// GetGitlabModels returns the standard GitLab model definitions.
+// GitLab Duo Agent Platform supports multiple Claude and GPT-5 models.
+// See: https://docs.gitlab.com/user/duo_agent_platform/model_selection/
+func GetGitlabModels() []*ModelInfo {
+	now := int64(1748044800) // 2025-05-24
+	return []*ModelInfo{
+		// Base model
+		{
+			ID:                  "gitlab-duo",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "gitlab",
+			Type:                "gitlab",
+			DisplayName:         "GitLab Duo",
+			Description:         "GitLab Duo base model",
+			ContextLength:       128000,
+			MaxCompletionTokens: 32768,
+			SupportedEndpoints:  []string{"/chat/completions"},
+		},
+		// Claude Opus models
+		{
+			ID:                  "duo-chat-opus-4-6",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "gitlab",
+			Type:                "gitlab",
+			DisplayName:         "GitLab Duo (Claude Opus 4.6)",
+			Description:         "Claude Opus 4.6 via GitLab Duo",
+			ContextLength:       1000000,
+			MaxCompletionTokens: 128000,
+			SupportedEndpoints:  []string{"/chat/completions"},
+			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high", "max"}},
+		},
+		{
+			ID:                  "duo-chat-opus-4-5",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "gitlab",
+			Type:                "gitlab",
+			DisplayName:         "GitLab Duo (Claude Opus 4.5)",
+			Description:         "Claude Opus 4.5 via GitLab Duo",
+			ContextLength:       1000000,
+			MaxCompletionTokens: 128000,
+			SupportedEndpoints:  []string{"/chat/completions"},
+			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high", "max"}},
+		},
+		// Claude Sonnet models
+		{
+			ID:                  "duo-chat-sonnet-4-6",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "gitlab",
+			Type:                "gitlab",
+			DisplayName:         "GitLab Duo (Claude Sonnet 4.6)",
+			Description:         "Claude Sonnet 4.6 via GitLab Duo",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+			SupportedEndpoints:  []string{"/chat/completions"},
+			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
+		},
+		{
+			ID:                  "duo-chat-sonnet-4-5",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "gitlab",
+			Type:                "gitlab",
+			DisplayName:         "GitLab Duo (Claude Sonnet 4.5)",
+			Description:         "Claude Sonnet 4.5 via GitLab Duo",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+			SupportedEndpoints:  []string{"/chat/completions"},
+			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
+		},
+		// Claude Haiku models
+		{
+			ID:                  "duo-chat-haiku-4-5",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "gitlab",
+			Type:                "gitlab",
+			DisplayName:         "GitLab Duo (Claude Haiku 4.5)",
+			Description:         "Claude Haiku 4.5 via GitLab Duo",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+			SupportedEndpoints:  []string{"/chat/completions"},
+		},
+		{
+			ID:                  "duo-chat-haiku-4-6",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "gitlab",
+			Type:                "gitlab",
+			DisplayName:         "GitLab Duo Alias",
+			Description:         "GitLab Duo Alias (Haiku 4.6)",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+			SupportedEndpoints:  []string{"/chat/completions"},
+		},
+		// GPT-5 models
+		{
+			ID:                  "duo-chat-gpt-5-1",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "gitlab",
+			Type:                "gitlab",
+			DisplayName:         "GitLab Duo (GPT-5.1)",
+			Description:         "GPT-5.1 via GitLab Duo",
+			ContextLength:       200000,
+			MaxCompletionTokens: 32768,
+			SupportedEndpoints:  []string{"/chat/completions"},
+			Thinking:            &ThinkingSupport{Levels: []string{"none", "low", "medium", "high", "xhigh"}},
+		},
+		{
+			ID:                  "duo-chat-gpt-5-mini",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "gitlab",
+			Type:                "gitlab",
+			DisplayName:         "GitLab Duo (GPT-5 Mini)",
+			Description:         "GPT-5 Mini via GitLab Duo",
+			ContextLength:       128000,
+			MaxCompletionTokens: 16384,
+			SupportedEndpoints:  []string{"/chat/completions"},
+			Thinking:            &ThinkingSupport{Levels: []string{"none", "low", "medium", "high", "xhigh"}},
+		},
+		{
+			ID:                  "duo-chat-gpt-5-2",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "gitlab",
+			Type:                "gitlab",
+			DisplayName:         "GitLab Duo (GPT-5.2)",
+			Description:         "GPT-5.2 via GitLab Duo",
+			ContextLength:       200000,
+			MaxCompletionTokens: 32768,
+			SupportedEndpoints:  []string{"/chat/completions"},
+			Thinking:            &ThinkingSupport{Levels: []string{"none", "low", "medium", "high", "xhigh"}},
+		},
+		{
+			ID:                  "duo-chat-gpt-5-2-codex",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "gitlab",
+			Type:                "gitlab",
+			DisplayName:         "GitLab Duo (GPT-5.2 Codex)",
+			Description:         "GPT-5.2 Codex via GitLab Duo",
+			ContextLength:       200000,
+			MaxCompletionTokens: 32768,
+			SupportedEndpoints:  []string{"/chat/completions", "/responses"},
+			Thinking:            &ThinkingSupport{Levels: []string{"none", "low", "medium", "high", "xhigh"}},
+		},
+		{
+			ID:                  "duo-chat-gpt-5-codex",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "gitlab",
+			Type:                "gitlab",
+			DisplayName:         "GitLab Duo (GPT-5 Codex)",
+			Description:         "GPT-5 Codex via GitLab Duo",
+			ContextLength:       200000,
+			MaxCompletionTokens: 32768,
+			SupportedEndpoints:  []string{"/chat/completions", "/responses"},
+			Thinking:            &ThinkingSupport{Levels: []string{"none", "low", "medium", "high", "xhigh"}},
+		},
+	}
+}
+
 // GetQoderModels returns the available models for the Qoder provider.
 func GetQoderModels() []*ModelInfo {
 	now := int64(1748044800) // 2025-05-24
@@ -408,6 +644,10 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetCodeBuddyAIModels()
 	case "cursor":
 		return GetCursorModels()
+	case "codearts":
+		return GetCodeArtsModels()
+	case "gitlab":
+		return GetGitlabModels()
 	default:
 		return nil
 	}
@@ -490,6 +730,8 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		GetAmazonQModels(),
 		GetCodeBuddyModels(),
 		GetCodeBuddyAIModels(),
+		GetCodeArtsModels(),
+		GetGitlabModels(),
 		GetCursorModels(),
 	}
 	for _, models := range allModels {

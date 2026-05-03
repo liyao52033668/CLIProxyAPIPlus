@@ -36,20 +36,20 @@ const attemptMaxIdleTime = 2 * time.Hour
 
 // Handler aggregates config reference, persistence path and helpers.
 type Handler struct {
-	cfg                  *config.Config
-	configFilePath       string
-	mu                   sync.Mutex
-	attemptsMu           sync.Mutex
-	failedAttempts       map[string]*attemptInfo // keyed by client IP
-	authManager          *coreauth.Manager
-	usageStats           *usage.RequestStatistics
-	tokenStore           coreauth.Store
-	localPassword        string
-	allowRemoteOverride  bool
-	envSecret            string
-	logDir               string
-	postAuthHook         coreauth.PostAuthHook
-	codeArtsOAuthHandler *codearts.OAuthWebHandler
+	cfg                      *config.Config
+	configFilePath           string
+	mu                       sync.Mutex
+	attemptsMu               sync.Mutex
+	failedAttempts           map[string]*attemptInfo // keyed by client IP
+	authManager              *coreauth.Manager
+	usageStats               *usage.RequestStatistics
+	tokenStore               coreauth.Store
+	localPassword            string
+	allowRemoteOverride      bool
+	envSecret                string
+	logDir                   string
+	postAuthHook             coreauth.PostAuthHook
+	codeArtsOAuthHandler     *codearts.OAuthWebHandler
 	onOAuthModelAliasUpdated func() // 回调：当 OAuthModelAlias 更新后调用
 }
 
