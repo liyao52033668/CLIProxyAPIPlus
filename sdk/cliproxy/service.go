@@ -558,6 +558,10 @@ func (s *Service) Run(ctx context.Context) error {
 		s.authManager = newDefaultAuthManager()
 	}
 
+	if s.server != nil {
+		s.server.SetSDKAuthManager(s.authManager)
+	}
+
 	s.ensureWebsocketGateway()
 	if s.server != nil && s.wsGateway != nil {
 		s.server.AttachWebsocketRoute(s.wsGateway.Path(), s.wsGateway.Handler())
@@ -1105,6 +1109,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		}
 	}
 	models = applyOAuthModelAlias(s.cfg, provider, authKind, models)
+	log.Debugf("registerModelsForAuth: provider=%s, authKind=%s, authID=%s, authProvider=%s, models=%d, compatDetected=%v", provider, authKind, a.ID, a.Provider, len(models), compatDetected)
 	if len(models) > 0 {
 		key := provider
 		if key == "" {

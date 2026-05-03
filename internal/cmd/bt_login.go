@@ -7,8 +7,8 @@ import (
 
 	btauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/bt"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 

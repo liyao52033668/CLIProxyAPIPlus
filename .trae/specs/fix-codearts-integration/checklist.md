@@ -1,0 +1,19 @@
+- [x] `signer.go` 的 `SignRequest` 对 POST 请求计算实际 body SHA256 hash，不再始终使用空 hash
+- [x] `buildCodeArtsPayload` 输出的 JSON 包含 chat_id、client、task、task_parameters、is_delta_response、user_id、attempt、parent_message_id 字段
+- [x] `buildCodeArtsPayload` 的 messages 格式为 `[{type: "text", content: "..."}]`
+- [x] `PrepareRequest` 设置 Accept: text/event-stream、Heartbeat-Enable、Ide-Name、X-Snap-Traceid 等请求头
+- [x] `sdk/auth/codearts.go` 存在且实现 Authenticator 接口（Provider、Login、RefreshLead）
+- [x] `sdk/auth/refresh_registry.go` 中注册了 codearts
+- [x] `internal/cmd/auth_manager.go` 中注册了 NewCodeArtsAuthenticator()
+- [x] `cmd/server/main.go` 中有 `--codearts-login` flag
+- [x] `internal/cmd/codearts_login.go` 存在且实现 DoCodeArtsLogin
+- [x] `--codearts-login` flag 处理分支正确调用 DoCodeArtsLogin
+- [x] `internal/thinking/provider/codearts/apply.go` 存在且注册了 "codearts" provider
+- [x] `internal/runtime/executor/helps/thinking_providers.go` 导入了 codearts thinking provider
+- [x] `config.example.yaml` 中 oauth-model-alias Supported channels 包含 codearts
+- [x] `config.example.yaml` 中 oauth-excluded-models Supported channels 包含 codearts 且不包含 qwen
+- [x] `internal/config/config.go` 中 OAuthExcludedModels 注释包含 codearts
+- [x] `internal/api/server.go` 中无中文注释
+- [x] `internal/watcher/watcher.go` 中无中文注释
+- [x] `go build -o test-output ./cmd/server && rm test-output` 编译通过
+- [x] `gofmt -w .` 格式化通过

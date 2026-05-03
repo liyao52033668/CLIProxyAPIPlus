@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -44,7 +45,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const oauthCallbackSuccessHTML = `<html><head><meta charset="utf-8"><title>Authentication successful</title><script>setTimeout(function(){window.close();},5000);</script></head><body><h1>Authentication successful!</h1><p>You can close this window.</p><p>This window will close automatically in 5 seconds.</p></body></html>`
+const oauthCallbackSuccessHTML = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Authentication successful</title><script>setTimeout(function(){window.close();},3000);</script></head><body style="display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f5f5f5"><div style="text-align:center;padding:40px;background:white;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,0.1)"><h1>✅ Authentication successful!</h1><p>You can close this tab.</p><p style="color:#666;font-size:14px">This tab will close automatically in 3 seconds.</p></div></body></html>`
 
 type serverOptionConfig struct {
 	extraMiddleware      []gin.HandlerFunc
@@ -337,6 +338,50 @@ func (s *Server) setupRoutes() {
 	})
 
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
+
+	if managementasset.HasEmbeddedAssets() {
+		mime.AddExtensionType(".css", "text/css; charset=utf-8")
+		mime.AddExtensionType(".js", "application/javascript; charset=utf-8")
+		mime.AddExtensionType(".mjs", "application/javascript; charset=utf-8")
+		mime.AddExtensionType(".woff", "font/woff")
+		mime.AddExtensionType(".woff2", "font/woff2")
+		mime.AddExtensionType(".ttf", "font/ttf")
+		mime.AddExtensionType(".otf", "font/otf")
+		mime.AddExtensionType(".svg", "image/svg+xml")
+		mime.AddExtensionType(".json", "application/json")
+		mime.AddExtensionType(".webp", "image/webp")
+		mime.AddExtensionType(".ico", "image/x-icon")
+		mime.AddExtensionType(".map", "application/json")
+
+		s.engine.GET("/_next/*filepath", s.serveEmbeddedAsset)
+		s.engine.GET("/favicon.ico", func(c *gin.Context) {
+			s.serveEmbeddedFile(c, "favicon.ico")
+		})
+
+		s.engine.NoRoute(func(c *gin.Context) {
+			if !managementasset.HasEmbeddedAssets() {
+				c.AbortWithStatus(http.StatusNotFound)
+				return
+			}
+			path := c.Request.URL.Path
+			if len(path) > 0 && path[0] == '/' {
+				path = path[1:]
+			}
+			if path == "" {
+				s.serveEmbeddedFile(c, "index.html")
+				return
+			}
+			htmlName := path + ".html"
+			fsys := managementasset.GetEmbeddedFS()
+			if f, err := fsys.Open(htmlName); err == nil {
+				_ = f.Close()
+				s.serveEmbeddedFile(c, htmlName)
+				return
+			}
+			s.serveEmbeddedFile(c, "index.html")
+		})
+	}
+
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
 	geminiCLIHandlers := gemini.NewGeminiCLIAPIHandler(s.handlers)
@@ -368,6 +413,10 @@ func (s *Server) setupRoutes() {
 
 	// Root endpoint
 	s.engine.GET("/", func(c *gin.Context) {
+		if managementasset.HasEmbeddedAssets() {
+			s.serveEmbeddedFile(c, "index.html")
+			return
+		}
 		c.JSON(http.StatusOK, gin.H{
 			"message": "CLI Proxy API Server",
 			"endpoints": []string{
@@ -697,6 +746,8 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/auth-files/fields", s.mgmt.PatchAuthFileFields)
 		mgmt.POST("/vertex/import", s.mgmt.ImportVertexCredential)
 
+		mgmt.GET("/oauth-providers", s.mgmt.GetOAuthProviders)
+
 		mgmt.GET("/anthropic-auth-url", s.mgmt.RequestAnthropicToken)
 		mgmt.GET("/codex-auth-url", s.mgmt.RequestCodexToken)
 		mgmt.GET("/gitlab-auth-url", s.mgmt.RequestGitLabToken)
@@ -732,28 +783,96 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 		c.AbortWithStatus(http.StatusNotFound)
 		return
 	}
-	filePath := managementasset.FilePath(s.configFilePath)
-	if strings.TrimSpace(filePath) == "" {
-		c.AbortWithStatus(http.StatusNotFound)
-		return
-	}
 
-	if _, err := os.Stat(filePath); err != nil {
-		if os.IsNotExist(err) {
-			// Synchronously ensure management.html is available with a detached context.
-			// Control panel bootstrap should not be canceled by client disconnects.
-			if !managementasset.EnsureLatestManagementHTML(context.Background(), managementasset.StaticDir(s.configFilePath), cfg.ProxyURL, cfg.RemoteManagement.PanelGitHubRepository) {
-				c.AbortWithStatus(http.StatusNotFound)
-				return
-			}
-		} else {
-			log.WithError(err).Error("failed to stat management control panel asset")
-			c.AbortWithStatus(http.StatusInternalServerError)
+	filePath := managementasset.FilePath(s.configFilePath)
+	if strings.TrimSpace(filePath) != "" {
+		if _, err := os.Stat(filePath); err == nil {
+			c.File(filePath)
 			return
 		}
 	}
 
-	c.File(filePath)
+	if managementasset.HasEmbeddedAssets() {
+		s.serveEmbeddedFile(c, "index.html")
+		return
+	}
+
+	if strings.TrimSpace(filePath) != "" {
+		if !managementasset.EnsureLatestManagementHTML(context.Background(), managementasset.StaticDir(s.configFilePath), cfg.ProxyURL, cfg.RemoteManagement.PanelGitHubRepository) {
+			c.AbortWithStatus(http.StatusNotFound)
+			return
+		}
+		c.File(filePath)
+		return
+	}
+
+	c.AbortWithStatus(http.StatusNotFound)
+}
+
+func (s *Server) serveEmbeddedFile(c *gin.Context, name string) {
+	fsys := managementasset.GetEmbeddedFS()
+	if fsys == nil {
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
+
+	f, err := fsys.Open(name)
+	if err != nil {
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
+	defer func() {
+		_ = f.Close()
+	}()
+
+	stat, err := f.Stat()
+	if err != nil {
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
+
+	if stat.IsDir() {
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
+
+	contentType := contentTypeForName(name)
+
+	c.DataFromReader(http.StatusOK, stat.Size(), contentType, f, nil)
+}
+
+func (s *Server) serveEmbeddedAsset(c *gin.Context) {
+	filepath := c.Param("filepath")
+	if len(filepath) > 0 && filepath[0] == '/' {
+		filepath = filepath[1:]
+	}
+	if filepath == "" {
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
+
+	s.serveEmbeddedFile(c, "_next/"+filepath)
+}
+
+func contentTypeForName(name string) string {
+	ext := strings.LastIndex(name, ".")
+	if ext >= 0 {
+		mimeType := mime.TypeByExtension(name[ext:])
+		if mimeType != "" {
+			return mimeType
+		}
+		if ext > 0 {
+			secondExt := strings.LastIndex(name[:ext], ".")
+			if secondExt >= 0 {
+				mimeType := mime.TypeByExtension(name[secondExt:])
+				if mimeType != "" {
+					return mimeType
+				}
+			}
+		}
+	}
+
+	return "application/octet-stream"
 }
 
 func (s *Server) enableKeepAlive(timeout time.Duration, onTimeout func()) {
@@ -1093,6 +1212,13 @@ func (s *Server) SetWebsocketAuthChangeHandler(fn func(bool, bool)) {
 		return
 	}
 	s.wsAuthChanged = fn
+}
+
+func (s *Server) SetSDKAuthManager(manager *sdkAuth.Manager) {
+	if s == nil || s.mgmt == nil {
+		return
+	}
+	s.mgmt.SetSDKAuthManager(manager)
 }
 
 // (management handlers moved to internal/api/handlers/management)

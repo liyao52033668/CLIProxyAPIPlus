@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master, dev]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  go-build:
+    name: Go Build & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: Format check
+        run: test -z "$(gofmt -l .)"
+
+      - name: Build
+        run: go build -o /dev/null ./cmd/server
+
+      - name: Test
+        run: go test ./...
+
+  frontend-build:
+    name: Frontend Build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
+
+  embed-check:
+    name: Embed Sync Check
+    runs-on: ubuntu-latest
+    needs: [go-build, frontend-build]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: web
+        run: npm run build
+
+      - name: Sync web_static
+        run: |
+          rm -rf internal/managementasset/web_static
+          cp -r web/out internal/managementasset/web_static
+
+      - name: Check embedded assets are up to date
+        run: |
+          if [ -n "$(git diff --name-only internal/managementasset/web_static)" ]; then
+            echo "::error::Embedded web assets are out of date. Run: cp -r web/out internal/managementasset/web_static"
+            git diff --stat internal/managementasset/web_static
+            exit 1
+          fi
+          echo "Embedded assets are up to date."
