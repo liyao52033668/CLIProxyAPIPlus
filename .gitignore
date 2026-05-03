@@ -3,12 +3,13 @@ cli-proxy-api
 cliproxy
 /server
 *.exe
-
+test-output
 
 # Configuration
 config.yaml
 .env
 .mcp.json
+
 # Generated content
 bin/*
 logs/*
@@ -24,6 +25,9 @@ objectstore/*
 
 # Static assets
 static/*
+
+# Embedded web assets (generated from web/out)
+internal/managementasset/web_static/*
 
 # Authentication data
 auths/*
@@ -62,3 +66,13 @@ _bmad-output/*
 .cli-proxy-api/
 .venv/
 *.bak
+
+# Web frontend
+web/node_modules/
+web/.next/
+web/out/
+
+# Private
+private/
+cli-proxy-api-plus
+server-1
