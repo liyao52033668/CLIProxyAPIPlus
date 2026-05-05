@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -47,16 +49,12 @@ func (e *JoyCodeExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.A
 		return fmt.Errorf("joycode: missing ptKey credential")
 	}
 
-	loginType, _ := auth.Metadata["loginType"].(string)
-	if loginType == "" {
-		loginType = "IDE"
-	}
-
 	req.Header.Set("Content-Type", "application/json; charset=UTF-8")
 	req.Header.Set("ptKey", ptKey)
-	req.Header.Set("loginType", loginType)
+	req.Header.Set("loginType", "")
 	req.Header.Set("User-Agent", joycode.JoyCodeUA)
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("x-ms-client-request-id", generateJoyCodeRequestID())
 
 	return nil
 }
@@ -275,4 +273,12 @@ func buildJoyCodePayload(openaiPayload []byte, modelName string, auth *cliproxya
 		return openaiPayload
 	}
 	return result
+}
+
+func generateJoyCodeRequestID() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("%032d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b)
 }

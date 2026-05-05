@@ -997,7 +997,9 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		models = getCodeArtsModels()
 		models = applyExcludedModels(models, excluded)
 	case "joycode":
-		models = getJoyCodeModels()
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		models = executor.FetchJoyCodeModels(ctx, a, s.cfg)
 		models = applyExcludedModels(models, excluded)
 	case "gitlab":
 		models = executor.GitLabModelsFromAuth(a)
