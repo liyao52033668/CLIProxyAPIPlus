@@ -62,6 +62,7 @@ func (h *OAuthWebHandler) RegisterRoutes(router gin.IRouter) {
 		oauth.GET("/callback", h.handleCallback)
 		oauth.GET("/status", h.handleStatus)
 	}
+	// JoyCode login page redirects to http://127.0.0.1:{port} with query params
 	router.GET("/joycode/callback", h.handleCallback)
 }
 
@@ -82,6 +83,30 @@ func generateJCAuthKey() string {
 func (h *OAuthWebHandler) handleIndex(c *gin.Context) {
 	c.Header("Content-Type", "text/html; charset=utf-8")
 	c.String(http.StatusOK, joyCodeLoginPage)
+}
+
+// HandleCallback is the public accessor for handleCallback, used by the root-path handler in server.go.
+func (h *OAuthWebHandler) HandleCallback(c *gin.Context) {
+	h.handleCallback(c)
+}
+
+// HandleRootCallback intercepts root-path requests that contain JoyCode auth parameters.
+// JoyCode login redirects to http://127.0.0.1:{port}/?authKey=...&pt_key=...
+func (h *OAuthWebHandler) HandleRootCallback(c *gin.Context) {
+	if c.Request.URL.Path != "/" {
+		c.Next()
+		return
+	}
+	ptKey := c.Query("pt_key")
+	if ptKey == "" {
+		ptKey = c.Query("ptKey")
+	}
+	if ptKey == "" && c.Query("authKey") == "" {
+		c.Next()
+		return
+	}
+	h.handleCallback(c)
+	c.Abort()
 }
 
 func (h *OAuthWebHandler) handleStart(c *gin.Context) {

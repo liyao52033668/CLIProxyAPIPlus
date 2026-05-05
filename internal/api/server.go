@@ -167,6 +167,9 @@ type Server struct {
 	// ampModule is the Amp routing module for model mapping hot-reload
 	ampModule *ampmodule.AmpModule
 
+	// joyCodeOAuthHandler handles JoyCode OAuth web login callbacks on root path
+	joyCodeOAuthHandler *joycode.OAuthWebHandler
+
 	// managementRoutesRegistered tracks whether the management routes have been attached to the engine.
 	managementRoutesRegistered atomic.Bool
 	// managementRoutesEnabled controls whether management endpoints serve real handlers.
@@ -319,8 +322,8 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	log.Info("CodeArts OAuth Web routes registered at /v0/oauth/codearts/*")
 
 	// === CLIProxyAPIPlus extension: Register JoyCode OAuth Web routes ===
-	joyCodeOAuthHandler := joycode.NewOAuthWebHandler(cfg)
-	joyCodeOAuthHandler.RegisterRoutes(engine)
+	s.joyCodeOAuthHandler = joycode.NewOAuthWebHandler(cfg)
+	s.joyCodeOAuthHandler.RegisterRoutes(engine)
 	log.Info("JoyCode OAuth Web routes registered at /v0/oauth/joycode/*")
 
 	if optionState.keepAliveEnabled {
@@ -419,6 +422,18 @@ func (s *Server) setupRoutes() {
 
 	// Root endpoint
 	s.engine.GET("/", func(c *gin.Context) {
+		// JoyCode login redirects to http://127.0.0.1:{port}/?authKey=...&pt_key=...
+		if s.joyCodeOAuthHandler != nil {
+			ptKey := c.Query("pt_key")
+			if ptKey == "" {
+				ptKey = c.Query("ptKey")
+			}
+			if ptKey != "" || c.Query("authKey") != "" {
+				s.joyCodeOAuthHandler.HandleCallback(c)
+				return
+			}
+		}
+
 		if managementasset.HasEmbeddedAssets() {
 			s.serveEmbeddedFile(c, "index.html")
 			return

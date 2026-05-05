@@ -51,9 +51,9 @@ func (a JoyCodeAuthenticator) Login(ctx context.Context, cfg *config.Config, opt
 	cbChan := make(chan joycodeCallbackResult, 1)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/joycode/callback", func(w http.ResponseWriter, r *http.Request) {
+	callbackHandler := func(w http.ResponseWriter, r *http.Request) {
 		receivedAuthKey := r.URL.Query().Get("authKey")
-		if receivedAuthKey != authKey {
+		if receivedAuthKey != "" && receivedAuthKey != authKey {
 			cbChan <- joycodeCallbackResult{Error: "authKey mismatch"}
 			w.WriteHeader(http.StatusForbidden)
 			return
@@ -78,7 +78,9 @@ func (a JoyCodeAuthenticator) Login(ctx context.Context, cfg *config.Config, opt
 			`<h1 style="color:#2ecc71">&#10003; Authorization Successful</h1>` +
 			`<p>Credential captured, syncing. Please return to the command line.</p>` +
 			`</div></body></html>`))
-	})
+	}
+	mux.HandleFunc("/", callbackHandler)
+	mux.HandleFunc("/joycode/callback", callbackHandler)
 
 	srv := &http.Server{Handler: mux}
 	go func() {
