@@ -450,6 +450,8 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 		s.coreManager.RegisterExecutor(executor.NewCodeBuddyAIExecutor(s.cfg))
 	case "codearts":
 		s.coreManager.RegisterExecutor(executor.NewCodeArtsExecutor(s.cfg))
+	case "joycode":
+		s.coreManager.RegisterExecutor(executor.NewJoyCodeExecutor(s.cfg))
 	case "gitlab":
 		s.coreManager.RegisterExecutor(executor.NewGitLabExecutor(s.cfg))
 	case "bt":
@@ -556,6 +558,10 @@ func (s *Service) Run(ctx context.Context) error {
 
 	if s.authManager == nil {
 		s.authManager = newDefaultAuthManager()
+	}
+
+	if s.server != nil {
+		s.server.SetSDKAuthManager(s.authManager)
 	}
 
 	s.ensureWebsocketGateway()
@@ -990,6 +996,11 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	case "codearts":
 		models = getCodeArtsModels()
 		models = applyExcludedModels(models, excluded)
+	case "joycode":
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		models = executor.FetchJoyCodeModels(ctx, a, s.cfg)
+		models = applyExcludedModels(models, excluded)
 	case "gitlab":
 		models = executor.GitLabModelsFromAuth(a)
 		models = applyExcludedModels(models, excluded)
@@ -1105,6 +1116,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		}
 	}
 	models = applyOAuthModelAlias(s.cfg, provider, authKind, models)
+	log.Debugf("registerModelsForAuth: provider=%s, authKind=%s, authID=%s, authProvider=%s, models=%d, compatDetected=%v", provider, authKind, a.ID, a.Provider, len(models), compatDetected)
 	if len(models) > 0 {
 		key := provider
 		if key == "" {

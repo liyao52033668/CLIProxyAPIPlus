@@ -29,7 +29,7 @@ func md5Hash(s string) string {
 
 func generateStableSID(phone string) string {
 	macSeed := md5Hash(phone + ":mac")
-	hostname := "bt-server-" + md5Hash(phone+":hostname")[:8]
+	hostname := "bt-server-" + md5Hash(phone + ":hostname")[:8]
 	cpu := "Intel Xeon Platinum 8480+"
 	return md5Hash(macSeed+hostname) + md5Hash(cpu)
 }
