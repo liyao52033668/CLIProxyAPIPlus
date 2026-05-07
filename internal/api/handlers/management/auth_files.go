@@ -3993,4 +3993,3 @@ func (h *Handler) RequestQoderToken(c *gin.Context) {
 
 	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
 }
-

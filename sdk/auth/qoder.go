@@ -368,4 +368,3 @@ func extractQoderCallbackParams(qs string) (token, authField string) {
 	authField = params["auth"]
 	return token, authField
 }
-

@@ -1,0 +1,16 @@
+- [x] Next.js + shadcn/ui 项目在 `./web` 下成功初始化，`npm run dev` 可正常启动
+- [x] API client 层封装所有 `/v0/management/*` 端点，包含认证 header 管理
+- [x] Management Key 登录页面可用，输入 key 后可访问管理面板
+- [x] Dashboard 页面显示服务器版本、状态、Provider 概览
+- [x] Config 页面可查看和编辑 config.yaml，各项设置控件可用
+- [x] Auth Files 页面可列出、上传、删除、启用/禁用、编辑认证文件
+- [x] OAuth 页面可列出所有 OAuth Provider，发起 OAuth 流程并轮询状态
+- [x] API Keys 页面可管理所有类型的 Key（api-keys、gemini、claude、codex、vertex、openai-compatibility）
+- [x] Usage 页面可查看统计、导出和导入数据
+- [x] Logs 页面可实时查看日志、查看错误日志、清理日志
+- [x] `GET /v0/management/oauth-providers` 端点返回正确的 Provider 列表
+- [x] `//go:embed` 成功嵌入 Next.js 静态导出产物
+- [x] 磁盘文件优先、嵌入资源 fallback 的逻辑正确
+- [x] `go build -o test-output ./cmd/server && rm test-output` 编译通过
+- [x] 前端 `npm run build` 成功生成静态导出产物
+- [x] 所有代码注释使用英文
