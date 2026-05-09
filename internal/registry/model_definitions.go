@@ -243,7 +243,7 @@ func GetCodeBuddyModels() []*ModelInfo {
 			ID: "deepseek-v4-flash", Object: "model", Created: now, OwnedBy: "tencent",
 			Type: "codebuddy", DisplayName: "DeepSeek V4 Flash", Description: "DeepSeek V4 Flash via CodeBuddy",
 			ContextLength: 1000000, MaxCompletionTokens: 50000, SupportedEndpoints: []string{"/chat/completions"},
-			Thinking:                 &ThinkingSupport{Levels: []string{"high", "max"}},
+			Thinking: &ThinkingSupport{Levels: []string{"high", "max"}},
 		},
 		{
 			ID: "deepseek-v3-2-volc", Object: "model", Created: now, OwnedBy: "tencent",
