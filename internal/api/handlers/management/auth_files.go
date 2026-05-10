@@ -3647,6 +3647,7 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 		return
 	}
+
 	if err := ValidateOAuthState(state); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "invalid state"})
 		return

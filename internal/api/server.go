@@ -22,6 +22,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/access"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/handlers/management"
 	managementHandlers "github.com/router-for-me/CLIProxyAPI/v6/internal/api/handlers/management"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/middleware"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules"
@@ -329,6 +330,10 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	s.joyCodeOAuthHandler = joycode.NewOAuthWebHandler(cfg)
 	s.joyCodeOAuthHandler.RegisterRoutes(engine)
 	s.mgmt.SetJoyCodeOAuthHandler(s.joyCodeOAuthHandler)
+	s.joyCodeOAuthHandler.SetAuthSuccessCallback(func(stateID string) {
+		management.CompleteOAuthSession(stateID)
+		management.CompleteOAuthSessionsByProvider("joycode")
+	})
 	log.Info("JoyCode OAuth Web routes registered at /v0/oauth/joycode/*")
 
 	if optionState.keepAliveEnabled {
