@@ -3,10 +3,150 @@ package auth
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
+
+type ProviderInfo struct {
+	Key             string   `json:"key"`
+	DisplayName     string   `json:"display_name"`
+	FlowType        string   `json:"flow_type"`
+	AuthURLEndpoint string   `json:"auth_url_endpoint"`
+	Aliases         []string `json:"aliases,omitempty"`
+	Configured      bool     `json:"configured"`
+}
+
+var providerMetadata = map[string]ProviderInfo{
+	"claude": {
+		Key:             "claude",
+		DisplayName:     "Claude (Anthropic)",
+		FlowType:        "authorization_code_pkce",
+		AuthURLEndpoint: "/anthropic-auth-url",
+		Aliases:         []string{"anthropic"},
+	},
+	"codex": {
+		Key:             "codex",
+		DisplayName:     "Codex (OpenAI)",
+		FlowType:        "authorization_code_pkce",
+		AuthURLEndpoint: "/codex-auth-url",
+		Aliases:         []string{"openai"},
+	},
+	"gemini": {
+		Key:             "gemini",
+		DisplayName:     "Gemini CLI",
+		FlowType:        "google_oauth2",
+		AuthURLEndpoint: "/gemini-cli-auth-url",
+		Aliases:         []string{"google"},
+	},
+	"antigravity": {
+		Key:             "antigravity",
+		DisplayName:     "Antigravity",
+		FlowType:        "google_oauth2",
+		AuthURLEndpoint: "/antigravity-auth-url",
+		Aliases:         []string{"anti-gravity"},
+	},
+	"kimi": {
+		Key:             "kimi",
+		DisplayName:     "Kimi",
+		FlowType:        "device_code",
+		AuthURLEndpoint: "/kimi-auth-url",
+	},
+	"kiro": {
+		Key:             "kiro",
+		DisplayName:     "Kiro",
+		FlowType:        "aws_builder_id",
+		AuthURLEndpoint: "/kiro-auth-url",
+	},
+	"github-copilot": {
+		Key:             "github-copilot",
+		DisplayName:     "GitHub Copilot",
+		FlowType:        "device_code",
+		AuthURLEndpoint: "/github-auth-url",
+		Aliases:         []string{"github"},
+	},
+	"gitlab": {
+		Key:             "gitlab",
+		DisplayName:     "GitLab",
+		FlowType:        "authorization_code_pkce",
+		AuthURLEndpoint: "/gitlab-auth-url",
+	},
+	"codebuddy": {
+		Key:             "codebuddy",
+		DisplayName:     "CodeBuddy",
+		FlowType:        "token",
+		AuthURLEndpoint: "",
+	},
+	"codebuddy-ai": {
+		Key:             "codebuddy-ai",
+		DisplayName:     "CodeBuddy AI",
+		FlowType:        "token",
+		AuthURLEndpoint: "",
+	},
+	"cursor": {
+		Key:             "cursor",
+		DisplayName:     "Cursor",
+		FlowType:        "pkce_polling",
+		AuthURLEndpoint: "/cursor-auth-url",
+	},
+	"qoder": {
+		Key:             "qoder",
+		DisplayName:     "Qoder",
+		FlowType:        "pkce_custom_uri",
+		AuthURLEndpoint: "/qoder-auth-url",
+	},
+	"codearts": {
+		Key:             "codearts",
+		DisplayName:     "CodeArts",
+		FlowType:        "web_oauth",
+		AuthURLEndpoint: "",
+	},
+	"joycode": {
+		Key:             "joycode",
+		DisplayName:     "JoyCode",
+		FlowType:        "web_oauth",
+		AuthURLEndpoint: "",
+	},
+	"kilo": {
+		Key:             "kilo",
+		DisplayName:     "Kilo",
+		FlowType:        "device_code",
+		AuthURLEndpoint: "/kilo-auth-url",
+	},
+}
+
+func (m *Manager) ListProviders() []ProviderInfo {
+	configuredKeys := make(map[string]bool)
+	if m.authenticators != nil {
+		for key := range m.authenticators {
+			configuredKeys[key] = true
+		}
+	}
+
+	seen := make(map[string]bool)
+	result := make([]ProviderInfo, 0, len(providerMetadata)+len(configuredKeys))
+
+	for key, info := range providerMetadata {
+		info.Configured = configuredKeys[key]
+		result = append(result, info)
+		seen[key] = true
+	}
+
+	for key := range configuredKeys {
+		if !seen[key] {
+			result = append(result, ProviderInfo{
+				Key:         key,
+				DisplayName: key,
+				FlowType:    "unknown",
+				Configured:  true,
+			})
+		}
+	}
+
+	sort.Slice(result, func(i, j int) bool { return result[i].Key < result[j].Key })
+	return result
+}
 
 // Manager aggregates authenticators and coordinates persistence via a token store.
 type Manager struct {
