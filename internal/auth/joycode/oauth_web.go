@@ -116,6 +116,26 @@ func (h *OAuthWebHandler) handleStart(c *gin.Context) {
 		return
 	}
 
+	loginURL, err := h.CreateSessionAndGetAuthURL(stateID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create session"})
+		return
+	}
+
+	log.Infof("JoyCode OAuth: session %s started, login URL: %s", stateID, loginURL)
+
+	if c.GetHeader("Accept") == "application/json" {
+		c.JSON(http.StatusOK, gin.H{"url": loginURL, "state": stateID})
+		return
+	}
+
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.String(http.StatusOK, fmt.Sprintf(joyCodeWaitingPage, loginURL, stateID))
+}
+
+// CreateSessionAndGetAuthURL creates a new session and returns the JoyCode authorization URL.
+// This method is exposed for use by management API handlers.
+func (h *OAuthWebHandler) CreateSessionAndGetAuthURL(stateID string) (string, error) {
 	authKey := generateJCAuthKey()
 
 	port := h.cfg.Port
@@ -136,16 +156,7 @@ func (h *OAuthWebHandler) handleStart(c *gin.Context) {
 	h.mu.Unlock()
 
 	loginURL := fmt.Sprintf("https://joycode.jd.com/login/?ideAppName=JoyCode&fromIde=ide&redirect=0&authPort=%d&authKey=%s", port, authKey)
-
-	log.Infof("JoyCode OAuth: session %s started, login URL: %s", stateID, loginURL)
-
-	if c.GetHeader("Accept") == "application/json" {
-		c.JSON(http.StatusOK, gin.H{"url": loginURL, "state": stateID})
-		return
-	}
-
-	c.Header("Content-Type", "text/html; charset=utf-8")
-	c.String(http.StatusOK, fmt.Sprintf(joyCodeWaitingPage, loginURL, stateID))
+	return loginURL, nil
 }
 
 func (h *OAuthWebHandler) handleCallback(c *gin.Context) {
