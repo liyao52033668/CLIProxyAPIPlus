@@ -29,6 +29,9 @@ func (h *Handler) GetJoyCodeAuthURL(c *gin.Context) {
 		return
 	}
 
+	// Register OAuth session with management
+	RegisterOAuthSession(stateID, "joycode")
+
 	// Use OAuthWebHandler if available, otherwise fallback to simple URL generation
 	if h.joyCodeOAuthHandler != nil {
 		loginURL, err := h.joyCodeOAuthHandler.CreateSessionAndGetAuthURL(stateID)

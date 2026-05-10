@@ -21,6 +21,8 @@ import (
 
 type sessionStatus string
 
+type AuthSuccessCallback func(stateID string)
+
 const (
 	jcPending sessionStatus = "pending"
 	jcWaiting sessionStatus = "waiting"
@@ -40,10 +42,11 @@ type jcWebSession struct {
 }
 
 type OAuthWebHandler struct {
-	cfg      *config.Config
-	sessions map[string]*jcWebSession
-	mu       sync.RWMutex
-	auth     *JoyCodeAuth
+	cfg                *config.Config
+	sessions           map[string]*jcWebSession
+	mu                 sync.RWMutex
+	auth               *JoyCodeAuth
+	authSuccessCallback AuthSuccessCallback
 }
 
 func NewOAuthWebHandler(cfg *config.Config) *OAuthWebHandler {
@@ -52,6 +55,11 @@ func NewOAuthWebHandler(cfg *config.Config) *OAuthWebHandler {
 		sessions: make(map[string]*jcWebSession),
 		auth:     NewJoyCodeAuth(nil),
 	}
+}
+
+// SetAuthSuccessCallback sets the callback to be called when authentication is successful.
+func (h *OAuthWebHandler) SetAuthSuccessCallback(callback AuthSuccessCallback) {
+	h.authSuccessCallback = callback
 }
 
 func (h *OAuthWebHandler) RegisterRoutes(router gin.IRouter) {
@@ -256,11 +264,17 @@ func (h *OAuthWebHandler) verifyAndSave(sess *jcWebSession, ptKey string) {
 	h.mu.Lock()
 	sess.status = jcSuccess
 	sess.token = tokenData
-	delete(h.sessions, sess.stateID)
+	stateID := sess.stateID
+	// Don't delete session yet so frontend can poll status
 	h.mu.Unlock()
 
 	h.saveTokenToFile(tokenData)
 	log.Infof("JoyCode OAuth: authentication successful for user %s", tokenData.UserID)
+
+	// Call the success callback if registered
+	if h.authSuccessCallback != nil {
+		h.authSuccessCallback(stateID)
+	}
 }
 
 func (h *OAuthWebHandler) handleStatus(c *gin.Context) {
