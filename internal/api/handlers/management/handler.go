@@ -14,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codearts"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/joycode"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
@@ -51,6 +52,7 @@ type Handler struct {
 	logDir                   string
 	postAuthHook             coreauth.PostAuthHook
 	codeArtsOAuthHandler     *codearts.OAuthWebHandler
+	joyCodeOAuthHandler      *joycode.OAuthWebHandler
 	onOAuthModelAliasUpdated func() // 回调：当 OAuthModelAlias 更新后调用
 }
 
@@ -139,6 +141,11 @@ func (h *Handler) SetCodeArtsOAuthHandler(handler *codearts.OAuthWebHandler) {
 			CompleteOAuthSessionsByProvider("codearts")
 		})
 	}
+}
+
+// SetJoyCodeOAuthHandler sets the JoyCode OAuth web handler.
+func (h *Handler) SetJoyCodeOAuthHandler(handler *joycode.OAuthWebHandler) {
+	h.joyCodeOAuthHandler = handler
 }
 
 // SetLogDirectory updates the directory where main.log should be looked up.

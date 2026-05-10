@@ -929,6 +929,8 @@ func cborValueToJSONCompatible(value any) any {
 // QuotaDetail represents quota information for a specific resource type
 type QuotaDetail struct {
 	Entitlement      float64 `json:"entitlement"`
+	Usage            float64 `json:"usage"`
+	PercentUsed      float64 `json:"percent_used"`
 	OverageCount     float64 `json:"overage_count"`
 	OveragePermitted bool    `json:"overage_permitted"`
 	PercentRemaining float64 `json:"percent_remaining"`
@@ -1046,10 +1048,98 @@ func (h *Handler) GetCopilotQuota(c *gin.Context) {
 		return
 	}
 
-	var usage CopilotUsageResponse
-	if errUnmarshal := json.Unmarshal(respBody, &usage); errUnmarshal != nil {
+	type RawCopilotUsageResponse struct {
+		AccessTypeSKU         string         `json:"access_type_sku"`
+		AnalyticsTrackingID   string         `json:"analytics_tracking_id"`
+		AssignedDate          string         `json:"assigned_date"`
+		CanSignupForLimited   bool           `json:"can_signup_for_limited"`
+		ChatEnabled           bool           `json:"chat_enabled"`
+		CopilotPlan           string         `json:"copilot_plan"`
+		OrganizationLoginList []any          `json:"organization_login_list"`
+		OrganizationList      []any          `json:"organization_list"`
+		LimitedUserQuotas     map[string]int `json:"limited_user_quotas"`
+		MonthlyQuotas         map[string]int `json:"monthly_quotas"`
+		LimitedUserResetDate  string         `json:"limited_user_reset_date"`
+	}
+
+	var raw RawCopilotUsageResponse
+	if errUnmarshal := json.Unmarshal(respBody, &raw); errUnmarshal != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to parse response"})
 		return
+	}
+
+	log.Debugf("GetCopilotQuota raw response body: %s", string(respBody))
+
+	chatEntitlement := float64(raw.MonthlyQuotas["chat"])
+	chatRemaining := float64(raw.LimitedUserQuotas["chat"])
+	chatUsage := chatEntitlement - chatRemaining
+	chatPercentRemaining := 0.0
+	chatPercentUsed := 0.0
+	if chatEntitlement > 0 {
+		chatPercentRemaining = chatRemaining / chatEntitlement
+		chatPercentUsed = chatUsage / chatEntitlement
+	}
+
+	completionsEntitlement := float64(raw.MonthlyQuotas["completions"])
+	completionsRemaining := float64(raw.LimitedUserQuotas["completions"])
+	completionsUsage := completionsEntitlement - completionsRemaining
+	completionsPercentRemaining := 0.0
+	completionsPercentUsed := 0.0
+	if completionsEntitlement > 0 {
+		completionsPercentRemaining = completionsRemaining / completionsEntitlement
+		completionsPercentUsed = completionsUsage / completionsEntitlement
+	}
+
+	quotaSnapshots := QuotaSnapshots{
+		Chat: QuotaDetail{
+			Entitlement:      chatEntitlement,
+			Usage:            chatUsage,
+			PercentUsed:      chatPercentUsed,
+			OverageCount:     0,
+			OveragePermitted: false,
+			PercentRemaining: chatPercentRemaining,
+			QuotaID:          "chat",
+			QuotaRemaining:   chatRemaining,
+			Remaining:        chatRemaining,
+			Unlimited:        false,
+		},
+		Completions: QuotaDetail{
+			Entitlement:      completionsEntitlement,
+			Usage:            completionsUsage,
+			PercentUsed:      completionsPercentUsed,
+			OverageCount:     0,
+			OveragePermitted: false,
+			PercentRemaining: completionsPercentRemaining,
+			QuotaID:          "completions",
+			QuotaRemaining:   completionsRemaining,
+			Remaining:        completionsRemaining,
+			Unlimited:        false,
+		},
+		PremiumInteractions: QuotaDetail{
+			Entitlement:      0,
+			Usage:            0,
+			PercentUsed:      0,
+			OverageCount:     0,
+			OveragePermitted: false,
+			PercentRemaining: 0,
+			QuotaID:          "premium_interactions",
+			QuotaRemaining:   0,
+			Remaining:        0,
+			Unlimited:        true,
+		},
+	}
+
+	usage := CopilotUsageResponse{
+		AccessTypeSKU:         raw.AccessTypeSKU,
+		AnalyticsTrackingID:   raw.AnalyticsTrackingID,
+		AssignedDate:          raw.AssignedDate,
+		CanSignupForLimited:   raw.CanSignupForLimited,
+		ChatEnabled:           raw.ChatEnabled,
+		CopilotPlan:           raw.CopilotPlan,
+		OrganizationLoginList: raw.OrganizationLoginList,
+		OrganizationList:      raw.OrganizationList,
+		QuotaResetDate:        raw.LimitedUserResetDate,
+		QuotaSnapshots:        quotaSnapshots,
 	}
 
 	c.JSON(http.StatusOK, usage)
@@ -1196,12 +1286,17 @@ func (h *Handler) enrichCopilotTokenResponse(ctx context.Context, response apiCa
 					if chatLimited, ok := limitedQuotas["chat"].(float64); ok {
 						chatRemaining = chatLimited
 					}
+					chatUsage := chatTotal - chatRemaining
 					percentRemaining := 0.0
+					percentUsed := 0.0
 					if chatTotal > 0 {
 						percentRemaining = (chatRemaining / chatTotal) * 100.0
+						percentUsed = (chatUsage / chatTotal) * 100.0
 					}
 					quotaSnapshots.Chat = QuotaDetail{
 						Entitlement:      chatTotal,
+						Usage:            chatUsage,
+						PercentUsed:      percentUsed,
 						Remaining:        chatRemaining,
 						QuotaRemaining:   chatRemaining,
 						PercentRemaining: percentRemaining,
@@ -1216,12 +1311,17 @@ func (h *Handler) enrichCopilotTokenResponse(ctx context.Context, response apiCa
 					if completionsLimited, ok := limitedQuotas["completions"].(float64); ok {
 						completionsRemaining = completionsLimited
 					}
+					completionsUsage := completionsTotal - completionsRemaining
 					percentRemaining := 0.0
+					percentUsed := 0.0
 					if completionsTotal > 0 {
 						percentRemaining = (completionsRemaining / completionsTotal) * 100.0
+						percentUsed = (completionsUsage / completionsTotal) * 100.0
 					}
 					quotaSnapshots.Completions = QuotaDetail{
 						Entitlement:      completionsTotal,
+						Usage:            completionsUsage,
+						PercentUsed:      percentUsed,
 						Remaining:        completionsRemaining,
 						QuotaRemaining:   completionsRemaining,
 						PercentRemaining: percentRemaining,

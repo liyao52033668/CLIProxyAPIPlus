@@ -116,6 +116,11 @@ func (h *OAuthWebHandler) handleStart(c *gin.Context) {
 
 	log.Infof("CodeArts OAuth: session %s started, login URL: %s", stateID, loginURL)
 
+	if c.GetHeader("Accept") == "application/json" {
+		c.JSON(http.StatusOK, gin.H{"url": loginURL, "state": stateID})
+		return
+	}
+
 	c.Header("Content-Type", "text/html; charset=utf-8")
 	c.String(http.StatusOK, fmt.Sprintf(codeArtsWaitingPage, loginURL, stateID))
 }
@@ -146,13 +151,7 @@ func (h *OAuthWebHandler) CreateSessionAndGetAuthURL(stateID string) (string, er
 
 	log.Infof("CodeArts OAuth: session %s started, login URL: %s", stateID, loginURL)
 
-	if c.GetHeader("Accept") == "application/json" {
-		c.JSON(http.StatusOK, gin.H{"url": loginURL, "state": stateID})
-		return
-	}
-
-	c.Header("Content-Type", "text/html; charset=utf-8")
-	c.String(http.StatusOK, fmt.Sprintf(codeArtsWaitingPage, loginURL, stateID))
+	return loginURL, nil
 }
 
 // handleCallback receives the callback from HuaweiCloud after user login.

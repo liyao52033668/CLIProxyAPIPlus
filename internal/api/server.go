@@ -328,6 +328,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	// === CLIProxyAPIPlus extension: Register JoyCode OAuth Web routes ===
 	s.joyCodeOAuthHandler = joycode.NewOAuthWebHandler(cfg)
 	s.joyCodeOAuthHandler.RegisterRoutes(engine)
+	s.mgmt.SetJoyCodeOAuthHandler(s.joyCodeOAuthHandler)
 	log.Info("JoyCode OAuth Web routes registered at /v0/oauth/joycode/*")
 
 	if optionState.keepAliveEnabled {
@@ -648,6 +649,8 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/kiro-quota", s.mgmt.GetKiroQuota)
 		s.mgmt.StartKiroQuotaRefresher()
 
+		
+
 		mgmt.GET("/api-keys", s.mgmt.GetAPIKeys)
 		mgmt.PUT("/api-keys", s.mgmt.PutAPIKeys)
 		mgmt.PATCH("/api-keys", s.mgmt.PatchAPIKeys)
@@ -770,6 +773,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/codearts-auth-url", s.mgmt.RequestCodeArtsToken)
 		mgmt.GET("/bt-auth-url", s.mgmt.RequestBTToken)
 		mgmt.POST("/bt-auth-url", s.mgmt.RequestBTToken)
+		mgmt.GET("/joycode-auth-url", s.mgmt.GetJoyCodeAuthURL)
 
 		mgmt.POST("/oauth-callback", s.mgmt.PostOAuthCallback)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
