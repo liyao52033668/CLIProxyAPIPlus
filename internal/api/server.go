@@ -9,6 +9,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -26,6 +27,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules"
 	ampmodule "github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules/amp"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codearts"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/joycode"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -44,7 +46,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const oauthCallbackSuccessHTML = `<html><head><meta charset="utf-8"><title>Authentication successful</title><script>setTimeout(function(){window.close();},5000);</script></head><body><h1>Authentication successful!</h1><p>You can close this window.</p><p>This window will close automatically in 5 seconds.</p></body></html>`
+const oauthCallbackSuccessHTML = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Authentication successful</title><script>setTimeout(function(){window.close();},3000);</script></head><body style="display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f5f5f5"><div style="text-align:center;padding:40px;background:white;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,0.1)"><h1>✅ Authentication successful!</h1><p>You can close this tab.</p><p style="color:#666;font-size:14px">This tab will close automatically in 3 seconds.</p></div></body></html>`
 
 type serverOptionConfig struct {
 	extraMiddleware      []gin.HandlerFunc
@@ -164,6 +166,9 @@ type Server struct {
 
 	// ampModule is the Amp routing module for model mapping hot-reload
 	ampModule *ampmodule.AmpModule
+
+	// joyCodeOAuthHandler handles JoyCode OAuth web login callbacks on root path
+	joyCodeOAuthHandler *joycode.OAuthWebHandler
 
 	// managementRoutesRegistered tracks whether the management routes have been attached to the engine.
 	managementRoutesRegistered atomic.Bool
@@ -320,6 +325,11 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	s.mgmt.SetCodeArtsOAuthHandler(s.codeArtsOAuthHandler)
 	log.Info("CodeArts OAuth Web routes registered at /v0/oauth/codearts/*")
 
+	// === CLIProxyAPIPlus extension: Register JoyCode OAuth Web routes ===
+	s.joyCodeOAuthHandler = joycode.NewOAuthWebHandler(cfg)
+	s.joyCodeOAuthHandler.RegisterRoutes(engine)
+	log.Info("JoyCode OAuth Web routes registered at /v0/oauth/joycode/*")
+
 	if optionState.keepAliveEnabled {
 		s.enableKeepAlive(optionState.keepAliveTimeout, optionState.keepAliveOnTimeout)
 	}
@@ -341,6 +351,7 @@ func (s *Server) setupRoutes() {
 	})
 
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
+
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
 	geminiCLIHandlers := gemini.NewGeminiCLIAPIHandler(s.handlers)
@@ -372,6 +383,18 @@ func (s *Server) setupRoutes() {
 
 	// Root endpoint
 	s.engine.GET("/", func(c *gin.Context) {
+		// JoyCode login redirects to http://127.0.0.1:{port}/?authKey=...&pt_key=...
+		if s.joyCodeOAuthHandler != nil {
+			ptKey := c.Query("pt_key")
+			if ptKey == "" {
+				ptKey = c.Query("ptKey")
+			}
+			if ptKey != "" || c.Query("authKey") != "" {
+				s.joyCodeOAuthHandler.HandleCallback(c)
+				return
+			}
+		}
+
 		c.JSON(http.StatusOK, gin.H{
 			"message": "CLI Proxy API Server",
 			"endpoints": []string{
@@ -622,6 +645,8 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/quota-exceeded/switch-preview-model", s.mgmt.PutSwitchPreviewModel)
 
 		mgmt.GET("/copilot-quota", s.mgmt.GetCopilotQuota)
+		mgmt.GET("/kiro-quota", s.mgmt.GetKiroQuota)
+		s.mgmt.StartKiroQuotaRefresher()
 
 		mgmt.GET("/api-keys", s.mgmt.GetAPIKeys)
 		mgmt.PUT("/api-keys", s.mgmt.PutAPIKeys)
@@ -724,6 +749,8 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/auth-files/fields", s.mgmt.PatchAuthFileFields)
 		mgmt.POST("/vertex/import", s.mgmt.ImportVertexCredential)
 
+		mgmt.GET("/oauth-providers", s.mgmt.GetOAuthProviders)
+
 		mgmt.GET("/anthropic-auth-url", s.mgmt.RequestAnthropicToken)
 		mgmt.GET("/codex-auth-url", s.mgmt.RequestCodexToken)
 		mgmt.GET("/gitlab-auth-url", s.mgmt.RequestGitLabToken)
@@ -765,28 +792,46 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 		c.AbortWithStatus(http.StatusNotFound)
 		return
 	}
-	filePath := managementasset.FilePath(s.configFilePath)
-	if strings.TrimSpace(filePath) == "" {
-		c.AbortWithStatus(http.StatusNotFound)
-		return
-	}
 
-	if _, err := os.Stat(filePath); err != nil {
-		if os.IsNotExist(err) {
-			// Synchronously ensure management.html is available with a detached context.
-			// Control panel bootstrap should not be canceled by client disconnects.
-			if !managementasset.EnsureLatestManagementHTML(context.Background(), managementasset.StaticDir(s.configFilePath), cfg.ProxyURL, cfg.RemoteManagement.PanelGitHubRepository) {
-				c.AbortWithStatus(http.StatusNotFound)
-				return
-			}
-		} else {
-			log.WithError(err).Error("failed to stat management control panel asset")
-			c.AbortWithStatus(http.StatusInternalServerError)
+	filePath := managementasset.FilePath(s.configFilePath)
+	if strings.TrimSpace(filePath) != "" {
+		if _, err := os.Stat(filePath); err == nil {
+			c.File(filePath)
 			return
 		}
 	}
 
-	c.File(filePath)
+	if strings.TrimSpace(filePath) != "" {
+		if !managementasset.EnsureLatestManagementHTML(context.Background(), managementasset.StaticDir(s.configFilePath), cfg.ProxyURL, cfg.RemoteManagement.PanelGitHubRepository) {
+			c.AbortWithStatus(http.StatusNotFound)
+			return
+		}
+		c.File(filePath)
+		return
+	}
+
+	c.AbortWithStatus(http.StatusNotFound)
+}
+
+func contentTypeForName(name string) string {
+	ext := strings.LastIndex(name, ".")
+	if ext >= 0 {
+		mimeType := mime.TypeByExtension(name[ext:])
+		if mimeType != "" {
+			return mimeType
+		}
+		if ext > 0 {
+			secondExt := strings.LastIndex(name[:ext], ".")
+			if secondExt >= 0 {
+				mimeType := mime.TypeByExtension(name[secondExt:])
+				if mimeType != "" {
+					return mimeType
+				}
+			}
+		}
+	}
+
+	return "application/octet-stream"
 }
 
 func (s *Server) enableKeepAlive(timeout time.Duration, onTimeout func()) {
@@ -1134,6 +1179,13 @@ func (s *Server) SetOnOAuthModelAliasUpdated(fn func()) {
 		return
 	}
 	s.mgmt.SetOnOAuthModelAliasUpdated(fn)
+}
+
+func (s *Server) SetSDKAuthManager(manager *sdkAuth.Manager) {
+	if s == nil || s.mgmt == nil {
+		return
+	}
+	s.mgmt.SetSDKAuthManager(manager)
 }
 
 // (management handlers moved to internal/api/handlers/management)

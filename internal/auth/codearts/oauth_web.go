@@ -123,7 +123,6 @@ func (h *OAuthWebHandler) handleStart(c *gin.Context) {
 // CreateSessionAndGetAuthURL creates a new session and returns the CodeArts authorization URL.
 // This method is exposed for use by management API handlers.
 func (h *OAuthWebHandler) CreateSessionAndGetAuthURL(stateID string) (string, error) {
-	// Generate ticket_id matching Python: secrets.token_hex(32) = 64 hex chars
 	ticketID := generateTicketID()
 
 	port := h.cfg.Port
@@ -143,8 +142,17 @@ func (h *OAuthWebHandler) CreateSessionAndGetAuthURL(stateID string) (string, er
 	h.ticketToState[ticketID] = stateID
 	h.mu.Unlock()
 
-	// Build login URL matching Python: {REDIRECT_HOST}/redirect1?ticket_id=...&theme=1&...
-	return h.auth.AuthorizationURL(ticketID, port), nil
+	loginURL := h.auth.AuthorizationURL(ticketID, port)
+
+	log.Infof("CodeArts OAuth: session %s started, login URL: %s", stateID, loginURL)
+
+	if c.GetHeader("Accept") == "application/json" {
+		c.JSON(http.StatusOK, gin.H{"url": loginURL, "state": stateID})
+		return
+	}
+
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.String(http.StatusOK, fmt.Sprintf(codeArtsWaitingPage, loginURL, stateID))
 }
 
 // handleCallback receives the callback from HuaweiCloud after user login.
@@ -215,7 +223,7 @@ func (h *OAuthWebHandler) handleCallback(c *gin.Context) {
 		c.Redirect(http.StatusTemporaryRedirect, redirectURL)
 	} else {
 		c.Header("Content-Type", "text/html; charset=utf-8")
-		c.String(http.StatusOK, `<html><body><h2>Login callback received! You can close this tab.</h2></body></html>`)
+		c.String(http.StatusOK, `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Authentication successful</title><script>setTimeout(function(){window.close();},3000);</script></head><body style="display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;font-family:sans-serif;background:#f5f5f5"><div style="text-align:center;padding:40px;background:white;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,0.1)"><h1>✅ Authentication successful!</h1><p>You can close this tab.</p><p style="color:#666;font-size:14px">This tab will close automatically in 3 seconds.</p></div></body></html>`)
 	}
 }
 

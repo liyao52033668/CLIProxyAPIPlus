@@ -92,7 +92,14 @@ type Auth struct {
 	ModelStates map[string]*ModelState `json:"model_states,omitempty"`
 
 	// Runtime carries non-serialisable data used during execution (in-memory only).
+	// Success counts the total number of successful requests routed through this auth.
+	Success int64 `json:"-"`
+	// Failed counts the total number of failed requests routed through this auth.
+	Failed int64 `json:"-"`
+
 	Runtime any `json:"-"`
+
+	recentRequests recentRequestRing `json:"-"`
 
 	indexAssigned bool `json:"-"`
 }
@@ -580,4 +587,93 @@ func normaliseUnix(raw int64) time.Time {
 		return time.UnixMilli(raw)
 	}
 	return time.Unix(raw, 0)
+}
+
+// --- Recent Requests Health Tracking ---
+
+const (
+	recentRequestBucketSeconds int64 = 10 * 60
+	recentRequestBucketCount         = 20
+)
+
+type recentRequestBucket struct {
+	bucketID int64
+	success  int64
+	failed   int64
+}
+
+type recentRequestRing struct {
+	buckets [recentRequestBucketCount]recentRequestBucket
+}
+
+// RecentRequestBucket is the exported per-bucket snapshot returned by the management API.
+type RecentRequestBucket struct {
+	Time    string `json:"time"`
+	Success int64  `json:"success"`
+	Failed  int64  `json:"failed"`
+}
+
+func recentRequestBucketID(now time.Time) int64 {
+	if now.IsZero() {
+		return 0
+	}
+	return now.Unix() / recentRequestBucketSeconds
+}
+
+func recentRequestBucketIndex(bucketID int64) int {
+	mod := bucketID % int64(recentRequestBucketCount)
+	if mod < 0 {
+		mod += int64(recentRequestBucketCount)
+	}
+	return int(mod)
+}
+
+func formatRecentRequestBucketLabel(bucketID int64) string {
+	start := time.Unix(bucketID*recentRequestBucketSeconds, 0).In(time.Local)
+	end := start.Add(time.Duration(recentRequestBucketSeconds) * time.Second)
+	return start.Format("15:04") + "-" + end.Format("15:04")
+}
+
+func (a *Auth) recordRecentRequest(now time.Time, success bool) {
+	if a == nil {
+		return
+	}
+	bucketID := recentRequestBucketID(now)
+	idx := recentRequestBucketIndex(bucketID)
+	bucket := &a.recentRequests.buckets[idx]
+	if bucket.bucketID != bucketID {
+		bucket.bucketID = bucketID
+		bucket.success = 0
+		bucket.failed = 0
+	}
+	if success {
+		bucket.success++
+	} else {
+		bucket.failed++
+	}
+}
+
+// RecentRequestsSnapshot returns the last 20 ten-minute buckets of request counts.
+func (a *Auth) RecentRequestsSnapshot(now time.Time) []RecentRequestBucket {
+	out := make([]RecentRequestBucket, 0, recentRequestBucketCount)
+	if a == nil {
+		return out
+	}
+
+	currentBucketID := recentRequestBucketID(now)
+	for i := recentRequestBucketCount - 1; i >= 0; i-- {
+		bucketID := currentBucketID - int64(i)
+		idx := recentRequestBucketIndex(bucketID)
+		bucket := a.recentRequests.buckets[idx]
+		entry := RecentRequestBucket{
+			Time: formatRecentRequestBucketLabel(bucketID),
+		}
+		if bucket.bucketID == bucketID {
+			entry.Success = bucket.success
+			entry.Failed = bucket.failed
+		}
+		out = append(out, entry)
+	}
+
+	return out
 }

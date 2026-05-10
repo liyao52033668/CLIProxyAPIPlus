@@ -2,12 +2,15 @@ package main
 
 import (
 	"fmt"
+
 	cursorproto "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/cursor/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/dynamicpb"
 )
 
 func main() {
-	ecm := cursorproto.NewMsg("ExecClientMessage")
+	ecm := dynamicpb.NewMessage(cursorproto.Msg("ExecClientMessage"))
 
 	// Try different field names
 	names := []string{
@@ -16,7 +19,7 @@ func main() {
 	}
 
 	for _, name := range names {
-		fd := ecm.Descriptor().Fields().ByName(protoreflect.Name(name))
+		fd := ecm.Descriptor().Fields().ByName(protoreflect.Name(protoreflect.Name(name)))
 		if fd != nil {
 			fmt.Printf("Found field %q: number=%d, kind=%s\n", name, fd.Number(), fd.Kind())
 		} else {

@@ -1733,14 +1733,15 @@ func TestCheckSystemInstructionsWithMode_StringSystemPreserved(t *testing.T) {
 	if !strings.HasPrefix(blocks[0].Get("text").String(), "x-anthropic-billing-header:") {
 		t.Fatalf("blocks[0] should be billing header, got %q", blocks[0].Get("text").String())
 	}
-	if blocks[1].Get("text").String() != "You are a Claude agent, built on Anthropic's Claude Agent SDK." {
+	if blocks[1].Get("text").String() != "You are Claude Code, Anthropic's official CLI for Claude." {
 		t.Fatalf("blocks[1] should be agent block, got %q", blocks[1].Get("text").String())
 	}
-	if blocks[2].Get("text").String() != "You are a helpful assistant." {
-		t.Fatalf("blocks[2] should be user system prompt, got %q", blocks[2].Get("text").String())
+	if !strings.HasPrefix(blocks[2].Get("text").String(), "You are an interactive agent") {
+		t.Fatalf("blocks[2] should be static prompt, got %q", blocks[2].Get("text").String())
 	}
-	if blocks[2].Get("cache_control.type").String() != "ephemeral" {
-		t.Fatalf("blocks[2] should have cache_control.type=ephemeral")
+	firstUserContent := gjson.GetBytes(out, "messages.0.content").String()
+	if !strings.Contains(firstUserContent, "You are a helpful assistant.") {
+		t.Fatalf("user system text should be prepended to first user message, got %q", firstUserContent)
 	}
 }
 
@@ -1751,8 +1752,8 @@ func TestCheckSystemInstructionsWithMode_StringSystemStrict(t *testing.T) {
 	out := checkSystemInstructionsWithMode(payload, true)
 
 	blocks := gjson.GetBytes(out, "system").Array()
-	if len(blocks) != 2 {
-		t.Fatalf("strict mode should produce 2 blocks, got %d", len(blocks))
+	if len(blocks) != 3 {
+		t.Fatalf("strict mode should produce 3 blocks, got %d", len(blocks))
 	}
 }
 
@@ -1763,8 +1764,8 @@ func TestCheckSystemInstructionsWithMode_EmptyStringSystemIgnored(t *testing.T) 
 	out := checkSystemInstructionsWithMode(payload, false)
 
 	blocks := gjson.GetBytes(out, "system").Array()
-	if len(blocks) != 2 {
-		t.Fatalf("empty string system should produce 2 blocks, got %d", len(blocks))
+	if len(blocks) != 3 {
+		t.Fatalf("empty string system should produce 3 blocks, got %d", len(blocks))
 	}
 }
 
@@ -1778,8 +1779,12 @@ func TestCheckSystemInstructionsWithMode_ArraySystemStillWorks(t *testing.T) {
 	if len(blocks) != 3 {
 		t.Fatalf("expected 3 system blocks, got %d", len(blocks))
 	}
-	if blocks[2].Get("text").String() != "Be concise." {
-		t.Fatalf("blocks[2] should be user system prompt, got %q", blocks[2].Get("text").String())
+	if !strings.HasPrefix(blocks[2].Get("text").String(), "You are an interactive agent") {
+		t.Fatalf("blocks[2] should be static prompt, got %q", blocks[2].Get("text").String())
+	}
+	firstUserContent := gjson.GetBytes(out, "messages.0.content").String()
+	if !strings.Contains(firstUserContent, "Be concise.") {
+		t.Fatalf("user system text should be prepended to first user message, got %q", firstUserContent)
 	}
 }
 
@@ -1793,8 +1798,9 @@ func TestCheckSystemInstructionsWithMode_StringWithSpecialChars(t *testing.T) {
 	if len(blocks) != 3 {
 		t.Fatalf("expected 3 system blocks, got %d", len(blocks))
 	}
-	if blocks[2].Get("text").String() != `Use <xml> tags & "quotes" in output.` {
-		t.Fatalf("blocks[2] text mangled, got %q", blocks[2].Get("text").String())
+	firstUserContent := gjson.GetBytes(out, "messages.0.content").String()
+	if !strings.Contains(firstUserContent, `Use <xml> tags & "quotes" in output.`) {
+		t.Fatalf("original system text not preserved in first user message, got %q", firstUserContent)
 	}
 }
 
@@ -1902,7 +1908,7 @@ func TestApplyCloaking_PreservesConfiguredStrictModeAndSensitiveWordsWhenModeOmi
 	out := applyCloaking(context.Background(), cfg, auth, payload, "claude-3-5-sonnet-20241022", "key-123")
 
 	blocks := gjson.GetBytes(out, "system").Array()
-	if len(blocks) != 2 {
+	if len(blocks) != 3 {
 		t.Fatalf("expected strict mode to keep only injected system blocks, got %d", len(blocks))
 	}
 	if got := gjson.GetBytes(out, "messages.0.content.0.text").String(); !strings.Contains(got, "\u200B") {

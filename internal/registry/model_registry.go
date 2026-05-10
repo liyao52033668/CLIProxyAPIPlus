@@ -1055,6 +1055,16 @@ func (r *ModelRegistry) GetModelProviders(modelID string) []string {
 
 	registration, exists := r.models[modelID]
 	if !exists || registration == nil || len(registration.Providers) == 0 {
+		var available []string
+		for k := range r.models {
+			available = append(available, k)
+		}
+		log.Debugf("GetModelProviders: modelID=%q not found (exists=%v, nil=%v, providers=%v), available models: %v", modelID, exists, registration == nil, func() int {
+			if registration != nil {
+				return len(registration.Providers)
+			}
+			return 0
+		}(), available)
 		return nil
 	}
 

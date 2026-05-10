@@ -1,13 +1,14 @@
 # Binaries
 /server
 *.exe
-
+test-output
 
 # Configuration
 CLIProxyAPI/*
 config.yaml
 .env
 .mcp.json
+
 # Generated content
 bin/*
 logs/*
@@ -23,6 +24,11 @@ objectstore/*
 
 # Static assets
 static/*
+
+# Embedded web assets (generated from web/out)
+internal/managementasset/web_static/*
+!internal/managementasset/web_static/.gitkeep
+!internal/managementasset/web_static/README.md
 
 # Authentication data
 auths/*
