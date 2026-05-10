@@ -116,6 +116,17 @@ func (h *OAuthWebHandler) handleStart(c *gin.Context) {
 		return
 	}
 
+	h.mu.Lock()
+	for id, sess := range h.sessions {
+		if sess.status == jcWaiting {
+			if sess.cancel != nil {
+				sess.cancel()
+			}
+			delete(h.sessions, id)
+		}
+	}
+	h.mu.Unlock()
+
 	loginURL, err := h.CreateSessionAndGetAuthURL(stateID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create session"})
@@ -143,17 +154,28 @@ func (h *OAuthWebHandler) CreateSessionAndGetAuthURL(stateID string) (string, er
 		port = 8318
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+
 	sess := &jcWebSession{
 		stateID:   stateID,
 		authKey:   authKey,
 		port:      port,
 		status:    jcWaiting,
 		startedAt: time.Now(),
+		cancel:    cancel,
 	}
 
 	h.mu.Lock()
 	h.sessions[stateID] = sess
 	h.mu.Unlock()
+
+	go func() {
+		<-ctx.Done()
+		h.mu.Lock()
+		delete(h.sessions, stateID)
+		h.mu.Unlock()
+		log.Debugf("JoyCode OAuth: session %s expired and cleaned up", stateID)
+	}()
 
 	loginURL := fmt.Sprintf("https://joycode.jd.com/login/?ideAppName=JoyCode&fromIde=ide&redirect=0&authPort=%d&authKey=%s", port, authKey)
 	return loginURL, nil
@@ -234,6 +256,7 @@ func (h *OAuthWebHandler) verifyAndSave(sess *jcWebSession, ptKey string) {
 	h.mu.Lock()
 	sess.status = jcSuccess
 	sess.token = tokenData
+	delete(h.sessions, sess.stateID)
 	h.mu.Unlock()
 
 	h.saveTokenToFile(tokenData)
