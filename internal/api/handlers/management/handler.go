@@ -42,6 +42,7 @@ type Handler struct {
 	attemptsMu               sync.Mutex
 	failedAttempts           map[string]*attemptInfo // keyed by client IP
 	authManager              *coreauth.Manager
+	sdkAuthManager      *sdkAuth.Manager
 	usageStats               *usage.RequestStatistics
 	tokenStore               coreauth.Store
 	localPassword            string
@@ -119,6 +120,9 @@ func (h *Handler) SetConfig(cfg *config.Config) { h.cfg = cfg }
 
 // SetAuthManager updates the auth manager reference used by management endpoints.
 func (h *Handler) SetAuthManager(manager *coreauth.Manager) { h.authManager = manager }
+
+// SetSDKAuthManager updates the SDK auth manager reference used for provider listing.
+func (h *Handler) SetSDKAuthManager(manager *sdkAuth.Manager) { h.sdkAuthManager = manager }
 
 // SetUsageStatistics allows replacing the usage statistics reference.
 func (h *Handler) SetUsageStatistics(stats *usage.RequestStatistics) { h.usageStats = stats }

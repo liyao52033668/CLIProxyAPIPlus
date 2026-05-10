@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -146,6 +147,8 @@ func (e *CodeArtsExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 	var contentBuilder strings.Builder
 	var reasoningBuilder strings.Builder
 	var promptTokens, completionTokens int64
+	var respModel string
+	toolCallsAccumulated := make(map[int]map[string]interface{})
 
 	scanner := bufio.NewScanner(httpResp.Body)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
@@ -154,12 +157,23 @@ func (e *CodeArtsExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 		if strings.HasPrefix(line, ":heartbeat") || line == "" {
 			continue
 		}
-		if !strings.HasPrefix(line, "data: ") {
+		if !strings.HasPrefix(line, "data: ") && !strings.HasPrefix(line, "data:") {
 			continue
 		}
-		data := strings.TrimPrefix(line, "data: ")
-		if data == "[DONE]" {
+		var data string
+		if strings.HasPrefix(line, "data: ") {
+			data = strings.TrimPrefix(line, "data: ")
+		} else {
+			data = strings.TrimPrefix(line, "data:")
+		}
+		if data == "[DONE]" || (gjson.Get(data, "text").String() == "[DONE]") {
 			break
+		}
+
+		errorCode := gjson.Get(data, "error_code")
+		if errorCode.Exists() && errorCode.Int() != 0 {
+			errMsg := gjson.Get(data, "error_msg").String()
+			return cliproxyexecutor.Response{}, fmt.Errorf("codearts: error %d: %s", errorCode.Int(), errMsg)
 		}
 
 		delta := gjson.Get(data, "delta")
@@ -170,6 +184,36 @@ func (e *CodeArtsExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 			if r := delta.Get("reasoning_content").String(); r != "" {
 				reasoningBuilder.WriteString(r)
 			}
+			if tcList := delta.Get("tool_calls"); tcList.Exists() && len(tcList.Array()) > 0 {
+				for _, tc := range tcList.Array() {
+					idx := int(tc.Get("index").Int())
+					if _, exists := toolCallsAccumulated[idx]; !exists {
+						toolCallsAccumulated[idx] = map[string]interface{}{
+							"id":   tc.Get("id").String(),
+							"type": tc.Get("type").String(),
+							"function": map[string]interface{}{
+								"name":      tc.Get("function.name").String(),
+								"arguments": tc.Get("function.arguments").String(),
+							},
+						}
+					} else {
+						existing := toolCallsAccumulated[idx]
+						if id := tc.Get("id").String(); id != "" {
+							existing["id"] = id
+						}
+						fnMap, _ := existing["function"].(map[string]interface{})
+						if name := tc.Get("function.name").String(); name != "" {
+							fnMap["name"] = name
+						}
+						if args := tc.Get("function.arguments").String(); args != "" {
+							fnMap["arguments"] = fnMap["arguments"].(string) + args
+						}
+					}
+				}
+			}
+		}
+		if mn := gjson.Get(data, "model_name").String(); mn != "" {
+			respModel = mn
 		}
 		if pt := gjson.Get(data, "prompt_tokens").Int(); pt > 0 {
 			promptTokens = pt
@@ -179,10 +223,40 @@ func (e *CodeArtsExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 		}
 	}
 
+	var toolCallsList []map[string]interface{}
+	if len(toolCallsAccumulated) > 0 {
+		indices := make([]int, 0, len(toolCallsAccumulated))
+		for k := range toolCallsAccumulated {
+			indices = append(indices, k)
+		}
+		sort.Ints(indices)
+		for _, k := range indices {
+			toolCallsList = append(toolCallsList, toolCallsAccumulated[k])
+		}
+	}
+
+	fullContent := contentBuilder.String()
+	if len(toolCallsList) == 0 && fullContent != "" && strings.Contains(fullContent, "<tool_call_id>") {
+		xmlToolCalls := parseXMLToolCalls(fullContent)
+		if len(xmlToolCalls) > 0 {
+			toolCallsList = xmlToolCalls
+			stripped := stripXMLToolCalls(fullContent)
+			if stripped == "" {
+				fullContent = ""
+			} else {
+				fullContent = stripped
+			}
+		}
+	}
+
+	if respModel == "" {
+		respModel = req.Model
+	}
+
 	from := sdktranslator.FromString("openai")
 	to := sdktranslator.FromString("codearts")
 
-	openAIResp := buildOpenAINonStreamResponse(contentBuilder.String(), reasoningBuilder.String(), req.Model, promptTokens, completionTokens)
+	openAIResp := buildOpenAINonStreamResponse(fullContent, reasoningBuilder.String(), respModel, promptTokens, completionTokens, toolCallsList)
 	var param any
 	translated := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, req.Payload, openAIResp, &param)
 
@@ -256,6 +330,8 @@ func (e *CodeArtsExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 		var lineCount int
 		var dataLineCount int
 		var firstNonEmptyLine string
+		var accumulatedContent strings.Builder
+		var hasToolCalls bool
 
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
@@ -282,22 +358,66 @@ func (e *CodeArtsExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 			}
 			dataLineCount++
 
-			if pt := gjson.Get(data, "prompt_tokens").Int(); pt > 0 {
-				totalPromptTokens = pt
+			result := convertCodeArtsSSEToOpenAI(data, req.Model)
+			if result.Err != nil {
+				log.Warnf("codearts: chunk error: %v", result.Err)
+				continue
 			}
-			if ct := gjson.Get(data, "completion_tokens").Int(); ct > 0 {
-				totalCompletionTokens = ct
-			}
-
-			openAIChunk := convertCodeArtsSSEToOpenAI(data, req.Model)
-			if openAIChunk == nil {
+			if result.Chunk == nil {
+				if pt := gjson.Get(data, "prompt_tokens").Int(); pt > 0 {
+					totalPromptTokens = pt
+				}
+				if ct := gjson.Get(data, "completion_tokens").Int(); ct > 0 {
+					totalCompletionTokens = ct
+				}
 				continue
 			}
 
-			translatedChunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, req.Payload, openAIChunk, &streamParam)
+			if result.HasToolCalls {
+				hasToolCalls = true
+			} else if result.HasContent {
+				accumulatedContent.WriteString(result.ContentValue)
+			}
+
+			if result.FinishReason == "stop" {
+				if pt := gjson.Get(data, "prompt_tokens").Int(); pt > 0 {
+					totalPromptTokens = pt
+				}
+				if ct := gjson.Get(data, "completion_tokens").Int(); ct > 0 {
+					totalCompletionTokens = ct
+				}
+			}
+
+			translatedChunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, req.Payload, result.Chunk, &streamParam)
 			for _, tc := range translatedChunks {
 				if len(tc) > 0 {
 					chunks <- cliproxyexecutor.StreamChunk{Payload: tc}
+				}
+			}
+		}
+
+		if !hasToolCalls && accumulatedContent.Len() > 0 && strings.Contains(accumulatedContent.String(), "<tool_call_id>") {
+			xmlToolCalls := parseXMLToolCalls(accumulatedContent.String())
+			if len(xmlToolCalls) > 0 {
+				hasToolCalls = true
+				for i, tc := range xmlToolCalls {
+					chunk := buildToolCallStreamChunk(req.Model, i, tc)
+					translatedChunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, req.Payload, chunk, &streamParam)
+					for _, tChunk := range translatedChunks {
+						if len(tChunk) > 0 {
+							chunks <- cliproxyexecutor.StreamChunk{Payload: tChunk}
+						}
+					}
+				}
+			}
+		}
+
+		if hasToolCalls {
+			finishChunk := buildFinishReasonStreamChunk(req.Model, "tool_calls")
+			translatedChunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, req.Payload, finishChunk, &streamParam)
+			for _, tChunk := range translatedChunks {
+				if len(tChunk) > 0 {
+					chunks <- cliproxyexecutor.StreamChunk{Payload: tChunk}
 				}
 			}
 		}
@@ -433,6 +553,142 @@ func generateChatID() string {
 	return hex.EncodeToString(b)
 }
 
+func generateToolCallID() string {
+	b := make([]byte, 12)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("call_%019d", time.Now().UnixNano())
+	}
+	return "call_" + hex.EncodeToString(b)
+}
+
+const toolsSystemPromptTemplate = "# Available Tools\n\nYou have access to the following tools. You MUST respond with tool calls using the exact XML format specified below.\n\n%s\n\n# Tool Call Format\n\nWhen you need to use a tool, you MUST output the tool call in the following XML format:\n\n<tool_call_id>call_<random_hex_24chars></tool_call_id>\n<tool_name>function_name_here</tool_name>\n<tool_arguments>\n{\"param1\": \"value1\", \"param2\": \"value2\"}\n</tool_arguments>\n\nRules:\n- Each tool call MUST have a unique tool_call_id starting with \"call_\" followed by 24 random hex characters.\n- tool_arguments MUST be valid JSON matching the function's parameters schema.\n- You may make multiple tool calls in a single response.\n- When you want to call tools, output ONLY the tool call XML blocks, do NOT output any other text.\n- Do NOT wrap tool calls in markdown code blocks.\n- The tool_call_id MUST be unique for each tool call."
+
+func buildToolsSystemPrompt(tools gjson.Result) string {
+	var toolDefs []string
+	for _, tool := range tools.Array() {
+		if tool.Get("type").String() != "function" {
+			continue
+		}
+		fn := tool.Get("function")
+		name := fn.Get("name").String()
+		desc := fn.Get("description").String()
+		params := fn.Get("parameters").Raw
+		if params == "" {
+			params = "{}"
+		}
+		toolDefs = append(toolDefs, fmt.Sprintf("## %s\n%s\nParameters: %s", name, desc, params))
+	}
+	if len(toolDefs) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(toolsSystemPromptTemplate, strings.Join(toolDefs, "\n\n"))
+}
+
+func parseXMLToolCalls(text string) []map[string]interface{} {
+	var results []map[string]interface{}
+	segments := strings.Split(text, "<tool_call_id>")
+	for _, seg := range segments[1:] {
+		idEnd := strings.Index(seg, "</tool_call_id>")
+		if idEnd < 0 {
+			continue
+		}
+		tcID := strings.TrimSpace(seg[:idEnd])
+
+		rest := seg[idEnd+len("</tool_call_id>"):]
+		nameStart := strings.Index(rest, "<tool_name>")
+		if nameStart < 0 {
+			continue
+		}
+		nameStart += len("<tool_name>")
+		nameEnd := strings.Index(rest, "</tool_name>")
+		if nameEnd < 0 || nameEnd < nameStart {
+			continue
+		}
+		tcName := strings.TrimSpace(rest[nameStart:nameEnd])
+
+		argsRest := rest[nameEnd+len("</tool_name>"):]
+		argsStart := strings.Index(argsRest, "<tool_arguments>")
+		if argsStart < 0 {
+			continue
+		}
+		argsStart += len("<tool_arguments>")
+		argsEnd := strings.Index(argsRest, "</tool_arguments>")
+		if argsEnd < 0 || argsEnd < argsStart {
+			continue
+		}
+		argsStr := strings.TrimSpace(argsRest[argsStart:argsEnd])
+
+		if tcID == "" {
+			tcID = generateToolCallID()
+		}
+		results = append(results, map[string]interface{}{
+			"id":   tcID,
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":      tcName,
+				"arguments": argsStr,
+			},
+		})
+	}
+	return results
+}
+
+func stripXMLToolCalls(text string) string {
+	result := text
+	for strings.Contains(result, "<tool_call_id>") && strings.Contains(result, "</tool_arguments>") {
+		start := strings.Index(result, "<tool_call_id>")
+		end := strings.Index(result, "</tool_arguments>") + len("</tool_arguments>")
+		if end <= start {
+			break
+		}
+		result = result[:start] + result[end:]
+	}
+	return strings.TrimSpace(result)
+}
+
+func buildToolCallStreamChunk(model string, index int, toolCall map[string]interface{}) []byte {
+	tc := map[string]interface{}{
+		"index":    index,
+		"id":       toolCall["id"],
+		"type":     "function",
+		"function": toolCall["function"],
+	}
+	chunk := map[string]interface{}{
+		"id":      "chatcmpl-codearts",
+		"object":  "chat.completion.chunk",
+		"created": time.Now().Unix(),
+		"model":   model,
+		"choices": []map[string]interface{}{
+			{
+				"index": 0,
+				"delta": map[string]interface{}{
+					"tool_calls": []map[string]interface{}{tc},
+				},
+			},
+		},
+	}
+	result, _ := json.Marshal(chunk)
+	return result
+}
+
+func buildFinishReasonStreamChunk(model string, finishReason string) []byte {
+	chunk := map[string]interface{}{
+		"id":      "chatcmpl-codearts",
+		"object":  "chat.completion.chunk",
+		"created": time.Now().Unix(),
+		"model":   model,
+		"choices": []map[string]interface{}{
+			{
+				"index":         0,
+				"delta":         map[string]interface{}{},
+				"finish_reason": finishReason,
+			},
+		},
+	}
+	result, _ := json.Marshal(chunk)
+	return result
+}
+
 // buildCodeArtsPayload converts the OpenAI-format payload to CodeArts format.
 func buildCodeArtsPayload(openaiPayload []byte, modelName, agentID, userID string, opts cliproxyexecutor.Options) []byte {
 	messages := gjson.GetBytes(openaiPayload, "messages")
@@ -444,7 +700,7 @@ func buildCodeArtsPayload(openaiPayload []byte, modelName, agentID, userID strin
 	var codeArtsMessages []map[string]string
 	for _, msg := range messages.Array() {
 		role := msg.Get("role").String()
-		content := msg.Get("content").String()
+		content := extractTextContent(msg.Get("content"))
 
 		var formattedContent string
 		switch role {
@@ -454,14 +710,16 @@ func buildCodeArtsPayload(openaiPayload []byte, modelName, agentID, userID strin
 			toolCalls := msg.Get("tool_calls")
 			if toolCalls.Exists() && len(toolCalls.Array()) > 0 {
 				var parts []string
-				parts = append(parts, "[Assistant]\n"+content)
+				if content != "" {
+					parts = append(parts, content)
+				}
 				for _, tc := range toolCalls.Array() {
 					name := tc.Get("function.name").String()
 					id := tc.Get("id").String()
 					args := tc.Get("function.arguments").String()
 					parts = append(parts, fmt.Sprintf("[Tool Call: %s] (id: %s)\n%s", name, id, args))
 				}
-				formattedContent = strings.Join(parts, "\n")
+				formattedContent = "[Assistant]\n" + strings.Join(parts, "\n")
 			} else {
 				formattedContent = "[Assistant]\n" + content
 			}
@@ -502,6 +760,23 @@ func buildCodeArtsPayload(openaiPayload []byte, modelName, agentID, userID strin
 
 	if tools := gjson.GetBytes(openaiPayload, "tools"); tools.Exists() {
 		taskParameters["tools"] = tools.Value()
+		toolsPrompt := buildToolsSystemPrompt(tools)
+		if toolsPrompt != "" {
+			hasSystem := false
+			for i, msg := range codeArtsMessages {
+				if strings.HasPrefix(msg["content"], "[System]") {
+					codeArtsMessages[i]["content"] = msg["content"] + "\n\n" + toolsPrompt
+					hasSystem = true
+					break
+				}
+			}
+			if !hasSystem {
+				codeArtsMessages = append(
+					[]map[string]string{{"type": "text", "content": "[System]\n" + toolsPrompt}},
+					codeArtsMessages...,
+				)
+			}
+		}
 	}
 	if temp := gjson.GetBytes(openaiPayload, "temperature"); temp.Exists() {
 		taskParameters["temperature"] = temp.Value()
@@ -532,80 +807,139 @@ func buildCodeArtsPayload(openaiPayload []byte, modelName, agentID, userID strin
 }
 
 // convertCodeArtsSSEToOpenAI converts a CodeArts SSE data line to OpenAI SSE format.
-func convertCodeArtsSSEToOpenAI(data string, model string) []byte {
+type codeartsStreamResult struct {
+	Chunk        []byte
+	HasToolCalls bool
+	HasContent   bool
+	ContentValue string
+	FinishReason string
+	Err          error
+}
+
+func convertCodeArtsSSEToOpenAI(data string, model string) codeartsStreamResult {
+	errorCode := gjson.Get(data, "error_code")
+	if errorCode.Exists() && errorCode.Int() != 0 {
+		errMsg := gjson.Get(data, "error_msg").String()
+		return codeartsStreamResult{Err: fmt.Errorf("CodeArts error %d: %s", errorCode.Int(), errMsg)}
+	}
+
 	delta := gjson.Get(data, "delta")
 	if !delta.Exists() {
-		return nil
+		return codeartsStreamResult{}
 	}
 
-	content := delta.Get("content").String()
-	reasoningContent := delta.Get("reasoning_content").String()
+	contentResult := delta.Get("content")
+	reasoningResult := delta.Get("reasoning_content")
+	toolCallsResult := delta.Get("tool_calls")
 
-	if content == "" && reasoningContent == "" {
+	contentExists := contentResult.Exists()
+	contentValue := contentResult.String()
+	reasoningExists := reasoningResult.Exists()
+	reasoningValue := reasoningResult.String()
+	hasToolCalls := toolCallsResult.Exists() && len(toolCallsResult.Array()) > 0
+
+	openaiDelta := make(map[string]interface{})
+
+	if contentExists {
+		openaiDelta["content"] = contentValue
+	} else if reasoningExists || hasToolCalls {
+		openaiDelta["content"] = ""
+	}
+
+	if reasoningExists {
+		openaiDelta["reasoning_content"] = reasoningValue
+	}
+
+	if hasToolCalls {
+		openaiDelta["tool_calls"] = toolCallsResult.Value()
+	}
+
+	if !contentExists && !reasoningExists && !hasToolCalls {
 		role := delta.Get("role").String()
-		if role == "" {
-			return nil
+		if role != "" {
+			openaiDelta["role"] = role
 		}
-		deltaMap := map[string]interface{}{"role": role}
-		chunk := map[string]interface{}{
-			"id":      "chatcmpl-codearts",
-			"object":  "chat.completion.chunk",
-			"created": time.Now().Unix(),
-			"model":   model,
-			"choices": []map[string]interface{}{
-				{
-					"index": 0,
-					"delta": deltaMap,
-				},
-			},
-		}
-		result, err := json.Marshal(chunk)
-		if err != nil {
-			return nil
-		}
-		return result
 	}
 
-	deltaMap := make(map[string]any)
-	if content != "" {
-		deltaMap["content"] = content
+	if len(openaiDelta) == 0 {
+		return codeartsStreamResult{}
 	}
-	if reasoningContent != "" {
-		deltaMap["reasoning_content"] = reasoningContent
+
+	finishReason := ""
+	promptTokens := gjson.Get(data, "prompt_tokens").Int()
+	completionTokens := gjson.Get(data, "completion_tokens").Int()
+	totalTokens := gjson.Get(data, "total_tokens").Int()
+
+	if completionTokens > 0 && !contentExists && !reasoningExists && !hasToolCalls {
+		finishReason = "stop"
+	}
+
+	respModel := gjson.Get(data, "model_name").String()
+	if respModel == "" {
+		respModel = model
 	}
 
 	chunk := map[string]any{
 		"id":      "chatcmpl-codearts",
 		"object":  "chat.completion.chunk",
 		"created": time.Now().Unix(),
-		"model":   model,
-		"choices": []map[string]any{
+		"model":   respModel,
+		"choices": []map[string]interface{}{
 			{
-				"index": 0,
-				"delta": deltaMap,
+				"index":         0,
+				"delta":         openaiDelta,
+				"finish_reason": nil,
 			},
 		},
 	}
 
-	result, err := json.Marshal(chunk)
-	if err != nil {
-		return nil
+	if finishReason != "" {
+		chunk["choices"].([]map[string]interface{})[0]["finish_reason"] = finishReason
 	}
 
-	return result
+	if totalTokens > 0 {
+		chunk["usage"] = map[string]interface{}{
+			"prompt_tokens":     promptTokens,
+			"completion_tokens": completionTokens,
+			"total_tokens":      totalTokens,
+		}
+	}
+
+	result, err := json.Marshal(chunk)
+	if err != nil {
+		return codeartsStreamResult{}
+	}
+
+	return codeartsStreamResult{
+		Chunk:        result,
+		HasToolCalls: hasToolCalls,
+		HasContent:   contentExists && contentValue != "",
+		ContentValue: contentValue,
+		FinishReason: finishReason,
+	}
 }
 
 // buildOpenAINonStreamResponse builds a complete OpenAI non-stream response.
-func buildOpenAINonStreamResponse(content, reasoning, model string, promptTokens, completionTokens int64) []byte {
-	message := map[string]any{
-		"role":    "assistant",
-		"content": content,
+func buildOpenAINonStreamResponse(content, reasoning, model string, promptTokens, completionTokens int64, toolCalls []map[string]interface{}) []byte {
+	message := map[string]interface{}{
+		"role": "assistant",
+	}
+	if content != "" {
+		message["content"] = content
+	} else {
+		message["content"] = nil
 	}
 	if reasoning != "" {
 		message["reasoning_content"] = reasoning
 	}
 
-	resp := map[string]any{
+	finishReason := "stop"
+	if len(toolCalls) > 0 {
+		finishReason = "tool_calls"
+		message["tool_calls"] = toolCalls
+	}
+
+	resp := map[string]interface{}{
 		"id":      "chatcmpl-codearts",
 		"object":  "chat.completion",
 		"created": time.Now().Unix(),
@@ -613,8 +947,8 @@ func buildOpenAINonStreamResponse(content, reasoning, model string, promptTokens
 		"choices": []map[string]any{
 			{
 				"index":         0,
-				"finish_reason": "stop",
 				"message":       message,
+				"finish_reason": finishReason,
 			},
 		},
 		"usage": map[string]any{
