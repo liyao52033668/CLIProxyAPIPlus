@@ -1,0 +1,37 @@
+package dto
+
+import "time"
+
+// UsageEventsPageRecord 是 usage events 列表的仓储查询结果。
+type UsageEventsPageRecord struct {
+	Events     []UsageEventRecord
+	Models     []string
+	TotalCount int64
+	Page       int
+	PageSize   int
+	TotalPages int
+}
+
+// UsageEventFilterOptionsRecord 是 usage events 筛选项的仓储查询结果。
+type UsageEventFilterOptionsRecord struct {
+	Models []string
+}
+
+// UsageEventRecord 是单条 usage event 的查询结果。
+type UsageEventRecord struct {
+	ID              uint
+	Timestamp       time.Time
+	APIGroupKey     string
+	Model           string
+	AuthType        string
+	Provider        string
+	Source          string
+	AuthIndex       string
+	Failed          bool
+	LatencyMS       int64
+	InputTokens     int64
+	OutputTokens    int64
+	ReasoningTokens int64
+	CachedTokens    int64
+	TotalTokens     int64
+}

@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/service"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"golang.org/x/crypto/bcrypt"
@@ -43,8 +44,9 @@ type Handler struct {
 	attemptsMu               sync.Mutex
 	failedAttempts           map[string]*attemptInfo // keyed by client IP
 	authManager              *coreauth.Manager
-	sdkAuthManager      *sdkAuth.Manager
+	sdkAuthManager           *sdkAuth.Manager
 	usageStats               *usage.RequestStatistics
+	usageService             service.UsageProvider
 	tokenStore               coreauth.Store
 	localPassword            string
 	allowRemoteOverride      bool
@@ -128,6 +130,9 @@ func (h *Handler) SetSDKAuthManager(manager *sdkAuth.Manager) { h.sdkAuthManager
 
 // SetUsageStatistics allows replacing the usage statistics reference.
 func (h *Handler) SetUsageStatistics(stats *usage.RequestStatistics) { h.usageStats = stats }
+
+// SetUsageService sets the usage service for database operations.
+func (h *Handler) SetUsageService(us service.UsageProvider) { h.usageService = us }
 
 // SetLocalPassword configures the runtime-local password accepted for localhost requests.
 func (h *Handler) SetLocalPassword(password string) { h.localPassword = password }

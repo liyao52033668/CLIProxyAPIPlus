@@ -5,7 +5,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/entities"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/repository"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/repository/dto"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/service"
 	log "github.com/sirupsen/logrus"
+	"gorm.io/gorm"
 )
 
 // Record contains the usage statistics captured for a single provider request.
@@ -16,6 +21,7 @@ type Record struct {
 	AuthID      string
 	AuthIndex   string
 	Source      string
+	AuthType    string
 	RequestedAt time.Time
 	Latency     time.Duration
 	Failed      bool
@@ -54,6 +60,8 @@ type Manager struct {
 
 	pluginsMu sync.RWMutex
 	plugins   []Plugin
+
+	db *gorm.DB
 }
 
 // NewManager constructs a manager with a buffered queue.
@@ -61,6 +69,36 @@ func NewManager(buffer int) *Manager {
 	m := &Manager{}
 	m.cond = sync.NewCond(&m.mu)
 	return m
+}
+
+// NewManagerWithDB constructs a manager with database persistence.
+func NewManagerWithDB(db *gorm.DB) *Manager {
+	m := &Manager{db: db}
+	m.cond = sync.NewCond(&m.mu)
+	if db != nil {
+		m.Register(&databasePlugin{db: db})
+	}
+	return m
+}
+
+// SetDB sets the database connection for the manager.
+func (m *Manager) SetDB(db *gorm.DB) {
+	if m == nil {
+		return
+	}
+	m.pluginsMu.Lock()
+	defer m.pluginsMu.Unlock()
+	m.db = db
+}
+
+// GetDB returns the database connection for the manager.
+func (m *Manager) GetDB() *gorm.DB {
+	if m == nil {
+		return nil
+	}
+	m.pluginsMu.RLock()
+	defer m.pluginsMu.RUnlock()
+	return m.db
 }
 
 // Start launches the background dispatcher. Calling Start multiple times is safe.
@@ -110,7 +148,6 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
 	if m == nil {
 		return
 	}
-	// ensure worker is running even if Start was not called explicitly
 	m.Start(context.Background())
 	m.mu.Lock()
 	if m.closed {
@@ -164,6 +201,56 @@ func safeInvoke(plugin Plugin, ctx context.Context, record Record) {
 	plugin.HandleUsage(ctx, record)
 }
 
+// databasePlugin persists usage records to the database.
+type databasePlugin struct {
+	db *gorm.DB
+}
+
+func (p *databasePlugin) HandleUsage(ctx context.Context, record Record) {
+	if p.db == nil {
+		return
+	}
+	timestamp := record.RequestedAt
+	if timestamp.IsZero() {
+		timestamp = time.Now()
+	}
+	event := entities.UsageEvent{
+		EventKey:        buildEventKey(record, timestamp),
+		APIGroupKey:     record.APIKey,
+		Model:           record.Model,
+		Provider:        record.Provider,
+		AuthType:        record.AuthType,
+		AuthIndex:       record.AuthIndex,
+		Source:          record.Source,
+		Timestamp:       timestamp,
+		Failed:          record.Failed,
+		LatencyMS:       record.Latency.Milliseconds(),
+		InputTokens:     record.Detail.InputTokens,
+		OutputTokens:    record.Detail.OutputTokens,
+		ReasoningTokens: record.Detail.ReasoningTokens,
+		CachedTokens:    record.Detail.CachedTokens,
+		TotalTokens:     record.Detail.TotalTokens,
+	}
+	if event.TotalTokens == 0 {
+		event.TotalTokens = event.InputTokens + event.OutputTokens + event.ReasoningTokens + event.CachedTokens
+	}
+	_, _, _ = repository.InsertUsageEvents(p.db, []entities.UsageEvent{event})
+}
+
+func buildEventKey(record Record, timestamp time.Time) string {
+	tokens := dto.TokenStats{
+		InputTokens:     record.Detail.InputTokens,
+		OutputTokens:    record.Detail.OutputTokens,
+		ReasoningTokens: record.Detail.ReasoningTokens,
+		CachedTokens:    record.Detail.CachedTokens,
+		TotalTokens:     record.Detail.TotalTokens,
+	}
+	if tokens.TotalTokens == 0 {
+		tokens.TotalTokens = tokens.InputTokens + tokens.OutputTokens + tokens.ReasoningTokens + tokens.CachedTokens
+	}
+	return service.BuildEventKey(record.APIKey, record.Model, timestamp, record.Source, record.AuthIndex, record.Failed, tokens)
+}
+
 var defaultManager = NewManager(512)
 
 // DefaultManager returns the global usage manager instance.
@@ -180,3 +267,9 @@ func StartDefault(ctx context.Context) { DefaultManager().Start(ctx) }
 
 // StopDefault stops the default manager's dispatcher.
 func StopDefault() { DefaultManager().Stop() }
+
+// SetDefaultManagerDB sets the database for the default manager.
+func SetDefaultManagerDB(db *gorm.DB) {
+	defaultManager.SetDB(db)
+	defaultManager.Register(&databasePlugin{db: db})
+}

@@ -33,6 +33,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -522,32 +523,23 @@ func main() {
 	}
 	if cfg.UsageStatisticsEnabled {
 		usage.SetStatisticsEnabled(cfg.UsageStatisticsEnabled)
-		var persister usage.UsagePersister
-		switch {
-		case usePostgresStore && pgStoreInst != nil:
-			if err := pgStoreInst.EnsureUsageTable(context.Background()); err != nil {
-				log.WithError(err).Warn("failed to ensure usage stats table, will use file fallback")
-				persister = store.NewUsageStore(pgStoreInst.WorkDir())
-			} else {
-				persister = &pgUsagePersister{pgStoreInst}
-			}
-		case useObjectStore && objectStoreInst != nil:
-			persister = &objUsagePersister{objectStoreInst}
-		case useGitStore && gitStoreInst != nil:
-			if err := gitStoreInst.EnsureRepository(); err != nil {
-				log.WithError(err).Warn("git store ensure repo, will use file fallback")
-				persister = store.NewUsageStore(gitStoreRoot)
-			} else {
-				persister = &gitUsagePersister{gitStoreInst}
-			}
-		default:
-			if cfg.AuthDir == "" {
-				persister = store.NewUsageStore("/CLIProxyAPI/data")
-			} else {
-				persister = store.NewUsageStore(cfg.AuthDir)
-			}
+		dataDir := cfg.AuthDir
+		if dataDir == "" {
+			dataDir = "/CLIProxyAPI/data"
 		}
-		usage.StartPersistence(persister, 0)
+		// 使用 SQLite 数据库进行 usage 持久化
+		usageDB, err := usage.InitUsageDB(usage.DBConfig{
+			Path:      filepath.Join(dataDir, "usage.db"),
+			AutoClean: true,
+		})
+		if err != nil {
+			log.WithError(err).Error("failed to init usage database")
+		} else {
+			persister := usage.NewDBUsagePersister(usageDB)
+			usage.StartPersistence(persister, 0)
+			coreusage.SetDefaultManagerDB(usageDB)
+			log.Info("usage database initialized")
+		}
 	}
 	coreauth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 

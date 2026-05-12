@@ -17,6 +17,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/service"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/wsrelay"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
@@ -99,6 +100,13 @@ type Service struct {
 //   - plugin: The usage plugin to register
 func (s *Service) RegisterUsagePlugin(plugin usage.Plugin) {
 	usage.RegisterPlugin(plugin)
+}
+
+// SetUsageService sets the usage service for the management handler.
+func (s *Service) SetUsageService(usageService service.UsageProvider) {
+	if s.server != nil {
+		s.server.SetUsageService(usageService)
+	}
 }
 
 // GetWatcher returns the underlying WatcherWrapper instance.
@@ -557,6 +565,12 @@ func (s *Service) Run(ctx context.Context) error {
 	s.server = api.NewServer(s.cfg, s.coreManager, s.accessManager, s.configPath, s.serverOptions...)
 	// Set callback to refresh model registrations when OAuthModelAlias is updated
 	s.server.SetOnOAuthModelAliasUpdated(s.RefreshAllModelRegistrations)
+
+	// Set usage service if database is configured
+	if db := usage.DefaultManager().GetDB(); db != nil {
+		s.server.SetUsageService(service.NewUsageService(db))
+		log.Info("usage service initialized for management API")
+	}
 
 	if s.authManager == nil {
 		s.authManager = newDefaultAuthManager()
