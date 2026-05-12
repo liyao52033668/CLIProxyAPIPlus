@@ -35,6 +35,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/service"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
@@ -604,6 +605,11 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/usage", s.mgmt.GetUsageStatistics)
 		mgmt.GET("/usage/export", s.mgmt.ExportUsageStatistics)
 		mgmt.POST("/usage/import", s.mgmt.ImportUsageStatistics)
+		mgmt.GET("/usage/db", s.mgmt.GetDBUsageStatistics)                        // 获取统计快照
+		mgmt.GET("/usage/db/overview", s.mgmt.GetDBUsageOverview)                 //获取概览
+		mgmt.GET("/usage/db/events", s.mgmt.GetDBUsageEvents)                     //获取事件列表
+		mgmt.GET("/usage/db/analysis", s.mgmt.GetDBUsageAnalysis)                 //获取分析结果
+		mgmt.GET("/usage/db/filter-options", s.mgmt.GetDBUsageEventFilterOptions) //获取事件筛选选项
 		mgmt.GET("/config", s.mgmt.GetConfig)
 		mgmt.GET("/config.yaml", s.mgmt.GetConfigYAML)
 		mgmt.PUT("/config.yaml", s.mgmt.PutConfigYAML)
@@ -653,8 +659,6 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/copilot-quota", s.mgmt.GetCopilotQuota)
 		mgmt.GET("/kiro-quota", s.mgmt.GetKiroQuota)
 		s.mgmt.StartKiroQuotaRefresher()
-
-		
 
 		mgmt.GET("/api-keys", s.mgmt.GetAPIKeys)
 		mgmt.PUT("/api-keys", s.mgmt.PutAPIKeys)
@@ -1195,6 +1199,14 @@ func (s *Server) SetSDKAuthManager(manager *sdkAuth.Manager) {
 		return
 	}
 	s.mgmt.SetSDKAuthManager(manager)
+}
+
+// SetUsageService sets the usage service for database-backed usage queries
+func (s *Server) SetUsageService(usageService service.UsageProvider) {
+	if s == nil || s.mgmt == nil {
+		return
+	}
+	s.mgmt.SetUsageService(usageService)
 }
 
 // (management handlers moved to internal/api/handlers/management)
