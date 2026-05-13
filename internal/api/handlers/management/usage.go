@@ -2,24 +2,27 @@ package management
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
+	repodto "github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/repository/dto"
+	keeperservice "github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/service"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/service/dto"
 )
 
 type usageExportPayload struct {
-	Version    int                      `json:"version"`
-	ExportedAt time.Time                `json:"exported_at"`
-	Usage      usage.StatisticsSnapshot `json:"usage"`
+	Version    int                        `json:"version"`
+	ExportedAt time.Time                  `json:"exported_at"`
+	Usage      repodto.StatisticsSnapshot `json:"usage"`
 }
 
 type usageImportPayload struct {
-	Version int                      `json:"version"`
-	Usage   usage.StatisticsSnapshot `json:"usage"`
+	Version int                         `json:"version"`
+	Usage   *repodto.StatisticsSnapshot `json:"usage"`
 }
 
 // GetUsageStatistics returns the in-memory request statistics snapshot.
@@ -34,23 +37,34 @@ func (h *Handler) GetUsageStatistics(c *gin.Context) {
 	})
 }
 
-// ExportUsageStatistics returns a complete usage snapshot for backup/migration.
+// ExportUsageStatistics returns a complete database-backed usage snapshot for backup/migration.
 func (h *Handler) ExportUsageStatistics(c *gin.Context) {
-	var snapshot usage.StatisticsSnapshot
-	if h != nil && h.usageStats != nil {
-		snapshot = h.usageStats.Snapshot()
+	if h == nil || h.usageService == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "usage service not available"})
+		return
+	}
+
+	snapshot, err := h.usageService.GetUsageWithFilter(c.Request.Context(), dto.UsageFilter{})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	payload := repodto.StatisticsSnapshot{}
+	if snapshot != nil {
+		payload = *snapshot
 	}
 	c.JSON(http.StatusOK, usageExportPayload{
-		Version:    1,
+		Version:    2,
 		ExportedAt: time.Now().UTC(),
-		Usage:      snapshot,
+		Usage:      payload,
 	})
 }
 
-// ImportUsageStatistics merges a previously exported usage snapshot into memory.
+// ImportUsageStatistics imports a previously exported usage snapshot into database storage.
 func (h *Handler) ImportUsageStatistics(c *gin.Context) {
-	if h == nil || h.usageStats == nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "usage statistics unavailable"})
+	if h == nil || h.usageService == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "usage service not available"})
 		return
 	}
 
@@ -65,18 +79,30 @@ func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json"})
 		return
 	}
-	if payload.Version != 0 && payload.Version != 1 {
+	if payload.Version != 0 && payload.Version != 1 && payload.Version != 2 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported version"})
 		return
 	}
+	if payload.Usage == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "usage snapshot is required"})
+		return
+	}
 
-	result := h.usageStats.MergeSnapshot(payload.Usage)
-	snapshot := h.usageStats.Snapshot()
+	result, err := h.usageService.ImportUsageSnapshot(c.Request.Context(), payload.Usage)
+	if err != nil {
+		if errors.Is(err, keeperservice.ErrInvalidUsageImportSnapshot) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"added":           result.Added,
 		"skipped":         result.Skipped,
-		"total_requests":  snapshot.TotalRequests,
-		"failed_requests": snapshot.FailureCount,
+		"total_requests":  result.TotalRequests,
+		"failed_requests": result.FailedCount,
 	})
 }
 

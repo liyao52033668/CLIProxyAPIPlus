@@ -2,7 +2,10 @@ package service
 
 import (
 	"context"
+	"fmt"
+	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/entities"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/repository"
 	repodto "github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/repository/dto"
 	servicedto "github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/service/dto"
@@ -219,4 +222,77 @@ func (s *usageService) GetUsageAnalysis(_ context.Context, filter servicedto.Usa
 	}
 
 	return &servicedto.UsageAnalysisSnapshot{APIs: apis, Models: models}, nil
+}
+
+func (s *usageService) ImportUsageSnapshot(_ context.Context, snapshot *repodto.StatisticsSnapshot) (*servicedto.UsageImportResult, error) {
+	if s.db == nil {
+		return nil, fmt.Errorf("database is nil")
+	}
+	if snapshot == nil {
+		return nil, fmt.Errorf("%w: usage snapshot is required", ErrInvalidUsageImportSnapshot)
+	}
+
+	events, err := buildUsageImportEvents(snapshot)
+	if err != nil {
+		return nil, err
+	}
+	inserted, deduped, err := repository.InsertUsageEvents(s.db, events)
+	if err != nil {
+		return nil, err
+	}
+
+	current, err := repository.BuildUsageSnapshot(s.db)
+	if err != nil {
+		return nil, err
+	}
+	return &servicedto.UsageImportResult{
+		Added:         inserted,
+		Skipped:       deduped,
+		TotalRequests: current.TotalRequests,
+		FailedCount:   current.FailureCount,
+	}, nil
+}
+
+func buildUsageImportEvents(snapshot *repodto.StatisticsSnapshot) ([]entities.UsageEvent, error) {
+	events := make([]entities.UsageEvent, 0)
+	hasDetails := false
+
+	for apiGroupKey, apiStats := range snapshot.APIs {
+		for modelName, modelStats := range apiStats.Models {
+			if modelStats.TotalRequests > 0 && len(modelStats.Details) == 0 {
+				return nil, fmt.Errorf("%w: model %q for api %q does not contain request details", ErrInvalidUsageImportSnapshot, strings.TrimSpace(modelName), strings.TrimSpace(apiGroupKey))
+			}
+			for _, detail := range modelStats.Details {
+				hasDetails = true
+				if detail.Timestamp.IsZero() {
+					return nil, fmt.Errorf("%w: request detail timestamp is required", ErrInvalidUsageImportSnapshot)
+				}
+				tokens := normalizeTokens(detail.Tokens)
+				events = append(events, entities.UsageEvent{
+					EventKey:        BuildEventKey(apiGroupKey, modelName, detail.Timestamp, detail.Source, detail.AuthIndex, detail.Failed, tokens),
+					APIGroupKey:     strings.TrimSpace(apiGroupKey),
+					Provider:        "",
+					Endpoint:        "",
+					AuthType:        "",
+					RequestID:       "",
+					Model:           strings.TrimSpace(modelName),
+					Timestamp:       detail.Timestamp.UTC(),
+					Source:          strings.TrimSpace(detail.Source),
+					AuthIndex:       strings.TrimSpace(detail.AuthIndex),
+					Failed:          detail.Failed,
+					LatencyMS:       detail.LatencyMS,
+					InputTokens:     tokens.InputTokens,
+					OutputTokens:    tokens.OutputTokens,
+					ReasoningTokens: tokens.ReasoningTokens,
+					CachedTokens:    tokens.CachedTokens,
+					TotalTokens:     tokens.TotalTokens,
+				})
+			}
+		}
+	}
+
+	if !hasDetails {
+		return nil, fmt.Errorf("%w: usage snapshot does not contain request details", ErrInvalidUsageImportSnapshot)
+	}
+	return events, nil
 }

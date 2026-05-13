@@ -52,6 +52,10 @@ func (s *usageEventsStub) GetUsageAnalysis(context.Context, servicedto.UsageFilt
 	return nil, s.err
 }
 
+func (s *usageEventsStub) ImportUsageSnapshot(context.Context, *dto.StatisticsSnapshot) (*servicedto.UsageImportResult, error) {
+	return nil, s.err
+}
+
 func TestUsageEventsReturnsFilteredRows(t *testing.T) {
 	provider := &usageEventsStub{events: []servicedto.UsageEventRecord{{
 		ID:              42,
