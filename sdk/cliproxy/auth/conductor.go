@@ -62,12 +62,13 @@ type RefreshEvaluator interface {
 }
 
 const (
-	refreshCheckInterval  = 5 * time.Second
-	refreshMaxConcurrency = 16
-	refreshPendingBackoff = time.Minute
-	refreshFailureBackoff = 1 * time.Minute
-	quotaBackoffBase      = time.Second
-	quotaBackoffMax       = 30 * time.Minute
+	refreshCheckInterval          = 5 * time.Second
+	refreshMaxConcurrency         = 16
+	refreshPendingBackoff         = time.Minute
+	refreshFailureBackoff         = 1 * time.Minute
+	quotaBackoffBase              = time.Second
+	quotaBackoffMax               = 30 * time.Minute
+	autoModelFailoverMaxAttempts  = 3
 )
 
 var quotaCooldownDisabled atomic.Bool
@@ -1191,25 +1192,10 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
-
-	_, maxRetryCredentials, maxWait := m.retrySettings()
-
-	var lastErr error
-	for attempt := 0; ; attempt++ {
-		resp, errExec := m.executeMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
-		if errExec == nil {
-			return resp, nil
-		}
-		lastErr = errExec
-		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, req.Model, maxWait)
-		if !shouldRetry {
-			break
-		}
-		if errWait := waitForCooldown(ctx, wait); errWait != nil {
-			return cliproxyexecutor.Response{}, errWait
-		}
+	if !opts.IsAuto {
+		return m.executeWithResolvedModel(ctx, normalized, req, opts)
 	}
-	return cliproxyexecutor.Response{}, m.handleExecutionError(lastErr)
+	return m.executeAutoWithModelFailover(ctx, normalized, req, opts)
 }
 
 // ExecuteCount performs a non-streaming execution using the configured selector and executor.
@@ -1219,17 +1205,36 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	if !opts.IsAuto {
+		return m.executeCountWithResolvedModel(ctx, normalized, req, opts)
+	}
+	return m.executeCountAutoWithModelFailover(ctx, normalized, req, opts)
+}
 
+// ExecuteStream performs a streaming execution using the configured selector and executor.
+// It supports multiple providers for the same model and round-robins the starting provider per model.
+func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	normalized := m.normalizeProviders(providers)
+	if len(normalized) == 0 {
+		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
+	}
+	if !opts.IsAuto {
+		return m.executeStreamWithResolvedModel(ctx, normalized, req, opts)
+	}
+	return m.executeStreamAutoWithModelFailover(ctx, normalized, req, opts)
+}
+
+func (m *Manager) executeWithResolvedModel(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
 	var lastErr error
 	for attempt := 0; ; attempt++ {
-		resp, errExec := m.executeCountMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
+		resp, errExec := m.executeMixedOnce(ctx, providers, req, opts, maxRetryCredentials)
 		if errExec == nil {
 			return resp, nil
 		}
 		lastErr = errExec
-		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, req.Model, maxWait)
+		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, providers, req.Model, maxWait)
 		if !shouldRetry {
 			break
 		}
@@ -1240,30 +1245,178 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 	return cliproxyexecutor.Response{}, m.handleExecutionError(lastErr)
 }
 
-// ExecuteStream performs a streaming execution using the configured selector and executor.
-// It supports multiple providers for the same model and round-robins the starting provider per model.
-func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
-	normalized := m.normalizeProviders(providers)
-	if len(normalized) == 0 {
-		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
-	}
-
+func (m *Manager) executeCountWithResolvedModel(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
 	var lastErr error
 	for attempt := 0; ; attempt++ {
-		result, errStream := m.executeStreamMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
+		resp, errExec := m.executeCountMixedOnce(ctx, providers, req, opts, maxRetryCredentials)
+		if errExec == nil {
+			return resp, nil
+		}
+		lastErr = errExec
+		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, providers, req.Model, maxWait)
+		if !shouldRetry {
+			break
+		}
+		if errWait := waitForCooldown(ctx, wait); errWait != nil {
+			return cliproxyexecutor.Response{}, errWait
+		}
+	}
+	return cliproxyexecutor.Response{}, m.handleExecutionError(lastErr)
+}
+
+func (m *Manager) executeStreamWithResolvedModel(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	_, maxRetryCredentials, maxWait := m.retrySettings()
+
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		result, errStream := m.executeStreamMixedOnce(ctx, providers, req, opts, maxRetryCredentials)
 		if errStream == nil {
 			return result, nil
 		}
 		lastErr = errStream
-		wait, shouldRetry := m.shouldRetryAfterError(errStream, attempt, normalized, req.Model, maxWait)
+		wait, shouldRetry := m.shouldRetryAfterError(errStream, attempt, providers, req.Model, maxWait)
 		if !shouldRetry {
 			break
 		}
 		if errWait := waitForCooldown(ctx, wait); errWait != nil {
 			return nil, errWait
 		}
+	}
+	return nil, m.handleExecutionError(lastErr)
+}
+
+func withRequestedModelMetadata(opts cliproxyexecutor.Options, requestedModel string) cliproxyexecutor.Options {
+	requestedModel = strings.TrimSpace(requestedModel)
+	if requestedModel == "" {
+		return opts
+	}
+	if len(opts.Metadata) == 0 {
+		opts.Metadata = map[string]any{cliproxyexecutor.RequestedModelMetadataKey: requestedModel}
+		return opts
+	}
+	meta := make(map[string]any, len(opts.Metadata)+1)
+	maps.Copy(meta, opts.Metadata)
+	meta[cliproxyexecutor.RequestedModelMetadataKey] = requestedModel
+	opts.Metadata = meta
+	return opts
+}
+
+func shouldFailoverAutoModel(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if isRequestInvalidError(err) {
+		return false
+	}
+	return true
+}
+
+func (m *Manager) nextAutoModelCandidate(excluded map[string]struct{}) (string, []string, error) {
+	registryRef := registry.GetGlobalRegistry()
+	for {
+		model, err := registryRef.GetFirstAvailableModelExcluding("", excluded)
+		if err != nil {
+			return "", nil, err
+		}
+		providers := m.normalizeProviders(util.GetProviderName(model))
+		if len(providers) > 0 {
+			return model, providers, nil
+		}
+		if excluded == nil {
+			excluded = make(map[string]struct{})
+		}
+		excluded[model] = struct{}{}
+	}
+}
+
+func (m *Manager) executeAutoWithModelFailover(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	currentProviders := providers
+	currentReq := req
+	triedModels := make(map[string]struct{}, autoModelFailoverMaxAttempts)
+	var lastErr error
+	for attempt := 0; attempt < autoModelFailoverMaxAttempts; attempt++ {
+		currentReq.Model = strings.TrimSpace(currentReq.Model)
+		if currentReq.Model == "" {
+			break
+		}
+		triedModels[currentReq.Model] = struct{}{}
+		resp, err := m.executeWithResolvedModel(ctx, currentProviders, currentReq, withRequestedModelMetadata(opts, currentReq.Model))
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+		if !shouldFailoverAutoModel(err) {
+			return cliproxyexecutor.Response{}, m.handleExecutionError(lastErr)
+		}
+		nextModel, nextProviders, errNext := m.nextAutoModelCandidate(triedModels)
+		if errNext != nil {
+			break
+		}
+		currentReq.Model = nextModel
+		currentProviders = nextProviders
+	}
+	return cliproxyexecutor.Response{}, m.handleExecutionError(lastErr)
+}
+
+func (m *Manager) executeCountAutoWithModelFailover(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	currentProviders := providers
+	currentReq := req
+	triedModels := make(map[string]struct{}, autoModelFailoverMaxAttempts)
+	var lastErr error
+	for attempt := 0; attempt < autoModelFailoverMaxAttempts; attempt++ {
+		currentReq.Model = strings.TrimSpace(currentReq.Model)
+		if currentReq.Model == "" {
+			break
+		}
+		triedModels[currentReq.Model] = struct{}{}
+		resp, err := m.executeCountWithResolvedModel(ctx, currentProviders, currentReq, withRequestedModelMetadata(opts, currentReq.Model))
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+		if !shouldFailoverAutoModel(err) {
+			return cliproxyexecutor.Response{}, m.handleExecutionError(lastErr)
+		}
+		nextModel, nextProviders, errNext := m.nextAutoModelCandidate(triedModels)
+		if errNext != nil {
+			break
+		}
+		currentReq.Model = nextModel
+		currentProviders = nextProviders
+	}
+	return cliproxyexecutor.Response{}, m.handleExecutionError(lastErr)
+}
+
+func (m *Manager) executeStreamAutoWithModelFailover(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	currentProviders := providers
+	currentReq := req
+	triedModels := make(map[string]struct{}, autoModelFailoverMaxAttempts)
+	var lastErr error
+	for attempt := 0; attempt < autoModelFailoverMaxAttempts; attempt++ {
+		currentReq.Model = strings.TrimSpace(currentReq.Model)
+		if currentReq.Model == "" {
+			break
+		}
+		triedModels[currentReq.Model] = struct{}{}
+		result, err := m.executeStreamWithResolvedModel(ctx, currentProviders, currentReq, withRequestedModelMetadata(opts, currentReq.Model))
+		if err == nil {
+			return result, nil
+		}
+		lastErr = err
+		if !shouldFailoverAutoModel(err) {
+			return nil, m.handleExecutionError(lastErr)
+		}
+		nextModel, nextProviders, errNext := m.nextAutoModelCandidate(triedModels)
+		if errNext != nil {
+			break
+		}
+		currentReq.Model = nextModel
+		currentProviders = nextProviders
 	}
 	return nil, m.handleExecutionError(lastErr)
 }
@@ -1444,6 +1597,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			if lastErr != nil {
 				var bootstrapErr *streamBootstrapError
 				if errors.As(lastErr, &bootstrapErr) && bootstrapErr != nil {
+					if opts.IsAuto {
+						return nil, bootstrapErr
+					}
 					return streamErrorResult(bootstrapErr.Headers(), bootstrapErr.cause), nil
 				}
 				return nil, lastErr
@@ -1455,6 +1611,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			if lastErr != nil {
 				var bootstrapErr *streamBootstrapError
 				if errors.As(lastErr, &bootstrapErr) && bootstrapErr != nil {
+					if opts.IsAuto {
+						return nil, bootstrapErr
+					}
 					return streamErrorResult(bootstrapErr.Headers(), bootstrapErr.cause), nil
 				}
 				return nil, lastErr
@@ -2527,6 +2686,44 @@ func (m *Manager) List() []*Auth {
 		list = append(list, auth.Clone())
 	}
 	return list
+}
+
+// HighestAvailablePriorityForModel reports the highest currently available auth priority
+// backing the requested model. The bool result is false when no eligible auth exists.
+func (m *Manager) HighestAvailablePriorityForModel(handlerType, model string) (int, bool) {
+	if m == nil {
+		return 0, false
+	}
+	registryRef := registry.GetGlobalRegistry()
+	now := time.Now()
+	bestPriority := 0
+	found := false
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, auth := range m.auths {
+		if auth == nil || auth.Disabled {
+			continue
+		}
+		providerKey := strings.TrimSpace(strings.ToLower(auth.Provider))
+		if handlerType != "" && providerKey != strings.TrimSpace(strings.ToLower(handlerType)) {
+			continue
+		}
+		if !m.authSupportsRouteModel(registryRef, auth, model) {
+			continue
+		}
+		checkModel := m.selectionModelForAuth(auth, model)
+		blocked, _, _ := isAuthBlockedForModel(auth, checkModel, now)
+		if blocked {
+			continue
+		}
+		priority := authPriority(auth)
+		if !found || priority > bestPriority {
+			bestPriority = priority
+			found = true
+		}
+	}
+	return bestPriority, found
 }
 
 // GetByID retrieves an auth entry by its ID.
