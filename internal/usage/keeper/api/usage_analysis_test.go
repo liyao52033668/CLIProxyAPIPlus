@@ -41,6 +41,10 @@ func (s *usageAnalysisStub) GetUsageAnalysis(_ context.Context, filter servicedt
 	return s.analysis, s.err
 }
 
+func (s *usageAnalysisStub) ImportUsageSnapshot(context.Context, *dto.StatisticsSnapshot) (*servicedto.UsageImportResult, error) {
+	return nil, s.err
+}
+
 func TestUsageAnalysisReturnsAggregatedRows(t *testing.T) {
 	provider := &usageAnalysisStub{analysis: &servicedto.UsageAnalysisSnapshot{
 		APIs: []servicedto.UsageAnalysisAPIStat{{

@@ -44,6 +44,10 @@ func (s *usageFilterStub) GetUsageAnalysis(context.Context, servicedto.UsageFilt
 	return nil, s.err
 }
 
+func (s *usageFilterStub) ImportUsageSnapshot(context.Context, *dto.StatisticsSnapshot) (*servicedto.UsageImportResult, error) {
+	return nil, s.err
+}
+
 func mustParseTime(t *testing.T, value string) time.Time {
 	t.Helper()
 	parsed, err := time.Parse(time.RFC3339, value)

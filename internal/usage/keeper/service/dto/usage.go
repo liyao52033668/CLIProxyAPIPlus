@@ -23,6 +23,14 @@ type UsageFilter struct {
 	Result    string
 }
 
+// UsageImportResult 是 usage 快照导入数据库后的结果。
+type UsageImportResult struct {
+	Added         int   `json:"added"`
+	Skipped       int   `json:"skipped"`
+	TotalRequests int64 `json:"total_requests"`
+	FailedCount   int64 `json:"failed_requests"`
+}
+
 // UsageEventsPage 是 usage events 列表的服务层结果。
 type UsageEventsPage struct {
 	Events     []UsageEventRecord
