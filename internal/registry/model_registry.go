@@ -139,6 +139,8 @@ type ModelRegistry struct {
 	// disabledPersistFunc is called to persist disabled auto models to config.
 	// If nil, no persistence is performed.
 	disabledPersistFunc func(models []string)
+	// highestPriorityFunc reports the highest currently available auth priority for a model.
+	highestPriorityFunc func(handlerType, modelID string) (int, bool)
 }
 
 // stickySessionState tracks the sticky model for a handler type
@@ -865,6 +867,64 @@ func cloneModelMaps(models []map[string]any) []map[string]any {
 	return cloned
 }
 
+func modelIDFromMap(model map[string]any) (string, bool) {
+	if model == nil {
+		return "", false
+	}
+	modelID, ok := model["id"].(string)
+	if !ok {
+		return "", false
+	}
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return "", false
+	}
+	return modelID, true
+}
+
+func (r *ModelRegistry) highestPriorityForModelLocked(handlerType, modelID string) (int, bool) {
+	if r == nil || strings.TrimSpace(modelID) == "" {
+		return 0, false
+	}
+	if r.highestPriorityFunc == nil {
+		return 0, false
+	}
+	return r.highestPriorityFunc(handlerType, modelID)
+}
+
+func (r *ModelRegistry) topPriorityCandidateIndexesLocked(handlerType string, models []map[string]any) []int {
+	candidates := make([]int, 0, len(models))
+	bestPriority := 0
+	foundPriority := false
+	anyPrioritySignal := r.highestPriorityFunc != nil
+	for index, model := range models {
+		modelID, ok := modelIDFromMap(model)
+		if !ok {
+			continue
+		}
+		if count := r.getModelCountLocked(modelID); count <= 0 || r.isModelDisabledForAnyAuthLocked(modelID) {
+			continue
+		}
+		if !anyPrioritySignal {
+			candidates = append(candidates, index)
+			continue
+		}
+		priority, ok := r.highestPriorityForModelLocked(handlerType, modelID)
+		if !ok {
+			continue
+		}
+		if !foundPriority || priority > bestPriority {
+			bestPriority = priority
+			foundPriority = true
+			candidates = candidates[:0]
+		}
+		if priority == bestPriority {
+			candidates = append(candidates, index)
+		}
+	}
+	return candidates
+}
+
 func cloneModelMapValue(value any) any {
 	switch typed := value.(type) {
 	case map[string]any:
@@ -1299,7 +1359,11 @@ func (r *ModelRegistry) CleanupExpiredQuotas() {
 //   - string: The model ID of the first available model, or empty string if none available
 //   - error: An error if no models are available
 func (r *ModelRegistry) GetFirstAvailableModel(handlerType string) (string, error) {
+	return r.GetFirstAvailableModelExcluding(handlerType, nil)
+}
 
+// GetFirstAvailableModelExcluding returns the first available model while skipping excluded model IDs.
+func (r *ModelRegistry) GetFirstAvailableModelExcluding(handlerType string, excluded map[string]struct{}) (string, error) {
 	// Get all available models for this handler type
 	models := r.GetAvailableModels(handlerType)
 	if len(models) == 0 {
@@ -1308,6 +1372,30 @@ func (r *ModelRegistry) GetFirstAvailableModel(handlerType string) (string, erro
 
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
+
+	candidateIndexes := r.topPriorityCandidateIndexesLocked(handlerType, models)
+	if len(candidateIndexes) == 0 {
+		return "", fmt.Errorf("no available clients for any model in handler type: %s", handlerType)
+	}
+
+	filteredIndexes := make([]int, 0, len(candidateIndexes))
+	candidateIDs := make(map[string]struct{}, len(candidateIndexes))
+	for _, index := range candidateIndexes {
+		modelID, ok := modelIDFromMap(models[index])
+		if !ok {
+			continue
+		}
+		if len(excluded) > 0 {
+			if _, skip := excluded[modelID]; skip {
+				continue
+			}
+		}
+		filteredIndexes = append(filteredIndexes, index)
+		candidateIDs[modelID] = struct{}{}
+	}
+	if len(filteredIndexes) == 0 {
+		return "", fmt.Errorf("no available clients for any model in handler type: %s", handlerType)
+	}
 
 	// Initialize sticky state map if needed
 	if r.stickyState == nil {
@@ -1321,34 +1409,30 @@ func (r *ModelRegistry) GetFirstAvailableModel(handlerType string) (string, erro
 		r.stickyState[handlerType] = state
 	}
 
-	// Check if current sticky model is still succeeding
+	// Check if current sticky model is still succeeding and still among top-priority candidates.
 	if state.ModelID != "" && state.Success {
-		if count := r.getModelCountLocked(state.ModelID); count > 0 && !r.isModelDisabledForAnyAuthLocked(state.ModelID) {
+		if _, ok := candidateIDs[state.ModelID]; ok {
 			r.incrementSelectionCountLocked(state.ModelID)
 			return state.ModelID, nil
 		}
-		// Sticky model no longer available or disabled, will switch
+		// Sticky model no longer available, disabled, excluded, or no longer top-priority.
 		state.Success = false
 	}
 
-	// Find next available model starting from round-robin index
-	startIndex := r.roundRobinIndex
-	for attempt := 0; attempt < len(models); attempt++ {
-		index := (startIndex + attempt) % len(models)
-		model := models[index]
-		modelID, ok := model["id"].(string)
+	// Find next available model starting from round-robin index within the top-priority set.
+	for offset := 0; offset < len(filteredIndexes); offset++ {
+		index := filteredIndexes[(r.roundRobinIndex+offset)%len(filteredIndexes)]
+		modelID, ok := modelIDFromMap(models[index])
 		if !ok {
 			continue
 		}
-		if count := r.getModelCountLocked(modelID); count > 0 && !r.isModelDisabledForAnyAuthLocked(modelID) {
-			r.roundRobinIndex = (index + 1) % len(models)
-			state.ModelID = modelID
-			state.IsAuto = true
-			state.Success = true
-			state.SelectionIdx = r.roundRobinIndex
-			r.incrementSelectionCountLocked(modelID)
-			return modelID, nil
-		}
+		r.roundRobinIndex = (index + 1) % len(models)
+		state.ModelID = modelID
+		state.IsAuto = true
+		state.Success = true
+		state.SelectionIdx = r.roundRobinIndex
+		r.incrementSelectionCountLocked(modelID)
+		return modelID, nil
 	}
 
 	return "", fmt.Errorf("no available clients for any model in handler type: %s", handlerType)
@@ -1449,6 +1533,17 @@ func (r *ModelRegistry) SetDisabledPersistFunc(f func(models []string)) {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 	r.disabledPersistFunc = f
+}
+
+// SetHighestPriorityFunc sets an optional callback used by auto model selection
+// to score models by the highest available auth priority backing each model.
+func (r *ModelRegistry) SetHighestPriorityFunc(f func(handlerType, modelID string) (int, bool)) {
+	if r == nil {
+		return
+	}
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	r.highestPriorityFunc = f
 }
 
 // EnableAutoModel removes a model from the disabled list, allowing it to be selected again.

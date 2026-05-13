@@ -250,6 +250,7 @@ func (b *Builder) Build() (*Service, error) {
 	if b.cfg != nil && len(b.cfg.DisabledAutoModels) > 0 {
 		registry.GetGlobalRegistry().LoadDisabledAutoModels(b.cfg.DisabledAutoModels)
 	}
+	registry.GetGlobalRegistry().SetHighestPriorityFunc(coreManager.HighestAvailablePriorityForModel)
 	registry.GetGlobalRegistry().SetDisabledPersistFunc(func(models []string) {
 		b.cfg.DisabledAutoModels = models
 		if err := managementasset.SaveCurrentConfig(b.configPath); err != nil {

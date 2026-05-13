@@ -191,3 +191,95 @@ func TestGetAvailableModelsShowsAllModelsIncludingDisabled(t *testing.T) {
 		t.Error("expected gpt-4o to appear in GetAvailableModels (API lists all models)")
 	}
 }
+
+func TestGetFirstAvailableModelPrefersHighestPriorityModelSet(t *testing.T) {
+	r := newTestModelRegistry()
+	r.RegisterClient("client-low", "openai", []*ModelInfo{{ID: "gpt-4o", DisplayName: "GPT-4o"}})
+	r.RegisterClient("client-high", "openai", []*ModelInfo{{ID: "gpt-4o-mini", DisplayName: "GPT-4o Mini"}})
+	r.SetHighestPriorityFunc(func(handlerType, modelID string) (int, bool) {
+		switch modelID {
+		case "gpt-4o":
+			return 10, true
+		case "gpt-4o-mini":
+			return 30, true
+		default:
+			return 0, false
+		}
+	})
+
+	model, err := r.GetFirstAvailableModel("openai")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if model != "gpt-4o-mini" {
+		t.Fatalf("expected highest-priority model gpt-4o-mini, got %q", model)
+	}
+}
+
+func TestGetFirstAvailableModelRoundRobinWithinPriorityTie(t *testing.T) {
+	r := newTestModelRegistry()
+	r.RegisterClient("client-1", "openai", []*ModelInfo{{ID: "gpt-4o", DisplayName: "GPT-4o"}})
+	r.RegisterClient("client-2", "openai", []*ModelInfo{{ID: "gpt-4o-mini", DisplayName: "GPT-4o Mini"}})
+	r.RegisterClient("client-3", "openai", []*ModelInfo{{ID: "gpt-4-turbo", DisplayName: "GPT-4 Turbo"}})
+	r.SetHighestPriorityFunc(func(handlerType, modelID string) (int, bool) {
+		switch modelID {
+		case "gpt-4o", "gpt-4o-mini":
+			return 30, true
+		case "gpt-4-turbo":
+			return 10, true
+		default:
+			return 0, false
+		}
+	})
+
+	model1, err := r.GetFirstAvailableModel("openai")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if model1 != "gpt-4o" {
+		t.Fatalf("expected first tied top-priority model gpt-4o, got %q", model1)
+	}
+
+	r.RecordModelResult("openai", model1, "client-1", false)
+
+	model2, err := r.GetFirstAvailableModel("openai")
+	if err != nil {
+		t.Fatalf("unexpected error after failover: %v", err)
+	}
+	if model2 != "gpt-4o-mini" {
+		t.Fatalf("expected failover within tied top-priority set to gpt-4o-mini, got %q", model2)
+	}
+}
+
+func TestGetFirstAvailableModelStickyInvalidatesWhenTopPriorityChanges(t *testing.T) {
+	r := newTestModelRegistry()
+	r.RegisterClient("client-1", "openai", []*ModelInfo{{ID: "gpt-4o", DisplayName: "GPT-4o"}})
+	r.RegisterClient("client-2", "openai", []*ModelInfo{{ID: "gpt-4o-mini", DisplayName: "GPT-4o Mini"}})
+	priorityByModel := map[string]int{
+		"gpt-4o":      30,
+		"gpt-4o-mini": 20,
+	}
+	r.SetHighestPriorityFunc(func(handlerType, modelID string) (int, bool) {
+		priority, ok := priorityByModel[modelID]
+		return priority, ok
+	})
+
+	model, err := r.GetFirstAvailableModel("openai")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if model != "gpt-4o" {
+		t.Fatalf("expected initial top-priority model gpt-4o, got %q", model)
+	}
+
+	priorityByModel["gpt-4o"] = 10
+	priorityByModel["gpt-4o-mini"] = 40
+
+	model, err = r.GetFirstAvailableModel("openai")
+	if err != nil {
+		t.Fatalf("unexpected error after priority change: %v", err)
+	}
+	if model != "gpt-4o-mini" {
+		t.Fatalf("expected sticky invalidation to switch to new top-priority model gpt-4o-mini, got %q", model)
+	}
+}

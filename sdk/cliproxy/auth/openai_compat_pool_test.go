@@ -210,6 +210,63 @@ func readOpenAICompatStreamPayload(t *testing.T, streamResult *cliproxyexecutor.
 	return string(payload)
 }
 
+func TestHighestAvailablePriorityForModelUsesCompatAuthPriority(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.RegisterExecutor(&openAICompatPoolExecutor{id: "pool"})
+
+	reg := registry.GetGlobalRegistry()
+	authHigh := &Auth{
+		ID:       "pool-high",
+		Provider: "pool",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"api_key":      "high-key",
+			"compat_name":  "pool",
+			"provider_key": "pool",
+			"priority":     "40",
+		},
+	}
+	authLow := &Auth{
+		ID:       "pool-low",
+		Provider: "pool",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"api_key":      "low-key",
+			"compat_name":  "pool",
+			"provider_key": "pool",
+			"priority":     "10",
+		},
+	}
+	if _, err := m.Register(context.Background(), authHigh); err != nil {
+		t.Fatalf("register high auth: %v", err)
+	}
+	if _, err := m.Register(context.Background(), authLow); err != nil {
+		t.Fatalf("register low auth: %v", err)
+	}
+	reg.RegisterClient(authHigh.ID, "pool", []*registry.ModelInfo{{ID: "gpt-4o"}})
+	reg.RegisterClient(authLow.ID, "pool", []*registry.ModelInfo{{ID: "gpt-4o-mini"}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(authHigh.ID)
+		reg.UnregisterClient(authLow.ID)
+	})
+
+	priority, ok := m.HighestAvailablePriorityForModel("", "gpt-4o")
+	if !ok {
+		t.Fatal("expected gpt-4o to have an available priority")
+	}
+	if priority != 40 {
+		t.Fatalf("gpt-4o priority = %d, want %d", priority, 40)
+	}
+
+	priority, ok = m.HighestAvailablePriorityForModel("", "gpt-4o-mini")
+	if !ok {
+		t.Fatal("expected gpt-4o-mini to have an available priority")
+	}
+	if priority != 10 {
+		t.Fatalf("gpt-4o-mini priority = %d, want %d", priority, 10)
+	}
+}
+
 func TestManagerExecuteCount_OpenAICompatAliasPoolStopsOnInvalidRequest(t *testing.T) {
 	alias := "claude-opus-4.66"
 	invalidErr := &Error{HTTPStatus: http.StatusUnprocessableEntity, Message: "unprocessable entity"}

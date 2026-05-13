@@ -9,6 +9,7 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -1145,14 +1146,15 @@ func (h *Handler) GetCopilotQuota(c *gin.Context) {
 	c.JSON(http.StatusOK, usage)
 }
 
-// findCopilotAuth locates a GitHub Copilot credential by auth_index or returns the first available one
+// findCopilotAuth locates a GitHub Copilot credential by auth_index or returns the first available one.
+// When no auth_index is provided, candidates are ordered by CreatedAt then ID to keep selection stable.
 func (h *Handler) findCopilotAuth(authIndex string) *coreauth.Auth {
 	if h == nil || h.authManager == nil {
 		return nil
 	}
 
 	auths := h.authManager.List()
-	var firstCopilot *coreauth.Auth
+	candidates := make([]*coreauth.Auth, 0, len(auths))
 
 	for _, auth := range auths {
 		if auth == nil {
@@ -1164,19 +1166,30 @@ func (h *Handler) findCopilotAuth(authIndex string) *coreauth.Auth {
 			continue
 		}
 
-		if firstCopilot == nil {
-			firstCopilot = auth
-		}
-
 		if authIndex != "" {
 			auth.EnsureIndex()
 			if auth.Index == authIndex {
 				return auth
 			}
 		}
+
+		candidates = append(candidates, auth)
 	}
 
-	return firstCopilot
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	sort.SliceStable(candidates, func(i, j int) bool {
+		left := candidates[i]
+		right := candidates[j]
+		if !left.CreatedAt.Equal(right.CreatedAt) {
+			return left.CreatedAt.Before(right.CreatedAt)
+		}
+		return left.ID < right.ID
+	})
+
+	return candidates[0]
 }
 
 // enrichCopilotTokenResponse fetches quota information and adds it to the Copilot token response body
