@@ -42,7 +42,7 @@ func TestPatchAuthFileFields_MergeHeadersAndDeleteEmptyValues(t *testing.T) {
 
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
 
-	body := `{"name":"test.json","prefix":"p1","proxy_url":"http://proxy.local","headers":{"X-Old":"new","X-New":"v","X-Remove":"  ","X-Nope":""}}`
+	body := `{"name":"test.json","prefix":"p1","proxy_url":"http://proxy.local","headers":{"X-Old":"new","X-New":"v","X-Remove":"  ","X-Nope":""},"priority":3,"excluded_models":["MODEL-B","model-a","model-a"],"disable_cooling":true,"websockets":true,"note":"patched"}`
 	rec := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(rec)
 	req := httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/fields", strings.NewReader(body))
@@ -106,9 +106,103 @@ func TestPatchAuthFileFields_MergeHeadersAndDeleteEmptyValues(t *testing.T) {
 	if _, ok := updated.Attributes["header:X-Nope"]; ok {
 		t.Fatalf("expected attrs header:X-Nope to be absent")
 	}
+	if got := updated.Attributes["priority"]; got != "3" {
+		t.Fatalf("attrs priority = %q, want %q", got, "3")
+	}
+	if got := updated.Attributes["excluded_models"]; got != "model-a,model-b" {
+		t.Fatalf("attrs excluded_models = %q, want %q", got, "model-a,model-b")
+	}
+	if got := updated.Attributes["websockets"]; got != "true" {
+		t.Fatalf("attrs websockets = %q, want %q", got, "true")
+	}
+	if got := updated.Attributes["note"]; got != "patched" {
+		t.Fatalf("attrs note = %q, want %q", got, "patched")
+	}
+	if got := updated.Metadata["priority"]; got != 3 {
+		t.Fatalf("metadata.priority = %#v, want %d", got, 3)
+	}
+	excludedModels, ok := updated.Metadata["excluded_models"].([]string)
+	if !ok {
+		t.Fatalf("metadata.excluded_models = %T, want []string", updated.Metadata["excluded_models"])
+	}
+	if got := strings.Join(excludedModels, ","); got != "model-a,model-b" {
+		t.Fatalf("metadata.excluded_models = %q, want %q", got, "model-a,model-b")
+	}
+	if got, _ := updated.Metadata["disable_cooling"].(bool); !got {
+		t.Fatalf("metadata.disable_cooling = %#v, want true", updated.Metadata["disable_cooling"])
+	}
+	if got, _ := updated.Metadata["websockets"].(bool); !got {
+		t.Fatalf("metadata.websockets = %#v, want true", updated.Metadata["websockets"])
+	}
+	if got := updated.Metadata["note"]; got != "patched" {
+		t.Fatalf("metadata.note = %#v, want %q", got, "patched")
+	}
 }
 
-func TestPatchAuthFileFields_HeadersEmptyMapIsNoop(t *testing.T) {
+func TestPatchAuthFileFields_EmptyCollectionsAndNullDeleteFields(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	record := &coreauth.Auth{
+		ID:       "delete.json",
+		FileName: "delete.json",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"path":            "/tmp/delete.json",
+			"header:X-Remove": "gone",
+			"priority":        "5",
+			"excluded_models": "model-a",
+			"websockets":      "true",
+			"note":            "old",
+		},
+		Metadata: map[string]any{
+			"type":            "codex",
+			"headers":         map[string]any{"X-Remove": "gone"},
+			"priority":        5,
+			"excluded_models": []string{"model-a"},
+			"disable_cooling": true,
+			"disable-cooling": true,
+			"websockets":      true,
+			"note":            "old",
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), record); errRegister != nil {
+		t.Fatalf("failed to register auth record: %v", errRegister)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+
+	body := `{"name":"delete.json","headers":{},"priority":0,"excluded_models":[],"disable_cooling":null,"websockets":null,"note":""}`
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/fields", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+	h.PatchAuthFileFields(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	updated, ok := manager.GetByID("delete.json")
+	if !ok || updated == nil {
+		t.Fatalf("expected auth record to exist after patch")
+	}
+	for _, key := range []string{"priority", "excluded_models", "websockets", "note", "header:X-Remove"} {
+		if _, ok := updated.Attributes[key]; ok {
+			t.Fatalf("expected attrs %s to be deleted", key)
+		}
+	}
+	for _, key := range []string{"headers", "priority", "excluded_models", "excluded-models", "disable_cooling", "disable-cooling", "websockets", "note"} {
+		if _, ok := updated.Metadata[key]; ok {
+			t.Fatalf("expected metadata %s to be deleted", key)
+		}
+	}
+}
+
+func TestPatchAuthFileFields_OmittedHeadersIsNoop(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	gin.SetMode(gin.TestMode)
 
@@ -135,7 +229,7 @@ func TestPatchAuthFileFields_HeadersEmptyMapIsNoop(t *testing.T) {
 
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
 
-	body := `{"name":"noop.json","note":"hello","headers":{}}`
+	body := `{"name":"noop.json","note":"hello"}`
 	rec := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(rec)
 	req := httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/fields", strings.NewReader(body))
