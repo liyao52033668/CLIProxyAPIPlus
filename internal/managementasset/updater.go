@@ -26,7 +26,7 @@ import (
 
 const (
 	defaultManagementReleaseURL  = "https://api.github.com/repos/liyao52033668/Cli-Proxy-API-Management-Center/releases/latest"
-	defaultManagementFallbackURL = "https://cpac0d8.up.railway.app/management.html"
+	defaultManagementFallbackURL = "https://cpamc.xiaoying.org.cn"
 	managementAssetName          = "management.html"
 	httpUserAgent                = "CLIProxyAPI-management-updater"
 	managementSyncMinInterval    = 30 * time.Second
