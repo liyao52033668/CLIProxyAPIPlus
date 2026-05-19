@@ -861,6 +861,21 @@ func (s *GitTokenStore) commitAndPushLocked(message string, relPaths ...string) 
 		if errors.Is(err, git.NoErrAlreadyUpToDate) {
 			return nil
 		}
+		// If push fails due to missing packfile, try repacking objects and retrying
+		if strings.Contains(err.Error(), "pack") && strings.Contains(err.Error(), "no such file or directory") {
+			_ = repo.RepackObjects(&git.RepackConfig{})
+			if retryErr := repo.Push(pushOpts); retryErr == nil || errors.Is(retryErr, git.NoErrAlreadyUpToDate) {
+				return nil
+			}
+		}
+		// If push fails due to missing objects (getting object), try fetching and retrying
+		if strings.Contains(err.Error(), "getting object") {
+			if fetchErr := repo.Fetch(&git.FetchOptions{Auth: s.gitAuth(), RemoteName: "origin"}); fetchErr == nil {
+				if retryErr := repo.Push(pushOpts); retryErr == nil || errors.Is(retryErr, git.NoErrAlreadyUpToDate) {
+					return nil
+				}
+			}
+		}
 		return fmt.Errorf("git token store: push: %w", err)
 	}
 	return nil
