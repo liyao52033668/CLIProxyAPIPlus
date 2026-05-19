@@ -19,6 +19,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/service"
+	internalwatcher "github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"golang.org/x/crypto/bcrypt"
@@ -48,6 +49,7 @@ type Handler struct {
 	usageStats               *usage.RequestStatistics
 	usageService             service.UsageProvider
 	tokenStore               coreauth.Store
+	invalidAuthSnapshot      func() []internalwatcher.InvalidAuthEntry
 	localPassword            string
 	allowRemoteOverride      bool
 	envSecret                string
@@ -133,6 +135,11 @@ func (h *Handler) SetUsageStatistics(stats *usage.RequestStatistics) { h.usageSt
 
 // SetUsageService sets the usage service for database operations.
 func (h *Handler) SetUsageService(us service.UsageProvider) { h.usageService = us }
+
+// SetInvalidAuthSnapshot registers a watcher-backed invalid auth snapshot provider.
+func (h *Handler) SetInvalidAuthSnapshot(fn func() []internalwatcher.InvalidAuthEntry) {
+	h.invalidAuthSnapshot = fn
+}
 
 // SetLocalPassword configures the runtime-local password accepted for localhost requests.
 func (h *Handler) SetLocalPassword(password string) { h.localPassword = password }

@@ -87,6 +87,7 @@ type WatcherWrapper struct {
 
 	setConfig             func(cfg *config.Config)
 	snapshotAuths         func() []*coreauth.Auth
+	snapshotInvalidAuths  func() []watcher.InvalidAuthEntry
 	setUpdateQueue        func(queue chan<- watcher.AuthUpdate)
 	dispatchRuntimeUpdate func(update watcher.AuthUpdate) bool
 	notifyTokenRefreshed  func(tokenID, accessToken, refreshToken, expiresAt string) // 方案 A: 后台刷新通知
@@ -138,6 +139,14 @@ func (w *WatcherWrapper) SnapshotAuths() []*coreauth.Auth {
 		return nil
 	}
 	return w.snapshotAuths()
+}
+
+// SnapshotInvalidAuths returns the current watcher-owned invalid auth snapshot.
+func (w *WatcherWrapper) SnapshotInvalidAuths() []watcher.InvalidAuthEntry {
+	if w == nil || w.snapshotInvalidAuths == nil {
+		return nil
+	}
+	return w.snapshotInvalidAuths()
 }
 
 // SetAuthUpdateQueue registers the channel used to propagate auth updates.

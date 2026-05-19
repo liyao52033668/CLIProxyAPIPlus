@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -30,11 +31,14 @@ import (
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/tui"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
+	usageconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/config"
+	usagerepository "github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/repository"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
+	"gorm.io/gorm"
 )
 
 var (
@@ -42,6 +46,13 @@ var (
 	Commit            = "none"
 	BuildDate         = "unknown"
 	DefaultConfigPath = ""
+
+	openRuntimeSQLiteUsageDatabase = func(path string) (*gorm.DB, error) {
+		return usage.InitUsageDB(usage.DBConfig{Path: path})
+	}
+	openRuntimePostgresUsageDatabase = func(dsn string) (*gorm.DB, error) {
+		return usagerepository.OpenPostgresDatabase(usageconfig.Config{PostgresDSN: dsn})
+	}
 )
 
 // pgUsagePersister adapts PostgresStore to usage.UsagePersister.
@@ -89,6 +100,119 @@ func init() {
 	buildinfo.Version = Version
 	buildinfo.Commit = Commit
 	buildinfo.BuildDate = BuildDate
+}
+
+func restoreGitStoreUsageDatabase(gitStoreInst *store.GitTokenStore, usageDBPath string) error {
+	if gitStoreInst == nil || strings.TrimSpace(usageDBPath) == "" {
+		return nil
+	}
+	if err := gitStoreInst.EnsureRepository(); err != nil {
+		return err
+	}
+	repoUsagePath := filepath.Join(gitStoreInst.AuthDir(), "usage.db")
+	if filepath.Clean(repoUsagePath) == filepath.Clean(usageDBPath) {
+		return nil
+	}
+	data, err := os.ReadFile(repoUsagePath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(usageDBPath), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(usageDBPath, data, 0o600)
+}
+
+func restoreObjectStoreUsageDatabase(objectStoreInst *store.ObjectTokenStore, usageDBPath string) error {
+	if objectStoreInst == nil || strings.TrimSpace(usageDBPath) == "" {
+		return nil
+	}
+	repoUsagePath := filepath.Join(objectStoreInst.AuthDir(), "usage.db")
+	if filepath.Clean(repoUsagePath) == filepath.Clean(usageDBPath) {
+		return nil
+	}
+	data, err := os.ReadFile(repoUsagePath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(usageDBPath), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(usageDBPath, data, 0o600)
+}
+
+func closeUsageSQLDB(sqlDB *sql.DB) error {
+	if sqlDB == nil {
+		return nil
+	}
+	if err := sqlDB.Close(); err != nil && !errors.Is(err, sql.ErrConnDone) {
+		return err
+	}
+	return nil
+}
+
+func persistGitStoreUsageDatabase(gitStoreInst *store.GitTokenStore, usageDB *gorm.DB) error {
+	if gitStoreInst == nil || usageDB == nil {
+		return nil
+	}
+	sqlDB, err := usageDB.DB()
+	if err != nil {
+		return err
+	}
+	if err := usageDB.Exec("PRAGMA wal_checkpoint(FULL)").Error; err != nil {
+		return err
+	}
+	if err := closeUsageSQLDB(sqlDB); err != nil {
+		return err
+	}
+	usagePath := filepath.Join(gitStoreInst.AuthDir(), "usage.db")
+	return gitStoreInst.PersistAuthFiles(context.Background(), "Update usage database", usagePath)
+}
+
+func persistObjectStoreUsageDatabase(objectStoreInst *store.ObjectTokenStore, usageDB *gorm.DB) error {
+	if objectStoreInst == nil || usageDB == nil {
+		return nil
+	}
+	sqlDB, err := usageDB.DB()
+	if err != nil {
+		return err
+	}
+	if err := usageDB.Exec("PRAGMA wal_checkpoint(FULL)").Error; err != nil {
+		return err
+	}
+	if err := closeUsageSQLDB(sqlDB); err != nil {
+		return err
+	}
+	usagePath := filepath.Join(objectStoreInst.AuthDir(), "usage.db")
+	return objectStoreInst.PersistAuthFiles(context.Background(), "Update usage database", usagePath)
+}
+
+func initializeUsageDatabase(dataDir string, usePostgresStore bool, pgStoreDSN string, useGitStore bool, gitStoreInst *store.GitTokenStore, useObjectStore bool, objectStoreInst *store.ObjectTokenStore) (*gorm.DB, error) {
+	if usePostgresStore {
+		return openRuntimePostgresUsageDatabase(pgStoreDSN)
+	}
+
+	if dataDir == "" {
+		dataDir = "/CLIProxyAPI/data"
+	}
+	usageDBPath := filepath.Join(dataDir, "usage.db")
+	if useGitStore {
+		if err := restoreGitStoreUsageDatabase(gitStoreInst, usageDBPath); err != nil {
+			return nil, err
+		}
+	}
+	if useObjectStore {
+		if err := restoreObjectStoreUsageDatabase(objectStoreInst, usageDBPath); err != nil {
+			return nil, err
+		}
+	}
+	return openRuntimeSQLiteUsageDatabase(usageDBPath)
 }
 
 // setKiroIncognitoMode sets the incognito browser mode for Kiro authentication.
@@ -523,15 +647,7 @@ func main() {
 	}
 	if cfg.UsageStatisticsEnabled {
 		usage.SetStatisticsEnabled(cfg.UsageStatisticsEnabled)
-		dataDir := cfg.AuthDir
-		if dataDir == "" {
-			dataDir = "/CLIProxyAPI/data"
-		}
-		// 使用 SQLite 数据库进行 usage 持久化
-		usageDB, err := usage.InitUsageDB(usage.DBConfig{
-			Path:      filepath.Join(dataDir, "usage.db"),
-			AutoClean: true,
-		})
+		usageDB, err := initializeUsageDatabase(cfg.AuthDir, usePostgresStore, pgStoreDSN, useGitStore, gitStoreInst, useObjectStore, objectStoreInst)
 		if err != nil {
 			log.WithError(err).Error("failed to init usage database")
 		} else {
@@ -762,6 +878,24 @@ func main() {
 			if cfg.AuthDir != "" {
 				kiro.InitializeAndStart(cfg.AuthDir, cfg)
 				defer kiro.StopGlobalRefreshManager()
+			}
+			if useGitStore {
+				defer func() {
+					if db := coreusage.DefaultManager().GetDB(); db != nil {
+						if err := persistGitStoreUsageDatabase(gitStoreInst, db); err != nil {
+							log.WithError(err).Warn("failed to persist usage database to git store")
+						}
+					}
+				}()
+			}
+			if useObjectStore {
+				defer func() {
+					if db := coreusage.DefaultManager().GetDB(); db != nil {
+						if err := persistObjectStoreUsageDatabase(objectStoreInst, db); err != nil {
+							log.WithError(err).Warn("failed to persist usage database to object store")
+						}
+					}
+				}()
 			}
 
 			cmd.StartService(cfg, configFilePath, password)

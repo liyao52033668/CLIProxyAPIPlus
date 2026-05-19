@@ -22,6 +22,32 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+func invalidAuthEntryFromFile(path string, info os.FileInfo, err error) InvalidAuthEntry {
+	entry := InvalidAuthEntry{
+		Name:          filepath.Base(path),
+		Path:          path,
+		Source:        "file",
+		Status:        "invalid",
+		StatusMessage: err.Error(),
+	}
+	if info != nil {
+		entry.Size = info.Size()
+		entry.ModTime = info.ModTime()
+	}
+	return entry
+}
+
+func (w *Watcher) setInvalidAuthEntryLocked(path string, entry InvalidAuthEntry) {
+	if w.invalidAuthsByPath == nil {
+		w.invalidAuthsByPath = make(map[string]InvalidAuthEntry)
+	}
+	w.invalidAuthsByPath[w.normalizeAuthPath(path)] = entry
+}
+
+func (w *Watcher) clearInvalidAuthEntryLocked(path string) {
+	delete(w.invalidAuthsByPath, w.normalizeAuthPath(path))
+}
+
 func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string, forceAuthRefresh bool) {
 	log.Debugf("starting full client load process")
 
@@ -161,11 +187,24 @@ func (w *Watcher) addOrUpdateClient(path string) {
 	sum := sha256.Sum256(data)
 	curHash := hex.EncodeToString(sum[:])
 	normalized := w.normalizeAuthPath(path)
+	info, _ := os.Stat(path)
 
 	// Parse new auth content for diff comparison
 	var newAuth coreauth.Auth
 	if errParse := json.Unmarshal(data, &newAuth); errParse != nil {
 		log.Errorf("failed to parse auth file %s: %v", filepath.Base(path), errParse)
+		w.clientsMutex.Lock()
+		if w.fileAuthsByPath == nil {
+			w.fileAuthsByPath = make(map[string]map[string]*coreauth.Auth)
+		}
+		oldByID := make(map[string]*coreauth.Auth, len(w.fileAuthsByPath[normalized]))
+		maps.Copy(oldByID, w.fileAuthsByPath[normalized])
+		delete(w.fileAuthsByPath, normalized)
+		w.lastAuthHashes[normalized] = curHash
+		w.setInvalidAuthEntryLocked(path, invalidAuthEntryFromFile(path, info, fmt.Errorf("invalid auth file: %w", errParse)))
+		updates := w.computePerPathUpdatesLocked(oldByID, map[string]*coreauth.Auth{})
+		w.clientsMutex.Unlock()
+		w.dispatchAuthUpdates(updates)
 		return
 	}
 
@@ -183,6 +222,7 @@ func (w *Watcher) addOrUpdateClient(path string) {
 		w.clientsMutex.Unlock()
 		return
 	}
+	w.clearInvalidAuthEntryLocked(path)
 
 	// Get old auth for diff comparison
 	cacheAuthContents := log.IsLevelEnabled(log.DebugLevel)

@@ -58,6 +58,8 @@ type Config struct {
 	WorkDir string
 	// SQLitePath 是 SQLite 数据库文件路径。
 	SQLitePath string
+	// PostgresDSN 是 Postgres 连接串，供 usage repository 的 Postgres opener 使用。
+	PostgresDSN string
 	// BackupEnabled 控制是否保存 SQLite 数据库备份文件。
 	BackupEnabled bool
 	// BackupDir 是 SQLite 数据库备份目录。
