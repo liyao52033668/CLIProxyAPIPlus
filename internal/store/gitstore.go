@@ -861,19 +861,21 @@ func (s *GitTokenStore) commitAndPushLocked(message string, relPaths ...string) 
 		if errors.Is(err, git.NoErrAlreadyUpToDate) {
 			return nil
 		}
-		// If push fails due to missing packfile, try repacking objects and retrying
-		if strings.Contains(err.Error(), "pack") && strings.Contains(err.Error(), "no such file or directory") {
-			_ = repo.RepackObjects(&git.RepackConfig{})
-			if retryErr := repo.Push(pushOpts); retryErr == nil || errors.Is(retryErr, git.NoErrAlreadyUpToDate) {
-				return nil
-			}
-		}
-		// If push fails due to missing objects (getting object), try fetching and retrying
-		if strings.Contains(err.Error(), "getting object") {
+		errMsg := err.Error()
+		// Handle packfile or missing object errors with a combined recovery strategy
+		if strings.Contains(errMsg, "packfile") ||
+			strings.Contains(errMsg, "getting object") ||
+			(strings.Contains(errMsg, "pack") && strings.Contains(errMsg, "no such file or directory")) {
+			// First try fetching from remote to ensure we have all objects
 			if fetchErr := repo.Fetch(&git.FetchOptions{Auth: s.gitAuth(), RemoteName: "origin"}); fetchErr == nil {
 				if retryErr := repo.Push(pushOpts); retryErr == nil || errors.Is(retryErr, git.NoErrAlreadyUpToDate) {
 					return nil
 				}
+			}
+			// If fetch doesn't help, try repacking objects
+			_ = repo.RepackObjects(&git.RepackConfig{})
+			if retryErr := repo.Push(pushOpts); retryErr == nil || errors.Is(retryErr, git.NoErrAlreadyUpToDate) {
+				return nil
 			}
 		}
 		return fmt.Errorf("git token store: push: %w", err)
