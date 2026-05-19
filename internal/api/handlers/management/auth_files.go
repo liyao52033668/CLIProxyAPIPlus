@@ -47,6 +47,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	internalwatcher "github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -409,6 +410,37 @@ func (h *Handler) managementCallbackURL(path string) (string, error) {
 	return fmt.Sprintf("%s://localhost:%d%s", scheme, h.cfg.Port, path), nil
 }
 
+func invalidWatcherAuthEntry(entry internalwatcher.InvalidAuthEntry) gin.H {
+	result := gin.H{
+		"id":             entry.Path,
+		"name":           entry.Name,
+		"path":           entry.Path,
+		"source":         "file",
+		"status":         "invalid",
+		"status_message": entry.StatusMessage,
+		"unavailable":    true,
+		"runtime_only":   false,
+		"disabled":       false,
+		"size":           entry.Size,
+	}
+	if !entry.ModTime.IsZero() {
+		result["modtime"] = entry.ModTime
+		result["updated_at"] = entry.ModTime
+	}
+	if trimmed := strings.TrimSpace(entry.Type); trimmed != "" {
+		result["type"] = trimmed
+		result["provider"] = trimmed
+	}
+	if trimmed := strings.TrimSpace(entry.Email); trimmed != "" {
+		result["email"] = trimmed
+		result["label"] = trimmed
+	}
+	if _, ok := result["label"]; !ok {
+		result["label"] = entry.Name
+	}
+	return result
+}
+
 func (h *Handler) ListAuthFiles(c *gin.Context) {
 	if h == nil {
 		c.JSON(500, gin.H{"error": "handler not initialized"})
@@ -423,6 +455,11 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 	for _, auth := range auths {
 		if entry := h.buildAuthFileEntry(auth); entry != nil {
 			files = append(files, entry)
+		}
+	}
+	if h.invalidAuthSnapshot != nil {
+		for _, invalid := range h.invalidAuthSnapshot() {
+			files = append(files, invalidWatcherAuthEntry(invalid))
 		}
 	}
 	sort.Slice(files, func(i, j int) bool {

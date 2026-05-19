@@ -62,7 +62,7 @@ func MarkAllAsApplied(db *gorm.DB) error {
 	return db.Transaction(func(tx *gorm.DB) error {
 		now := time.Now().UTC()
 		for _, migration := range orderedMigrations() {
-			if err := tx.Exec("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)", migration.version, now).Error; err != nil {
+			if err := markSchemaMigrationApplied(tx, migration.version, now); err != nil {
 				return fmt.Errorf("mark schema migration %s applied: %w", migration.version, err)
 			}
 		}
@@ -71,8 +71,15 @@ func MarkAllAsApplied(db *gorm.DB) error {
 }
 
 func createSchemaMigrationsTable(db *gorm.DB) error {
-	if err := db.Exec("CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at DATETIME NOT NULL)").Error; err != nil {
+	if err := db.Exec("CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMP NOT NULL)").Error; err != nil {
 		return fmt.Errorf("create schema_migrations table: %w", err)
+	}
+	return nil
+}
+
+func markSchemaMigrationApplied(db *gorm.DB, version string, appliedAt time.Time) error {
+	if err := db.Exec("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?) ON CONFLICT (version) DO NOTHING", version, appliedAt.UTC()).Error; err != nil {
+		return fmt.Errorf("mark schema migration %s applied: %w", version, err)
 	}
 	return nil
 }
@@ -120,7 +127,7 @@ func runSchemaMigration(db *gorm.DB, migration databaseMigration) error {
 			logger.WithError(err).Error("schema migration failed")
 			return fmt.Errorf("record schema migration %s: %w", migration.version, err)
 		}
-	//	logger.Info("schema migration applied")
+		//	logger.Info("schema migration applied")
 		return nil
 	})
 }

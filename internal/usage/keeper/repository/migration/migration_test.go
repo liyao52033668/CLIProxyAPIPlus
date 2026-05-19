@@ -145,6 +145,34 @@ func TestOpenDatabaseMigrationsAreIdempotent(t *testing.T) {
 // 	}
 // }
 
+func TestMarkSchemaMigrationAppliedIsIdempotent(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(testSQLiteDSN(filepath.Join(t.TempDir(), "app.db"))), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	defer closeOpenedDatabase(t, db)
+
+	if err := createSchemaMigrationsTable(db); err != nil {
+		t.Fatalf("create schema_migrations table: %v", err)
+	}
+
+	appliedAt := schemaMigration{Version: "test_version"}.AppliedAt
+	if err := markSchemaMigrationApplied(db, "test_version", appliedAt); err != nil {
+		t.Fatalf("first mark schema migration applied: %v", err)
+	}
+	if err := markSchemaMigrationApplied(db, "test_version", appliedAt); err != nil {
+		t.Fatalf("second mark schema migration applied: %v", err)
+	}
+
+	var count int64
+	if err := db.Table("schema_migrations").Where("version = ?", "test_version").Count(&count).Error; err != nil {
+		t.Fatalf("count schema migrations: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected one applied schema migration, got %d", count)
+	}
+}
+
 func TestRunSchemaMigrationLogsErrors(t *testing.T) {
 	logs := captureMigrationLogs(t, logrus.InfoLevel)
 	db, err := gorm.Open(sqlite.Open(testSQLiteDSN(filepath.Join(t.TempDir(), "app.db"))), &gorm.Config{})
@@ -152,8 +180,8 @@ func TestRunSchemaMigrationLogsErrors(t *testing.T) {
 		t.Fatalf("open database: %v", err)
 	}
 	defer closeOpenedDatabase(t, db)
-	if err := db.Exec("CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at DATETIME NOT NULL)").Error; err != nil {
-		t.Fatalf("create schema_migrations: %v", err)
+	if err := createSchemaMigrationsTable(db); err != nil {
+		t.Fatalf("create schema_migrations table: %v", err)
 	}
 
 	err = runSchemaMigration(db, databaseMigration{

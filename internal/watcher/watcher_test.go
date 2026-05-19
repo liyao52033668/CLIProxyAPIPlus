@@ -415,6 +415,75 @@ func TestAddOrUpdateClientTriggersReloadAndHash(t *testing.T) {
 	}
 }
 
+func TestAddOrUpdateClientRecordsInvalidAuthEntry(t *testing.T) {
+	tmpDir := t.TempDir()
+	authFile := filepath.Join(tmpDir, "broken.json")
+	if err := os.WriteFile(authFile, []byte(`{"type":`), 0o644); err != nil {
+		t.Fatalf("failed to create invalid auth file: %v", err)
+	}
+
+	w := &Watcher{
+		authDir:            tmpDir,
+		lastAuthHashes:     make(map[string]string),
+		fileAuthsByPath:    make(map[string]map[string]*coreauth.Auth),
+		invalidAuthsByPath: make(map[string]InvalidAuthEntry),
+	}
+	w.SetConfig(&config.Config{AuthDir: tmpDir})
+
+	w.addOrUpdateClient(authFile)
+
+	entries := w.InvalidAuthEntries()
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 invalid auth entry, got %d", len(entries))
+	}
+	entry := entries[0]
+	if entry.Name != "broken.json" {
+		t.Fatalf("entry name = %q, want %q", entry.Name, "broken.json")
+	}
+	if entry.Status != "invalid" {
+		t.Fatalf("entry status = %q, want %q", entry.Status, "invalid")
+	}
+	if entry.StatusMessage == "" {
+		t.Fatal("expected invalid auth entry to include status message")
+	}
+}
+
+func TestAddOrUpdateClientClearsInvalidAuthEntryAfterRecovery(t *testing.T) {
+	tmpDir := t.TempDir()
+	authFile := filepath.Join(tmpDir, "recover.json")
+	if err := os.WriteFile(authFile, []byte(`{"type":`), 0o644); err != nil {
+		t.Fatalf("failed to create invalid auth file: %v", err)
+	}
+
+	w := &Watcher{
+		authDir:            tmpDir,
+		lastAuthHashes:     make(map[string]string),
+		fileAuthsByPath:    make(map[string]map[string]*coreauth.Auth),
+		invalidAuthsByPath: make(map[string]InvalidAuthEntry),
+	}
+	w.SetConfig(&config.Config{AuthDir: tmpDir})
+
+	w.addOrUpdateClient(authFile)
+	if len(w.InvalidAuthEntries()) != 1 {
+		t.Fatalf("expected invalid auth entry after bad write")
+	}
+
+	if err := os.WriteFile(authFile, []byte(`{"type":"claude","email":"user@example.com"}`), 0o644); err != nil {
+		t.Fatalf("failed to rewrite auth file: %v", err)
+	}
+
+	w.addOrUpdateClient(authFile)
+
+	if got := len(w.InvalidAuthEntries()); got != 0 {
+		t.Fatalf("expected invalid auth entries to be cleared, got %d", got)
+	}
+	w.clientsMutex.RLock()
+	defer w.clientsMutex.RUnlock()
+	if len(w.fileAuthsByPath[w.normalizeAuthPath(authFile)]) == 0 {
+		t.Fatal("expected synthesized auths after recovery")
+	}
+}
+
 func TestRemoveClientRemovesHash(t *testing.T) {
 	tmpDir := t.TempDir()
 	authFile := filepath.Join(tmpDir, "sample.json")
@@ -1518,6 +1587,22 @@ func TestNewWatcherDetectsPersisterAndAuthDir(t *testing.T) {
 	}
 	if w.mirroredAuthDir != tmp {
 		t.Fatalf("expected mirroredAuthDir %s, got %s", tmp, w.mirroredAuthDir)
+	}
+}
+
+func TestNewWatcherInvalidAuthEntriesStartsEmpty(t *testing.T) {
+	w, err := NewWatcher("config.yaml", "auth", nil)
+	if err != nil {
+		t.Fatalf("NewWatcher failed: %v", err)
+	}
+	defer w.Stop()
+
+	entries := w.InvalidAuthEntries()
+	if entries == nil {
+		t.Fatal("expected empty slice, got nil")
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected no invalid auth entries, got %d", len(entries))
 	}
 }
 

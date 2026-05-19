@@ -4,6 +4,7 @@ package watcher
 
 import (
 	"context"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -30,35 +31,36 @@ type authDirProvider interface {
 
 // Watcher manages file watching for configuration and authentication files
 type Watcher struct {
-	configPath        string
-	authDir           string
-	config            *config.Config
-	clientsMutex      sync.RWMutex
-	configReloadMu    sync.Mutex
-	configReloadTimer *time.Timer
-	serverUpdateMu    sync.Mutex
-	serverUpdateTimer *time.Timer
-	serverUpdateLast  time.Time
-	serverUpdatePend  bool
-	stopped           atomic.Bool
-	reloadCallback    func(*config.Config)
-	watcher           *fsnotify.Watcher
-	lastAuthHashes    map[string]string
-	lastAuthContents  map[string]*coreauth.Auth
-	fileAuthsByPath   map[string]map[string]*coreauth.Auth
-	lastRemoveTimes   map[string]time.Time
-	lastConfigHash    string
-	authQueue         chan<- AuthUpdate
-	currentAuths      map[string]*coreauth.Auth
-	runtimeAuths      map[string]*coreauth.Auth
-	dispatchMu        sync.Mutex
-	dispatchCond      *sync.Cond
-	pendingUpdates    map[string]AuthUpdate
-	pendingOrder      []string
-	dispatchCancel    context.CancelFunc
-	storePersister    storePersister
-	mirroredAuthDir   string
-	oldConfigYaml     []byte
+	configPath         string
+	authDir            string
+	config             *config.Config
+	clientsMutex       sync.RWMutex
+	configReloadMu     sync.Mutex
+	configReloadTimer  *time.Timer
+	serverUpdateMu     sync.Mutex
+	serverUpdateTimer  *time.Timer
+	serverUpdateLast   time.Time
+	serverUpdatePend   bool
+	stopped            atomic.Bool
+	reloadCallback     func(*config.Config)
+	watcher            *fsnotify.Watcher
+	lastAuthHashes     map[string]string
+	lastAuthContents   map[string]*coreauth.Auth
+	fileAuthsByPath    map[string]map[string]*coreauth.Auth
+	invalidAuthsByPath map[string]InvalidAuthEntry
+	lastRemoveTimes    map[string]time.Time
+	lastConfigHash     string
+	authQueue          chan<- AuthUpdate
+	currentAuths       map[string]*coreauth.Auth
+	runtimeAuths       map[string]*coreauth.Auth
+	dispatchMu         sync.Mutex
+	dispatchCond       *sync.Cond
+	pendingUpdates     map[string]AuthUpdate
+	pendingOrder       []string
+	dispatchCancel     context.CancelFunc
+	storePersister     storePersister
+	mirroredAuthDir    string
+	oldConfigYaml      []byte
 }
 
 // AuthUpdateAction represents the type of change detected in auth sources.
@@ -77,6 +79,19 @@ type AuthUpdate struct {
 	Auth   *coreauth.Auth
 }
 
+// InvalidAuthEntry describes an auth file that could not be loaded into a valid auth entry.
+type InvalidAuthEntry struct {
+	Name          string
+	Path          string
+	Size          int64
+	ModTime       time.Time
+	Source        string
+	Status        string
+	StatusMessage string
+	Type          string
+	Email         string
+}
+
 const (
 	// replaceCheckDelay is a short delay to allow atomic replace (rename) to settle
 	// before deciding whether a Remove event indicates a real deletion.
@@ -93,12 +108,13 @@ func NewWatcher(configPath, authDir string, reloadCallback func(*config.Config))
 		return nil, errNewWatcher
 	}
 	w := &Watcher{
-		configPath:      configPath,
-		authDir:         authDir,
-		reloadCallback:  reloadCallback,
-		watcher:         watcher,
-		lastAuthHashes:  make(map[string]string),
-		fileAuthsByPath: make(map[string]map[string]*coreauth.Auth),
+		configPath:         configPath,
+		authDir:            authDir,
+		reloadCallback:     reloadCallback,
+		watcher:            watcher,
+		lastAuthHashes:     make(map[string]string),
+		fileAuthsByPath:    make(map[string]map[string]*coreauth.Auth),
+		invalidAuthsByPath: make(map[string]InvalidAuthEntry),
 	}
 	w.dispatchCond = sync.NewCond(&w.dispatchMu)
 	if store := sdkAuth.GetTokenStore(); store != nil {
@@ -156,6 +172,31 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 	cfg := w.config
 	w.clientsMutex.RUnlock()
 	return snapshotCoreAuths(cfg, w.authDir)
+}
+
+// InvalidAuthEntries returns a sorted snapshot of watcher-owned invalid auth file state.
+func (w *Watcher) InvalidAuthEntries() []InvalidAuthEntry {
+	if w == nil {
+		return []InvalidAuthEntry{}
+	}
+
+	w.clientsMutex.RLock()
+	entries := make([]InvalidAuthEntry, 0, len(w.invalidAuthsByPath))
+	for _, entry := range w.invalidAuthsByPath {
+		entries = append(entries, entry)
+	}
+	w.clientsMutex.RUnlock()
+
+	sort.Slice(entries, func(i, j int) bool {
+		left := strings.ToLower(entries[i].Name)
+		right := strings.ToLower(entries[j].Name)
+		if left == right {
+			return entries[i].Path < entries[j].Path
+		}
+		return left < right
+	})
+
+	return entries
 }
 
 // NotifyTokenRefreshed handles token update notifications from the background refresher

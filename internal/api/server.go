@@ -37,6 +37,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/service"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	internalwatcher "github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/claude"
@@ -1207,6 +1208,13 @@ func (s *Server) SetUsageService(usageService service.UsageProvider) {
 		return
 	}
 	s.mgmt.SetUsageService(usageService)
+}
+
+func (s *Server) SetInvalidAuthSnapshot(fn func() []internalwatcher.InvalidAuthEntry) {
+	if s == nil || s.mgmt == nil {
+		return
+	}
+	s.mgmt.SetInvalidAuthSnapshot(fn)
 }
 
 // (management handlers moved to internal/api/handlers/management)
