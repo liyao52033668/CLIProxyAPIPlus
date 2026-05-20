@@ -25,6 +25,7 @@ main:
             toFile: tag_info.json
             dryRun: false
             blockWhenFail: false
+            releaseRules: ./release-rules.json
             branch: $CNB_BRANCH
             repoUrlHttps: $CNB_REPO_URL_HTTPS
           exports:
