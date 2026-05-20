@@ -18,10 +18,11 @@ import (
 	"time"
 
 	"github.com/go-git/go-git/v6"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/store"
-	usageconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/entities"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/repository"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
+	usageconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/entities"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/repository"
 	"gorm.io/gorm"
 )
 
@@ -208,6 +209,62 @@ func TestInitializeUsageDatabaseUsesPostgresOpenerForPostgresStore(t *testing.T)
 	}
 	if sqliteCalled {
 		t.Fatal("did not expect sqlite opener to be called")
+	}
+}
+
+func TestPrepareRuntimeAuthDirAndUsageDatabaseResolvesAuthDirBeforeInitialization(t *testing.T) {
+	resolvedAuthDir := filepath.Join(t.TempDir(), "resolved-auths")
+	originalResolveAuthDir := resolveRuntimeAuthDir
+	originalInitializeUsageDatabase := initializeRuntimeUsageDatabase
+	t.Cleanup(func() {
+		resolveRuntimeAuthDir = originalResolveAuthDir
+		initializeRuntimeUsageDatabase = originalInitializeUsageDatabase
+	})
+
+	var resolveCalled bool
+	var observedAuthDir string
+	var initializeCalls int
+	resolveRuntimeAuthDir = func(authDir string) (string, error) {
+		if authDir != config.DefaultAuthDir {
+			t.Fatalf("authDir passed to ResolveAuthDir = %q, want %q", authDir, config.DefaultAuthDir)
+		}
+		resolveCalled = true
+		return resolvedAuthDir, nil
+	}
+	initializeRuntimeUsageDatabase = func(dataDir string, usePostgresStore bool, pgStoreDSN string, useGitStore bool, gitStoreInst *store.GitTokenStore, useObjectStore bool, objectStoreInst *store.ObjectTokenStore) (*gorm.DB, error) {
+		initializeCalls++
+		if !resolveCalled {
+			t.Fatal("initializeUsageDatabase called before auth dir was resolved")
+		}
+		observedAuthDir = dataDir
+		if dataDir != resolvedAuthDir {
+			t.Fatalf("initializeUsageDatabase authDir = %q, want %q", dataDir, resolvedAuthDir)
+		}
+		return &gorm.DB{}, nil
+	}
+
+	cfg := &config.Config{
+		AuthDir:                config.DefaultAuthDir,
+		UsageStatisticsEnabled: true,
+	}
+	usageDB, authDirResolved, err := prepareRuntimeAuthDirAndUsageDatabase(cfg, false, "", false, nil, false, nil)
+	if err != nil {
+		t.Fatalf("prepareRuntimeAuthDirAndUsageDatabase: %v", err)
+	}
+	if usageDB == nil {
+		t.Fatal("expected usage database to be initialized")
+	}
+	if !authDirResolved {
+		t.Fatal("expected auth dir resolution to succeed")
+	}
+	if initializeCalls != 1 {
+		t.Fatalf("initializeUsageDatabase called %d times, want 1", initializeCalls)
+	}
+	if observedAuthDir != resolvedAuthDir {
+		t.Fatalf("observed auth dir = %q, want %q", observedAuthDir, resolvedAuthDir)
+	}
+	if cfg.AuthDir != resolvedAuthDir {
+		t.Fatalf("cfg.AuthDir = %q, want %q", cfg.AuthDir, resolvedAuthDir)
 	}
 }
 

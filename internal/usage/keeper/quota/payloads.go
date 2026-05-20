@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/cpa/dto/apicall"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/cpa/dto/apicall"
 )
 
 func parseAntigravityQuotaPayload(response *apicall.Response) (*AntigravityQuotaPayload, error) {

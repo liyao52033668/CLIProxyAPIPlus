@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/repository/dto"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/repository/dto"
 )
 
 func BuildEventKey(apiGroupKey, model string, timestamp time.Time, source, authIndex string, failed bool, tokens dto.TokenStats) string {

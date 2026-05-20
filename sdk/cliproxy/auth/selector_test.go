@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
 func TestFillFirstSelectorPick_Deterministic(t *testing.T) {
@@ -747,6 +747,48 @@ func TestExtractSessionID_ClaudeCodePriorityOverHeader(t *testing.T) {
 	}
 }
 
+func TestExtractSessionID_UsesMetadataUserIDWhenPayloadMissing(t *testing.T) {
+	t.Parallel()
+
+	metadata := map[string]any{"user_id": "user_xxx_account__session_12345678-1234-1234-1234-123456789abc"}
+	got := ExtractSessionID(nil, nil, metadata)
+	want := "claude:12345678-1234-1234-1234-123456789abc"
+	if got != want {
+		t.Fatalf("ExtractSessionID() = %q, want %q", got, want)
+	}
+}
+
+func TestSessionAffinitySelectorPick_UsesMetadataUserID(t *testing.T) {
+	t.Parallel()
+
+	selector := &SessionAffinitySelector{fallback: &RoundRobinSelector{}, cache: NewSessionCache(time.Hour)}
+	t.Cleanup(selector.Stop)
+	auths := []*Auth{{ID: "a"}, {ID: "b"}}
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{"user_id": "user_xxx_account__session_12345678-1234-1234-1234-123456789abc"}}
+
+	first, err := selector.Pick(context.Background(), "gemini", "model-a", opts, auths)
+	if err != nil {
+		t.Fatalf("first Pick() error = %v", err)
+	}
+	if first == nil {
+		t.Fatal("first Pick() auth = nil")
+	}
+	if first.ID != "a" {
+		t.Fatalf("first Pick() auth.ID = %q, want %q", first.ID, "a")
+	}
+
+	second, err := selector.Pick(context.Background(), "gemini", "model-a", opts, auths)
+	if err != nil {
+		t.Fatalf("second Pick() error = %v", err)
+	}
+	if second == nil {
+		t.Fatal("second Pick() auth = nil")
+	}
+	if second.ID != "a" {
+		t.Fatalf("second Pick() auth.ID = %q, want cached %q; metadata session affinity may not be wired", second.ID, "a")
+	}
+}
+
 func TestExtractSessionID_ClaudeCodePriorityOverIdempotencyKey(t *testing.T) {
 	t.Parallel()
 
@@ -771,6 +813,100 @@ func TestExtractSessionID_Headers(t *testing.T) {
 	want := "header:my-explicit-session"
 	if got != want {
 		t.Errorf("ExtractSessionID() with header = %q, want %q", got, want)
+	}
+}
+
+func TestExtractSessionID_CodexSessionIDHeader(t *testing.T) {
+	t.Parallel()
+
+	headers := make(http.Header)
+	headers.Set("Session_id", "codex-session-123")
+
+	got := ExtractSessionID(headers, nil, nil)
+	want := "codex:codex-session-123"
+	if got != want {
+		t.Errorf("ExtractSessionID() with Session_id = %q, want %q", got, want)
+	}
+}
+
+func TestExtractSessionID_ClientRequestIDHeader(t *testing.T) {
+	t.Parallel()
+
+	headers := make(http.Header)
+	headers.Set("X-Client-Request-Id", "pi-session-123")
+
+	got := ExtractSessionID(headers, nil, nil)
+	want := "clientreq:pi-session-123"
+	if got != want {
+		t.Errorf("ExtractSessionID() with X-Client-Request-Id = %q, want %q", got, want)
+	}
+}
+
+func TestExtractSessionID_CodexSessionIDPriorityOverClientRequestID(t *testing.T) {
+	t.Parallel()
+
+	headers := make(http.Header)
+	headers.Set("X-Client-Request-Id", "pi-session-123")
+	headers.Set("Session_id", "codex-session-456")
+
+	got := ExtractSessionID(headers, nil, nil)
+	want := "codex:codex-session-456"
+	if got != want {
+		t.Errorf("ExtractSessionID() = %q, want %q (Session_id should take priority over X-Client-Request-Id)", got, want)
+	}
+}
+
+func TestExtractSessionID_AmpThreadId(t *testing.T) {
+	t.Parallel()
+
+	headers := make(http.Header)
+	headers.Set("X-Amp-Thread-Id", "T-7873e6bd-6354-4a9a-be2c-c7702c6e1b64")
+
+	got := ExtractSessionID(headers, nil, nil)
+	want := "amp:T-7873e6bd-6354-4a9a-be2c-c7702c6e1b64"
+	if got != want {
+		t.Errorf("ExtractSessionID() with X-Amp-Thread-Id = %q, want %q", got, want)
+	}
+}
+
+func TestExtractSessionID_AmpThreadIdPriorityOverClientRequestID(t *testing.T) {
+	t.Parallel()
+
+	headers := make(http.Header)
+	headers.Set("X-Amp-Thread-Id", "T-priority-test")
+	headers.Set("X-Client-Request-Id", "pi-session-123")
+
+	got := ExtractSessionID(headers, nil, nil)
+	want := "amp:T-priority-test"
+	if got != want {
+		t.Errorf("ExtractSessionID() = %q, want %q (X-Amp-Thread-Id should take priority over X-Client-Request-Id)", got, want)
+	}
+}
+
+// TestExtractSessionID_AmpThreadIdLowerPriority verifies X-Amp-Thread-Id is lower
+// priority than Claude Code metadata.user_id but higher than conversation_id.
+func TestExtractSessionID_AmpThreadIdPriority(t *testing.T) {
+	t.Parallel()
+
+	// X-Amp-Thread-Id should be used when no Claude Code user_id is present
+	headers := make(http.Header)
+	headers.Set("X-Amp-Thread-Id", "T-priority-test")
+
+	payload := []byte(`{"conversation_id":"conv-12345"}`)
+	got := ExtractSessionID(headers, payload, nil)
+	want := "amp:T-priority-test"
+	if got != want {
+		t.Errorf("ExtractSessionID() = %q, want %q (Amp thread ID should take priority over conversation_id)", got, want)
+	}
+
+	// Claude Code user_id should take priority over X-Amp-Thread-Id
+	headers2 := make(http.Header)
+	headers2.Set("X-Amp-Thread-Id", "T-priority-test")
+	payload2 := []byte(`{"metadata":{"user_id":"user_xxx_account__session_ac980658-63bd-4fb3-97ba-8da64cb1e344"}}`)
+	got2 := ExtractSessionID(headers2, payload2, nil)
+	want2 := "claude:ac980658-63bd-4fb3-97ba-8da64cb1e344"
+	if got2 != want2 {
+		t.Errorf("ExtractSessionID() = %q, want %q (Claude Code should take priority over Amp thread ID)", got2, want2)
 	}
 }
 

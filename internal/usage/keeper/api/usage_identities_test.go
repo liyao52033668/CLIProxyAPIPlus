@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/entities"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/redact"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/service"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/entities"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/redact"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/service"
 )
 
 type usageIdentitiesStub struct {

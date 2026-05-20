@@ -8,10 +8,11 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
-	repodto "github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/repository/dto"
-	keeperservice "github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/service"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/service/dto"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
+	repodto "github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/repository/dto"
+	keeperservice "github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/service"
+	dto "github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/service/dto"
 )
 
 type usageExportPayload struct {
@@ -27,6 +28,10 @@ type usageImportPayload struct {
 
 // GetUsageStatistics returns the in-memory request statistics snapshot.
 func (h *Handler) GetUsageStatistics(c *gin.Context) {
+	if c.Query("count") != "" {
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
 	var snapshot usage.StatisticsSnapshot
 	if h != nil && h.usageStats != nil {
 		snapshot = h.usageStats.Snapshot()
@@ -104,6 +109,22 @@ func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 		"total_requests":  result.TotalRequests,
 		"failed_requests": result.FailedCount,
 	})
+}
+
+// GetUsageQueue returns queued usage records as JSON objects.
+func (h *Handler) GetUsageQueue(c *gin.Context) {
+	count, errCount := parseUsageQueueCount(c.Query("count"))
+	if errCount != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errCount.Error()})
+		return
+	}
+
+	records := redisqueue.PopOldest(count)
+	payload := make([]json.RawMessage, 0, len(records))
+	for _, record := range records {
+		payload = append(payload, json.RawMessage(record))
+	}
+	c.JSON(http.StatusOK, payload)
 }
 
 // GetDBUsageStatistics returns usage statistics from database with optional time range filter.
@@ -191,6 +212,14 @@ func (h *Handler) GetDBUsageEventFilterOptions(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, options)
+}
+
+func parseUsageQueueCount(raw string) (int, error) {
+	count, err := strconv.Atoi(raw)
+	if err != nil || count <= 0 {
+		return 0, errors.New("count must be positive")
+	}
+	return count, nil
 }
 
 func buildUsageFilterFromRequest(c *gin.Context) dto.UsageFilter {

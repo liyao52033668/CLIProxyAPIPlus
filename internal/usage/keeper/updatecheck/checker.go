@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/version"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/version"
 )
 
 const (

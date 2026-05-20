@@ -7,8 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/updatecheck"
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/updatecheck"
 )
 
 type updateCheckerStub struct {

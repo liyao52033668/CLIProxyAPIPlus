@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 
-	repodto "github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/repository/dto"
-	servicedto "github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/service/dto"
+	repodto "github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/repository/dto"
+	servicedto "github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/service/dto"
 )
 
 var ErrInvalidUsageImportSnapshot = errors.New("invalid usage import snapshot")

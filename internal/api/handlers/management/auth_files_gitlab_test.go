@@ -10,8 +10,8 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 func TestRequestGitLabPATToken_SavesAuthRecord(t *testing.T) {
@@ -150,6 +150,39 @@ func TestPostOAuthCallback_GitLabWritesPendingCallbackFile(t *testing.T) {
 	}
 	if got := payload["state"]; got != state {
 		t.Fatalf("callback state = %q, want %q", got, state)
+	}
+}
+
+func TestPostOAuthCallback_AllowsAuthUrlPendingState(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	authDir := t.TempDir()
+	state := "gitlab-authurl-123"
+	RegisterOAuthSession(state, "gitlab")
+	SetOAuthSessionError(state, "auth_url|https://example.com/auth")
+	t.Cleanup(func() { CompleteOAuthSession(state) })
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, coreauth.NewManager(nil, nil, nil))
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v0/management/oauth-callback", strings.NewReader(`{"provider":"gitlab","state":"`+state+`","code":"test-code"}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	h.PostOAuthCallback(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+}
+
+func TestSetOAuthSessionError_DoesNotCreateProviderlessSession(t *testing.T) {
+	state := "gitlab-missing-session-123"
+	SetOAuthSessionError(state, "auth_url|https://example.com/auth")
+	_, _, ok := GetOAuthSession(state)
+	if ok {
+		t.Fatal("expected missing state to remain absent")
 	}
 }
 

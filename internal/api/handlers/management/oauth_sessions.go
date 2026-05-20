@@ -90,17 +90,10 @@ func (s *oauthSessionStore) SetError(state, message string) {
 	s.purgeExpiredLocked(now)
 	session, ok := s.sessions[state]
 	if !ok {
-		// Create session if it doesn't exist to ensure error message is stored
-		session = oauthSession{
-			Provider:  "",
-			Status:    message,
-			CreatedAt: now,
-			ExpiresAt: now.Add(s.ttl),
-		}
-	} else {
-		session.Status = message
-		session.ExpiresAt = now.Add(s.ttl)
+		return
 	}
+	session.Status = message
+	session.ExpiresAt = now.Add(s.ttl)
 	s.sessions[state] = session
 }
 
@@ -200,6 +193,21 @@ func IsOAuthSessionPending(state, provider string) bool {
 	return oauthSessions.IsPending(state, provider)
 }
 
+func oauthSessionErrorWithCause(message string, cause error) string {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		message = "Authentication failed"
+	}
+	if cause == nil {
+		return message
+	}
+	detail := strings.TrimSpace(cause.Error())
+	if detail == "" {
+		return message
+	}
+	return message + ": " + detail
+}
+
 func ValidateOAuthState(state string) error {
 	trimmed := strings.TrimSpace(state)
 	if trimmed == "" {
@@ -245,6 +253,8 @@ func NormalizeOAuthProvider(provider string) (string, error) {
 		return "qoder", nil
 	case "github":
 		return "github", nil
+	case "xai", "x-ai", "x.ai", "grok":
+		return "xai", nil
 	default:
 		return "", errUnsupportedOAuthFlow
 	}

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/textproto"
 	"regexp"
 	"strings"
 	"sync"
@@ -17,12 +18,12 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/klauspost/compress/zstd"
 	xxHash64 "github.com/pierrec/xxHash/xxHash64"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -509,6 +510,45 @@ func TestApplyClaudeHeaders_DisableDeviceProfileStabilization(t *testing.T) {
 	assertClaudeFingerprint(t, lowerReq.Header, "claude-cli/2.1.61 (external, cli)", "0.73.0", "v24.2.0", "Windows", "x64")
 }
 
+func TestApplyClaudeHeaders_EnablesGitLabDuoContext1MHeader(t *testing.T) {
+	resetClaudeDeviceProfileCache()
+
+	cfg := &config.Config{}
+	auth := &cliproxyauth.Auth{
+		ID: "auth-gitlab-1m",
+		Attributes: map[string]string{
+			"api_key":                     "key-gitlab-1m",
+			"gitlab_duo_force_context_1m": "true",
+		},
+	}
+
+	req := newClaudeHeaderTestRequest(t, http.Header{})
+	applyClaudeHeaders(req, auth, "key-gitlab-1m", false, nil, cfg)
+
+	if got := req.Header.Get("Anthropic-Beta"); !strings.Contains(got, "context-1m-2025-08-07") {
+		t.Fatalf("Anthropic-Beta = %q, want to contain context-1m-2025-08-07", got)
+	}
+}
+
+func TestApplyClaudeHeaders_EnablesGitLabDuoContext1MViaRequestHeader(t *testing.T) {
+	resetClaudeDeviceProfileCache()
+
+	cfg := &config.Config{}
+	auth := &cliproxyauth.Auth{
+		ID: "auth-gitlab-1m-header",
+		Attributes: map[string]string{
+			"api_key": "key-gitlab-1m-header",
+		},
+	}
+
+	req := newClaudeHeaderTestRequest(t, http.Header{textproto.CanonicalMIMEHeaderKey("X-CPA-CLAUDE-1M"): []string{"1"}})
+	applyClaudeHeaders(req, auth, "key-gitlab-1m-header", false, nil, cfg)
+
+	if got := req.Header.Get("Anthropic-Beta"); !strings.Contains(got, "context-1m-2025-08-07") {
+		t.Fatalf("Anthropic-Beta = %q, want to contain context-1m-2025-08-07", got)
+	}
+}
+
 func TestApplyClaudeHeaders_LegacyModePreservesConfiguredUserAgentOverrideForClaudeClients(t *testing.T) {
 	resetClaudeDeviceProfileCache()
 
@@ -933,6 +973,113 @@ func TestClaudeExecutor_GeneratesNewUserIDByDefault(t *testing.T) {
 	}
 	if !helps.IsValidUserID(userIDs[0]) || !helps.IsValidUserID(userIDs[1]) {
 		t.Fatalf("user_ids should be valid, got %q and %q", userIDs[0], userIDs[1])
+	}
+}
+
+func TestClaudeExecutor_ExecuteOpenAINonStreamRejectsEmptyClaudeStream(t *testing.T) {
+	_, err := executeOpenAIChatCompletionThroughClaude(t, "")
+	if err == nil {
+		t.Fatal("Execute error = nil, want empty stream error")
+	}
+	assertStatusErr(t, err, http.StatusBadGateway)
+	if !strings.Contains(err.Error(), "empty stream response") {
+		t.Fatalf("Execute error = %q, want empty stream response", err.Error())
+	}
+}
+
+func TestClaudeExecutor_ExecuteOpenAINonStreamRejectsClaudeErrorEvent(t *testing.T) {
+	body := `data: {"type":"error","error":{"type":"overloaded_error","message":"upstream overloaded"}}` + "\n"
+	_, err := executeOpenAIChatCompletionThroughClaude(t, body)
+	if err == nil {
+		t.Fatal("Execute error = nil, want upstream error event")
+	}
+	assertStatusErr(t, err, http.StatusBadGateway)
+	if !strings.Contains(err.Error(), "upstream overloaded") {
+		t.Fatalf("Execute error = %q, want upstream overloaded", err.Error())
+	}
+}
+
+func TestClaudeExecutor_ExecuteOpenAINonStreamRejectsIncompleteClaudeStream(t *testing.T) {
+	body := strings.Join([]string{
+		`data: {"type":"message_start","message":{"id":"msg_123","model":"claude-3-5-sonnet-20241022"}}`,
+		`data: {"type":"message_stop"}`,
+		``,
+	}, "\n")
+
+	_, err := executeOpenAIChatCompletionThroughClaude(t, body)
+	if err == nil {
+		t.Fatal("Execute error = nil, want incomplete stream error")
+	}
+	assertStatusErr(t, err, http.StatusBadGateway)
+	if !strings.Contains(err.Error(), "ended before message completion") {
+		t.Fatalf("Execute error = %q, want incomplete stream error", err.Error())
+	}
+}
+
+func TestClaudeExecutor_ExecuteOpenAINonStreamConvertsValidClaudeStream(t *testing.T) {
+	body := strings.Join([]string{
+		`event: message_start`,
+		`data: {"type":"message_start","message":{"id":"msg_123","model":"claude-3-5-sonnet-20241022"}}`,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`,
+		`event: message_delta`,
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":2,"output_tokens":1}}`,
+		`event: message_stop`,
+		`data: {"type":"message_stop"}`,
+		``,
+	}, "\n")
+
+	resp, err := executeOpenAIChatCompletionThroughClaude(t, body)
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if got := gjson.GetBytes(resp.Payload, "id").String(); got != "msg_123" {
+		t.Fatalf("response id = %q, want msg_123; payload=%s", got, string(resp.Payload))
+	}
+	if got := gjson.GetBytes(resp.Payload, "model").String(); got != "claude-3-5-sonnet-20241022" {
+		t.Fatalf("response model = %q, want claude-3-5-sonnet-20241022", got)
+	}
+	if got := gjson.GetBytes(resp.Payload, "choices.0.message.content").String(); got != "ok" {
+		t.Fatalf("response content = %q, want ok", got)
+	}
+	if got := gjson.GetBytes(resp.Payload, "usage.total_tokens").Int(); got != 3 {
+		t.Fatalf("usage.total_tokens = %d, want 3", got)
+	}
+}
+
+func executeOpenAIChatCompletionThroughClaude(t *testing.T, upstreamBody string) (cliproxyexecutor.Response, error) {
+	t.Helper()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(upstreamBody))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"hi"}]}`)
+
+	return executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+	})
+}
+
+func assertStatusErr(t *testing.T, err error, want int) {
+	t.Helper()
+
+	status, ok := err.(interface{ StatusCode() int })
+	if !ok {
+		t.Fatalf("error %T does not expose StatusCode", err)
+	}
+	if got := status.StatusCode(); got != want {
+		t.Fatalf("StatusCode() = %d, want %d", got, want)
 	}
 }
 
@@ -1714,7 +1861,27 @@ func TestClaudeExecutor_ExecuteStream_AcceptEncodingOverrideCannotBypassIdentity
 	}
 }
 
-// Test case 1: String system prompt is preserved and converted to a content block
+func expectedClaudeCodeStaticPrompt() string {
+	return strings.Join([]string{
+		helps.ClaudeCodeIntro,
+		helps.ClaudeCodeSystem,
+		helps.ClaudeCodeDoingTasks,
+		helps.ClaudeCodeToneAndStyle,
+		helps.ClaudeCodeOutputEfficiency,
+	}, "\n\n")
+}
+
+func expectedForwardedSystemReminder(text string) string {
+	return fmt.Sprintf(`<system-reminder>
+As you answer the user's questions, you can use the following context from the system:
+%s
+
+IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.
+</system-reminder>
+`, text)
+}
+
+// Test case 1: String system prompt is preserved by forwarding it to the first user message
 func TestCheckSystemInstructionsWithMode_StringSystemPreserved(t *testing.T) {
 	payload := []byte(`{"system":"You are a helpful assistant.","messages":[{"role":"user","content":"hi"}]}`)
 
@@ -1736,16 +1903,19 @@ func TestCheckSystemInstructionsWithMode_StringSystemPreserved(t *testing.T) {
 	if blocks[1].Get("text").String() != "You are Claude Code, Anthropic's official CLI for Claude." {
 		t.Fatalf("blocks[1] should be agent block, got %q", blocks[1].Get("text").String())
 	}
-	if !strings.HasPrefix(blocks[2].Get("text").String(), "You are an interactive agent") {
-		t.Fatalf("blocks[2] should be static prompt, got %q", blocks[2].Get("text").String())
+	if blocks[2].Get("text").String() != expectedClaudeCodeStaticPrompt() {
+		t.Fatalf("blocks[2] should be static Claude Code prompt, got %q", blocks[2].Get("text").String())
 	}
-	firstUserContent := gjson.GetBytes(out, "messages.0.content").String()
-	if !strings.Contains(firstUserContent, "You are a helpful assistant.") {
-		t.Fatalf("user system text should be prepended to first user message, got %q", firstUserContent)
+	if blocks[2].Get("cache_control").Exists() {
+		t.Fatalf("blocks[2] should not have cache_control, got %s", blocks[2].Get("cache_control").Raw)
+	}
+
+	if got := gjson.GetBytes(out, "messages.0.content").String(); got != expectedForwardedSystemReminder("You are a helpful assistant.")+"hi" {
+		t.Fatalf("messages[0].content should include forwarded system prompt, got %q", got)
 	}
 }
 
-// Test case 2: Strict mode drops the string system prompt
+// Test case 2: Strict mode keeps only the injected Claude Code system blocks
 func TestCheckSystemInstructionsWithMode_StringSystemStrict(t *testing.T) {
 	payload := []byte(`{"system":"You are a helpful assistant.","messages":[{"role":"user","content":"hi"}]}`)
 
@@ -1753,11 +1923,14 @@ func TestCheckSystemInstructionsWithMode_StringSystemStrict(t *testing.T) {
 
 	blocks := gjson.GetBytes(out, "system").Array()
 	if len(blocks) != 3 {
-		t.Fatalf("strict mode should produce 3 blocks, got %d", len(blocks))
+		t.Fatalf("strict mode should produce 3 injected blocks, got %d", len(blocks))
+	}
+	if got := gjson.GetBytes(out, "messages.0.content").String(); got != "hi" {
+		t.Fatalf("strict mode should not forward system prompt into messages, got %q", got)
 	}
 }
 
-// Test case 3: Empty string system prompt does not produce a spurious block
+// Test case 3: Empty string system prompt does not alter the first user message
 func TestCheckSystemInstructionsWithMode_EmptyStringSystemIgnored(t *testing.T) {
 	payload := []byte(`{"system":"","messages":[{"role":"user","content":"hi"}]}`)
 
@@ -1765,11 +1938,14 @@ func TestCheckSystemInstructionsWithMode_EmptyStringSystemIgnored(t *testing.T) 
 
 	blocks := gjson.GetBytes(out, "system").Array()
 	if len(blocks) != 3 {
-		t.Fatalf("empty string system should produce 3 blocks, got %d", len(blocks))
+		t.Fatalf("empty string system should still produce 3 injected blocks, got %d", len(blocks))
+	}
+	if got := gjson.GetBytes(out, "messages.0.content").String(); got != "hi" {
+		t.Fatalf("empty string system should not alter messages, got %q", got)
 	}
 }
 
-// Test case 4: Array system prompt is unaffected by the string handling
+// Test case 4: Array system prompt is forwarded to the first user message
 func TestCheckSystemInstructionsWithMode_ArraySystemStillWorks(t *testing.T) {
 	payload := []byte(`{"system":[{"type":"text","text":"Be concise."}],"messages":[{"role":"user","content":"hi"}]}`)
 
@@ -1779,16 +1955,15 @@ func TestCheckSystemInstructionsWithMode_ArraySystemStillWorks(t *testing.T) {
 	if len(blocks) != 3 {
 		t.Fatalf("expected 3 system blocks, got %d", len(blocks))
 	}
-	if !strings.HasPrefix(blocks[2].Get("text").String(), "You are an interactive agent") {
-		t.Fatalf("blocks[2] should be static prompt, got %q", blocks[2].Get("text").String())
+	if blocks[2].Get("text").String() != expectedClaudeCodeStaticPrompt() {
+		t.Fatalf("blocks[2] should be static Claude Code prompt, got %q", blocks[2].Get("text").String())
 	}
-	firstUserContent := gjson.GetBytes(out, "messages.0.content").String()
-	if !strings.Contains(firstUserContent, "Be concise.") {
-		t.Fatalf("user system text should be prepended to first user message, got %q", firstUserContent)
+	if got := gjson.GetBytes(out, "messages.0.content").String(); got != expectedForwardedSystemReminder("Be concise.")+"hi" {
+		t.Fatalf("messages[0].content should include forwarded array system prompt, got %q", got)
 	}
 }
 
-// Test case 5: Special characters in string system prompt survive conversion
+// Test case 5: Special characters in string system prompt survive forwarding
 func TestCheckSystemInstructionsWithMode_StringWithSpecialChars(t *testing.T) {
 	payload := []byte(`{"system":"Use <xml> tags & \"quotes\" in output.","messages":[{"role":"user","content":"hi"}]}`)
 
@@ -1798,9 +1973,8 @@ func TestCheckSystemInstructionsWithMode_StringWithSpecialChars(t *testing.T) {
 	if len(blocks) != 3 {
 		t.Fatalf("expected 3 system blocks, got %d", len(blocks))
 	}
-	firstUserContent := gjson.GetBytes(out, "messages.0.content").String()
-	if !strings.Contains(firstUserContent, `Use <xml> tags & "quotes" in output.`) {
-		t.Fatalf("original system text not preserved in first user message, got %q", firstUserContent)
+	if got := gjson.GetBytes(out, "messages.0.content").String(); got != expectedForwardedSystemReminder(`Use <xml> tags & "quotes" in output.`)+"hi" {
+		t.Fatalf("forwarded system prompt text mangled, got %q", got)
 	}
 }
 
@@ -1909,9 +2083,12 @@ func TestApplyCloaking_PreservesConfiguredStrictModeAndSensitiveWordsWhenModeOmi
 
 	blocks := gjson.GetBytes(out, "system").Array()
 	if len(blocks) != 3 {
-		t.Fatalf("expected strict mode to keep only injected system blocks, got %d", len(blocks))
+		t.Fatalf("expected strict mode to keep the 3 injected Claude Code system blocks, got %d", len(blocks))
 	}
-	if got := gjson.GetBytes(out, "messages.0.content.0.text").String(); !strings.Contains(got, "\u200B") {
+	if got := gjson.GetBytes(out, "messages.0.content.#").Int(); got != 1 {
+		t.Fatalf("strict mode should not prepend a forwarded system reminder block, got %d content blocks", got)
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.text").String(); !strings.Contains(got, "​") {
 		t.Fatalf("expected configured sensitive word obfuscation to apply, got %q", got)
 	}
 }
@@ -1959,19 +2136,16 @@ func TestNormalizeClaudeTemperatureForThinking_AfterForcedToolChoiceKeepsOrigina
 func TestRemapOAuthToolNames_TitleCase_NoReverseNeeded(t *testing.T) {
 	body := []byte(`{"tools":[{"name":"Bash","description":"Run shell commands","input_schema":{"type":"object","properties":{"cmd":{"type":"string"}}}}],"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
 
-	out, renamed := remapOAuthToolNames(body)
-	if renamed {
-		t.Fatalf("renamed = true, want false")
+	out, reverseMap := remapOAuthToolNames(body)
+	if len(reverseMap) != 0 {
+		t.Fatalf("reverseMap = %v, want empty", reverseMap)
 	}
 	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "Bash" {
 		t.Fatalf("tools.0.name = %q, want %q", got, "Bash")
 	}
 
 	resp := []byte(`{"content":[{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"cmd":"ls"}}]}`)
-	reversed := resp
-	if renamed {
-		reversed = reverseRemapOAuthToolNames(resp)
-	}
+	reversed := reverseRemapOAuthToolNames(resp, reverseMap)
 	if got := gjson.GetBytes(reversed, "content.0.name").String(); got != "Bash" {
 		t.Fatalf("content.0.name = %q, want %q", got, "Bash")
 	}
@@ -1980,20 +2154,150 @@ func TestRemapOAuthToolNames_TitleCase_NoReverseNeeded(t *testing.T) {
 func TestRemapOAuthToolNames_Lowercase_ReverseApplied(t *testing.T) {
 	body := []byte(`{"tools":[{"name":"bash","description":"Run shell commands","input_schema":{"type":"object","properties":{"cmd":{"type":"string"}}}}],"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
 
-	out, renamed := remapOAuthToolNames(body)
-	if !renamed {
-		t.Fatalf("renamed = false, want true")
+	out, reverseMap := remapOAuthToolNames(body)
+	if reverseMap["Bash"] != "bash" {
+		t.Fatalf("reverseMap = %v, want entry Bash->bash", reverseMap)
 	}
 	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "Bash" {
 		t.Fatalf("tools.0.name = %q, want %q", got, "Bash")
 	}
 
 	resp := []byte(`{"content":[{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"cmd":"ls"}}]}`)
-	reversed := resp
-	if renamed {
-		reversed = reverseRemapOAuthToolNames(resp)
-	}
+	reversed := reverseRemapOAuthToolNames(resp, reverseMap)
 	if got := gjson.GetBytes(reversed, "content.0.name").String(); got != "bash" {
 		t.Fatalf("content.0.name = %q, want %q", got, "bash")
+	}
+}
+
+// TestRemapOAuthToolNames_MixedCase_OnlyRenamedToolsReversed is the regression
+// test for a case where a single request contains both a TitleCase tool (which
+// must pass through unchanged) and a lowercase tool that we forward-rename.
+// Before the fix, triggering ANY forward rename caused the reverse pass to
+// lowercase every TitleCase tool in the response using a global reverse map,
+// corrupting tool names the client originally sent in TitleCase (notably Amp
+// CLI's `Bash`, which its registry lookup cannot find as `bash`).
+func TestRemapOAuthToolNames_MixedCase_OnlyRenamedToolsReversed(t *testing.T) {
+	body := []byte(`{"tools":[` +
+		`{"name":"Bash","input_schema":{"type":"object","properties":{"cmd":{"type":"string"}}}},` +
+		`{"name":"glob","input_schema":{"type":"object","properties":{"filePattern":{"type":"string"}}}}` +
+		`]}`)
+
+	out, reverseMap := remapOAuthToolNames(body)
+
+	// Forward: TitleCase `Bash` is not a forward-map key, must pass through.
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "Bash" {
+		t.Fatalf("tools.0.name = %q, want %q (TitleCase tool must not be renamed)", got, "Bash")
+	}
+	// Forward: `glob` is a forward-map key, upstream sees `Glob`.
+	if got := gjson.GetBytes(out, "tools.1.name").String(); got != "Glob" {
+		t.Fatalf("tools.1.name = %q, want %q", got, "Glob")
+	}
+
+	// Reverse map records ONLY the rename that happened.
+	if len(reverseMap) != 1 || reverseMap["Glob"] != "glob" {
+		t.Fatalf("reverseMap = %v, want {Glob:glob}", reverseMap)
+	}
+
+	// Upstream responds with a `Bash` tool_use. Since we never renamed `Bash`,
+	// reverseRemap MUST leave it alone.
+	bashResp := []byte(`{"content":[{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"cmd":"ls"}}]}`)
+	reversed := reverseRemapOAuthToolNames(bashResp, reverseMap)
+	if got := gjson.GetBytes(reversed, "content.0.name").String(); got != "Bash" {
+		t.Fatalf("content.0.name = %q, want %q (Bash must be preserved; was never forward-renamed)", got, "Bash")
+	}
+
+	// Upstream responds with a `Glob` tool_use. Since we renamed `glob`→`Glob`,
+	// reverseRemap MUST restore the original `glob`.
+	globResp := []byte(`{"content":[{"type":"tool_use","id":"toolu_02","name":"Glob","input":{"filePattern":"**/*.go"}}]}`)
+	reversed = reverseRemapOAuthToolNames(globResp, reverseMap)
+	if got := gjson.GetBytes(reversed, "content.0.name").String(); got != "glob" {
+		t.Fatalf("content.0.name = %q, want %q (Glob must be restored to client's original `glob`)", got, "glob")
+	}
+}
+
+// TestReverseRemapOAuthToolNamesFromStreamLine_HonorsPerRequestMap guards the
+// SSE streaming code path against the same mixed-case bug.
+func TestReverseRemapOAuthToolNamesFromStreamLine_HonorsPerRequestMap(t *testing.T) {
+	reverseMap := map[string]string{"Glob": "glob"}
+
+	// Bash block was never renamed, must pass through as-is.
+	bashLine := []byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_01","name":"Bash","input":{}}}`)
+	out := reverseRemapOAuthToolNamesFromStreamLine(bashLine, reverseMap)
+	if !bytes.Contains(out, []byte(`"name":"Bash"`)) {
+		t.Fatalf("Bash should be preserved, got: %s", string(out))
+	}
+	if bytes.Contains(out, []byte(`"name":"bash"`)) {
+		t.Fatalf("Bash must not be lowercased, got: %s", string(out))
+	}
+
+	// Glob block IS in the reverseMap, must be restored to `glob`.
+	globLine := []byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_02","name":"Glob","input":{}}}`)
+	out = reverseRemapOAuthToolNamesFromStreamLine(globLine, reverseMap)
+	if !bytes.Contains(out, []byte(`"name":"glob"`)) {
+		t.Fatalf("Glob should be restored to glob, got: %s", string(out))
+	}
+}
+
+func TestPrepareClaudeOAuthToolNamesForUpstream_MixedCaseWithPrefix(t *testing.T) {
+	body := []byte(`{"tools":[` +
+		`{"name":"Bash","input_schema":{"type":"object","properties":{"cmd":{"type":"string"}}}},` +
+		`{"name":"glob","input_schema":{"type":"object","properties":{"filePattern":{"type":"string"}}}}` +
+		`],"messages":[{"role":"assistant","content":[` +
+		`{"type":"tool_use","id":"toolu_01","name":"Bash","input":{}},` +
+		`{"type":"tool_use","id":"toolu_02","name":"glob","input":{}}` +
+		`]}]}`)
+
+	out, reverseMap := prepareClaudeOAuthToolNamesForUpstream(body, "proxy_", false)
+
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "proxy_Bash" {
+		t.Fatalf("tools.0.name = %q, want %q", got, "proxy_Bash")
+	}
+	if got := gjson.GetBytes(out, "tools.1.name").String(); got != "proxy_Glob" {
+		t.Fatalf("tools.1.name = %q, want %q", got, "proxy_Glob")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != "proxy_Bash" {
+		t.Fatalf("messages.0.content.0.name = %q, want %q", got, "proxy_Bash")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.1.name").String(); got != "proxy_Glob" {
+		t.Fatalf("messages.0.content.1.name = %q, want %q", got, "proxy_Glob")
+	}
+	if len(reverseMap) != 1 || reverseMap["Glob"] != "glob" {
+		t.Fatalf("reverseMap = %v, want {Glob:glob}", reverseMap)
+	}
+}
+
+func TestRestoreClaudeOAuthToolNamesFromResponse_MixedCaseWithPrefix(t *testing.T) {
+	reverseMap := map[string]string{"Glob": "glob"}
+	resp := []byte(`{"content":[` +
+		`{"type":"tool_use","id":"toolu_01","name":"proxy_Bash","input":{}},` +
+		`{"type":"tool_use","id":"toolu_02","name":"proxy_Glob","input":{}}` +
+		`]}`)
+
+	out := restoreClaudeOAuthToolNamesFromResponse(resp, "proxy_", false, reverseMap)
+
+	if got := gjson.GetBytes(out, "content.0.name").String(); got != "Bash" {
+		t.Fatalf("content.0.name = %q, want %q", got, "Bash")
+	}
+	if got := gjson.GetBytes(out, "content.1.name").String(); got != "glob" {
+		t.Fatalf("content.1.name = %q, want %q", got, "glob")
+	}
+}
+
+func TestRestoreClaudeOAuthToolNamesFromStreamLine_MixedCaseWithPrefix(t *testing.T) {
+	reverseMap := map[string]string{"Glob": "glob"}
+
+	bashLine := []byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_01","name":"proxy_Bash","input":{}}}`)
+	out := restoreClaudeOAuthToolNamesFromStreamLine(bashLine, "proxy_", false, reverseMap)
+	if !bytes.Contains(out, []byte(`"name":"Bash"`)) {
+		t.Fatalf("Bash should be preserved, got: %s", string(out))
+	}
+	if bytes.Contains(out, []byte(`"name":"bash"`)) {
+		t.Fatalf("Bash must not be lowercased, got: %s", string(out))
+	}
+
+	globLine := []byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_02","name":"proxy_Glob","input":{}}}`)
+	out = restoreClaudeOAuthToolNamesFromStreamLine(globLine, "proxy_", false, reverseMap)
+	if !bytes.Contains(out, []byte(`"name":"glob"`)) {
+		t.Fatalf("Glob should be restored to glob, got: %s", string(out))
 	}
 }

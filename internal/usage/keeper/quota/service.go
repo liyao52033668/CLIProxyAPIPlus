@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/repository"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/repository"
 
 	"gorm.io/gorm"
 )

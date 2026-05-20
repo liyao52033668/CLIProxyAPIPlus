@@ -142,7 +142,7 @@ func TestLookupModelInfoReturnsCloneForStaticDefinitions(t *testing.T) {
 	}
 	first.Thinking.Levels[0] = "mutated"
 
-	second := LookupModelInfo("glm-5v-turbo")
+	second := LookupModelInfo("glm-4.6")
 	if second == nil || second.Thinking == nil || len(second.Thinking.Levels) == 0 || second.Thinking.Levels[0] == "mutated" {
 		t.Fatalf("expected static lookup clone, got %+v", second)
 	}

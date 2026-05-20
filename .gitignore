@@ -5,6 +5,7 @@ test-output
 
 # Configuration
 CLIProxyAPI/*
+cpaplus/*
 config.yaml
 .env
 .mcp.json

@@ -1,14 +1,15 @@
 package repository
 
 import (
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/repository/dto"
 	"crypto/sha256"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/entities"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/repository/dto"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/entities"
 )
 
 func TestInsertRedisUsageInboxMessagesPersistsPendingRows(t *testing.T) {

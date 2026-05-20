@@ -1,9 +1,9 @@
 package api
 
 import (
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/entities"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/service"
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/entities"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/service"
 )
 
 // loadUsageResolutionData 为 Request Events 和 Credentials 加载 source 解析所需的活跃 usage identities。

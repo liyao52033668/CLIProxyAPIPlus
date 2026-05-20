@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/poller"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/poller"
 )
 
 type manualSyncRunner struct {

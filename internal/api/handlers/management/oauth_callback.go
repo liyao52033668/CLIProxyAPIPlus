@@ -134,8 +134,8 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"status": "error", "error": "unknown or expired state"})
 			return
 		}
-		if sessionStatus != "" && !strings.HasPrefix(sessionStatus, "auth_url|") {
-			c.JSON(http.StatusConflict, gin.H{"status": "error", "error": "oauth flow is not pending"})
+		if sessionStatus != "" && !strings.HasPrefix(sessionStatus, "auth_url|") && !strings.HasPrefix(sessionStatus, "device_code|") {
+			c.JSON(http.StatusConflict, gin.H{"status": "error", "error": sessionStatus})
 			return
 		}
 		if !strings.EqualFold(sessionProvider, canonicalProvider) {
@@ -152,6 +152,11 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 
 	if _, errWrite := WriteOAuthCallbackFileForPendingSessionWithAuth(h.cfg.AuthDir, canonicalProvider, state, code, errMsg, auth); errWrite != nil {
 		if errors.Is(errWrite, errOAuthSessionNotPending) {
+			_, status, okSession := GetOAuthSession(state)
+			if okSession && status != "" {
+				c.JSON(http.StatusConflict, gin.H{"status": "error", "error": status})
+				return
+			}
 			c.JSON(http.StatusConflict, gin.H{"status": "error", "error": "oauth flow is not pending"})
 			return
 		}

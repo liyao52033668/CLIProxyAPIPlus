@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/entities"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/repository"
-	repodto "github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/repository/dto"
-	servicedto "github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/service/dto"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/entities"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/repository"
+	repodto "github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/repository/dto"
+	servicedto "github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/service/dto"
 	"gorm.io/gorm"
 )
 

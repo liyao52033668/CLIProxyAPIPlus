@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/cpa/dto/apicall"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/cpa/dto/response"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/cpa/dto/apicall"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/cpa/dto/response"
 )
 
 func TestFetchExternalAPIKeysSendsBearerTokenAndParsesExternalKeys(t *testing.T) {

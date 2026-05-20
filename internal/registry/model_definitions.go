@@ -6,6 +6,13 @@ import (
 	"strings"
 )
 
+const (
+	codexBuiltinImageModelID      = "gpt-image-2"
+	xaiBuiltinImageModelID        = "grok-imagine-image"
+	xaiBuiltinImageQualityModelID = "grok-imagine-image-quality"
+	xaiBuiltinVideoModelID        = "grok-imagine-video"
+)
+
 // staticModelsJSON mirrors the top-level structure of models.json.
 type staticModelsJSON struct {
 	Claude      []*ModelInfo `json:"claude"`
@@ -19,6 +26,7 @@ type staticModelsJSON struct {
 	CodexPro    []*ModelInfo `json:"codex-pro"`
 	Kimi        []*ModelInfo `json:"kimi"`
 	Antigravity []*ModelInfo `json:"antigravity"`
+	XAI         []*ModelInfo `json:"xai"`
 }
 
 // GetClaudeModels returns the standard Claude model definitions.
@@ -48,22 +56,30 @@ func GetAIStudioModels() []*ModelInfo {
 
 // GetCodexFreeModels returns model definitions for the Codex free plan tier.
 func GetCodexFreeModels() []*ModelInfo {
-	return cloneModelInfos(getModels().CodexFree)
+	models := cloneModelInfos(getModels().CodexFree)
+	filtered := models[:0]
+	for _, model := range models {
+		if model != nil && strings.EqualFold(strings.TrimSpace(model.ID), "gpt-5.5") {
+			continue
+		}
+		filtered = append(filtered, model)
+	}
+	return WithCodexBuiltins(filtered)
 }
 
 // GetCodexTeamModels returns model definitions for the Codex team plan tier.
 func GetCodexTeamModels() []*ModelInfo {
-	return cloneModelInfos(getModels().CodexTeam)
+	return WithCodexBuiltins(cloneModelInfos(getModels().CodexTeam))
 }
 
 // GetCodexPlusModels returns model definitions for the Codex plus plan tier.
 func GetCodexPlusModels() []*ModelInfo {
-	return cloneModelInfos(getModels().CodexPlus)
+	return WithCodexBuiltins(cloneModelInfos(getModels().CodexPlus))
 }
 
 // GetCodexProModels returns model definitions for the Codex pro plan tier.
 func GetCodexProModels() []*ModelInfo {
-	return cloneModelInfos(getModels().CodexPro)
+	return WithCodexBuiltins(cloneModelInfos(getModels().CodexPro))
 }
 
 // GetKimiModels returns the standard Kimi (Moonshot AI) model definitions.
@@ -458,34 +474,34 @@ func GetCodeBuddyModels() []*ModelInfo {
 			ID: "kimi-k2.6", Object: "model", Created: now, OwnedBy: "tencent",
 			Type: "codebuddy", DisplayName: "Kimi K2.6", Description: "Kimi K2.6 via CodeBuddy",
 			ContextLength: 256000, MaxCompletionTokens: 32000, SupportedEndpoints: []string{"/chat/completions"},
-			Thinking:                                 &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
+			Thinking:                 &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
 			SupportedInputModalities: []string{"TEXT", "IMAGE"},
 		},
 		{
 			ID: "kimi-k2.5", Object: "model", Created: now, OwnedBy: "tencent",
 			Type: "codebuddy", DisplayName: "Kimi K2.5", Description: "Kimi K2.5 via CodeBuddy",
 			ContextLength: 256000, MaxCompletionTokens: 32000, SupportedEndpoints: []string{"/chat/completions"},
-			Thinking:                                 &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
+			Thinking:                 &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
 			SupportedInputModalities: []string{"TEXT", "IMAGE"},
 		},
 		{
 			ID: "minimax-m2.7", Object: "model", Created: now, OwnedBy: "tencent",
 			Type: "codebuddy", DisplayName: "MiniMax M2.7", Description: "MiniMax M2.7 via CodeBuddy",
 			ContextLength: 200000, MaxCompletionTokens: 48000, SupportedEndpoints: []string{"/chat/completions"},
-			Thinking:                                 &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
+			Thinking:                 &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
 			SupportedInputModalities: []string{"TEXT", "IMAGE"},
 		},
 		{
 			ID: "deepseek-v4-flash", Object: "model", Created: now, OwnedBy: "tencent",
 			Type: "codebuddy", DisplayName: "DeepSeek V4 Flash", Description: "DeepSeek V4 Flash via CodeBuddy",
 			ContextLength: 1000000, MaxCompletionTokens: 50000, SupportedEndpoints: []string{"/chat/completions"},
-			Thinking:                 &ThinkingSupport{Levels: []string{"high", "max"}},
+			Thinking: &ThinkingSupport{Levels: []string{"high", "max"}},
 		},
 		{
 			ID: "deepseek-v3-2-volc", Object: "model", Created: now, OwnedBy: "tencent",
 			Type: "codebuddy", DisplayName: "DeepSeek V3.2", Description: "DeepSeek V3.2 via CodeBuddy",
 			ContextLength: 96000, MaxCompletionTokens: 32000, SupportedEndpoints: []string{"/chat/completions"},
-			Thinking:                                 &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
+			Thinking:                 &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
 			SupportedInputModalities: []string{"TEXT", "IMAGE"},
 		},
 		{
@@ -578,6 +594,121 @@ func GetCodeBuddyAIModels() []*ModelInfo {
 	}
 }
 
+// GetXAIModels returns the standard xAI Grok model definitions.
+func GetXAIModels() []*ModelInfo {
+	return WithXAIBuiltins(cloneModelInfos(getModels().XAI))
+}
+
+// WithCodexBuiltins injects hard-coded Codex-only model definitions that should
+// not depend on remote models.json updates. Built-ins replace any matching IDs
+// already present in the provided slice.
+func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
+	return upsertModelInfos(models, codexBuiltinImageModelInfo())
+}
+
+// WithXAIBuiltins injects hard-coded xAI image/video model definitions that should
+// not depend on remote models.json updates.
+func WithXAIBuiltins(models []*ModelInfo) []*ModelInfo {
+	return upsertModelInfos(models, xaiBuiltinImageModelInfo(), xaiBuiltinImageQualityModelInfo(), xaiBuiltinVideoModelInfo())
+}
+
+func codexBuiltinImageModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:          codexBuiltinImageModelID,
+		Object:      "model",
+		Created:     1704067200, // 2024-01-01
+		OwnedBy:     "openai",
+		Type:        "openai",
+		DisplayName: "GPT Image 2",
+		Version:     codexBuiltinImageModelID,
+	}
+}
+
+func xaiBuiltinImageModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:          xaiBuiltinImageModelID,
+		Object:      "model",
+		Created:     1735689600, // 2025-01-01
+		OwnedBy:     "xai",
+		Type:        "xai",
+		DisplayName: "Grok Imagine Image",
+		Name:        xaiBuiltinImageModelID,
+		Description: "xAI Grok image generation model.",
+	}
+}
+
+func xaiBuiltinImageQualityModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:          xaiBuiltinImageQualityModelID,
+		Object:      "model",
+		Created:     1735689600, // 2025-01-01
+		OwnedBy:     "xai",
+		Type:        "xai",
+		DisplayName: "Grok Imagine Image Quality",
+		Name:        xaiBuiltinImageQualityModelID,
+		Description: "xAI Grok higher-fidelity image generation model.",
+	}
+}
+
+func xaiBuiltinVideoModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:          xaiBuiltinVideoModelID,
+		Object:      "model",
+		Created:     1735689600, // 2025-01-01
+		OwnedBy:     "xai",
+		Type:        "xai",
+		DisplayName: "Grok Imagine Video",
+		Name:        xaiBuiltinVideoModelID,
+		Description: "xAI Grok video generation model.",
+	}
+}
+
+func upsertModelInfos(models []*ModelInfo, extras ...*ModelInfo) []*ModelInfo {
+	if len(extras) == 0 {
+		return models
+	}
+
+	extraIDs := make(map[string]struct{}, len(extras))
+	extraList := make([]*ModelInfo, 0, len(extras))
+	for _, extra := range extras {
+		if extra == nil {
+			continue
+		}
+		id := strings.TrimSpace(extra.ID)
+		if id == "" {
+			continue
+		}
+		key := strings.ToLower(id)
+		if _, exists := extraIDs[key]; exists {
+			continue
+		}
+		extraIDs[key] = struct{}{}
+		extraList = append(extraList, cloneModelInfo(extra))
+	}
+
+	if len(extraList) == 0 {
+		return models
+	}
+
+	filtered := make([]*ModelInfo, 0, len(models)+len(extraList))
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		id := strings.TrimSpace(model.ID)
+		if id == "" {
+			continue
+		}
+		if _, exists := extraIDs[strings.ToLower(id)]; exists {
+			continue
+		}
+		filtered = append(filtered, model)
+	}
+
+	filtered = append(filtered, extraList...)
+	return filtered
+}
+
 // cloneModelInfos returns a shallow copy of the slice with each element deep-cloned.
 func cloneModelInfos(models []*ModelInfo) []*ModelInfo {
 	if len(models) == 0 {
@@ -606,6 +737,7 @@ func cloneModelInfos(models []*ModelInfo) []*ModelInfo {
 //   - amazonq
 //   - antigravity (returns static overrides only)
 //   - bt (BaoTa Panel; dynamically fetched with static fallbacks)
+//   - xai
 func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 	key := strings.ToLower(strings.TrimSpace(channel))
 	switch key {
@@ -647,6 +779,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetCodeArtsModels()
 	case "gitlab":
 		return GetGitlabModels()
+	case "xai", "x-ai", "grok":
+		return GetXAIModels()
 	default:
 		return nil
 	}
@@ -705,6 +839,25 @@ func GetCursorModels() []*ModelInfo {
 	}
 }
 
+func GetGLMStaticModels() []*ModelInfo {
+	now := int64(1748044800)
+	return []*ModelInfo{
+		{
+			ID:                  "glm-4.6",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "zhipu",
+			Type:                "glm",
+			DisplayName:         "GLM-4.6",
+			Description:         "GLM-4.6 static model definition",
+			ContextLength:       128000,
+			MaxCompletionTokens: 32768,
+			SupportedEndpoints:  []string{"/chat/completions"},
+			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
+		},
+	}
+}
+
 // LookupStaticModelInfo searches all static model definitions for a model by ID.
 // Returns nil if no matching model is found.
 func LookupStaticModelInfo(modelID string) *ModelInfo {
@@ -730,8 +883,10 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		GetCodeBuddyModels(),
 		GetCodeBuddyAIModels(),
 		GetCodeArtsModels(),
+		GetGLMStaticModels(),
 		GetGitlabModels(),
 		GetCursorModels(),
+		data.XAI,
 	}
 	for _, models := range allModels {
 		for _, m := range models {

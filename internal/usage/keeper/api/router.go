@@ -14,12 +14,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/poller"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/quota"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/service"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/updatecheck"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/version"
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/poller"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/quota"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/service"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/updatecheck"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/version"
 )
 
 const appBasePathPlaceholder = "__APP_BASE_PATH__"
