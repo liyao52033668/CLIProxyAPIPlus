@@ -9,9 +9,9 @@ import (
 	"testing/fstest"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/poller"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/version"
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/poller"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/version"
 )
 
 func testStaticFS(t *testing.T, files map[string]string) fs.FS {

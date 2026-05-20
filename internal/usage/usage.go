@@ -4,12 +4,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/cpa"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/entities"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/repository"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/repository/dto"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/service"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/cpa"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/entities"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/repository"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/repository/dto"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/service"
 	"gorm.io/gorm"
 )
 

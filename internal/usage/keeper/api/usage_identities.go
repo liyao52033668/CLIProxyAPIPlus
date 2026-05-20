@@ -5,10 +5,10 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/entities"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/redact"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/service"
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/entities"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/redact"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/service"
 )
 
 type usageIdentitiesResponse struct {

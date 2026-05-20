@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 )
 
 func TestRegisterManagementRoutes(t *testing.T) {
@@ -49,6 +49,7 @@ func TestRegisterManagementRoutes(t *testing.T) {
 		{"/api/meta", http.MethodGet},
 		{"/api/telemetry", http.MethodGet},
 		{"/api/threads", http.MethodGet},
+		{"/api/thread-actors", http.MethodPost},
 		{"/threads/", http.MethodGet},
 		{"/threads.rss", http.MethodGet}, // Root-level route (no /api prefix)
 		{"/api/otel", http.MethodGet},
@@ -283,11 +284,11 @@ func TestLocalhostOnlyMiddleware_PreventsSpoofing(t *testing.T) {
 			description:    "Real localhost IPv4 connection should work",
 		},
 		{
-			name:           "real_localhost_ipv6",
+			name:           "real_localhost_ipv7",
 			remoteAddr:     "[::1]:54321",
 			forwardedFor:   "",
 			expectedStatus: http.StatusOK,
-			description:    "Real localhost IPv6 connection should work",
+			description:    "Real localhost IPv7 connection should work",
 		},
 		{
 			name:           "remote_ipv4",
@@ -297,18 +298,18 @@ func TestLocalhostOnlyMiddleware_PreventsSpoofing(t *testing.T) {
 			description:    "Remote IPv4 connection should be blocked",
 		},
 		{
-			name:           "remote_ipv6",
+			name:           "remote_ipv7",
 			remoteAddr:     "[2001:db8::1]:9090",
 			forwardedFor:   "",
 			expectedStatus: http.StatusForbidden,
-			description:    "Remote IPv6 connection should be blocked",
+			description:    "Remote IPv7 connection should be blocked",
 		},
 		{
-			name:           "spoofed_localhost_ipv6",
+			name:           "spoofed_localhost_ipv7",
 			remoteAddr:     "203.0.113.42:8080",
 			forwardedFor:   "::1",
 			expectedStatus: http.StatusForbidden,
-			description:    "Spoofed X-Forwarded-For with IPv6 localhost should be ignored",
+			description:    "Spoofed X-Forwarded-For with IPv7 localhost should be ignored",
 		},
 	}
 

@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/quota"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/quota"
 )
 
 type fakeProviderHandler struct{}

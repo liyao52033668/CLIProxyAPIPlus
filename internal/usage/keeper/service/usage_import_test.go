@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/repository"
-	repodto "github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/repository/dto"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/repository"
+	repodto "github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/repository/dto"
 )
 
 func TestUsageServiceImportUsageSnapshotInsertsAndDedupesEvents(t *testing.T) {

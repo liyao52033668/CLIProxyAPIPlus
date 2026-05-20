@@ -1,15 +1,16 @@
 package repository
 
 import (
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/repository/dto"
 	"math"
 	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/entities"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/repository/dto"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/entities"
 )
 
 func withRepositoryTestLocation(t *testing.T, name string) {

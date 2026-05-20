@@ -4,10 +4,10 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/redact"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/service"
-	servicedto "github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/service/dto"
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/redact"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/service"
+	servicedto "github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/service/dto"
 )
 
 type usageAnalysisResponse struct {

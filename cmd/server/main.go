@@ -18,25 +18,27 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
-	configaccess "github.com/router-for-me/CLIProxyAPI/v6/internal/access/config_access"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/cmd"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/store"
-	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/tui"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
-	usageconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/config"
-	usagerepository "github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/repository"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	configaccess "github.com/router-for-me/CLIProxyAPI/v7/internal/access/config_access"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/cmd"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
+	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/tui"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
+	usageconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/config"
+	usagerepository "github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/repository"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 	"gorm.io/gorm"
 )
@@ -47,12 +49,15 @@ var (
 	BuildDate         = "unknown"
 	DefaultConfigPath = ""
 
+	resolveRuntimeAuthDir = util.ResolveAuthDir
+
 	openRuntimeSQLiteUsageDatabase = func(path string) (*gorm.DB, error) {
 		return usage.InitUsageDB(usage.DBConfig{Path: path})
 	}
 	openRuntimePostgresUsageDatabase = func(dsn string) (*gorm.DB, error) {
 		return usagerepository.OpenPostgresDatabase(usageconfig.Config{PostgresDSN: dsn})
 	}
+	initializeRuntimeUsageDatabase = initializeUsageDatabase
 )
 
 // pgUsagePersister adapts PostgresStore to usage.UsagePersister.
@@ -215,6 +220,22 @@ func initializeUsageDatabase(dataDir string, usePostgresStore bool, pgStoreDSN s
 	return openRuntimeSQLiteUsageDatabase(usageDBPath)
 }
 
+func prepareRuntimeAuthDirAndUsageDatabase(cfg *config.Config, usePostgresStore bool, pgStoreDSN string, useGitStore bool, gitStoreInst *store.GitTokenStore, useObjectStore bool, objectStoreInst *store.ObjectTokenStore) (*gorm.DB, bool, error) {
+	resolvedAuthDir, err := resolveRuntimeAuthDir(cfg.AuthDir)
+	if err != nil {
+		return nil, false, err
+	}
+	cfg.AuthDir = resolvedAuthDir
+	if !cfg.UsageStatisticsEnabled {
+		return nil, true, nil
+	}
+	usageDB, err := initializeRuntimeUsageDatabase(cfg.AuthDir, usePostgresStore, pgStoreDSN, useGitStore, gitStoreInst, useObjectStore, objectStoreInst)
+	if err != nil {
+		return nil, true, err
+	}
+	return usageDB, true, nil
+}
+
 // setKiroIncognitoMode sets the incognito browser mode for Kiro authentication.
 // Kiro defaults to incognito mode for multi-account support.
 // Users can explicitly override with --incognito or --no-incognito flags.
@@ -265,11 +286,14 @@ func main() {
 	var qoderLogin bool
 	var codeartsLogin bool
 	var joycodeLogin bool
+	var xaiLogin bool
 	var projectID string
 	var vertexImport string
 	var vertexImportPrefix string
 	var configPath string
 	var password string
+	var homeJWT string
+	var homeDisableClusterDiscovery bool
 	var tuiMode bool
 	var standalone bool
 	var noIncognito bool
@@ -309,11 +333,14 @@ func main() {
 	flag.BoolVar(&qoderLogin, "qoder-login", false, "Login to Qoder using PKCE browser flow")
 	flag.BoolVar(&codeartsLogin, "codearts-login", false, "Login to HuaweiCloud CodeArts using OAuth")
 	flag.BoolVar(&joycodeLogin, "joycode-login", false, "Login to JoyCode using OAuth")
+	flag.BoolVar(&xaiLogin, "xai-login", false, "Login to xAI using OAuth")
 	flag.StringVar(&projectID, "project_id", "", "Project ID (Gemini only, not required)")
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
 	flag.StringVar(&vertexImportPrefix, "vertex-import-prefix", "", "Prefix for Vertex model namespacing (use with -vertex-import)")
 	flag.StringVar(&password, "password", "", "")
+	flag.StringVar(&homeJWT, "home-jwt", "", "Home control plane JWT for mTLS certificate bootstrap and connection")
+	flag.BoolVar(&homeDisableClusterDiscovery, "home-disable-cluster-discovery", false, "Disable Home CLUSTER NODES discovery and keep using the configured -home-jwt address")
 	flag.BoolVar(&tuiMode, "tui", false, "Start with terminal management UI")
 	flag.BoolVar(&standalone, "standalone", false, "In TUI mode, start an embedded local server")
 	flag.BoolVar(&localModel, "local-model", false, "Use embedded model catalog only, skip remote model fetching")
@@ -352,6 +379,7 @@ func main() {
 	var err error
 	var cfg *config.Config
 	var isCloudDeploy bool
+	var configLoadedFromHome bool
 	var (
 		usePostgresStore     bool
 		pgStoreDSN           string
@@ -399,6 +427,13 @@ func main() {
 		return "", false
 	}
 	writableBase := util.WritablePath()
+
+	if strings.TrimSpace(homeJWT) == "" {
+		if v, ok := lookupEnv("HOME_JWT", "home_jwt"); ok {
+			homeJWT = v
+		}
+	}
+
 	if value, ok := lookupEnv("PGSTORE_DSN", "pgstore_dsn"); ok {
 		usePostgresStore = true
 		pgStoreDSN = value
@@ -462,7 +497,55 @@ func main() {
 	// Determine and load the configuration file.
 	// Prefer the Postgres store when configured, otherwise fallback to git or local files.
 	var configFilePath string
-	if usePostgresStore {
+	if strings.TrimSpace(homeJWT) != "" {
+		configLoadedFromHome = true
+		ctxHome, cancelHome := context.WithTimeout(context.Background(), 30*time.Second)
+		homeCfg, errHomeCfg := home.ConfigFromJWT(ctxHome, homeJWT)
+		cancelHome()
+		if errHomeCfg != nil {
+			log.Errorf("invalid -home-jwt: %v", errHomeCfg)
+			return
+		}
+		if homeDisableClusterDiscovery {
+			homeCfg.DisableClusterDiscovery = true
+		}
+		homeClient := home.New(homeCfg)
+		defer homeClient.Close()
+
+		ctxHomeConfig, cancelHomeConfig := context.WithTimeout(context.Background(), 30*time.Second)
+		raw, errGetConfig := homeClient.GetConfig(ctxHomeConfig)
+		cancelHomeConfig()
+		if errGetConfig != nil {
+			log.Errorf("failed to fetch config from home: %v", errGetConfig)
+			return
+		}
+
+		parsed, errParseConfig := config.ParseConfigBytes(raw)
+		if errParseConfig != nil {
+			log.Errorf("failed to parse config payload from home: %v", errParseConfig)
+			return
+		}
+		if parsed == nil {
+			parsed = &config.Config{}
+		}
+		parsed.Home = homeCfg
+		parsed.Port = 8317 // Default to 8317 for home mode, can be overridden by home config
+		parsed.UsageStatisticsEnabled = true
+		cfg = parsed
+
+		// Keep a non-empty config path for downstream components (log paths, management assets, etc),
+		// but do not require the file to exist when loading config from home.
+		if strings.TrimSpace(configPath) != "" {
+			configFilePath = configPath
+		} else {
+			configFilePath = filepath.Join(wd, "config.yaml")
+		}
+
+		// Local stores are intentionally disabled when config is loaded from home.
+		usePostgresStore = false
+		useObjectStore = false
+		useGitStore = false
+	} else if usePostgresStore {
 		if pgStoreLocalPath == "" {
 			pgStoreLocalPath = wd
 		}
@@ -628,35 +711,46 @@ func main() {
 	// In cloud deploy mode, check if we have a valid configuration
 	var configFileExists bool
 	if isCloudDeploy {
-		if info, errStat := os.Stat(configFilePath); errStat != nil {
-			// Don't mislead: API server will not start until configuration is provided.
-			log.Info("Cloud deploy mode: No configuration file detected; standing by for configuration")
-			configFileExists = false
-		} else if info.IsDir() {
-			log.Info("Cloud deploy mode: Config path is a directory; standing by for configuration")
-			configFileExists = false
-		} else if cfg.Port == 0 {
-			// LoadConfigOptional returns empty config when file is empty or invalid.
-			// Config file exists but is empty or invalid; treat as missing config
-			log.Info("Cloud deploy mode: Configuration file is empty or invalid; standing by for valid configuration")
-			configFileExists = false
+		if configLoadedFromHome && cfg != nil {
+			configFileExists = cfg.Port != 0
 		} else {
-			log.Info("Cloud deploy mode: Configuration file detected; starting service")
-			configFileExists = true
+			if info, errStat := os.Stat(configFilePath); errStat != nil {
+				// Don't mislead: API server will not start until configuration is provided.
+				log.Info("Cloud deploy mode: No configuration file detected; standing by for configuration")
+				configFileExists = false
+			} else if info.IsDir() {
+				log.Info("Cloud deploy mode: Config path is a directory; standing by for configuration")
+				configFileExists = false
+			} else if cfg.Port == 0 {
+				// LoadConfigOptional returns empty config when file is empty or invalid.
+				// Config file exists but is empty or invalid; treat as missing config
+				log.Info("Cloud deploy mode: Configuration file is empty or invalid; standing by for valid configuration")
+				configFileExists = false
+			} else {
+				log.Info("Cloud deploy mode: Configuration file detected; starting service")
+				configFileExists = true
+			}
 		}
 	}
-	if cfg.UsageStatisticsEnabled {
+
+	usageDB, authDirResolved, errUsage := prepareRuntimeAuthDirAndUsageDatabase(cfg, usePostgresStore, pgStoreDSN, useGitStore, gitStoreInst, useObjectStore, objectStoreInst)
+	if errUsage != nil {
+		if authDirResolved {
+			log.WithError(errUsage).Error("failed to init usage database")
+		} else {
+			log.Errorf("failed to resolve auth directory: %v", errUsage)
+			return
+		}
+	} else if cfg.UsageStatisticsEnabled && usageDB != nil {
 		usage.SetStatisticsEnabled(cfg.UsageStatisticsEnabled)
-		usageDB, err := initializeUsageDatabase(cfg.AuthDir, usePostgresStore, pgStoreDSN, useGitStore, gitStoreInst, useObjectStore, objectStoreInst)
-		if err != nil {
-			log.WithError(err).Error("failed to init usage database")
-		} else {
-			persister := usage.NewDBUsagePersister(usageDB)
-			usage.StartPersistence(persister, 0)
-			coreusage.SetDefaultManagerDB(usageDB)
-			log.Info("usage database initialized")
-		}
+		persister := usage.NewDBUsagePersister(usageDB)
+		usage.StartPersistence(persister, 0)
+		coreusage.SetDefaultManagerDB(usageDB)
+		log.Info("usage database initialized")
 	}
+	usage.SetStatisticsEnabled(cfg.UsageStatisticsEnabled)
+	redisqueue.SetUsageStatisticsEnabled(cfg.UsageStatisticsEnabled)
+	redisqueue.SetRetentionSeconds(cfg.RedisUsageQueueRetentionSeconds)
 	coreauth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 
 	if err = logging.ConfigureLogOutput(cfg); err != nil {
@@ -668,13 +762,6 @@ func main() {
 
 	// Set the log level based on the configuration.
 	util.SetLogLevel(cfg)
-
-	if resolvedAuthDir, errResolveAuthDir := util.ResolveAuthDir(cfg.AuthDir); errResolveAuthDir != nil {
-		log.Errorf("failed to resolve auth directory: %v", errResolveAuthDir)
-		return
-	} else {
-		cfg.AuthDir = resolvedAuthDir
-	}
 	managementasset.SetCurrentConfig(cfg)
 
 	// Create login options to be used in authentication flows.
@@ -739,28 +826,18 @@ func main() {
 	} else if cursorLogin {
 		cmd.DoCursorLogin(cfg, options)
 	} else if kiroLogin {
-		// For Kiro auth, default to incognito mode for multi-account support
-		// Users can explicitly override with --no-incognito
-		// Note: This config mutation is safe - auth commands exit after completion
-		// and don't share config with StartService (which is in the else branch)
 		setKiroIncognitoMode(cfg, useIncognito, noIncognito)
 		kiro.InitFingerprintConfig(cfg)
 		cmd.DoKiroLogin(cfg, options)
 	} else if kiroGoogleLogin {
-		// For Kiro auth, default to incognito mode for multi-account support
-		// Users can explicitly override with --no-incognito
-		// Note: This config mutation is safe - auth commands exit after completion
 		setKiroIncognitoMode(cfg, useIncognito, noIncognito)
 		kiro.InitFingerprintConfig(cfg)
 		cmd.DoKiroGoogleLogin(cfg, options)
 	} else if kiroAWSLogin {
-		// For Kiro auth, default to incognito mode for multi-account support
-		// Users can explicitly override with --no-incognito
 		setKiroIncognitoMode(cfg, useIncognito, noIncognito)
 		kiro.InitFingerprintConfig(cfg)
 		cmd.DoKiroAWSLogin(cfg, options)
 	} else if kiroAWSAuthCode {
-		// For Kiro auth with authorization code flow (better UX)
 		setKiroIncognitoMode(cfg, useIncognito, noIncognito)
 		kiro.InitFingerprintConfig(cfg)
 		cmd.DoKiroAWSAuthCodeLogin(cfg, options)
@@ -768,7 +845,6 @@ func main() {
 		kiro.InitFingerprintConfig(cfg)
 		cmd.DoKiroImport(cfg, options)
 	} else if kiroIDCLogin {
-		// For Kiro IDC auth, default to incognito mode for multi-account support
 		setKiroIncognitoMode(cfg, useIncognito, noIncognito)
 		kiro.InitFingerprintConfig(cfg)
 		cmd.DoKiroIDCLogin(cfg, options, kiroIDCStartURL, kiroIDCRegion, kiroIDCFlow)
@@ -780,6 +856,8 @@ func main() {
 		cmd.DoCodeArtsLogin(cfg, options)
 	} else if joycodeLogin {
 		cmd.DoJoyCodeLogin(cfg, options)
+	} else if xaiLogin {
+		cmd.DoXAILogin(cfg, options)
 	} else {
 		// In cloud deploy mode without config file, just wait for shutdown signals
 		if isCloudDeploy && !configFileExists {
@@ -795,8 +873,10 @@ func main() {
 				// Standalone mode: start an embedded local server and connect TUI client to it.
 				managementasset.StartAutoUpdater(context.Background(), configFilePath)
 				misc.StartAntigravityVersionUpdater(context.Background())
-				if !localModel {
+				if !localModel && !cfg.Home.Enabled {
 					registry.StartModelsUpdater(context.Background())
+				} else if cfg.Home.Enabled {
+					log.Info("Home mode: remote model updates disabled")
 				}
 				hook := tui.NewLogHook(2000)
 				hook.SetFormatter(&logging.LogFormatter{})
@@ -871,8 +951,10 @@ func main() {
 			// Start the main proxy service
 			managementasset.StartAutoUpdater(context.Background(), configFilePath)
 			misc.StartAntigravityVersionUpdater(context.Background())
-			if !localModel {
+			if !localModel && !cfg.Home.Enabled {
 				registry.StartModelsUpdater(context.Background())
+			} else if cfg.Home.Enabled {
+				log.Info("Home mode: remote model updates disabled")
 			}
 
 			if cfg.AuthDir != "" {

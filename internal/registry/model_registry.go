@@ -11,9 +11,12 @@ import (
 	"sync"
 	"time"
 
-	misc "github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	misc "github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	log "github.com/sirupsen/logrus"
 )
+
+// OpenAIImageModelType marks models that are callable through OpenAI-compatible image endpoints.
+const OpenAIImageModelType = "openai-image"
 
 // ModelInfo represents information about an available model
 type ModelInfo struct {
@@ -1395,6 +1398,26 @@ func (r *ModelRegistry) GetFirstAvailableModelExcluding(handlerType string, excl
 	}
 	if len(filteredIndexes) == 0 {
 		return "", fmt.Errorf("no available clients for any model in handler type: %s", handlerType)
+	}
+	if strings.TrimSpace(handlerType) == "" {
+		sort.Slice(filteredIndexes, func(i, j int) bool {
+			leftModel := models[filteredIndexes[i]]
+			rightModel := models[filteredIndexes[j]]
+			leftCreated, _ := leftModel["created"].(int64)
+			rightCreated, _ := rightModel["created"].(int64)
+			if leftCreated != rightCreated {
+				return leftCreated > rightCreated
+			}
+			leftID, _ := modelIDFromMap(leftModel)
+			rightID, _ := modelIDFromMap(rightModel)
+			return leftID < rightID
+		})
+		modelID, ok := modelIDFromMap(models[filteredIndexes[0]])
+		if !ok {
+			return "", fmt.Errorf("no available clients for any model in handler type: %s", handlerType)
+		}
+		r.incrementSelectionCountLocked(modelID)
+		return modelID, nil
 	}
 
 	// Initialize sticky state map if needed

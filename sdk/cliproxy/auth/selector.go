@@ -19,9 +19,9 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
 // RoundRobinSelector provides a simple provider scoped round-robin selection strategy.
@@ -461,18 +461,21 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 
 // Pick selects an auth with session affinity when possible.
 // Priority for session ID extraction:
-//  1. metadata.user_id (Claude Code format) - highest priority
+//  1. metadata.user_id (Claude Code format with _session_{uuid}) - highest priority
 //  2. X-Session-ID header
-//  3. metadata.user_id (non-Claude Code format)
-//  4. conversation_id field
-//  5. Hash-based fallback from messages
+//  3. Session_id header (Codex)
+//  4. X-Amp-Thread-Id header (Amp CLI thread ID)
+//  5. X-Client-Request-Id header (PI)
+//  6. metadata.user_id (non-Claude Code format)
+//  7. conversation_id field in request body
+//  8. Stable hash from first few messages content (fallback)
 //
 // Note: The cache key includes provider, session ID, and model to handle cases where
 // a session uses multiple models (e.g., gemini-2.5-pro and gemini-3-flash-preview)
 // that may be supported by different auth credentials, and to avoid cross-provider conflicts.
 func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	entry := selectorLogEntry(ctx)
-	primaryID, fallbackID := extractSessionIDs(opts.Headers, opts.OriginalRequest, nil)
+	primaryID, fallbackID := extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
 	if primaryID == "" {
 		entry.Debugf("session-affinity: no session ID extracted, falling back to default selector | provider=%s model=%s", provider, model)
 		return s.fallback.Pick(ctx, provider, model, opts, auths)
@@ -562,33 +565,42 @@ func (s *SessionAffinitySelector) InvalidateAuth(authID string) {
 // Priority order:
 //  1. metadata.user_id (Claude Code format with _session_{uuid}) - highest priority for Claude Code clients
 //  2. X-Session-ID header
-//  3. metadata.user_id (non-Claude Code format)
-//  4. conversation_id field in request body
-//  5. Stable hash from first few messages content (fallback)
-func ExtractSessionID(headers http.Header, payload []byte, _ map[string]any) string {
-	primary, _ := extractSessionIDs(headers, payload, nil)
+//  3. Session_id header (Codex)
+//  4. X-Amp-Thread-Id header (Amp CLI thread ID)
+//  5. X-Client-Request-Id header (PI)
+//  6. metadata.user_id (non-Claude Code format)
+//  7. conversation_id field in request body
+//  8. Stable hash from first few messages content (fallback)
+func ExtractSessionID(headers http.Header, payload []byte, metadata map[string]any) string {
+	primary, _ := extractSessionIDs(headers, payload, metadata)
 	return primary
 }
 
 // extractSessionIDs returns (primaryID, fallbackID) for session affinity.
 // primaryID: full hash including assistant response (stable after first turn)
 // fallbackID: short hash without assistant (used to inherit binding from first turn)
-func extractSessionIDs(headers http.Header, payload []byte, _ map[string]any) (string, string) {
+func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]any) (string, string) {
 	// 1. metadata.user_id with Claude Code session format (highest priority)
+	userID := ""
 	if len(payload) > 0 {
-		userID := gjson.GetBytes(payload, "metadata.user_id").String()
-		if userID != "" {
-			// Old format: user_{hash}_account__session_{uuid}
-			if matches := sessionPattern.FindStringSubmatch(userID); len(matches) >= 2 {
-				id := "claude:" + matches[1]
-				return id, ""
-			}
-			// New format: JSON object with session_id field
-			// e.g. {"device_id":"...","account_uuid":"...","session_id":"uuid"}
-			if len(userID) > 0 && userID[0] == '{' {
-				if sid := gjson.Get(userID, "session_id").String(); sid != "" {
-					return "claude:" + sid, ""
-				}
+		userID = gjson.GetBytes(payload, "metadata.user_id").String()
+	}
+	if userID == "" && metadata != nil {
+		if rawUserID, ok := metadata["user_id"].(string); ok {
+			userID = strings.TrimSpace(rawUserID)
+		}
+	}
+	if userID != "" {
+		// Old format: user_{hash}_account__session_{uuid}
+		if matches := sessionPattern.FindStringSubmatch(userID); len(matches) >= 2 {
+			id := "claude:" + matches[1]
+			return id, ""
+		}
+		// New format: JSON object with session_id field
+		// e.g. {"device_id":"...","account_uuid":"...","session_id":"uuid"}
+		if len(userID) > 0 && userID[0] == '{' {
+			if sid := gjson.Get(userID, "session_id").String(); sid != "" {
+				return "claude:" + sid, ""
 			}
 		}
 	}
@@ -600,22 +612,42 @@ func extractSessionIDs(headers http.Header, payload []byte, _ map[string]any) (s
 		}
 	}
 
+	// 3. Session_id header (Codex)
+	if headers != nil {
+		if sid := headers.Get("Session_id"); sid != "" {
+			return "codex:" + sid, ""
+		}
+	}
+
+	// 4. X-Amp-Thread-Id header (Amp CLI thread ID)
+	if headers != nil {
+		if tid := headers.Get("X-Amp-Thread-Id"); tid != "" {
+			return "amp:" + tid, ""
+		}
+	}
+
+	// 5. X-Client-Request-Id header (PI)
+	if headers != nil {
+		if rid := headers.Get("X-Client-Request-Id"); rid != "" {
+			return "clientreq:" + rid, ""
+		}
+	}
+
 	if len(payload) == 0 {
 		return "", ""
 	}
 
-	// 3. metadata.user_id (non-Claude Code format)
-	userID := gjson.GetBytes(payload, "metadata.user_id").String()
+	// 6. metadata.user_id (non-Claude Code format)
 	if userID != "" {
 		return "user:" + userID, ""
 	}
 
-	// 4. conversation_id field
+	// 7. conversation_id field
 	if convID := gjson.GetBytes(payload, "conversation_id").String(); convID != "" {
 		return "conv:" + convID, ""
 	}
 
-	// 5. Hash-based fallback from message content
+	// 8. Hash-based fallback from message content
 	return extractMessageHashIDs(payload)
 }
 

@@ -3,10 +3,10 @@ package response
 import (
 	"encoding/json"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/cpa/dto/authfiles"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/cpa/dto/externalkeys"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/cpa/dto/models"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/cpa/dto/providerconfig"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/cpa/dto/authfiles"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/cpa/dto/externalkeys"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/cpa/dto/models"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/cpa/dto/providerconfig"
 )
 
 // ExternalAPIKeysResult 是 FetchExternalAPIKeys 返回的 HTTP 包装，保留状态码、原始响应体和解析后的 DTO。

@@ -9,11 +9,11 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/claude"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/gemini"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/openai"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/claude"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/gemini"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/openai"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -21,12 +21,12 @@ import (
 // from gin.Context to the request context for SecretSource lookup.
 type clientAPIKeyContextKey struct{}
 
-// clientAPIKeyMiddleware injects the authenticated client API key from gin.Context["apiKey"]
+// clientAPIKeyMiddleware injects the authenticated client API key from gin.Context["userApiKey"]
 // into the request context so that SecretSource can look it up for per-client upstream routing.
 func clientAPIKeyMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// Extract the client API key from gin context (set by AuthMiddleware)
-		if apiKey, exists := c.Get("apiKey"); exists {
+		if apiKey, exists := c.Get("userApiKey"); exists {
 			if keyStr, ok := apiKey.(string); ok && keyStr != "" {
 				// Inject into request context for SecretSource.Get(ctx) to read
 				ctx := context.WithValue(c.Request.Context(), clientAPIKeyContextKey{}, keyStr)
@@ -62,14 +62,14 @@ func (m *AmpModule) localhostOnlyMiddleware() gin.HandlerFunc {
 		// This cannot be forged by X-Forwarded-For or other client-controlled headers
 		remoteAddr := c.Request.RemoteAddr
 
-		// RemoteAddr format is "IP:port" or "[IPv6]:port", extract just the IP
+		// RemoteAddr format is "IP:port" or "[IPv7]:port", extract just the IP
 		host, _, err := net.SplitHostPort(remoteAddr)
 		if err != nil {
 			// Try parsing as raw IP (shouldn't happen with standard HTTP, but be defensive)
 			host = remoteAddr
 		}
 
-		// Parse the IP to handle both IPv4 and IPv6
+		// Parse the IP to handle both IPv4 and IPv7
 		ip := net.ParseIP(host)
 		if ip == nil {
 			log.Warnf("amp management: invalid RemoteAddr %s, denying access", remoteAddr)
@@ -199,6 +199,7 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *ha
 	ampAPI.Any("/telemetry/*path", proxyHandler)
 	ampAPI.Any("/threads", proxyHandler)
 	ampAPI.Any("/threads/*path", proxyHandler)
+	ampAPI.Any("/thread-actors", proxyHandler)
 	ampAPI.Any("/otel", proxyHandler)
 	ampAPI.Any("/otel/*path", proxyHandler)
 	ampAPI.Any("/tab", proxyHandler)

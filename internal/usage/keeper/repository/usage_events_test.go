@@ -1,13 +1,14 @@
 package repository
 
 import (
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/repository/dto"
 	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage/keeper/entities"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/repository/dto"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/entities"
 )
 
 func TestListUsageEventsWithFilterAppliesTimeBoundsAndPagination(t *testing.T) {

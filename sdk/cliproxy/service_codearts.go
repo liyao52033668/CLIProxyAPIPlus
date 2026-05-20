@@ -3,7 +3,7 @@ package cliproxy
 import (
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 )
 
 // getCodeArtsModels returns the hardcoded list of CodeArts models.
