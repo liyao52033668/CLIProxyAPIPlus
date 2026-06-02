@@ -3,7 +3,9 @@ package management
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -456,6 +458,7 @@ func (h *Handler) PutOpenAICompat(c *gin.Context) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	filtered = applyOpenAICompatibilityUpdatedAt(h.cfg.OpenAICompatibility, filtered, time.Now().UTC())
 	h.cfg.OpenAICompatibility = filtered
 	h.cfg.SanitizeOpenAICompatibility()
 	h.persistLocked(c)
@@ -530,6 +533,8 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 		entry.Headers = config.NormalizeHeaders(*body.Value.Headers)
 	}
 	normalizeOpenAICompatibilityEntry(&entry)
+	now := time.Now().UTC()
+	entry.UpdatedAt = &now
 	h.cfg.OpenAICompatibility[targetIndex] = entry
 	h.cfg.SanitizeOpenAICompatibility()
 	h.persistLocked(c)
@@ -1129,6 +1134,26 @@ func normalizedOpenAICompatibilityEntries(entries []config.OpenAICompatibility) 
 		out[i] = copyEntry
 	}
 	return out
+}
+
+func applyOpenAICompatibilityUpdatedAt(previous, next []config.OpenAICompatibility, now time.Time) []config.OpenAICompatibility {
+	result := make([]config.OpenAICompatibility, len(next))
+	copy(result, next)
+	for i := range result {
+		if i < len(previous) && openAICompatibilityEqualIgnoringUpdatedAt(previous[i], result[i]) {
+			result[i].UpdatedAt = previous[i].UpdatedAt
+			continue
+		}
+		updatedAt := now
+		result[i].UpdatedAt = &updatedAt
+	}
+	return result
+}
+
+func openAICompatibilityEqualIgnoringUpdatedAt(left, right config.OpenAICompatibility) bool {
+	left.UpdatedAt = nil
+	right.UpdatedAt = nil
+	return reflect.DeepEqual(left, right)
 }
 
 func normalizeClaudeKey(entry *config.ClaudeKey) {

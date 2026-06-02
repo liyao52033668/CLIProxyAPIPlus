@@ -59,6 +59,7 @@ GEMINI.md
 _bmad/*
 _bmad-output/*
 .mcp/cache/
+.codegraph/*
 
 # macOS
 .DS_Store

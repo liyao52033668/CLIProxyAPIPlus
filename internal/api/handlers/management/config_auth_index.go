@@ -3,6 +3,7 @@ package management
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
@@ -37,6 +38,7 @@ type openAICompatibilityWithAuthIndex struct {
 	Name          string                                   `json:"name"`
 	Priority      int                                      `json:"priority,omitempty"`
 	Disabled      bool                                     `json:"disabled"`
+	UpdatedAt     *time.Time                               `json:"updated-at,omitempty"`
 	Prefix        string                                   `json:"prefix,omitempty"`
 	BaseURL       string                                   `json:"base-url"`
 	APIKeyEntries []openAICompatibilityAPIKeyWithAuthIndex `json:"api-key-entries,omitempty"`
@@ -217,6 +219,7 @@ func (h *Handler) openAICompatibilityWithAuthIndex() []openAICompatibilityWithAu
 			Name:      entry.Name,
 			Priority:  entry.Priority,
 			Disabled:  entry.Disabled,
+			UpdatedAt: entry.UpdatedAt,
 			Prefix:    entry.Prefix,
 			BaseURL:   entry.BaseURL,
 			Models:    entry.Models,
