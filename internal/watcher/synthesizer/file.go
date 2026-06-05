@@ -169,6 +169,23 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 			}
 		}
 	}
+	// For github-copilot auth files, extract plan_type from filename.
+	// Filename format: github-copilot-{username}-{plan}.json
+	if provider == "github-copilot" {
+		baseName := filepath.Base(fullPath)
+		nameWithoutExt := strings.TrimSuffix(baseName, ".json")
+		parts := strings.Split(nameWithoutExt, "-")
+		// Expected format: github-copilot-username-plan (minimum 4 parts)
+		if len(parts) >= 4 {
+			planType := parts[len(parts)-1]
+			if trimmed := strings.TrimSpace(planType); trimmed != "" {
+				validPlanTypes := map[string]bool{"free": true, "pro": true, "pro+": true, "max": true}
+				if validPlanTypes[trimmed] {
+					a.Attributes["plan_type"] = trimmed
+				}
+			}
+		}
+	}
 	if provider == "gemini-cli" {
 		if virtuals := SynthesizeGeminiVirtualAuths(a, metadata, now); len(virtuals) > 0 {
 			for _, v := range virtuals {

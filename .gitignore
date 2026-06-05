@@ -2,6 +2,7 @@
 /server
 *.exe
 test-output
+cli-proxy-api
 
 # Configuration
 CLIProxyAPI/*

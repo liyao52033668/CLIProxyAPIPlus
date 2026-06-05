@@ -3527,6 +3527,7 @@ func (h *Handler) RequestGitHubToken(c *gin.Context) {
 	authURL := deviceCode.VerificationURI
 	userCode := deviceCode.UserCode
 
+	RegisterOAuthSession(state, "github-copilot")
 	SetOAuthSessionError(state, "device_code|"+authURL+"|"+userCode)
 
 	go func() {
