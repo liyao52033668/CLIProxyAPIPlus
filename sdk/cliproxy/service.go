@@ -1233,7 +1233,11 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	case "github-copilot":
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		models = executor.FetchGitHubCopilotModels(ctx, a, s.cfg)
+		copilotPlanType := ""
+		if a.Attributes != nil {
+			copilotPlanType = strings.TrimSpace(a.Attributes["plan_type"])
+		}
+		models = executor.FetchGitHubCopilotModels(ctx, a, s.cfg, copilotPlanType)
 		models = applyExcludedModels(models, excluded)
 	case "kiro":
 		models = s.fetchKiroModels(a)

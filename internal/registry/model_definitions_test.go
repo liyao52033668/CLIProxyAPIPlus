@@ -1,43 +1,17 @@
 package registry
 
-import "slices"
-
-import "testing"
-
-func TestGitHubCopilotGeminiModelsAreChatOnly(t *testing.T) {
-	models := GetGitHubCopilotModels()
-	required := map[string]bool{
-		"gemini-2.5-pro":         false,
-		"gemini-3-pro-preview":   false,
-		"gemini-3.1-pro-preview": false,
-		"gemini-3-flash-preview": false,
-	}
-
-	for _, model := range models {
-		if _, ok := required[model.ID]; !ok {
-			continue
-		}
-		required[model.ID] = true
-		if len(model.SupportedEndpoints) != 1 || model.SupportedEndpoints[0] != "/chat/completions" {
-			t.Fatalf("model %q supported endpoints = %v, want [/chat/completions]", model.ID, model.SupportedEndpoints)
-		}
-	}
-
-	for modelID, found := range required {
-		if !found {
-			t.Fatalf("expected GitHub Copilot model %q in definitions", modelID)
-		}
-	}
-}
+import (
+	"slices"
+	"testing"
+)
 
 func TestGitHubCopilotClaudeModelsSupportMessages(t *testing.T) {
 	models := GetGitHubCopilotModels()
 	required := map[string]bool{
 		"claude-haiku-4.5":  false,
-		"claude-opus-4.1":   false,
-		"claude-opus-4.5":   false,
 		"claude-opus-4.6":   false,
-		"claude-sonnet-4":   false,
+		"claude-opus-4.7":   false,
+		"claude-opus-4.8":   false,
 		"claude-sonnet-4.5": false,
 		"claude-sonnet-4.6": false,
 	}
@@ -111,6 +85,98 @@ func TestWithXAIBuiltinsAddsVideoModel(t *testing.T) {
 	if !found {
 		t.Fatalf("expected %s builtin model", xaiBuiltinVideoModelID)
 	}
+}
+
+func TestGitHubCopilotTierModelsContainment(t *testing.T) {
+	tiers := map[string][]*ModelInfo{
+		"free": GetGitHubCopilotFreeModels(),
+		"pro":  GetGitHubCopilotProModels(),
+		"pro+": GetGitHubCopilotProPlusModels(),
+		"max":  GetGitHubCopilotMaxModels(),
+		"all":  GetGitHubCopilotModels(),
+	}
+
+	// Every model in a lower tier must appear in every higher tier.
+	mustContain := map[string][]string{
+		"free": {},
+		"pro": {
+			"gpt-5-mini", "claude-haiku-4.5",
+			"gpt-5.4-mini", "claude-sonnet-4.5", "claude-sonnet-4.6",
+			"gpt-5.2", "gpt-5.4", "gpt-5.3-codex",
+		},
+		"pro+": {
+			"gpt-5-mini", "claude-haiku-4.5",
+			"gpt-5.4-mini", "claude-sonnet-4.5", "claude-sonnet-4.6",
+			"gpt-5.2", "gpt-5.4", "gpt-5.3-codex",
+			"gpt-5.5", "claude-opus-4.7", "claude-opus-4.8",
+		},
+		"max": {
+			"gpt-5-mini", "claude-haiku-4.5",
+			"gpt-5.4-mini", "claude-sonnet-4.5", "claude-sonnet-4.6",
+			"gpt-5.2", "gpt-5.4", "gpt-5.3-codex",
+			"gpt-5.5", "claude-opus-4.7", "claude-opus-4.8",
+			"claude-opus-4.6",
+		},
+		"all": {
+			"gpt-5-mini", "claude-haiku-4.5",
+			"gpt-5.4-mini", "claude-sonnet-4.5", "claude-sonnet-4.6",
+			"gpt-5.2", "gpt-5.4", "gpt-5.3-codex",
+			"gpt-5.5", "claude-opus-4.7", "claude-opus-4.8",
+			"claude-opus-4.6",
+		},
+	}
+
+	for tierName, wantIDs := range mustContain {
+		t.Run(tierName+"/contains-expected", func(t *testing.T) {
+			models := tiers[tierName]
+			for _, id := range wantIDs {
+				if findModelInfo(models, id) == nil {
+					t.Fatalf("%s tier missing required model %q", tierName, id)
+				}
+			}
+		})
+	}
+
+	// Free tier must NOT include Pro+ and Max models.
+	mustExclude := map[string][]string{
+		"free": {
+			"gpt-5.4-mini", "claude-sonnet-4.5", "claude-sonnet-4.6",
+			"gpt-5.2", "gpt-5.4", "gpt-5.3-codex",
+			"gpt-5.5", "claude-opus-4.7", "claude-opus-4.8", "claude-opus-4.6",
+		},
+		"pro": {
+			"gpt-5.5", "claude-opus-4.7", "claude-opus-4.8", "claude-opus-4.6",
+		},
+		"pro+": {
+			"claude-opus-4.6",
+		},
+	}
+
+	for tierName, bannedIDs := range mustExclude {
+		t.Run(tierName+"/excludes-higher-tier", func(t *testing.T) {
+			models := tiers[tierName]
+			for _, id := range bannedIDs {
+				if findModelInfo(models, id) != nil {
+					t.Fatalf("%s tier should NOT include model %q", tierName, id)
+				}
+			}
+		})
+	}
+
+	// Returned slices must be independent copies; mutating one must not affect another.
+	t.Run("returned-slices-are-independent", func(t *testing.T) {
+		free := GetGitHubCopilotFreeModels()
+		pro := GetGitHubCopilotProModels()
+		if len(free) == 0 || len(pro) == 0 {
+			t.Fatalf("expected non-empty tier slices, got free=%d pro=%d", len(free), len(pro))
+		}
+		originalID := free[0].ID
+		free[0].ID = "mutated"
+		defer func() { free[0].ID = originalID }()
+		if findModelInfo(GetGitHubCopilotFreeModels(), originalID) == nil {
+			t.Fatal("mutating returned slice affected subsequent calls")
+		}
+	})
 }
 
 func TestValidateModelsCatalogAllowsMissingSections(t *testing.T) {

@@ -98,7 +98,7 @@ func (a GitHubCopilotAuthenticator) Login(ctx context.Context, cfg *config.Confi
 		metadata["api_token_expires_at"] = apiToken.ExpiresAt
 	}
 
-	fileName := fmt.Sprintf("github-copilot-%s.json", authBundle.Username)
+	fileName := copilot.CredentialFileName(authBundle.Username, "", true)
 
 	label := authBundle.Email
 	if label == "" {
