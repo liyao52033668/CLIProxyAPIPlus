@@ -1673,11 +1673,27 @@ func FetchGitHubCopilotModels(ctx context.Context, auth *cliproxyauth.Auth, cfg 
 		return getGitHubCopilotModelsByTier(tier)
 	}
 
-	// Build a lookup from the static definitions so we can enrich dynamic entries
-	// with known context lengths, thinking support, etc.
-	staticMap := make(map[string]*registry.ModelInfo)
-	for _, m := range getGitHubCopilotModelsByTier(tier) {
-		staticMap[m.ID] = m
+	// Get all models across all tiers (to identify high-tier exclusive models)
+	allModels := registry.GetGitHubCopilotModels()
+	allModelIDs := make(map[string]bool)
+	for _, m := range allModels {
+		allModelIDs[strings.ToLower(m.ID)] = true
+	}
+
+	// Get models available for the current tier
+	allowedModels := getGitHubCopilotModelsByTier(tier)
+	allowedModelIDs := make(map[string]bool)
+	for _, m := range allowedModels {
+		allowedModelIDs[strings.ToLower(m.ID)] = true
+	}
+
+	// Build blacklist: models that exist in static definitions but are NOT available for this tier
+	// These are the "high-tier exclusive" models that should be filtered out
+	blacklistedModelIDs := make(map[string]bool)
+	for id := range allModelIDs {
+		if !allowedModelIDs[id] {
+			blacklistedModelIDs[id] = true
+		}
 	}
 
 	now := time.Now().Unix()
@@ -1687,11 +1703,21 @@ func FetchGitHubCopilotModels(ctx context.Context, auth *cliproxyauth.Auth, cfg 
 		if entry.ID == "" {
 			continue
 		}
-		// Deduplicate model IDs to avoid incorrect reference counting.
-		if _, dup := seen[entry.ID]; dup {
+
+		entryID := strings.ToLower(entry.ID)
+
+		// Blacklist filter: only exclude models that are explicitly in static definitions
+		// AND not available for this tier. Models not in static definitions pass through.
+		if blacklistedModelIDs[entryID] {
+			log.Debugf("github-copilot: skipping model %q not available for tier %q", entry.ID, tier)
 			continue
 		}
-		seen[entry.ID] = struct{}{}
+
+		// Deduplicate model IDs to avoid incorrect reference counting.
+		if _, dup := seen[entryID]; dup {
+			continue
+		}
+		seen[entryID] = struct{}{}
 
 		m := &registry.ModelInfo{
 			ID:      entry.ID,
@@ -1710,8 +1736,15 @@ func FetchGitHubCopilotModels(ctx context.Context, auth *cliproxyauth.Auth, cfg 
 			m.DisplayName = entry.ID
 		}
 
-		// Merge known metadata from the static fallback list
-		if static, ok := staticMap[entry.ID]; ok {
+		// Merge known metadata from the static definitions
+		var static *registry.ModelInfo
+		for _, sm := range allowedModels {
+			if strings.EqualFold(sm.ID, entry.ID) {
+				static = sm
+				break
+			}
+		}
+		if static != nil {
 			if m.DisplayName == entry.ID && static.DisplayName != "" {
 				m.DisplayName = static.DisplayName
 			}
@@ -1721,7 +1754,7 @@ func FetchGitHubCopilotModels(ctx context.Context, auth *cliproxyauth.Auth, cfg 
 			m.SupportedEndpoints = static.SupportedEndpoints
 			m.Thinking = static.Thinking
 		} else {
-			// Sensible defaults for models not in the static list
+			// Use defaults for models not in static definitions
 			m.Description = entry.ID + " via GitHub Copilot"
 			m.ContextLength = defaultCopilotContextLength
 			m.MaxCompletionTokens = defaultCopilotMaxCompletionTokens
@@ -1745,6 +1778,12 @@ func FetchGitHubCopilotModels(ctx context.Context, auth *cliproxyauth.Auth, cfg 
 		models = append(models, m)
 	}
 
-	log.Infof("github-copilot: fetched %d models from API", len(models))
+	// If no models passed the whitelist filter, fall back to static models
+	if len(models) == 0 {
+		log.Warnf("github-copilot: no dynamic models matched static whitelist for tier %q, using static models", tier)
+		return getGitHubCopilotModelsByTier(tier)
+	}
+
+	log.Infof("github-copilot: fetched %d models from API (filtered by tier %q)", len(models), tier)
 	return models
 }

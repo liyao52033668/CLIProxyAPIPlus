@@ -387,7 +387,7 @@ func GetQoderModels() []*ModelInfo {
 			Description: "Qwen 3.7 Max via Qoder",
 		},
 		{
-			ID:          "qmodel",
+			ID:          "qwen3.7-plus",
 			Object:      "model",
 			Created:     now,
 			OwnedBy:     "qoder",
@@ -396,7 +396,7 @@ func GetQoderModels() []*ModelInfo {
 			Description: "Qwen 3.7 Plus via Qoder",
 		},
 		{
-			ID:          "dmodel",
+			ID:          "deepseek-v4-pro",
 			Object:      "model",
 			Created:     now,
 			OwnedBy:     "qoder",
@@ -405,7 +405,7 @@ func GetQoderModels() []*ModelInfo {
 			Description: "DeepSeek V4 Pro via Qoder",
 		},
 		{
-			ID:          "dfmodel",
+			ID:          "deepseek-v4-flash",
 			Object:      "model",
 			Created:     now,
 			OwnedBy:     "qoder",
@@ -414,7 +414,7 @@ func GetQoderModels() []*ModelInfo {
 			Description: "DeepSeek V4 Flash via Qoder",
 		},
 		{
-			ID:          "gm51model",
+			ID:          "glm-5.1",
 			Object:      "model",
 			Created:     now,
 			OwnedBy:     "qoder",
@@ -423,7 +423,7 @@ func GetQoderModels() []*ModelInfo {
 			Description: "GLM 5.1 via Qoder",
 		},
 		{
-			ID:          "kmodel",
+			ID:          "kimi-k2.6",
 			Object:      "model",
 			Created:     now,
 			OwnedBy:     "qoder",
@@ -432,7 +432,7 @@ func GetQoderModels() []*ModelInfo {
 			Description: "Kimi K2.6 via Qoder",
 		},
 		{
-			ID:          "mmodel",
+			ID:          "minimax-m3",
 			Object:      "model",
 			Created:     now,
 			OwnedBy:     "qoder",

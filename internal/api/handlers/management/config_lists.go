@@ -1239,6 +1239,12 @@ func sanitizedOAuthModelAlias(entries map[string][]config.OAuthModelAlias) map[s
 	}
 	copied := make(map[string][]config.OAuthModelAlias, len(entries))
 	for channel, aliases := range entries {
+		// Preserve nil values as "disabled" markers to prevent SanitizeOAuthModelAlias
+		// from re-injecting default aliases (fixes github-copilot/kiro delete issue)
+		if aliases == nil {
+			copied[channel] = nil
+			continue
+		}
 		if len(aliases) == 0 {
 			continue
 		}
