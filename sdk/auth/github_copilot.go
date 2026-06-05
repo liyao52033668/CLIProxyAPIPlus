@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/copilot"
@@ -31,6 +32,49 @@ func (GitHubCopilotAuthenticator) RefreshLead() *time.Duration {
 	return nil
 }
 
+// getGitHubCopilotPlanTier prompts the user to select their GitHub Copilot plan tier.
+func getGitHubCopilotPlanTier(opts *LoginOptions) string {
+	tierOptions := []string{"free", "pro", "pro+", "max"}
+
+	if opts != nil && opts.Prompt != nil {
+		// Use custom prompt function if provided
+		for {
+			selection, err := opts.Prompt("Select your GitHub Copilot plan tier (free/pro/pro+/max): ")
+			if err != nil {
+				log.Warnf("Failed to prompt for plan tier: %v", err)
+				return ""
+			}
+			selection = strings.TrimSpace(strings.ToLower(selection))
+			for _, opt := range tierOptions {
+				if selection == opt {
+					return selection
+				}
+			}
+			fmt.Printf("Invalid tier. Please choose from: %s\n", strings.Join(tierOptions, ", "))
+		}
+	}
+
+	// Fallback to interactive prompt
+	fmt.Println("\nPlease select your GitHub Copilot plan tier:")
+	for i, opt := range tierOptions {
+		fmt.Printf("%d. %s\n", i+1, opt)
+	}
+	fmt.Print("Enter your choice (1-4): ")
+
+	var choice int
+	for {
+		_, err := fmt.Scanln(&choice)
+		if err != nil {
+			fmt.Print("Please enter a number: ")
+			continue
+		}
+		if choice >= 1 && choice <= len(tierOptions) {
+			return tierOptions[choice-1]
+		}
+		fmt.Printf("Invalid choice. Please enter 1-%d: ", len(tierOptions))
+	}
+}
+
 // Login initiates the GitHub device flow authentication for Copilot access.
 func (a GitHubCopilotAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {
 	if cfg == nil {
@@ -38,6 +82,17 @@ func (a GitHubCopilotAuthenticator) Login(ctx context.Context, cfg *config.Confi
 	}
 	if opts == nil {
 		opts = &LoginOptions{}
+	}
+
+	// Get plan tier from options or prompt user
+	planTier := ""
+	if opts.Metadata != nil {
+		if t, ok := opts.Metadata["plan_type"]; ok && t != "" {
+			planTier = strings.TrimSpace(strings.ToLower(t))
+		}
+	}
+	if planTier == "" {
+		planTier = getGitHubCopilotPlanTier(opts)
 	}
 
 	authSvc := copilot.NewCopilotAuth(cfg)
@@ -92,20 +147,21 @@ func (a GitHubCopilotAuthenticator) Login(ctx context.Context, cfg *config.Confi
 		"token_type":   authBundle.TokenData.TokenType,
 		"scope":        authBundle.TokenData.Scope,
 		"timestamp":    time.Now().UnixMilli(),
+		"plan_type":    planTier,
 	}
 
 	if apiToken.ExpiresAt > 0 {
 		metadata["api_token_expires_at"] = apiToken.ExpiresAt
 	}
 
-	fileName := copilot.CredentialFileName(authBundle.Username, "", true)
+	fileName := copilot.CredentialFileName(authBundle.Username, planTier, true)
 
 	label := authBundle.Email
 	if label == "" {
 		label = authBundle.Username
 	}
 
-	fmt.Printf("\nGitHub Copilot authentication successful for user: %s\n", authBundle.Username)
+	fmt.Printf("\nGitHub Copilot authentication successful for user: %s (tier: %s)\n", authBundle.Username, planTier)
 
 	return &coreauth.Auth{
 		ID:       fileName,
