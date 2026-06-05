@@ -3542,7 +3542,7 @@ func (h *Handler) RequestGitHubToken(c *gin.Context) {
 			Type:        "github-copilot",
 		}
 
-		fileName := fmt.Sprintf("github-copilot-%s.json", username)
+		fileName := copilot.CredentialFileName(username, "", true)
 		label := userInfo.Email
 		if label == "" {
 			label = username

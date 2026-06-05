@@ -1626,19 +1626,38 @@ const (
 	defaultCopilotMaxCompletionTokens = 16384
 )
 
+// getGitHubCopilotModelsByTier returns the static model definitions filtered by plan tier.
+// If tier is empty or unrecognized, returns all available models.
+func getGitHubCopilotModelsByTier(tier string) []*registry.ModelInfo {
+	tier = strings.TrimSpace(strings.ToLower(tier))
+	switch tier {
+	case "free":
+		return registry.GetGitHubCopilotFreeModels()
+	case "pro":
+		return registry.GetGitHubCopilotProModels()
+	case "pro+", "pro-plus":
+		return registry.GetGitHubCopilotProPlusModels()
+	case "max":
+		return registry.GetGitHubCopilotMaxModels()
+	default:
+		return registry.GetGitHubCopilotModels()
+	}
+}
+
 // FetchGitHubCopilotModels dynamically fetches available models from the GitHub Copilot API.
 // It exchanges the GitHub access token stored in auth.Metadata for a Copilot API token,
 // then queries the /models endpoint. Falls back to the static registry on any failure.
-func FetchGitHubCopilotModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config) []*registry.ModelInfo {
+// The tier parameter filters models to the specified plan tier (free/pro/pro+/max).
+func FetchGitHubCopilotModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config, tier string) []*registry.ModelInfo {
 	if auth == nil {
 		log.Debug("github-copilot: auth is nil, using static models")
-		return registry.GetGitHubCopilotModels()
+		return getGitHubCopilotModelsByTier(tier)
 	}
 
 	accessToken := metaStringValue(auth.Metadata, "access_token")
 	if accessToken == "" {
 		log.Debug("github-copilot: no access_token in auth metadata, using static models")
-		return registry.GetGitHubCopilotModels()
+		return getGitHubCopilotModelsByTier(tier)
 	}
 
 	copilotAuth := copilotauth.NewCopilotAuth(cfg)
@@ -1646,18 +1665,18 @@ func FetchGitHubCopilotModels(ctx context.Context, auth *cliproxyauth.Auth, cfg 
 	entries, err := copilotAuth.ListModelsWithGitHubToken(ctx, accessToken)
 	if err != nil {
 		log.Warnf("github-copilot: failed to fetch dynamic models: %v, using static models", err)
-		return registry.GetGitHubCopilotModels()
+		return getGitHubCopilotModelsByTier(tier)
 	}
 
 	if len(entries) == 0 {
 		log.Debug("github-copilot: API returned no models, using static models")
-		return registry.GetGitHubCopilotModels()
+		return getGitHubCopilotModelsByTier(tier)
 	}
 
 	// Build a lookup from the static definitions so we can enrich dynamic entries
 	// with known context lengths, thinking support, etc.
 	staticMap := make(map[string]*registry.ModelInfo)
-	for _, m := range registry.GetGitHubCopilotModels() {
+	for _, m := range getGitHubCopilotModelsByTier(tier) {
 		staticMap[m.ID] = m
 	}
 
