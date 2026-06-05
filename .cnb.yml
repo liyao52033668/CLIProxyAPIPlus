@@ -39,10 +39,9 @@ main:
           script: |
             set -e
 
-            # 新 tag 由 auto-tag 阶段提供
-            # 优先取 NEW_TAG，如果 NEW_TAG 为空，则尝试取当前 HEAD 的精确 tag，都没有则赋空值
-            CURRENT_TAG="${NEW_TAG:-$(git tag --sort=-v:refname | grep -v "^${CURRENT_TAG}$" | head -n 1 || echo "")}"
-            # 获取上一个 tag
+            # New tag from auto-tag stage; fall back to latest tag if empty
+            CURRENT_TAG="${NEW_TAG:-$(git tag --sort=-v:refname | head -n 1 || echo "")}"
+            # Previous tag (excluding CURRENT_TAG)
             PREV_TAG=$(git tag --sort=-v:refname | grep -v "^${CURRENT_TAG}$" | head -n 1 || echo "")
 
             echo "=== Release Info ==="
@@ -50,18 +49,21 @@ main:
             echo "PREV_TAG:    ${PREV_TAG}"
 
             # Generate changelog from commit history
+            REPO_URL="https://cnb.cool/liyao52033/CLIProxyAPIPlus"
             if [ -n "${PREV_TAG}" ]; then
               RANGE="${PREV_TAG}..${CURRENT_TAG}"
             else
-              RANGE="${CURRENT_TAG}"
+              # First tag or no previous tag — limit to recent commits to avoid
+              # an unbounded changelog that exceeds ARG_MAX
+              RANGE="-1"
             fi
 
             echo "=== Changelog ==="
-            REPO_URL="https://cnb.cool/liyao52033/CLIProxyAPIPlus"
-            NOTES=$(git log ${RANGE} --pretty=format:"- [%h](${REPO_URL}/-/commit/%H) %s" --no-merges)
-            echo "${NOTES}"
+            # Write changelog directly to a file to avoid shell ARG_MAX limits
+            git log ${RANGE} --pretty=format:"- [%h](${REPO_URL}/-/commit/%H) %s" --no-merges > /tmp/changelog.txt
+            cat /tmp/changelog.txt
 
-            # 检查 Release 是否已存在
+            # Check if release already exists
             EXIST_RELEASE=$(curl --silent --fail --request GET \
               --url "${CNB_API_ENDPOINT}/liyao52033/CLIProxyAPIPlus/-/releases/tags/${CURRENT_TAG}" \
               --header "Accept: application/vnd.cnb.api+json" \
@@ -70,27 +72,27 @@ main:
             if [ -n "${EXIST_RELEASE}" ]; then
               echo "Release ${CURRENT_TAG} already exists, skip creation"
             else
-              # 使用临时文件避免 argument list too long
-              printf '%s' "${NOTES}" > /tmp/changelog.txt
-              PAYLOAD=$(jq -Rs \
+              # Build JSON payload to a file to avoid ARG_MAX when passing via curl --data
+              jq -Rs \
                 --arg tag_name "${CURRENT_TAG}" \
                 '{tag_name: $tag_name, name: $tag_name, body: ., draft: false, prerelease: false, make_latest: "true"}' \
-                /tmp/changelog.txt)
-              
+                /tmp/changelog.txt > /tmp/release_payload.json
+
+              # Use --data @file to avoid shell argument length limits
               curl --fail --silent --show-error \
                 --request POST \
                 --url "${CNB_API_ENDPOINT}/liyao52033/CLIProxyAPIPlus/-/releases" \
                 --header "Accept: application/vnd.cnb.api+json" \
                 --header "Authorization: Bearer ${CNB_TOKEN}" \
                 --header "Content-Type: application/json" \
-                --data "${PAYLOAD}"
-              
+                --data @/tmp/release_payload.json
+
               echo "✅ Release ${CURRENT_TAG} created successfully"
             fi
         - name: prepare build args
           imports: https://cnb.cool/liyao52033/envs/-/blob/main/envs.yml
           script: |
-              VERSION="${NEW_TAG:-$(git tag --sort=-v:refname | grep -v "^${CURRENT_TAG}$" | head -n 1 || echo "")}"
+              VERSION="${NEW_TAG:-$(git tag --sort=-v:refname | head -n 1 || echo "")}"
               COMMIT="${CNB_COMMIT:-$(git rev-parse --short HEAD 2>/dev/null || echo none)}"
               BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
