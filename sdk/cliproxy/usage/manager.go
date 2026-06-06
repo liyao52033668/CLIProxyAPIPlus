@@ -27,6 +27,7 @@ type Record struct {
 	Source      string
 	RequestedAt time.Time
 	Latency     time.Duration
+	TTFT        time.Duration
 	Failed      bool
 	Fail        Failure
 	Detail      Detail
@@ -52,6 +53,8 @@ type Detail struct {
 }
 
 type requestedModelAliasContextKey struct{}
+type reasoningEffortContextKey struct{}
+type serviceTierContextKey struct{}
 
 // WithRequestedModelAlias stores the client-requested model name for usage sinks.
 func WithRequestedModelAlias(ctx context.Context, alias string) context.Context {
@@ -71,6 +74,62 @@ func RequestedModelAliasFromContext(ctx context.Context) string {
 		return ""
 	}
 	raw := ctx.Value(requestedModelAliasContextKey{})
+	switch value := raw.(type) {
+	case string:
+		return strings.TrimSpace(value)
+	case []byte:
+		return strings.TrimSpace(string(value))
+	default:
+		return ""
+	}
+}
+
+// WithReasoningEffort stores the resolved reasoning effort label for usage sinks.
+func WithReasoningEffort(ctx context.Context, effort string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	effort = strings.TrimSpace(effort)
+	if effort == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, reasoningEffortContextKey{}, effort)
+}
+
+// ReasoningEffortFromContext returns the reasoning effort stored in ctx.
+func ReasoningEffortFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	raw := ctx.Value(reasoningEffortContextKey{})
+	switch value := raw.(type) {
+	case string:
+		return strings.TrimSpace(value)
+	case []byte:
+		return strings.TrimSpace(string(value))
+	default:
+		return ""
+	}
+}
+
+// WithServiceTier stores the resolved service tier label for usage sinks.
+func WithServiceTier(ctx context.Context, tier string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	tier = strings.TrimSpace(tier)
+	if tier == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, serviceTierContextKey{}, tier)
+}
+
+// ServiceTierFromContext returns the service tier stored in ctx.
+func ServiceTierFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	raw := ctx.Value(serviceTierContextKey{})
 	switch value := raw.(type) {
 	case string:
 		return strings.TrimSpace(value)

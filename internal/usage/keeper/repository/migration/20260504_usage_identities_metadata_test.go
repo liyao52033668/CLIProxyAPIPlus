@@ -2,6 +2,7 @@ package migration
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -89,5 +90,58 @@ func TestOpenDatabaseSkipsUsageIdentityMetadataMigrationWhenLegacyTablesAreMissi
 	}
 	if db.Migrator().HasTable("auth_files") || db.Migrator().HasTable("provider_metadata") {
 		t.Fatal("expected legacy metadata tables not to be recreated")
+	}
+}
+
+func TestUsageIdentityMetadataInsertSQLUsesFixedStatements(t *testing.T) {
+	testCases := []struct {
+		name             string
+		got              string
+		wantTable        string
+		wantDeletedExpr  string
+		wantDeletedValue string
+	}{
+		{
+			name:             "auth files with deleted_at",
+			got:              authFilesUsageIdentityInsertSQL(true),
+			wantTable:        "FROM auth_files",
+			wantDeletedExpr:  "deleted_at IS NOT NULL",
+			wantDeletedValue: ", deleted_at",
+		},
+		{
+			name:             "auth files without deleted_at",
+			got:              authFilesUsageIdentityInsertSQL(false),
+			wantTable:        "FROM auth_files",
+			wantDeletedExpr:  ", false,",
+			wantDeletedValue: ", NULL",
+		},
+		{
+			name:             "provider metadata with deleted_at",
+			got:              providerMetadataUsageIdentityInsertSQL(true),
+			wantTable:        "FROM provider_metadata",
+			wantDeletedExpr:  "deleted_at IS NOT NULL",
+			wantDeletedValue: ", deleted_at",
+		},
+		{
+			name:             "provider metadata without deleted_at",
+			got:              providerMetadataUsageIdentityInsertSQL(false),
+			wantTable:        "FROM provider_metadata",
+			wantDeletedExpr:  ", false,",
+			wantDeletedValue: ", NULL",
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if !strings.Contains(testCase.got, testCase.wantTable) {
+				t.Fatalf("SQL %q does not contain table marker %q", testCase.got, testCase.wantTable)
+			}
+			if !strings.Contains(testCase.got, testCase.wantDeletedExpr) {
+				t.Fatalf("SQL %q does not contain deleted expression %q", testCase.got, testCase.wantDeletedExpr)
+			}
+			if !strings.Contains(testCase.got, testCase.wantDeletedValue) {
+				t.Fatalf("SQL %q does not contain deleted value %q", testCase.got, testCase.wantDeletedValue)
+			}
+		})
 	}
 }

@@ -600,6 +600,38 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 }
 
 // Refresh refreshes the authentication credentials (no-op for Gemini CLI).
+func cleanGeminiCLIRequestSchemas(payload []byte) []byte {
+	paths := make([]string, 0)
+	root := gjson.ParseBytes(payload)
+	for toolIndex, tool := range root.Get("request.tools").Array() {
+		for declIndex, decl := range tool.Get("function_declarations").Array() {
+			if decl.Get("parameters").Exists() {
+				paths = append(paths, fmt.Sprintf("request.tools.%d.function_declarations.%d.parameters", toolIndex, declIndex))
+			}
+			if decl.Get("parametersJsonSchema").Exists() {
+				paths = append(paths, fmt.Sprintf("request.tools.%d.function_declarations.%d.parametersJsonSchema", toolIndex, declIndex))
+			}
+		}
+		for declIndex, decl := range tool.Get("functionDeclarations").Array() {
+			if decl.Get("parameters").Exists() {
+				paths = append(paths, fmt.Sprintf("request.tools.%d.functionDeclarations.%d.parameters", toolIndex, declIndex))
+			}
+			if decl.Get("parametersJsonSchema").Exists() {
+				paths = append(paths, fmt.Sprintf("request.tools.%d.functionDeclarations.%d.parametersJsonSchema", toolIndex, declIndex))
+			}
+		}
+	}
+	for _, path := range paths {
+		schema := gjson.GetBytes(payload, path)
+		if !schema.Exists() || schema.Type != gjson.JSON {
+			continue
+		}
+		cleaned := util.CleanJSONSchemaForGemini(schema.Raw)
+		payload, _ = sjson.SetRawBytes(payload, path, []byte(cleaned))
+	}
+	return payload
+}
+
 func (e *GeminiCLIExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
 	if refreshed, handled, err := helps.RefreshAuthViaHome(ctx, e.cfg, auth); handled {
 		return refreshed, err

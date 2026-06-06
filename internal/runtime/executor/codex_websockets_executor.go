@@ -586,15 +586,15 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			}
 			if msgType != websocket.TextMessage {
 				if msgType == websocket.BinaryMessage {
-					err = fmt.Errorf("codex websockets executor: unexpected binary message")
+					binaryErr := fmt.Errorf("codex websockets executor: unexpected binary message")
 					terminateReason = "unexpected_binary"
-					terminateErr = err
-					helps.RecordAPIWebsocketError(ctx, e.cfg, "unexpected_binary", err)
-					reporter.PublishFailure(ctx, err)
+					terminateErr = binaryErr
+					helps.RecordAPIWebsocketError(ctx, e.cfg, "unexpected_binary", binaryErr)
+					reporter.PublishFailure(ctx, binaryErr)
 					if sess != nil {
-						e.invalidateUpstreamConn(sess, conn, "unexpected_binary", err)
+						e.invalidateUpstreamConn(sess, conn, "unexpected_binary", binaryErr)
 					}
-					_ = send(cliproxyexecutor.StreamChunk{Err: err})
+					_ = send(cliproxyexecutor.StreamChunk{Err: binaryErr})
 					return
 				}
 				continue

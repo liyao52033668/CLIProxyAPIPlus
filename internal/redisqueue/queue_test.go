@@ -50,6 +50,44 @@ func TestSetEnabledFalseClosesUsageSubscribers(t *testing.T) {
 	})
 }
 
+func TestEnqueueErrorBroadcastsToErrorSubscribersOnly(t *testing.T) {
+	withEnabledQueue(t, func() {
+		errorSubscriber, unsubscribeError := SubscribeErrors()
+		defer unsubscribeError()
+		usageSubscriber, unsubscribeUsage := SubscribeUsage()
+		defer unsubscribeUsage()
+
+		EnqueueError([]byte("error-record"))
+
+		requireUsageSubscriberPayload(t, errorSubscriber, "error-record")
+
+		select {
+		case got := <-usageSubscriber:
+			t.Fatalf("usage subscriber unexpectedly received %q", string(got))
+		default:
+		}
+
+		if items := PopOldest(1); len(items) != 0 {
+			t.Fatalf("PopOldest() items = %q, want empty for error queue payload", items)
+		}
+	})
+}
+
+func TestPopOldestErrorsReturnsQueuedErrorPayloads(t *testing.T) {
+	withEnabledQueue(t, func() {
+		EnqueueError([]byte("queued-error"))
+
+		if items := PopOldest(1); len(items) != 0 {
+			t.Fatalf("PopOldest() items = %q, want empty for error queue payload", items)
+		}
+
+		items := PopOldestErrors(1)
+		if len(items) != 1 || string(items[0]) != "queued-error" {
+			t.Fatalf("PopOldestErrors() items = %q, want queued error payload", items)
+		}
+	})
+}
+
 func requireUsageSubscriberPayload(t *testing.T, subscriber <-chan []byte, want string) {
 	t.Helper()
 

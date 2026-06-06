@@ -166,6 +166,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		AuthType:    r.authType,
 		RequestedAt: r.requestedAt,
 		Latency:     r.latency(),
+		TTFT:        r.latency(),
 		Failed:      failed,
 		Fail:        fail,
 		Detail:      detail,

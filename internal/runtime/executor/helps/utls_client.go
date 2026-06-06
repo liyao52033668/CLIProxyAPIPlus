@@ -1,6 +1,7 @@
 package helps
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"strings"
@@ -152,7 +153,35 @@ func (f *fallbackRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 // NewUtlsHTTPClient creates an HTTP client using utls Chrome TLS fingerprint.
 // Use this for Claude API requests to match real Claude Code's TLS behavior.
 // Falls back to standard transport for non-HTTPS requests.
-func NewUtlsHTTPClient(cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
+func NewUtlsHTTPClient(args ...any) *http.Client {
+	ctx, cfg, auth, timeout := parseUtlsHTTPClientArgs(args)
+	return newUtlsHTTPClient(ctx, cfg, auth, timeout)
+}
+
+func parseUtlsHTTPClientArgs(args []any) (context.Context, *config.Config, *cliproxyauth.Auth, time.Duration) {
+	ctx := context.Background()
+	var cfg *config.Config
+	var auth *cliproxyauth.Auth
+	var timeout time.Duration
+
+	switch len(args) {
+	case 4:
+		if candidate, ok := args[0].(context.Context); ok && candidate != nil {
+			ctx = candidate
+		}
+		cfg, _ = args[1].(*config.Config)
+		auth, _ = args[2].(*cliproxyauth.Auth)
+		timeout, _ = args[3].(time.Duration)
+	case 3:
+		cfg, _ = args[0].(*config.Config)
+		auth, _ = args[1].(*cliproxyauth.Auth)
+		timeout, _ = args[2].(time.Duration)
+	}
+
+	return ctx, cfg, auth, timeout
+}
+
+func newUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
 	var proxyURL string
 	if auth != nil {
 		proxyURL = strings.TrimSpace(auth.ProxyURL)
@@ -172,6 +201,10 @@ func NewUtlsHTTPClient(cfg *config.Config, auth *cliproxyauth.Auth, timeout time
 	if proxyURL != "" {
 		if transport := buildProxyTransport(proxyURL); transport != nil {
 			standardTransport = transport
+		}
+	} else if ctx != nil {
+		if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
+			standardTransport = rt
 		}
 	}
 

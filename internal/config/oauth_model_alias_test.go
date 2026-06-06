@@ -107,44 +107,6 @@ func TestSanitizeOAuthModelAlias_InjectsDefaultKiroAliases(t *testing.T) {
 	}
 }
 
-func TestSanitizeOAuthModelAlias_InjectsDefaultGitHubCopilotAliases(t *testing.T) {
-	cfg := &Config{
-		OAuthModelAlias: map[string][]OAuthModelAlias{
-			"codex": {
-				{Name: "gpt-5", Alias: "g5"},
-			},
-		},
-	}
-
-	cfg.SanitizeOAuthModelAlias()
-
-	copilotAliases := cfg.OAuthModelAlias["github-copilot"]
-	if len(copilotAliases) == 0 {
-		t.Fatal("expected default github-copilot aliases to be injected")
-	}
-
-	aliasSet := make(map[string]bool, len(copilotAliases))
-	for _, a := range copilotAliases {
-		aliasSet[a.Alias] = true
-		if !a.Fork {
-			t.Fatalf("expected all default github-copilot aliases to have fork=true, got fork=false for %q", a.Alias)
-		}
-	}
-	expectedAliases := []string{
-		"claude-haiku-4-5",
-		"claude-opus-4-1",
-		"claude-opus-4-5",
-		"claude-opus-4-6",
-		"claude-sonnet-4-5",
-		"claude-sonnet-4-6",
-	}
-	for _, expected := range expectedAliases {
-		if !aliasSet[expected] {
-			t.Fatalf("expected default github-copilot alias %q to be present", expected)
-		}
-	}
-}
-
 func TestSanitizeOAuthModelAlias_DoesNotOverrideUserKiroAliases(t *testing.T) {
 	// When user has configured kiro aliases, defaults should NOT be injected
 	cfg := &Config{

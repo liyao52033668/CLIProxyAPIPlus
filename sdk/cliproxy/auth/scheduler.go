@@ -707,6 +707,15 @@ func (m *modelScheduler) removeEntryLocked(authID string) {
 	m.rebuildIndexesLocked()
 }
 
+func (s *authScheduler) removeAuth(authID string) {
+	if s == nil || authID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.removeAuthLocked(authID)
+}
+
 // promoteExpiredLocked reevaluates blocked auths whose retry time has elapsed.
 func (m *modelScheduler) promoteExpiredLocked(now time.Time) {
 	if m == nil || len(m.blocked) == 0 {

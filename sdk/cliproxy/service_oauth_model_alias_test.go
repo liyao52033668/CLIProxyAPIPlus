@@ -91,7 +91,7 @@ func TestApplyOAuthModelAlias_ForkAddsMultipleAliases(t *testing.T) {
 	}
 }
 
-func TestApplyOAuthModelAlias_DefaultGitHubCopilotAliasViaSanitize(t *testing.T) {
+func TestApplyOAuthModelAlias_GitHubCopilotGeneratesAliasesFromDynamicModels(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.SanitizeOAuthModelAlias()
 
@@ -101,15 +101,15 @@ func TestApplyOAuthModelAlias_DefaultGitHubCopilotAliasViaSanitize(t *testing.T)
 
 	out := applyOAuthModelAlias(cfg, "github-copilot", "oauth", models)
 	if len(out) != 2 {
-		t.Fatalf("expected 2 models (original + default alias), got %d", len(out))
+		t.Fatalf("expected original and generated alias model, got %d", len(out))
 	}
 	if out[0].ID != "claude-opus-4.6" {
 		t.Fatalf("expected first model id %q, got %q", "claude-opus-4.6", out[0].ID)
 	}
 	if out[1].ID != "claude-opus-4-6" {
-		t.Fatalf("expected second model id %q, got %q", "claude-opus-4-6", out[1].ID)
+		t.Fatalf("expected generated alias model id %q, got %q", "claude-opus-4-6", out[1].ID)
 	}
 	if out[1].Name != "models/claude-opus-4-6" {
-		t.Fatalf("expected aliased model name %q, got %q", "models/claude-opus-4-6", out[1].Name)
+		t.Fatalf("expected generated alias model name %q, got %q", "models/claude-opus-4-6", out[1].Name)
 	}
 }

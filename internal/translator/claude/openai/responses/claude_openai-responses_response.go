@@ -32,6 +32,7 @@ type claudeToResponsesState struct {
 	ReasoningActive    bool
 	ReasoningItemID    string
 	ReasoningBuf       strings.Builder
+	ReasoningEnc       string
 	ReasoningPartAdded bool
 	ReasoningIndex     int
 	// usage aggregation
@@ -220,6 +221,10 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 					out = append(out, emitEvent("response.reasoning_summary_text.delta", msg))
 				}
 			}
+		} else if dt == "signature_delta" {
+			if st.ReasoningActive {
+				st.ReasoningEnc = d.Get("signature").String()
+			}
 		}
 	case "content_block_stop":
 		idx := int(root.Get("index").Int())
@@ -277,6 +282,13 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			partDone, _ = sjson.SetBytes(partDone, "output_index", st.ReasoningIndex)
 			partDone, _ = sjson.SetBytes(partDone, "part.text", full)
 			out = append(out, emitEvent("response.reasoning_summary_part.done", partDone))
+			itemDone := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"reasoning","status":"completed","encrypted_content":"","summary":[{"type":"summary_text","text":""}]}}`)
+			itemDone, _ = sjson.SetBytes(itemDone, "sequence_number", nextSeq())
+			itemDone, _ = sjson.SetBytes(itemDone, "output_index", st.ReasoningIndex)
+			itemDone, _ = sjson.SetBytes(itemDone, "item.id", st.ReasoningItemID)
+			itemDone, _ = sjson.SetBytes(itemDone, "item.summary.0.text", full)
+			itemDone, _ = sjson.SetBytes(itemDone, "item.encrypted_content", st.ReasoningEnc)
+			out = append(out, emitEvent("response.output_item.done", itemDone))
 			st.ReasoningActive = false
 			st.ReasoningPartAdded = false
 		}
@@ -368,8 +380,9 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 		outputsWrapper := []byte(`{"arr":[]}`)
 		// reasoning item (if any)
 		if st.ReasoningBuf.Len() > 0 || st.ReasoningPartAdded {
-			item := []byte(`{"id":"","type":"reasoning","summary":[{"type":"summary_text","text":""}]}`)
+			item := []byte(`{"id":"","type":"reasoning","encrypted_content":"","summary":[{"type":"summary_text","text":""}]}`)
 			item, _ = sjson.SetBytes(item, "id", st.ReasoningItemID)
+			item, _ = sjson.SetBytes(item, "encrypted_content", st.ReasoningEnc)
 			item, _ = sjson.SetBytes(item, "summary.0.text", st.ReasoningBuf.String())
 			outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
 		}
@@ -475,6 +488,7 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 		textBuf         strings.Builder
 		reasoningBuf    strings.Builder
 		reasoningActive bool
+		reasoningEnc    string
 		reasoningItemID string
 		inputTokens     int64
 		outputTokens    int64
@@ -551,6 +565,10 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 					if t := d.Get("thinking"); t.Exists() {
 						reasoningBuf.WriteString(t.String())
 					}
+				}
+			case "signature_delta":
+				if reasoningActive {
+					reasoningEnc = d.Get("signature").String()
 				}
 			}
 
@@ -638,8 +656,9 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 	// Build output array
 	outputsWrapper := []byte(`{"arr":[]}`)
 	if reasoningBuf.Len() > 0 {
-		item := []byte(`{"id":"","type":"reasoning","summary":[{"type":"summary_text","text":""}]}`)
+		item := []byte(`{"id":"","type":"reasoning","encrypted_content":"","summary":[{"type":"summary_text","text":""}]}`)
 		item, _ = sjson.SetBytes(item, "id", reasoningItemID)
+		item, _ = sjson.SetBytes(item, "encrypted_content", reasoningEnc)
 		item, _ = sjson.SetBytes(item, "summary.0.text", reasoningBuf.String())
 		outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
 	}

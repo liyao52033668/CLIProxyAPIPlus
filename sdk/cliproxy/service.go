@@ -14,6 +14,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -1866,12 +1867,27 @@ func applyOAuthModelAlias(cfg *config.Config, provider, authKind string, models 
 		return models
 	}
 	channel := coreauth.OAuthModelAliasChannel(provider, authKind)
-	if channel == "" || len(cfg.OAuthModelAlias) == 0 {
+	if channel == "" {
 		return models
 	}
-	aliases := cfg.OAuthModelAlias[channel]
+	aliases, hasConfiguredChannel := cfg.OAuthModelAlias[channel]
 	if len(aliases) == 0 {
-		return models
+		if channel != "github-copilot" || hasConfiguredChannel {
+			return models
+		}
+		modelIDs := make([]string, 0, len(models))
+		for _, model := range models {
+			if model == nil {
+				continue
+			}
+			if id := strings.TrimSpace(model.ID); id != "" {
+				modelIDs = append(modelIDs, id)
+			}
+		}
+		aliases = internalconfig.GitHubCopilotAliasesFromModels(modelIDs)
+		if len(aliases) == 0 {
+			return models
+		}
 	}
 
 	type aliasEntry struct {

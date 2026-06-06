@@ -1,8 +1,6 @@
 package migration
 
 import (
-	"fmt"
-
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/entities"
 
 	"gorm.io/gorm"
@@ -25,11 +23,8 @@ func removeUsageIdentityQuotaFieldsMigration(tx *gorm.DB) error {
 		"secondary_window_reset_at",
 	}
 	for _, column := range columns {
-		if !tx.Migrator().HasColumn(&entities.UsageIdentity{}, column) {
-			continue
-		}
-		if err := tx.Exec(fmt.Sprintf("ALTER TABLE usage_identities DROP COLUMN %s", column)).Error; err != nil {
-			return fmt.Errorf("drop usage_identities.%s column: %w", column, err)
+		if err := dropColumnIfExists(tx, "usage_identities", column); err != nil {
+			return err
 		}
 	}
 	return nil

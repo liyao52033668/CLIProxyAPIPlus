@@ -322,6 +322,7 @@ func (l *authAutoRefreshLoop) remove(authID string) {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	delete(l.dirty, authID)
 	item, ok := l.index[authID]
 	if !ok || item == nil {
 		return

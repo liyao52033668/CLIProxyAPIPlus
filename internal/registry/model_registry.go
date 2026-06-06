@@ -106,6 +106,8 @@ type ModelRegistration struct {
 	SuspendedClients map[string]string
 	// SelectionCount tracks how many times this model has been selected
 	SelectionCount int64
+	// RegistrationOrder preserves deterministic model ordering based on first registration.
+	RegistrationOrder uint64
 }
 
 // ModelRegistryHook provides optional callbacks for external integrations to track model list changes.
@@ -144,6 +146,8 @@ type ModelRegistry struct {
 	disabledPersistFunc func(models []string)
 	// highestPriorityFunc reports the highest currently available auth priority for a model.
 	highestPriorityFunc func(handlerType, modelID string) (int, bool)
+	// nextRegistrationOrder assigns deterministic ordering to newly seen models.
+	nextRegistrationOrder uint64
 }
 
 // stickySessionState tracks the sticky model for a handler type
@@ -501,7 +505,9 @@ func (r *ModelRegistry) addModelRegistration(modelID, provider string, model *Mo
 		LastUpdated:          now,
 		QuotaExceededClients: make(map[string]*time.Time),
 		SuspendedClients:     make(map[string]string),
+		RegistrationOrder:    r.nextRegistrationOrder,
 	}
+	r.nextRegistrationOrder++
 	if provider != "" {
 		registration.Providers = map[string]int{provider: 1}
 		registration.InfoByProvider[provider] = cloneModelInfo(model)
@@ -809,10 +815,16 @@ func (r *ModelRegistry) GetAvailableModels(handlerType string) []map[string]any 
 }
 
 func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.Time) ([]map[string]any, time.Time) {
-	models := make([]map[string]any, 0, len(r.models))
+	type availableModelEntry struct {
+		model             map[string]any
+		registrationOrder uint64
+		modelID           string
+	}
+
+	entries := make([]availableModelEntry, 0, len(r.models))
 	var expiresAt time.Time
 
-	for _, registration := range r.models {
+	for modelID, registration := range r.models {
 		availableClients := registration.Count
 
 		expiredClients := 0
@@ -846,9 +858,25 @@ func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.
 		if effectiveClients > 0 || (availableClients > 0 && (expiredClients > 0 || cooldownSuspended > 0) && otherSuspended == 0) {
 			model := r.convertModelToMap(registration.Info, handlerType)
 			if model != nil {
-				models = append(models, model)
+				entries = append(entries, availableModelEntry{
+					model:             model,
+					registrationOrder: registration.RegistrationOrder,
+					modelID:           modelID,
+				})
 			}
 		}
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].registrationOrder == entries[j].registrationOrder {
+			return entries[i].modelID < entries[j].modelID
+		}
+		return entries[i].registrationOrder < entries[j].registrationOrder
+	})
+
+	models := make([]map[string]any, 0, len(entries))
+	for _, entry := range entries {
+		models = append(models, entry.model)
 	}
 
 	return models, expiresAt

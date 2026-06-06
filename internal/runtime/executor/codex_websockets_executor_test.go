@@ -556,3 +556,50 @@ func TestNewProxyAwareWebsocketDialerDirectDisablesProxy(t *testing.T) {
 		t.Fatal("expected websocket proxy function to be nil for direct mode")
 	}
 }
+
+func TestCodexWebsocketsExecuteStreamUnexpectedBinaryMessage(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Fatalf("request path = %s, want /responses", r.URL.Path)
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade websocket: %v", err)
+		}
+		defer func() { _ = conn.Close() }()
+
+		if _, _, err := conn.ReadMessage(); err != nil {
+			t.Fatalf("read upstream websocket message: %v", err)
+		}
+		if err := conn.WriteMessage(websocket.BinaryMessage, []byte{0x01}); err != nil {
+			t.Fatalf("write binary websocket message: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL}}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5-codex",
+		Payload: []byte(`{"model":"gpt-5-codex","input":[]}`),
+	}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("codex")}
+
+	result, err := exec.ExecuteStream(context.Background(), auth, req, opts)
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	select {
+	case chunk, ok := <-result.Chunks:
+		if !ok {
+			t.Fatal("expected stream chunk before close")
+		}
+		if chunk.Err == nil || !strings.Contains(chunk.Err.Error(), "unexpected binary message") {
+			t.Fatalf("chunk err = %v, want unexpected binary message", chunk.Err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for stream error chunk")
+	}
+}

@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -52,6 +53,37 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	out := fmt.Appendf(nil, `{"model":"","max_tokens":32000,"messages":[],"metadata":{"user_id":"%s"}}`, userID)
 
 	root := gjson.ParseBytes(rawJSON)
+
+	appendAssistantPart := func(partJSON []byte) {
+		if len(partJSON) == 0 {
+			return
+		}
+		messageCount := int(gjson.GetBytes(out, "messages.#").Int())
+		if messageCount > 0 {
+			lastPath := fmt.Sprintf("messages.%d", messageCount-1)
+			if gjson.GetBytes(out, lastPath+".role").String() == "assistant" {
+				lastContent := gjson.GetBytes(out, lastPath+".content")
+				if lastContent.IsArray() {
+					out, _ = sjson.SetRawBytes(out, lastPath+".content.-1", partJSON)
+					return
+				}
+				if lastContent.Type == gjson.String {
+					content := []byte(`[]`)
+					if text := lastContent.String(); text != "" {
+						textPart := []byte(`{"type":"text","text":""}`)
+						textPart, _ = sjson.SetBytes(textPart, "text", text)
+						content, _ = sjson.SetRawBytes(content, "-1", textPart)
+					}
+					content, _ = sjson.SetRawBytes(content, "-1", partJSON)
+					out, _ = sjson.SetRawBytes(out, lastPath+".content", content)
+					return
+				}
+			}
+		}
+		msg := []byte(`{"role":"assistant","content":[]}`)
+		msg, _ = sjson.SetRawBytes(msg, "content.-1", partJSON)
+		out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
+	}
 
 	// Convert OpenAI Responses reasoning.effort to Claude thinking config.
 	if v := root.Get("reasoning.effort"); v.Exists() {
@@ -280,24 +312,35 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				}
 
 				if len(partsJSON) > 0 {
-					msg := []byte(`{"role":"","content":[]}`)
-					msg, _ = sjson.SetBytes(msg, "role", role)
-					if len(partsJSON) == 1 && !hasImage && !hasFile {
-						// Preserve legacy behavior for single text content
-						msg, _ = sjson.DeleteBytes(msg, "content")
-						textPart := gjson.Parse(partsJSON[0])
-						msg, _ = sjson.SetBytes(msg, "content", textPart.Get("text").String())
-					} else {
+					if role == "assistant" {
 						for _, partJSON := range partsJSON {
-							msg, _ = sjson.SetRawBytes(msg, "content.-1", []byte(partJSON))
+							appendAssistantPart([]byte(partJSON))
 						}
+					} else {
+						msg := []byte(`{"role":"","content":[]}`)
+						msg, _ = sjson.SetBytes(msg, "role", role)
+						if len(partsJSON) == 1 && !hasImage && !hasFile {
+							msg, _ = sjson.DeleteBytes(msg, "content")
+							textPart := gjson.Parse(partsJSON[0])
+							msg, _ = sjson.SetBytes(msg, "content", textPart.Get("text").String())
+						} else {
+							for _, partJSON := range partsJSON {
+								msg, _ = sjson.SetRawBytes(msg, "content.-1", []byte(partJSON))
+							}
+						}
+						out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
 					}
-					out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
 				} else if textAggregate.Len() > 0 || role == "system" {
-					msg := []byte(`{"role":"","content":""}`)
-					msg, _ = sjson.SetBytes(msg, "role", role)
-					msg, _ = sjson.SetBytes(msg, "content", textAggregate.String())
-					out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
+					if role == "assistant" {
+						textPart := []byte(`{"type":"text","text":""}`)
+						textPart, _ = sjson.SetBytes(textPart, "text", textAggregate.String())
+						appendAssistantPart(textPart)
+					} else {
+						msg := []byte(`{"role":"","content":""}`)
+						msg, _ = sjson.SetBytes(msg, "role", role)
+						msg, _ = sjson.SetBytes(msg, "content", textAggregate.String())
+						out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
+					}
 				}
 
 			case "function_call":
@@ -334,6 +377,16 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				usr := []byte(`{"role":"user","content":[]}`)
 				usr, _ = sjson.SetRawBytes(usr, "content.-1", toolResult)
 				out, _ = sjson.SetRawBytes(out, "messages.-1", usr)
+
+			case "reasoning":
+				normalizedSignature, ok := sigcompat.CompatibleSignatureForProvider(sigcompat.SignatureProviderClaude, item.Get("encrypted_content").String())
+				if !ok {
+					return true
+				}
+				thinkingPart := []byte(`{"type":"thinking","thinking":"","signature":""}`)
+				thinkingPart, _ = sjson.SetBytes(thinkingPart, "thinking", item.Get("summary.0.text").String())
+				thinkingPart, _ = sjson.SetBytes(thinkingPart, "signature", normalizedSignature)
+				appendAssistantPart(thinkingPart)
 			}
 			return true
 		})

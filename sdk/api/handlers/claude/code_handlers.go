@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
@@ -47,6 +48,30 @@ func NewClaudeCodeAPIHandler(apiHandlers *handlers.BaseAPIHandler) *ClaudeCodeAP
 // HandlerType returns the identifier for this handler implementation.
 func (h *ClaudeCodeAPIHandler) HandlerType() string {
 	return Claude
+}
+
+func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.ErrorMessage) {
+	status := http.StatusInternalServerError
+	if msg != nil && msg.StatusCode > 0 {
+		status = msg.StatusCode
+	}
+	if msg != nil && msg.Addon != nil && handlers.PassthroughHeadersEnabled(h.Cfg) {
+		for key, values := range msg.Addon {
+			if len(values) == 0 {
+				continue
+			}
+			c.Writer.Header().Del(key)
+			for _, value := range values {
+				c.Writer.Header().Add(key, value)
+			}
+		}
+	}
+	body, _ := json.Marshal(h.toClaudeError(msg))
+	if !c.Writer.Written() {
+		c.Writer.Header().Set("Content-Type", "application/json")
+	}
+	c.Status(status)
+	_, _ = c.Writer.Write(body)
 }
 
 // Models returns a list of models supported by this handler.
@@ -306,6 +331,21 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.
 	})
 }
 
+func pendingClaudeStreamError(errs <-chan *interfaces.ErrorMessage) (*interfaces.ErrorMessage, bool) {
+	if errs == nil {
+		return nil, false
+	}
+	select {
+	case errMsg, ok := <-errs:
+		if !ok || errMsg == nil {
+			return nil, false
+		}
+		return errMsg, true
+	default:
+		return nil, false
+	}
+}
+
 type claudeErrorDetail struct {
 	Type    string `json:"type"`
 	Message string `json:"message"`
@@ -317,11 +357,28 @@ type claudeErrorResponse struct {
 }
 
 func (h *ClaudeCodeAPIHandler) toClaudeError(msg *interfaces.ErrorMessage) claudeErrorResponse {
+	errType := "api_error"
+	errMessage := ""
+	if msg != nil && msg.Error != nil {
+		errMessage = msg.Error.Error()
+		if raw := strings.TrimSpace(errMessage); gjson.Valid(raw) {
+			if parsedType := strings.TrimSpace(gjson.Get(raw, "error.type").String()); parsedType != "" {
+				errType = parsedType
+			} else if parsedType := strings.TrimSpace(gjson.Get(raw, "type").String()); parsedType != "" && parsedType != "error" {
+				errType = parsedType
+			}
+			if parsedMessage := strings.TrimSpace(gjson.Get(raw, "error.message").String()); parsedMessage != "" {
+				errMessage = parsedMessage
+			} else if parsedMessage := strings.TrimSpace(gjson.Get(raw, "message").String()); parsedMessage != "" {
+				errMessage = parsedMessage
+			}
+		}
+	}
 	return claudeErrorResponse{
 		Type: "error",
 		Error: claudeErrorDetail{
-			Type:    "api_error",
-			Message: msg.Error.Error(),
+			Type:    errType,
+			Message: errMessage,
 		},
 	}
 }

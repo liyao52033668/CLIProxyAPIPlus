@@ -1,16 +1,29 @@
 package logging
 
 import (
-	"errors"
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	log "github.com/sirupsen/logrus"
 )
 
-func TestGinLogrusRecoveryRepanicsErrAbortHandler(t *testing.T) {
+func TestGinLogrusRecoveryDoesNotConvertErrAbortHandlerTo500OrLogStack(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+
+	var logrusOutput bytes.Buffer
+	previousLogrusOutput := log.StandardLogger().Out
+	log.SetOutput(&logrusOutput)
+	defer log.SetOutput(previousLogrusOutput)
+
+	var ginRecoveryOutput bytes.Buffer
+	previousGinErrorWriter := gin.DefaultErrorWriter
+	gin.DefaultErrorWriter = &ginRecoveryOutput
+	defer func() {
+		gin.DefaultErrorWriter = previousGinErrorWriter
+	}()
 
 	engine := gin.New()
 	engine.Use(GinLogrusRecovery())
@@ -21,24 +34,19 @@ func TestGinLogrusRecoveryRepanicsErrAbortHandler(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/abort", nil)
 	recorder := httptest.NewRecorder()
 
-	defer func() {
-		recovered := recover()
-		if recovered == nil {
-			t.Fatalf("expected panic, got nil")
-		}
-		err, ok := recovered.(error)
-		if !ok {
-			t.Fatalf("expected error panic, got %T", recovered)
-		}
-		if !errors.Is(err, http.ErrAbortHandler) {
-			t.Fatalf("expected ErrAbortHandler, got %v", err)
-		}
-		if err != http.ErrAbortHandler {
-			t.Fatalf("expected exact ErrAbortHandler sentinel, got %v", err)
-		}
-	}()
-
 	engine.ServeHTTP(recorder, req)
+	if recorder.Code == http.StatusInternalServerError {
+		t.Fatalf("expected ErrAbortHandler not to be converted into 500, got %d", recorder.Code)
+	}
+	if logrusOutput.Len() != 0 {
+		t.Fatalf("expected no logrus recovery log, got %q", logrusOutput.String())
+	}
+	if bytes.Contains(ginRecoveryOutput.Bytes(), []byte("[Recovery]")) {
+		t.Fatalf("expected gin recovery to avoid stack log, got %q", ginRecoveryOutput.String())
+	}
+	if ginRecoveryOutput.Len() == 0 {
+		t.Fatal("expected gin to handle ErrAbortHandler via its broken-pipe path")
+	}
 }
 
 func TestGinLogrusRecoveryHandlesRegularPanic(t *testing.T) {

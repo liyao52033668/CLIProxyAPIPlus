@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 
+	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
@@ -16,8 +17,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 	rawJSON := inputRawJSON
 
 	// Note: modelName and stream parameters are part of the fixed method signature
-	_ = modelName // Unused but required by interface
-	_ = stream    // Unused but required by interface
+	_ = stream // Unused but required by interface
 
 	// Base Gemini API template (do not include thinkingConfig by default)
 	out := []byte(`{"contents":[]}`)
@@ -118,7 +118,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 
 			switch itemType {
 			case "message":
-				if strings.EqualFold(itemRole, "system") {
+				if strings.EqualFold(itemRole, "system") || strings.EqualFold(itemRole, "developer") {
 					if contentArray := item.Get("content"); contentArray.Exists() {
 						systemInstr := []byte(`{"parts":[]}`)
 						if systemInstructionResult := gjson.GetBytes(out, "systemInstruction"); systemInstructionResult.Exists() {
@@ -352,10 +352,29 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				out, _ = sjson.SetRawBytes(out, "contents.-1", functionContent)
 
 			case "reasoning":
+				text := item.Get("summary.0.text").String()
+				rawSignature := item.Get("encrypted_content").String()
+				targetProvider := sigcompat.SignatureProviderFromModelName(modelName)
+				if targetProvider == sigcompat.SignatureProviderClaude {
+					if strings.TrimSpace(text) == "" {
+						continue
+					}
+					normalized, ok := sigcompat.CompatibleAntigravityClaudeThinkingSignature(rawSignature)
+					if !ok {
+						continue
+					}
+					thoughtContent := []byte(`{"role":"model","parts":[]}`)
+					thought := []byte(`{"text":"","thoughtSignature":"","thought":true}`)
+					thought, _ = sjson.SetBytes(thought, "text", text)
+					thought, _ = sjson.SetBytes(thought, "thoughtSignature", normalized)
+					thoughtContent, _ = sjson.SetRawBytes(thoughtContent, "parts.-1", thought)
+					out, _ = sjson.SetRawBytes(out, "contents.-1", thoughtContent)
+					continue
+				}
 				thoughtContent := []byte(`{"role":"model","parts":[]}`)
 				thought := []byte(`{"text":"","thoughtSignature":"","thought":true}`)
-				thought, _ = sjson.SetBytes(thought, "text", item.Get("summary.0.text").String())
-				thought, _ = sjson.SetBytes(thought, "thoughtSignature", item.Get("encrypted_content").String())
+				thought, _ = sjson.SetBytes(thought, "text", text)
+				thought, _ = sjson.SetBytes(thought, "thoughtSignature", sigcompat.GeminiReplaySignatureOrBypass(rawSignature, sigcompat.SignatureBlockKindGeminiModelPart))
 
 				thoughtContent, _ = sjson.SetRawBytes(thoughtContent, "parts.-1", thought)
 				out, _ = sjson.SetRawBytes(out, "contents.-1", thoughtContent)

@@ -15,6 +15,7 @@ import (
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/config"
 	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/client"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/go-git/go-git/v6/plumbing/transport"
 	"github.com/go-git/go-git/v6/plumbing/transport/http"
@@ -129,7 +130,7 @@ func (s *GitTokenStore) EnsureRepository() error {
 			s.dirLock.Unlock()
 			return fmt.Errorf("git token store: create repo dir: %w", errMk)
 		}
-		cloneOpts := &git.CloneOptions{Auth: authMethod, URL: s.remote}
+		cloneOpts := &git.CloneOptions{URL: s.remote, ClientOptions: authMethod}
 		if s.branch != "" {
 			cloneOpts.ReferenceName = plumbing.NewBranchReferenceName(s.branch)
 		}
@@ -210,7 +211,7 @@ func (s *GitTokenStore) EnsureRepository() error {
 				}
 			}
 		}
-		pullOpts := &git.PullOptions{Auth: authMethod, RemoteName: "origin"}
+		pullOpts := &git.PullOptions{RemoteName: "origin", ClientOptions: authMethod}
 		if s.branch != "" {
 			pullOpts.ReferenceName = plumbing.NewBranchReferenceName(s.branch)
 		}
@@ -575,7 +576,7 @@ func (s *GitTokenStore) repoDirSnapshot() string {
 	return s.repoDir
 }
 
-func (s *GitTokenStore) gitAuth() transport.AuthMethod {
+func (s *GitTokenStore) gitAuth() []client.Option {
 	if s.username == "" && s.password == "" {
 		return nil
 	}
@@ -583,7 +584,7 @@ func (s *GitTokenStore) gitAuth() transport.AuthMethod {
 	if user == "" {
 		user = "git"
 	}
-	return &http.BasicAuth{Username: user, Password: s.password}
+	return []client.Option{client.WithHTTPAuth(&http.BasicAuth{Username: user, Password: s.password})}
 }
 
 func (s *GitTokenStore) relativeToRepo(path string) (string, error) {
@@ -609,7 +610,7 @@ func (s *GitTokenStore) relativeToRepo(path string) (string, error) {
 	return rel, nil
 }
 
-func (s *GitTokenStore) checkoutConfiguredBranch(repo *git.Repository, worktree *git.Worktree, authMethod transport.AuthMethod) error {
+func (s *GitTokenStore) checkoutConfiguredBranch(repo *git.Repository, worktree *git.Worktree, authMethod []client.Option) error {
 	branchRefName := plumbing.NewBranchReferenceName(s.branch)
 	headRef, errHead := repo.Head()
 	switch {
@@ -632,7 +633,7 @@ func (s *GitTokenStore) checkoutConfiguredBranch(repo *git.Repository, worktree 
 	return nil
 }
 
-func (s *GitTokenStore) checkoutConfiguredRemoteTrackingBranch(repo *git.Repository, worktree *git.Worktree, branchRefName plumbing.ReferenceName, authMethod transport.AuthMethod) error {
+func (s *GitTokenStore) checkoutConfiguredRemoteTrackingBranch(repo *git.Repository, worktree *git.Worktree, branchRefName plumbing.ReferenceName, authMethod []client.Option) error {
 	remoteRefName := plumbing.ReferenceName("refs/remotes/origin/" + s.branch)
 	remoteRef, err := repo.Reference(remoteRefName, true)
 	if errors.Is(err, plumbing.ErrReferenceNotFound) {
@@ -663,8 +664,8 @@ func (s *GitTokenStore) checkoutConfiguredRemoteTrackingBranch(repo *git.Reposit
 	return nil
 }
 
-func syncRemoteReferences(repo *git.Repository, authMethod transport.AuthMethod) error {
-	if err := repo.Fetch(&git.FetchOptions{Auth: authMethod, RemoteName: "origin"}); err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
+func syncRemoteReferences(repo *git.Repository, authMethod []client.Option) error {
+	if err := repo.Fetch(&git.FetchOptions{RemoteName: "origin", ClientOptions: authMethod}); err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
 		return err
 	}
 	return nil
@@ -672,7 +673,7 @@ func syncRemoteReferences(repo *git.Repository, authMethod transport.AuthMethod)
 
 // resolveRemoteDefaultBranch queries the origin remote to determine the remote's default branch
 // (the target of HEAD) and returns the corresponding local branch reference name (e.g. refs/heads/master).
-func resolveRemoteDefaultBranch(repo *git.Repository, authMethod transport.AuthMethod) (resolvedRemoteBranch, error) {
+func resolveRemoteDefaultBranch(repo *git.Repository, authMethod []client.Option) (resolvedRemoteBranch, error) {
 	if err := syncRemoteReferences(repo, authMethod); err != nil {
 		return resolvedRemoteBranch{}, fmt.Errorf("resolve remote default: sync remote refs: %w", err)
 	}
@@ -680,7 +681,7 @@ func resolveRemoteDefaultBranch(repo *git.Repository, authMethod transport.AuthM
 	if err != nil {
 		return resolvedRemoteBranch{}, fmt.Errorf("resolve remote default: get remote: %w", err)
 	}
-	refs, err := remote.List(&git.ListOptions{Auth: authMethod})
+	refs, err := remote.List(&git.ListOptions{ClientOptions: authMethod})
 	if err != nil {
 		if resolved, ok := resolveRemoteDefaultBranchFromLocal(repo); ok {
 			return resolved, nil
@@ -747,7 +748,7 @@ func shouldFallbackToCurrentBranch(repo *git.Repository, err error) bool {
 // checkoutRemoteDefaultBranch ensures the working tree is checked out to the remote's default branch
 // (the branch target of origin/HEAD). If the local branch does not exist it will be created to track
 // the remote branch.
-func checkoutRemoteDefaultBranch(repo *git.Repository, worktree *git.Worktree, authMethod transport.AuthMethod) error {
+func checkoutRemoteDefaultBranch(repo *git.Repository, worktree *git.Worktree, authMethod []client.Option) error {
 	resolved, err := resolveRemoteDefaultBranch(repo, authMethod)
 	if err != nil {
 		return err
@@ -859,7 +860,7 @@ func (s *GitTokenStore) commitAndPushLocked(message string, relPaths ...string) 
 	} else if errRewrite := s.rewriteHeadAsSingleCommit(repo, headRef.Name(), commitHash, message, signature); errRewrite != nil {
 		return errRewrite
 	}
-	pushOpts := &git.PushOptions{Auth: s.gitAuth(), Force: true}
+	pushOpts := &git.PushOptions{ClientOptions: s.gitAuth(), Force: true}
 	if s.branch != "" {
 		pushOpts.RefSpecs = []config.RefSpec{config.RefSpec("refs/heads/" + s.branch + ":refs/heads/" + s.branch)}
 	} else {
@@ -878,7 +879,7 @@ func (s *GitTokenStore) commitAndPushLocked(message string, relPaths ...string) 
 			strings.Contains(errMsg, "getting object") ||
 			(strings.Contains(errMsg, "pack") && strings.Contains(errMsg, "no such file or directory")) {
 			// First try fetching from remote to ensure we have all objects
-			if fetchErr := repo.Fetch(&git.FetchOptions{Auth: s.gitAuth(), RemoteName: "origin"}); fetchErr == nil {
+			if fetchErr := repo.Fetch(&git.FetchOptions{RemoteName: "origin", ClientOptions: s.gitAuth()}); fetchErr == nil {
 				if retryErr := repo.Push(pushOpts); retryErr == nil || errors.Is(retryErr, git.NoErrAlreadyUpToDate) {
 					return nil
 				}

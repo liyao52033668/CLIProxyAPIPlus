@@ -20,7 +20,7 @@ var providerAppliers = map[string]ProviderApplier{
 	"kimi":         nil,
 	"codebuddy":    nil,
 	"codebuddy-ai": nil,
-	"xai":         nil,
+	"xai":          nil,
 }
 
 // GetProviderApplier returns the ProviderApplier for the given provider name.
@@ -327,12 +327,54 @@ func extractThinkingConfig(body []byte, provider string) ThinkingConfig {
 		return extractGeminiConfig(body, provider)
 	case "openai", "codebuddy", "codebuddy-ai":
 		return extractOpenAIConfig(body)
-	case "codex", "xai":
+	case "codex", "xai", "openai-response":
 		return extractCodexConfig(body)
 	case "kimi":
 		return extractOpenAIConfig(body)
 	default:
 		return ThinkingConfig{}
+	}
+}
+
+// ExtractReasoningEffort returns the effective reasoning effort after applying
+// model suffix precedence over request body configuration.
+func ExtractReasoningEffort(body []byte, fromFormat, model string) string {
+	provider := strings.ToLower(strings.TrimSpace(fromFormat))
+	if provider == "" {
+		provider = "openai"
+	}
+
+	suffixResult := ParseSuffix(model)
+	if suffixResult.HasSuffix {
+		config := parseSuffixToConfig(suffixResult.RawSuffix, provider, model)
+		if hasThinkingConfig(config) {
+			return thinkingConfigEffort(config)
+		}
+	}
+
+	config := extractThinkingConfig(body, provider)
+	if !hasThinkingConfig(config) {
+		return ""
+	}
+	return thinkingConfigEffort(config)
+}
+
+func thinkingConfigEffort(config ThinkingConfig) string {
+	switch config.Mode {
+	case ModeLevel:
+		return string(config.Level)
+	case ModeBudget:
+		effort, ok := ConvertBudgetToLevel(config.Budget)
+		if !ok {
+			return ""
+		}
+		return effort
+	case ModeNone:
+		return string(LevelNone)
+	case ModeAuto:
+		return string(LevelAuto)
+	default:
+		return ""
 	}
 }
 

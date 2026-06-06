@@ -169,6 +169,15 @@ func (NoopHook) OnAuthUpdated(context.Context, *Auth) {}
 // OnResult implements Hook.
 func (NoopHook) OnResult(context.Context, Result) {}
 
+type homeAuthDispatcher interface {
+	HeartbeatOK() bool
+	RPopAuth(ctx context.Context, model string, sessionID string, headers http.Header, count int) ([]byte, error)
+}
+
+var currentHomeDispatcher = func() homeAuthDispatcher {
+	return home.Current()
+}
+
 // Manager orchestrates auth lifecycle, selection, execution, and persistence.
 type Manager struct {
 	store     Store
@@ -1218,18 +1227,24 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 		return nil, nil
 	}
 	m.mu.Lock()
-	if existing, ok := m.auths[auth.ID]; ok && existing != nil {
-		if !auth.indexAssigned && auth.Index == "" {
-			auth.Index = existing.Index
-			auth.indexAssigned = existing.indexAssigned
+	existing, ok := m.auths[auth.ID]
+	if !ok || existing == nil {
+		m.mu.Unlock()
+		if auth.Disabled || auth.Status == StatusDisabled {
+			return nil, nil
 		}
-		auth.Success = existing.Success
-		auth.Failed = existing.Failed
-		auth.recentRequests = existing.recentRequests
-		if !existing.Disabled && existing.Status != StatusDisabled && !auth.Disabled && auth.Status != StatusDisabled {
-			if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
-				auth.ModelStates = existing.ModelStates
-			}
+		return m.Register(ctx, auth)
+	}
+	if !auth.indexAssigned && auth.Index == "" {
+		auth.Index = existing.Index
+		auth.indexAssigned = existing.indexAssigned
+	}
+	auth.Success = existing.Success
+	auth.Failed = existing.Failed
+	auth.recentRequests = existing.recentRequests
+	if !existing.Disabled && existing.Status != StatusDisabled && !auth.Disabled && auth.Status != StatusDisabled {
+		if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
+			auth.ModelStates = existing.ModelStates
 		}
 	}
 	auth.EnsureIndex()
@@ -1244,6 +1259,34 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	_ = m.persist(ctx, auth)
 	m.hook.OnAuthUpdated(ctx, auth.Clone())
 	return auth.Clone(), nil
+}
+
+// Remove deletes an auth entry and clears its scheduler and auto-refresh state.
+func (m *Manager) Remove(ctx context.Context, id string) {
+	if m == nil {
+		return
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return
+	}
+
+	m.mu.Lock()
+	if _, ok := m.auths[id]; !ok {
+		m.mu.Unlock()
+		return
+	}
+	delete(m.auths, id)
+	m.mu.Unlock()
+
+	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	if m.scheduler != nil {
+		m.scheduler.removeAuth(id)
+	}
+	m.removeRefreshSchedule(id)
+	if m.store != nil {
+		_ = m.store.Delete(ctx, id)
+	}
 }
 
 // Load resets manager state from the backing store.
@@ -1476,6 +1519,31 @@ func (m *Manager) executeStreamWithResolvedModel(ctx context.Context, providers 
 	return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 }
 
+func (m *Manager) prepareRequestAuth(ctx context.Context, auth *Auth, executor ProviderExecutor) (*Auth, error) {
+	if auth == nil || executor == nil {
+		return auth, nil
+	}
+	preparer, ok := executor.(RequestAuthPreparer)
+	if !ok || preparer == nil || !preparer.ShouldPrepareRequestAuth(auth) {
+		return auth, nil
+	}
+	updated, err := preparer.PrepareRequestAuth(ctx, auth)
+	if err != nil {
+		return nil, err
+	}
+	if updated == nil {
+		return auth, nil
+	}
+	persistCtx := ctx
+	if shouldSkipPersist(ctx) {
+		persistCtx = context.Background()
+	}
+	if _, errUpdate := m.Update(persistCtx, updated); errUpdate != nil {
+		return nil, errUpdate
+	}
+	return updated, nil
+}
+
 func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int) (cliproxyexecutor.Response, error) {
 	if len(providers) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
@@ -1509,6 +1577,12 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, req.Model)
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
+
+		preparedAuth, errPrepare := m.prepareRequestAuth(ctx, auth, executor)
+		if errPrepare != nil {
+			return cliproxyexecutor.Response{}, errPrepare
+		}
+		auth = preparedAuth
 
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
@@ -1801,7 +1875,27 @@ func hasRequestedModelMetadata(meta map[string]any) bool {
 
 func contextWithRequestedModelAlias(ctx context.Context, opts cliproxyexecutor.Options, fallback string) context.Context {
 	alias := requestedModelAliasFromOptions(opts, fallback)
-	return coreusage.WithRequestedModelAlias(ctx, alias)
+	ctx = coreusage.WithRequestedModelAlias(ctx, alias)
+	if len(opts.Metadata) == 0 {
+		return ctx
+	}
+	if raw, ok := opts.Metadata[cliproxyexecutor.ReasoningEffortMetadataKey]; ok {
+		switch value := raw.(type) {
+		case string:
+			ctx = coreusage.WithReasoningEffort(ctx, value)
+		case []byte:
+			ctx = coreusage.WithReasoningEffort(ctx, string(value))
+		}
+	}
+	if raw, ok := opts.Metadata[cliproxyexecutor.ServiceTierMetadataKey]; ok {
+		switch value := raw.(type) {
+		case string:
+			ctx = coreusage.WithServiceTier(ctx, value)
+		case []byte:
+			ctx = coreusage.WithServiceTier(ctx, string(value))
+		}
+	}
+	return ctx
 }
 
 func requestedModelAliasFromOptions(opts cliproxyexecutor.Options, fallback string) string {
@@ -2462,6 +2556,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		}
 	}
 
+	m.publishErrorEvent(result, authSnapshot)
 	m.hook.OnResult(ctx, result)
 }
 
@@ -3541,6 +3636,19 @@ func (m *Manager) clearHomeRuntimeAuths() {
 	m.mu.Unlock()
 }
 
+func (m *Manager) removeRefreshSchedule(authID string) {
+	if m == nil || authID == "" {
+		return
+	}
+	m.mu.RLock()
+	loop := m.refreshLoop
+	m.mu.RUnlock()
+	if loop == nil {
+		return
+	}
+	loop.remove(authID)
+}
+
 func (m *Manager) clearHomeRuntimeAuthsLocked() {
 	if m == nil {
 		return
@@ -3628,7 +3736,7 @@ func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts clipro
 		}
 	}
 
-	client := home.Current()
+	client := currentHomeDispatcher()
 	if client == nil || !client.HeartbeatOK() {
 		return nil, nil, "", &Error{Code: "home_unavailable", Message: "home control center unavailable", HTTPStatus: http.StatusServiceUnavailable}
 	}
@@ -3682,6 +3790,9 @@ func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts clipro
 	}
 	if strings.TrimSpace(auth.ID) == "" {
 		return nil, nil, "", &Error{Code: "invalid_auth", Message: "home returned auth without id", HTTPStatus: http.StatusBadGateway}
+	}
+	if _, alreadyTried := tried[auth.ID]; alreadyTried {
+		return nil, nil, "", &Error{Code: homeRequestRetryExceededErrorCode, Message: "home returned already-tried auth", HTTPStatus: http.StatusUnauthorized}
 	}
 	providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
 	if providerKey == "" {
@@ -4306,6 +4417,12 @@ type RoundTripperProvider interface {
 // to mutate outbound HTTP requests with provider credentials.
 type RequestPreparer interface {
 	PrepareRequest(req *http.Request, auth *Auth) error
+}
+
+// RequestAuthPreparer allows executors to refresh or enrich auth metadata before execution.
+type RequestAuthPreparer interface {
+	ShouldPrepareRequestAuth(auth *Auth) bool
+	PrepareRequestAuth(ctx context.Context, auth *Auth) (*Auth, error)
 }
 
 func executorKeyFromAuth(auth *Auth) string {

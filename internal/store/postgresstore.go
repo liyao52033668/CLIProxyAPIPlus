@@ -9,10 +9,12 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
@@ -27,6 +29,8 @@ const (
 	defaultUsageKey    = "usage"
 	defaultUsageTable  = "usage_store"
 )
+
+var postgresIdentifierPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // PostgresStoreConfig captures configuration required to initialize a Postgres-backed store.
 type PostgresStoreConfig struct {
@@ -65,6 +69,9 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 	}
 	if cfg.AuthTable == "" {
 		cfg.AuthTable = defaultAuthTable
+	}
+	if err := validatePostgresStoreConfig(&cfg); err != nil {
+		return nil, err
 	}
 
 	spoolRoot := strings.TrimSpace(cfg.SpoolDir)
@@ -121,31 +128,16 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 		return fmt.Errorf("postgres store: not initialized")
 	}
 	if schema := strings.TrimSpace(s.cfg.Schema); schema != "" {
-		query := fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", quoteIdentifier(schema))
-		if _, err := s.db.ExecContext(ctx, query); err != nil {
+		if _, err := s.db.ExecContext(ctx, createSchemaIfNotExistsSQL(schema)); err != nil {
 			return fmt.Errorf("postgres store: create schema: %w", err)
 		}
 	}
 	configTable := s.fullTableName(s.cfg.ConfigTable)
-	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
-		CREATE TABLE IF NOT EXISTS %s (
-			id TEXT PRIMARY KEY,
-			content TEXT NOT NULL,
-			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-		)
-	`, configTable)); err != nil {
+	if _, err := s.db.ExecContext(ctx, createTableIfNotExistsSQL(configTable, "TEXT")); err != nil {
 		return fmt.Errorf("postgres store: create config table: %w", err)
 	}
 	authTable := s.fullTableName(s.cfg.AuthTable)
-	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
-		CREATE TABLE IF NOT EXISTS %s (
-			id TEXT PRIMARY KEY,
-			content JSONB NOT NULL,
-			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-		)
-	`, authTable)); err != nil {
+	if _, err := s.db.ExecContext(ctx, createTableIfNotExistsSQL(authTable, "JSONB")); err != nil {
 		return fmt.Errorf("postgres store: create auth table: %w", err)
 	}
 	if err := s.EnsureUsageTable(ctx); err != nil {
@@ -160,14 +152,7 @@ func (s *PostgresStore) EnsureUsageTable(ctx context.Context) error {
 		return fmt.Errorf("postgres store: not initialized")
 	}
 	usageTable := s.fullTableName(s.usageTable())
-	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
-		CREATE TABLE IF NOT EXISTS %s (
-			id TEXT PRIMARY KEY,
-			content JSONB NOT NULL,
-			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-		)
-	`, usageTable)); err != nil {
+	if _, err := s.db.ExecContext(ctx, createTableIfNotExistsSQL(usageTable, "JSONB")); err != nil {
 		return fmt.Errorf("postgres store: create usage table: %w", err)
 	}
 	return nil
@@ -302,7 +287,7 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 
 // List enumerates all auth records stored in PostgreSQL.
 func (s *PostgresStore) List(ctx context.Context) ([]*cliproxyauth.Auth, error) {
-	query := fmt.Sprintf("SELECT id, content, created_at, updated_at FROM %s ORDER BY id", s.fullTableName(s.cfg.AuthTable))
+	query := selectAuthRecordsSQL(s.fullTableName(s.cfg.AuthTable))
 	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("postgres store: list auth: %w", err)
@@ -439,7 +424,7 @@ func (s *PostgresStore) PersistConfig(ctx context.Context) error {
 
 // syncConfigFromDatabase writes the database-stored config to disk or seeds the database from template.
 func (s *PostgresStore) syncConfigFromDatabase(ctx context.Context, exampleConfigPath string) error {
-	query := fmt.Sprintf("SELECT content FROM %s WHERE id = $1", s.fullTableName(s.cfg.ConfigTable))
+	query := selectContentByIDSQL(s.fullTableName(s.cfg.ConfigTable))
 	var content string
 	err := s.db.QueryRowContext(ctx, query, defaultConfigKey).Scan(&content)
 	switch {
@@ -481,7 +466,7 @@ func (s *PostgresStore) syncConfigFromDatabase(ctx context.Context, exampleConfi
 
 // syncAuthFromDatabase populates the local auth directory from PostgreSQL data.
 func (s *PostgresStore) syncAuthFromDatabase(ctx context.Context) error {
-	query := fmt.Sprintf("SELECT id, content FROM %s", s.fullTableName(s.cfg.AuthTable))
+	query := selectIDAndContentSQL(s.fullTableName(s.cfg.AuthTable))
 	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
 		return fmt.Errorf("postgres store: load auth from database: %w", err)
@@ -548,12 +533,7 @@ func (s *PostgresStore) upsertAuthRecord(ctx context.Context, relID, path string
 
 func (s *PostgresStore) persistAuth(ctx context.Context, relID string, data []byte) error {
 	jsonPayload := json.RawMessage(data)
-	query := fmt.Sprintf(`
-		INSERT INTO %s (id, content, created_at, updated_at)
-		VALUES ($1, $2, NOW(), NOW())
-		ON CONFLICT (id)
-		DO UPDATE SET content = EXCLUDED.content, updated_at = NOW()
-	`, s.fullTableName(s.cfg.AuthTable))
+	query := upsertRecordSQL(s.fullTableName(s.cfg.AuthTable))
 	if _, err := s.db.ExecContext(ctx, query, relID, jsonPayload); err != nil {
 		return fmt.Errorf("postgres store: upsert auth record: %w", err)
 	}
@@ -561,7 +541,7 @@ func (s *PostgresStore) persistAuth(ctx context.Context, relID string, data []by
 }
 
 func (s *PostgresStore) deleteAuthRecord(ctx context.Context, relID string) error {
-	query := fmt.Sprintf("DELETE FROM %s WHERE id = $1", s.fullTableName(s.cfg.AuthTable))
+	query := deleteByIDSQL(s.fullTableName(s.cfg.AuthTable))
 	if _, err := s.db.ExecContext(ctx, query, relID); err != nil {
 		return fmt.Errorf("postgres store: delete auth record: %w", err)
 	}
@@ -569,12 +549,7 @@ func (s *PostgresStore) deleteAuthRecord(ctx context.Context, relID string) erro
 }
 
 func (s *PostgresStore) persistConfig(ctx context.Context, data []byte) error {
-	query := fmt.Sprintf(`
-		INSERT INTO %s (id, content, created_at, updated_at)
-		VALUES ($1, $2, NOW(), NOW())
-		ON CONFLICT (id)
-		DO UPDATE SET content = EXCLUDED.content, updated_at = NOW()
-	`, s.fullTableName(s.cfg.ConfigTable))
+	query := upsertRecordSQL(s.fullTableName(s.cfg.ConfigTable))
 	normalized := normalizeLineEndings(string(data))
 	if _, err := s.db.ExecContext(ctx, query, defaultConfigKey, normalized); err != nil {
 		return fmt.Errorf("postgres store: upsert config: %w", err)
@@ -583,7 +558,7 @@ func (s *PostgresStore) persistConfig(ctx context.Context, data []byte) error {
 }
 
 func (s *PostgresStore) deleteConfigRecord(ctx context.Context) error {
-	query := fmt.Sprintf("DELETE FROM %s WHERE id = $1", s.fullTableName(s.cfg.ConfigTable))
+	query := deleteByIDSQL(s.fullTableName(s.cfg.ConfigTable))
 	if _, err := s.db.ExecContext(ctx, query, defaultConfigKey); err != nil {
 		return fmt.Errorf("postgres store: delete config: %w", err)
 	}
@@ -596,7 +571,7 @@ func (s *PostgresStore) LoadUsage(ctx context.Context) (*usage.StatisticsSnapsho
 		return nil, nil
 	}
 	usageTable := s.fullTableName(s.usageTable())
-	query := fmt.Sprintf("SELECT content FROM %s WHERE id = $1", usageTable)
+	query := selectContentByIDSQL(usageTable)
 	var content string
 	err := s.db.QueryRowContext(ctx, query, defaultUsageKey).Scan(&content)
 	switch {
@@ -619,32 +594,27 @@ func (s *PostgresStore) SaveUsage(ctx context.Context, snapshot *usage.Statistic
 		return nil
 	}
 
-	// 先加载现有数据
+	// Load existing data first.
 	existing, err := s.LoadUsage(ctx)
 	if err != nil {
 		return err
 	}
 
-	// 创建临时统计结构，合并两个快照
+	// Create a temporary statistics structure and merge both snapshots.
 	finalStats := usage.NewRequestStatistics()
 	if existing != nil {
 		finalStats.MergeSnapshot(*existing)
 	}
 	finalStats.MergeSnapshot(*snapshot)
 
-	// 保存合并后的快照
+	// Persist the merged snapshot.
 	mergedSnapshot := finalStats.Snapshot()
 
 	data, err := json.Marshal(&mergedSnapshot)
 	if err != nil {
 		return fmt.Errorf("postgres store: marshal usage stats: %w", err)
 	}
-	query := fmt.Sprintf(`
-		INSERT INTO %s (id, content, created_at, updated_at)
-		VALUES ($1, $2, NOW(), NOW())
-		ON CONFLICT (id)
-		DO UPDATE SET content = EXCLUDED.content, updated_at = NOW()
-	`, s.fullTableName(s.usageTable()))
+	query := upsertRecordSQL(s.fullTableName(s.usageTable()))
 	if _, err := s.db.ExecContext(ctx, query, defaultUsageKey, string(data)); err != nil {
 		return fmt.Errorf("postgres store: upsert usage stats: %w", err)
 	}
@@ -727,15 +697,81 @@ func (s *PostgresStore) absoluteAuthPath(id string) (string, error) {
 }
 
 func (s *PostgresStore) fullTableName(name string) string {
-	if strings.TrimSpace(s.cfg.Schema) == "" {
-		return quoteIdentifier(name)
+	if schema := strings.TrimSpace(s.cfg.Schema); schema != "" {
+		return pgx.Identifier{schema, name}.Sanitize()
 	}
-	return quoteIdentifier(s.cfg.Schema) + "." + quoteIdentifier(name)
+	return pgx.Identifier{name}.Sanitize()
 }
 
-func quoteIdentifier(identifier string) string {
-	replaced := strings.ReplaceAll(identifier, "\"", "\"\"")
-	return "\"" + replaced + "\""
+func validatePostgresStoreConfig(cfg *PostgresStoreConfig) error {
+	if cfg == nil {
+		return fmt.Errorf("postgres store: config is nil")
+	}
+	cfg.Schema = strings.TrimSpace(cfg.Schema)
+	cfg.ConfigTable = strings.TrimSpace(cfg.ConfigTable)
+	cfg.AuthTable = strings.TrimSpace(cfg.AuthTable)
+	cfg.UsageTable = strings.TrimSpace(cfg.UsageTable)
+	if cfg.Schema != "" {
+		if err := validatePostgresIdentifier("schema", cfg.Schema); err != nil {
+			return err
+		}
+	}
+	if err := validatePostgresIdentifier("config table", cfg.ConfigTable); err != nil {
+		return err
+	}
+	if err := validatePostgresIdentifier("auth table", cfg.AuthTable); err != nil {
+		return err
+	}
+	if err := validatePostgresIdentifier("usage table", cfg.UsageTable); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validatePostgresIdentifier(kind, identifier string) error {
+	if identifier == "" {
+		return fmt.Errorf("postgres store: %s identifier is empty", kind)
+	}
+	if !postgresIdentifierPattern.MatchString(identifier) {
+		return fmt.Errorf("postgres store: invalid %s identifier %q", kind, identifier)
+	}
+	return nil
+}
+
+func createSchemaIfNotExistsSQL(schema string) string {
+	return "CREATE SCHEMA IF NOT EXISTS " + pgx.Identifier{schema}.Sanitize()
+}
+
+func createTableIfNotExistsSQL(tableName, contentType string) string {
+	return "CREATE TABLE IF NOT EXISTS " + tableName + ` (
+		id TEXT PRIMARY KEY,
+		content ` + contentType + ` NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`
+}
+
+func selectAuthRecordsSQL(tableName string) string {
+	return "SELECT id, content, created_at, updated_at FROM " + tableName + " ORDER BY id"
+}
+
+func selectContentByIDSQL(tableName string) string {
+	return "SELECT content FROM " + tableName + " WHERE id = $1"
+}
+
+func selectIDAndContentSQL(tableName string) string {
+	return "SELECT id, content FROM " + tableName
+}
+
+func upsertRecordSQL(tableName string) string {
+	return "INSERT INTO " + tableName + ` (id, content, created_at, updated_at)
+		VALUES ($1, $2, NOW(), NOW())
+		ON CONFLICT (id)
+		DO UPDATE SET content = EXCLUDED.content, updated_at = NOW()`
+}
+
+func deleteByIDSQL(tableName string) string {
+	return "DELETE FROM " + tableName + " WHERE id = $1"
 }
 
 func valueAsString(v any) string {

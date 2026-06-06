@@ -4,15 +4,17 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
-	"slices"
 	"sort"
 	"strings"
 	"time"
 
 	codexauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
+	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
@@ -189,6 +191,8 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
 		body = ensureImageGenerationTool(body, baseModel, auth)
 	}
+	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, e.Identifier(), body)
+	body, replayScope := applyCodexReasoningReplayCache(ctx, from, req, opts, body)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
@@ -264,6 +268,11 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 			continue
 		}
 
+		if eventType == "response.failed" {
+			clearCodexReasoningReplayOnInvalidSignature(replayScope, eventData)
+			err = newCodexFailedEventErr(eventData)
+			return resp, err
+		}
 		if eventType != "response.completed" {
 			continue
 		}
@@ -273,26 +282,8 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		}
 		publishCodexImageToolUsage(ctx, reporter, body, eventData)
 
-		completedData := eventData
-		outputResult := gjson.GetBytes(completedData, "response.output")
-		shouldPatchOutput := (!outputResult.Exists() || !outputResult.IsArray() || len(outputResult.Array()) == 0) && (len(outputItemsByIndex) > 0 || len(outputItemsFallback) > 0)
-		if shouldPatchOutput {
-			completedDataPatched := completedData
-			completedDataPatched, _ = sjson.SetRawBytes(completedDataPatched, "response.output", []byte(`[]`))
-
-			indexes := make([]int64, 0, len(outputItemsByIndex))
-			for idx := range outputItemsByIndex {
-				indexes = append(indexes, idx)
-			}
-			slices.Sort(indexes)
-			for _, idx := range indexes {
-				completedDataPatched, _ = sjson.SetRawBytes(completedDataPatched, "response.output.-1", outputItemsByIndex[idx])
-			}
-			for _, item := range outputItemsFallback {
-				completedDataPatched, _ = sjson.SetRawBytes(completedDataPatched, "response.output.-1", item)
-			}
-			completedData = completedDataPatched
-		}
+		completedData := patchCodexCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
+		cacheCodexReasoningReplayFromCompleted(replayScope, completedData)
 
 		var param any
 		out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, completedData, &param)
@@ -338,6 +329,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
 		body = ensureImageGenerationTool(body, baseModel, auth)
 	}
+	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, e.Identifier(), body)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
@@ -439,6 +431,8 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
 		body = ensureImageGenerationTool(body, baseModel, auth)
 	}
+	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, e.Identifier(), body)
+	body, replayScope := applyCodexReasoningReplayCache(ctx, from, req, opts, body)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
@@ -508,12 +502,20 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				switch gjson.GetBytes(data, "type").String() {
 				case "response.output_item.done":
 					collectCodexOutputItemDone(data, outputItemsByIndex, &outputItemsFallback)
+				case "response.failed":
+					clearCodexReasoningReplayOnInvalidSignature(replayScope, data)
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Err: newCodexFailedEventErr(data)}:
+					case <-ctx.Done():
+					}
+					return
 				case "response.completed":
 					if detail, ok := helps.ParseCodexUsage(data); ok {
 						reporter.Publish(ctx, detail)
 					}
 					publishCodexImageToolUsage(ctx, reporter, body, data)
 					data = patchCodexCompletedOutput(data, outputItemsByIndex, outputItemsFallback)
+					cacheCodexReasoningReplayFromCompleted(replayScope, data)
 					translatedLine = append([]byte("data: "), data...)
 				}
 			}
@@ -537,6 +539,15 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+}
+
+func translateCodexRequestPair(from, to sdktranslator.Format, model string, originalPayload, payload []byte, stream bool) ([]byte, []byte) {
+	translated := sdktranslator.TranslateRequest(from, to, model, payload, stream)
+	if bytes.Equal(originalPayload, payload) {
+		return translated, translated
+	}
+	originalTranslated := sdktranslator.TranslateRequest(from, to, model, originalPayload, stream)
+	return originalTranslated, translated
 }
 
 func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
@@ -933,13 +944,303 @@ func ensureImageGenerationTool(body []byte, baseModel string, auth *cliproxyauth
 	return body
 }
 
-func publishCodexImageToolUsage(ctx context.Context, reporter *helps.UsageReporter, body []byte, completedData []byte) {
-	detail, ok := helps.ParseCodexImageToolUsage(completedData)
+type codexReasoningReplayScope struct {
+	modelName  string
+	sessionKey string
+}
+
+func (s codexReasoningReplayScope) valid() bool {
+	return strings.TrimSpace(s.modelName) != "" && strings.TrimSpace(s.sessionKey) != ""
+}
+
+func codexReasoningReplaySessionKeyFromPayload(payload []byte) string {
+	if len(payload) == 0 {
+		return ""
+	}
+	if sessionID := strings.TrimSpace(gjson.GetBytes(payload, "client_metadata.x-codex-window-id").String()); sessionID != "" {
+		return "window:" + sessionID
+	}
+	return ""
+}
+
+func codexReasoningReplaySessionKeyFromHeaders(headers http.Header) string {
+	if headers == nil {
+		return ""
+	}
+	for key, values := range headers {
+		if !strings.EqualFold(key, "Session_id") && !strings.EqualFold(key, "Session-Id") {
+			continue
+		}
+		for _, value := range values {
+			if sessionID := strings.TrimSpace(value); sessionID != "" {
+				return "session-id:" + sessionID
+			}
+		}
+	}
+	if windowID := strings.TrimSpace(headers.Get("X-Codex-Window-Id")); windowID != "" {
+		return "window:" + windowID
+	}
+	return ""
+}
+
+func codexReasoningReplaySessionKey(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, body []byte) string {
+	if from == sdktranslator.FromString("claude") {
+		userID := strings.TrimSpace(gjson.GetBytes(req.Payload, "metadata.user_id").String())
+		if strings.HasPrefix(userID, "{") {
+			if sessionID := strings.TrimSpace(gjson.Get(userID, "session_id").String()); sessionID != "" {
+				return "claude:" + sessionID
+			}
+		}
+	}
+	if key := codexReasoningReplaySessionKeyFromPayload(body); key != "" {
+		return key
+	}
+	if key := codexReasoningReplaySessionKeyFromHeaders(opts.Headers); key != "" {
+		return key
+	}
+	if key := codexReasoningReplaySessionKeyFromHeaders(reqToHeaders(ctx)); key != "" {
+		return key
+	}
+	return ""
+}
+
+func codexReasoningReplayScopeFromRequest(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, body []byte) codexReasoningReplayScope {
+	return codexReasoningReplayScope{
+		modelName:  thinking.ParseSuffix(req.Model).ModelName,
+		sessionKey: codexReasoningReplaySessionKey(ctx, from, req, opts, body),
+	}
+}
+
+func applyCodexReasoningReplayCache(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, body []byte) ([]byte, codexReasoningReplayScope) {
+	scope := codexReasoningReplayScopeFromRequest(ctx, from, req, opts, body)
+	if !scope.valid() || from != sdktranslator.FromString("claude") {
+		return body, scope
+	}
+	cachedItems, ok := internalcache.GetCodexReasoningReplayItems(scope.modelName, scope.sessionKey)
+	if !ok || len(cachedItems) == 0 {
+		return body, scope
+	}
+	if hasReasoningInput(body) {
+		return body, scope
+	}
+
+	matchedOutputByCallID := claudeToolResultOutputsByCallID(req.Payload)
+	replayItems := filterReplayItemsForClaudeOutputs(cachedItems, matchedOutputByCallID)
+	if len(replayItems) == 0 {
+		return body, scope
+	}
+
+	inputItems := gjson.GetBytes(body, "input").Array()
+	insertAt := claudeReplayInsertIndex(inputItems)
+	updated, err := insertReplayItems(body, replayItems, insertAt)
+	if err != nil {
+		return body, scope
+	}
+	return updated, scope
+}
+
+func cacheCodexReasoningReplayFromCompleted(scope codexReasoningReplayScope, completedData []byte) {
+	if !scope.valid() {
+		return
+	}
+	output := gjson.GetBytes(completedData, "response.output")
+	if !output.IsArray() {
+		return
+	}
+	items := make([][]byte, 0, len(output.Array()))
+	for _, item := range output.Array() {
+		if item.Type == gjson.JSON {
+			items = append(items, []byte(item.Raw))
+		}
+	}
+	internalcache.CacheCodexReasoningReplayItems(scope.modelName, scope.sessionKey, items)
+}
+
+func clearCodexReasoningReplayOnInvalidSignature(scope codexReasoningReplayScope, eventData []byte) {
+	if !scope.valid() {
+		return
+	}
+	if !strings.EqualFold(gjson.GetBytes(eventData, "type").String(), "response.failed") {
+		return
+	}
+	if code, errType, ok := codexStatusErrorClassification(http.StatusBadRequest, eventData); ok && code == "thinking_signature_invalid" && errType == "invalid_request_error" {
+		internalcache.DeleteCodexReasoningReplayItem(scope.modelName, scope.sessionKey)
+	}
+}
+
+func newCodexFailedEventErr(eventData []byte) error {
+	message := strings.TrimSpace(gjson.GetBytes(eventData, "response.error.message").String())
+	if message == "" {
+		message = strings.TrimSpace(gjson.GetBytes(eventData, "error.message").String())
+	}
+	if message == "" {
+		message = strings.TrimSpace(gjson.GetBytes(eventData, "message").String())
+	}
+	if message == "" {
+		message = strings.TrimSpace(string(eventData))
+	}
+	body := []byte(`{"error":{}}`)
+	if errType := strings.TrimSpace(gjson.GetBytes(eventData, "response.error.type").String()); errType != "" {
+		body, _ = sjson.SetBytes(body, "error.type", errType)
+	}
+	if code := strings.TrimSpace(gjson.GetBytes(eventData, "response.error.code").String()); code != "" {
+		body, _ = sjson.SetBytes(body, "error.code", code)
+	}
+	body, _ = sjson.SetBytes(body, "error.message", message)
+	return newCodexStatusErr(http.StatusBadRequest, body)
+}
+
+func publishCodexImageToolUsage(ctx context.Context, reporter *helps.UsageReporter, body []byte, eventData []byte) {
+	if reporter == nil {
+		return
+	}
+	detail, ok := helps.ParseCodexImageToolUsage(eventData)
 	if !ok {
 		return
 	}
-	reporter.EnsurePublished(ctx)
 	reporter.PublishAdditionalModel(ctx, codexImageGenerationToolModel(body), detail)
+}
+
+func reqToHeaders(ctx context.Context) http.Header {
+	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+		return ginCtx.Request.Header
+	}
+	return nil
+}
+
+func hasReasoningInput(body []byte) bool {
+	for _, item := range gjson.GetBytes(body, "input").Array() {
+		if item.Get("type").String() == "reasoning" {
+			return true
+		}
+	}
+	return false
+}
+
+func claudeReplayInsertIndex(items []gjson.Result) int {
+	for index, item := range items {
+		itemType := item.Get("type").String()
+		if itemType == "message" && item.Get("role").String() == "assistant" {
+			return index
+		}
+		if itemType == "function_call_output" {
+			return index
+		}
+	}
+	return 0
+}
+
+func insertReplayItems(body []byte, replayItems [][]byte, insertAt int) ([]byte, error) {
+	input := gjson.GetBytes(body, "input")
+	if !input.IsArray() {
+		input = gjson.ParseBytes([]byte(`[]`))
+	}
+	arr := input.Array()
+	parts := make([][]byte, 0, len(arr)+len(replayItems))
+	for index, item := range arr {
+		if index == insertAt {
+			parts = append(parts, replayItems...)
+		}
+		parts = append(parts, []byte(item.Raw))
+	}
+	if insertAt >= len(arr) {
+		parts = append(parts, replayItems...)
+	}
+	joined := []byte("[]")
+	if len(parts) > 0 {
+		var buf bytes.Buffer
+		buf.WriteByte('[')
+		for index, part := range parts {
+			if index > 0 {
+				buf.WriteByte(',')
+			}
+			buf.Write(part)
+		}
+		buf.WriteByte(']')
+		joined = buf.Bytes()
+	}
+	return sjson.SetRawBytes(body, "input", joined)
+}
+
+func claudeToolResultOutputsByCallID(payload []byte) map[string][]byte {
+	matched := make(map[string][]byte)
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.IsArray() {
+		return matched
+	}
+	for _, message := range messages.Array() {
+		contents := message.Get("content")
+		if !contents.IsArray() {
+			continue
+		}
+		for _, content := range contents.Array() {
+			if content.Get("type").String() != "tool_result" {
+				continue
+			}
+			callID := shortenCodexReplayCallIDIfNeeded(content.Get("tool_use_id").String())
+			if callID == "" {
+				continue
+			}
+			output := []byte(`{"type":"function_call_output"}`)
+			output, _ = sjson.SetBytes(output, "call_id", callID)
+			if contentValue := content.Get("content"); contentValue.IsArray() {
+				toolResultContent := []byte(`[]`)
+				toolResultIndex := 0
+				for _, entry := range contentValue.Array() {
+					if entry.Get("type").String() != "text" {
+						continue
+					}
+					toolResultContent, _ = sjson.SetBytes(toolResultContent, fmt.Sprintf("%d.type", toolResultIndex), "input_text")
+					toolResultContent, _ = sjson.SetBytes(toolResultContent, fmt.Sprintf("%d.text", toolResultIndex), entry.Get("text").String())
+					toolResultIndex++
+				}
+				if toolResultIndex > 0 {
+					output, _ = sjson.SetRawBytes(output, "output", toolResultContent)
+				}
+			} else {
+				output, _ = sjson.SetBytes(output, "output", content.Get("content").String())
+			}
+			matched[callID] = output
+		}
+	}
+	return matched
+}
+
+func filterReplayItemsForClaudeOutputs(cachedItems [][]byte, outputs map[string][]byte) [][]byte {
+	replayItems := make([][]byte, 0, len(cachedItems))
+	for _, item := range cachedItems {
+		itemType := gjson.GetBytes(item, "type").String()
+		switch itemType {
+		case "reasoning":
+			replayItems = append(replayItems, item)
+		case "function_call":
+			callID := shortenCodexReplayCallIDIfNeeded(gjson.GetBytes(item, "call_id").String())
+			if _, ok := outputs[callID]; !ok {
+				continue
+			}
+			updated := item
+			updated, _ = sjson.SetBytes(updated, "call_id", callID)
+			replayItems = append(replayItems, updated)
+		case "custom_tool_call":
+			continue
+		}
+	}
+	return replayItems
+}
+
+func shortenCodexReplayCallIDIfNeeded(id string) string {
+	const limit = 64
+	id = strings.TrimSpace(id)
+	if len(id) <= limit {
+		return id
+	}
+	sum := sha256.Sum256([]byte(id))
+	suffix := "_" + hex.EncodeToString(sum[:8])
+	prefixLen := limit - len(suffix)
+	if prefixLen <= 0 {
+		return suffix[len(suffix)-limit:]
+	}
+	return id[:prefixLen] + suffix
 }
 
 func codexImageGenerationToolModel(body []byte) string {

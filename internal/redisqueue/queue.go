@@ -10,6 +10,7 @@ const (
 	defaultRetentionSeconds int64 = 60
 	maxRetentionSeconds     int64 = 3600
 	usageSubscriberBuffer         = 256
+	errorSubscriberBuffer         = 256
 )
 
 type queueItem struct {
@@ -28,7 +29,8 @@ type queue struct {
 var (
 	enabled          atomic.Bool
 	retentionSeconds atomic.Int64
-	global           queue
+	usageQueue       queue
+	errorQueue       queue
 )
 
 func init() {
@@ -38,7 +40,8 @@ func init() {
 func SetEnabled(value bool) {
 	enabled.Store(value)
 	if !value {
-		global.clear()
+		usageQueue.clear()
+		errorQueue.clear()
 	}
 }
 
@@ -57,16 +60,11 @@ func SetRetentionSeconds(value int) {
 }
 
 func Enqueue(payload []byte) {
-	if !Enabled() {
-		return
-	}
-	if len(payload) == 0 {
-		return
-	}
-	if global.publishToSubscribers(payload) {
-		return
-	}
-	global.enqueue(payload)
+	enqueue(&usageQueue, payload)
+}
+
+func EnqueueError(payload []byte) {
+	enqueue(&errorQueue, payload)
 }
 
 func PopOldest(count int) [][]byte {
@@ -76,11 +74,38 @@ func PopOldest(count int) [][]byte {
 	if count <= 0 {
 		return nil
 	}
-	return global.popOldest(count)
+	return usageQueue.popOldest(count)
+}
+
+func PopOldestErrors(count int) [][]byte {
+	if !Enabled() {
+		return nil
+	}
+	if count <= 0 {
+		return nil
+	}
+	return errorQueue.popOldest(count)
 }
 
 func SubscribeUsage() (<-chan []byte, func()) {
-	return global.subscribeUsage()
+	return usageQueue.subscribe(usageSubscriberBuffer)
+}
+
+func SubscribeErrors() (<-chan []byte, func()) {
+	return errorQueue.subscribe(errorSubscriberBuffer)
+}
+
+func enqueue(target *queue, payload []byte) {
+	if !Enabled() {
+		return
+	}
+	if len(payload) == 0 {
+		return
+	}
+	if target.publishToSubscribers(payload) {
+		return
+	}
+	target.enqueue(payload)
 }
 
 func (q *queue) clear() {
@@ -135,8 +160,8 @@ func (q *queue) publishToSubscribers(payload []byte) bool {
 	return true
 }
 
-func (q *queue) subscribeUsage() (<-chan []byte, func()) {
-	subscriber := make(chan []byte, usageSubscriberBuffer)
+func (q *queue) subscribe(bufferSize int) (<-chan []byte, func()) {
+	subscriber := make(chan []byte, bufferSize)
 
 	q.mu.Lock()
 	if q.subscribers == nil {
@@ -150,13 +175,13 @@ func (q *queue) subscribeUsage() (<-chan []byte, func()) {
 	var once sync.Once
 	unsubscribe := func() {
 		once.Do(func() {
-			q.unsubscribeUsage(id)
+			q.unsubscribe(id)
 		})
 	}
 	return subscriber, unsubscribe
 }
 
-func (q *queue) unsubscribeUsage(id uint64) {
+func (q *queue) unsubscribe(id uint64) {
 	q.mu.Lock()
 	subscriber, ok := q.subscribers[id]
 	if ok {

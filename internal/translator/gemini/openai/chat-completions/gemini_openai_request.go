@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
+	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
@@ -191,7 +192,6 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 									data := pieces[1][7:]
 									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.mime_type", mime)
 									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.data", data)
-									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".thoughtSignature", geminiFunctionThoughtSignature)
 									p++
 								}
 							}
@@ -261,7 +261,8 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 						fargs := tc.Get("function.arguments").String()
 						node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".functionCall.name", fname)
 						node, _ = sjson.SetRawBytes(node, "parts."+itoa(p)+".functionCall.args", []byte(fargs))
-						node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".thoughtSignature", geminiFunctionThoughtSignature)
+						rawSignature := tc.Get("extra_content.google.thought_signature").String()
+						node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".thoughtSignature", sigcompat.GeminiReplaySignatureOrBypass(rawSignature, sigcompat.SignatureBlockKindGeminiFunctionCall))
 						p++
 						if fid != "" {
 							fIDs = append(fIDs, fid)
