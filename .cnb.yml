@@ -37,8 +37,6 @@ main:
             if [ -f tag_info.json ]; then cat tag_info.json; else echo "tag_info.json not found, skipping"; fi
         - name: generate changelog and create release
           script: |
-            set -e
-
             # New tag from auto-tag stage; fall back to latest tag if empty
             CURRENT_TAG="${NEW_TAG:-$(git tag --sort=-v:refname | head -n 1 || echo "")}"
             # Previous tag (excluding CURRENT_TAG)
@@ -53,15 +51,24 @@ main:
             if [ -n "${PREV_TAG}" ]; then
               RANGE="${PREV_TAG}..${CURRENT_TAG}"
             else
-              # First tag or no previous tag — limit to recent commits to avoid
-              # an unbounded changelog that exceeds ARG_MAX
-              RANGE="-1"
+              RANGE="-50"
             fi
 
-            echo "=== Changelog ==="
-            # Write changelog directly to a file to avoid shell ARG_MAX limits
-            git log ${RANGE} --pretty=format:"- [%h](${REPO_URL}/-/commit/%H) %s" --no-merges > /tmp/changelog.txt
+            echo "=== Changelog (max 200 commits) ==="
+            # Limit changelog to 200 commits to avoid exceeding API payload size limits
+            git log ${RANGE} --pretty=format:"- [%h](${REPO_URL}/-/commit/%H) %s" --no-merges -200 > /tmp/changelog.txt
             cat /tmp/changelog.txt
+
+            # Ensure body does not exceed 80KB to stay within API limits
+            BODY_SIZE=$(wc -c < /tmp/changelog.txt)
+            echo "Changelog body size: ${BODY_SIZE} bytes"
+            if [ "${BODY_SIZE}" -gt 80000 ]; then
+              echo "WARNING: Changelog exceeds 80KB, truncating..."
+              head -c 80000 /tmp/changelog.txt > /tmp/changelog_trimmed.txt
+              echo "" >> /tmp/changelog_trimmed.txt
+              echo "... (truncated, full history available in git log)" >> /tmp/changelog_trimmed.txt
+              mv /tmp/changelog_trimmed.txt /tmp/changelog.txt
+            fi
 
             # Check if release already exists
             EXIST_RELEASE=$(curl --silent --fail --request GET \
@@ -79,15 +86,22 @@ main:
                 /tmp/changelog.txt > /tmp/release_payload.json
 
               # Use --data @file to avoid shell argument length limits
-              curl --fail --silent --show-error \
+              # Do NOT use set -e so that a release creation failure doesn't block downstream stages
+              HTTP_CODE=$(curl --write-out "%{http_code}" --silent --output /tmp/release_response.txt \
                 --request POST \
                 --url "${CNB_API_ENDPOINT}/liyao52033/CLIProxyAPIPlus/-/releases" \
                 --header "Accept: application/vnd.cnb.api+json" \
                 --header "Authorization: Bearer ${CNB_TOKEN}" \
                 --header "Content-Type: application/json" \
-                --data @/tmp/release_payload.json
+                --data @/tmp/release_payload.json)
 
-              echo "✅ Release ${CURRENT_TAG} created successfully"
+              if [ "${HTTP_CODE}" -ge 200 ] && [ "${HTTP_CODE}" -lt 300 ]; then
+                echo "✅ Release ${CURRENT_TAG} created successfully"
+              else
+                echo "⚠️ Failed to create release ${CURRENT_TAG} (HTTP ${HTTP_CODE})"
+                cat /tmp/release_response.txt
+                echo "Release creation skipped — continuing pipeline"
+              fi
             fi
         - name: prepare build args
           imports: https://cnb.cool/liyao52033/envs/-/blob/main/envs.yml
