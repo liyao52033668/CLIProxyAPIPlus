@@ -277,6 +277,7 @@ func (e *QoderExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	if errMarshal != nil {
 		return resp, fmt.Errorf("qoder executor: failed to marshal request body: %w", errMarshal)
 	}
+	logQoderRequestDiagnostics(baseModel, qoderBody, qoderBodyJSON)
 
 	// Build COSY authenticated request using the upstream SSE transport.
 	httpReq, errReq := e.buildCosyRequest(ctx, auth, url, qoderBodyJSON, true, baseModel, contract)
@@ -334,6 +335,7 @@ func (e *QoderExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 			b, _ := io.ReadAll(httpResp.Body)
 			_ = httpResp.Body.Close()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+			logQoderUpstreamErrorDiagnostics(helps.PayloadRequestedModel(opts, req.Model), req.Model, qoderBodyJSON, httpResp.StatusCode, httpResp.Header.Get("Content-Type"), b)
 			lastErr = statusErr{code: httpResp.StatusCode, msg: string(b)}
 			continue
 		}
@@ -356,6 +358,7 @@ func (e *QoderExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+		logQoderUpstreamErrorDiagnostics(helps.PayloadRequestedModel(opts, req.Model), req.Model, qoderBodyJSON, httpResp.StatusCode, httpResp.Header.Get("Content-Type"), b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return resp, err
@@ -407,6 +410,7 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if errMarshal != nil {
 		return nil, fmt.Errorf("qoder executor: failed to marshal request body: %w", errMarshal)
 	}
+	logQoderRequestDiagnostics(baseModel, qoderBody, qoderBodyJSON)
 
 	// Build COSY authenticated request (plain JSON for stream)
 	httpReq, errReq := e.buildCosyRequest(ctx, auth, url, qoderBodyJSON, true, baseModel, contract)
@@ -436,6 +440,8 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	retryCfg := qoderDefaultRetryConfig()
 	var httpResp *http.Response
 	var lastErr error
+	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
+	streamAttemptStartedAt := time.Now()
 
 	for attempt := 0; attempt < retryCfg.MaxRetries; attempt++ {
 		if attempt > 0 {
@@ -449,6 +455,7 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			util.ApplyCustomHeadersFromAttrs(httpReq, auth.Attributes)
 		}
 
+		streamAttemptStartedAt = time.Now()
 		httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 		httpResp, lastErr = httpClient.Do(httpReq)
 		if lastErr != nil {
@@ -464,6 +471,7 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			b, _ := io.ReadAll(httpResp.Body)
 			_ = httpResp.Body.Close()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+			logQoderUpstreamErrorDiagnostics(helps.PayloadRequestedModel(opts, req.Model), req.Model, qoderBodyJSON, httpResp.StatusCode, httpResp.Header.Get("Content-Type"), b)
 			lastErr = statusErr{code: httpResp.StatusCode, msg: string(b)}
 			continue
 		}
@@ -480,6 +488,7 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+		logQoderUpstreamErrorDiagnostics(helps.PayloadRequestedModel(opts, req.Model), req.Model, qoderBodyJSON, httpResp.StatusCode, httpResp.Header.Get("Content-Type"), b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("qoder executor: close response body error: %v", errClose)
@@ -500,8 +509,12 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, 1_048_576) // 1MB
 		var param any
+		totalSSELines := 0
+		totalOpenAIChunks := 0
+		totalTranslatedPayloads := 0
 		for scanner.Scan() {
 			line := scanner.Bytes()
+			totalSSELines++
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 
 			// Parse Qoder SSE format: data:{...} where body contains inner OpenAI chunk
@@ -509,6 +522,7 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			if openAIChunk == nil {
 				continue
 			}
+			totalOpenAIChunks++
 
 			if detail, ok := helps.ParseOpenAIStreamUsage(openAIChunk); ok {
 				reporter.Publish(ctx, detail)
@@ -518,14 +532,19 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			sseLine := append([]byte("data: "), openAIChunk...)
 			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(sseLine), &param)
 			for i := range chunks {
+				if len(chunks[i]) > 0 {
+					totalTranslatedPayloads++
+				}
 				out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
 			}
 		}
+		errScan := scanner.Err()
+		log.Debugf("qoder executor: stream bootstrap diagnostics stage=stream_loop_exit requested_model=%s upstream_model=%s status=%d elapsed_ms=%d sse_lines=%d openai_chunks=%d translated_payloads=%d ctx_err=%s scanner_err=%s", strings.TrimSpace(requestedModel), strings.TrimSpace(req.Model), httpResp.StatusCode, time.Since(streamAttemptStartedAt).Milliseconds(), totalSSELines, totalOpenAIChunks, totalTranslatedPayloads, qoderDiagnosticErrString(ctx.Err()), qoderDiagnosticErrString(errScan))
 		doneChunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param)
 		for i := range doneChunks {
 			out <- cliproxyexecutor.StreamChunk{Payload: doneChunks[i]}
 		}
-		if errScan := scanner.Err(); errScan != nil {
+		if errScan != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.PublishFailure(ctx)
 			out <- cliproxyexecutor.StreamChunk{Err: errScan}
@@ -722,6 +741,89 @@ func (e *QoderExecutor) buildQoderRequestBody(openaiBody []byte, modelKey string
 		},
 	}
 	return body
+}
+
+func logQoderRequestDiagnostics(modelKey string, body map[string]any, bodyJSON []byte) {
+	messages, _ := body["messages"].([]any)
+	tools, _ := body["tools"].([]any)
+	roleCounts := map[string]int{}
+	totalTextChars := 0
+	lastUserChars := 0
+	for _, raw := range messages {
+		message, ok := raw.(map[string]any)
+		if !ok {
+			roleCounts["unknown"]++
+			continue
+		}
+		role, _ := message["role"].(string)
+		role = strings.TrimSpace(role)
+		if role == "" {
+			role = "unknown"
+		}
+		roleCounts[role]++
+		text := qoderNormalizeMessageText(message)
+		textChars := len([]rune(text))
+		totalTextChars += textChars
+		if role == "user" {
+			lastUserChars = textChars
+		}
+	}
+	log.Debugf(
+		"qoder executor: request diagnostics model=%s messages=%d tools=%d body_bytes=%d text_chars=%d last_user_chars=%d role_counts=%s",
+		modelKey,
+		len(messages),
+		len(tools),
+		len(bodyJSON),
+		totalTextChars,
+		lastUserChars,
+		formatQoderRoleCounts(roleCounts),
+	)
+}
+
+func logQoderUpstreamErrorDiagnostics(requestedModel string, upstreamModel string, bodyJSON []byte, statusCode int, contentType string, responseBody []byte) {
+	log.Debugf(
+		"qoder executor: upstream error diagnostics status=%d requested_model=%s upstream_model=%s body_bytes=%d error_body=%s",
+		statusCode,
+		strings.TrimSpace(requestedModel),
+		strings.TrimSpace(upstreamModel),
+		len(bodyJSON),
+		helps.SummarizeErrorBody(contentType, responseBody),
+	)
+}
+
+func qoderDiagnosticErrString(err error) string {
+	if err == nil {
+		return "none"
+	}
+	return strings.TrimSpace(err.Error())
+}
+
+func formatQoderRoleCounts(roleCounts map[string]int) string {
+	if len(roleCounts) == 0 {
+		return "none"
+	}
+	ordered := []string{"system", "user", "assistant", "tool", "unknown"}
+	parts := make([]string, 0, len(roleCounts))
+	seen := make(map[string]struct{}, len(roleCounts))
+	for _, role := range ordered {
+		if count := roleCounts[role]; count > 0 {
+			parts = append(parts, fmt.Sprintf("%s=%d", role, count))
+			seen[role] = struct{}{}
+		}
+	}
+	for role, count := range roleCounts {
+		if count <= 0 {
+			continue
+		}
+		if _, ok := seen[role]; ok {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s=%d", role, count))
+	}
+	if len(parts) == 0 {
+		return "none"
+	}
+	return strings.Join(parts, ",")
 }
 
 func qoderConversationKeyFromPayload(openaiBody []byte) string {

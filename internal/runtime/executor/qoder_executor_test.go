@@ -619,6 +619,217 @@ func TestQoderExecutorBuildQoderRequestBody_DoesNotSetQoderCLISessionType(t *tes
 	}
 }
 
+func TestQoderExecutorExecute_LogsRequestDiagnostics(t *testing.T) {
+	var logOutput bytes.Buffer
+	previousLogOutput := log.StandardLogger().Out
+	previousLogLevel := log.GetLevel()
+	log.SetOutput(&logOutput)
+	log.SetLevel(log.DebugLevel)
+	defer log.SetOutput(previousLogOutput)
+	defer log.SetLevel(previousLogLevel)
+
+	requestCount := 0
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", qoderRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requestCount++
+		switch requestCount {
+		case 1:
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"id":"u1","name":"Qoder User","securityOauthToken":"session-token","refreshToken":"refresh-token","userType":"personal_standard"}`)),
+				Request:    req,
+			}, nil
+		case 2:
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body: io.NopCloser(strings.NewReader(strings.Join([]string{
+					`data: {"body":"{\"choices\":[{\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}"}`,
+					`data: {"body":"[DONE]"}`,
+				}, "\n"))),
+				Request: req,
+			}, nil
+		default:
+			t.Fatalf("unexpected request %d: %s %s", requestCount, req.Method, req.URL.String())
+			return nil, nil
+		}
+	}))
+
+	e := NewQoderExecutor(&config.Config{})
+	_, err := e.Execute(ctx, &cliproxyauth.Auth{
+		Metadata: map[string]any{
+			"auth_method":           "pat",
+			"personal_access_token": "qdr_pat_token",
+			"uid":                   "u1",
+			"machine_id":            "m1",
+		},
+	}, cliproxyexecutor.Request{
+		Model: "qwen3.7-max",
+		Payload: []byte(`{
+			"messages":[{"role":"user","content":"read the repo and update the config loader"}],
+			"tools":[
+				{"type":"function","function":{"name":"glob","description":"find files","parameters":{"type":"object"}}},
+				{"type":"function","function":{"name":"read","description":"read file","parameters":{"type":"object"}}}
+			]
+		}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai")})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	logText := logOutput.String()
+	if !strings.Contains(logText, "qoder executor: request diagnostics") {
+		t.Fatalf("expected request diagnostics log, got: %s", logText)
+	}
+	for _, want := range []string{"model=qwen3.7-max", "messages=1", "tools=2", "body_bytes="} {
+		if !strings.Contains(logText, want) {
+			t.Fatalf("expected request diagnostics log to contain %q, got: %s", want, logText)
+		}
+	}
+}
+
+func TestQoderExecutorExecute_LogsUpstreamErrorDiagnostics(t *testing.T) {
+	var logOutput bytes.Buffer
+	previousLogOutput := log.StandardLogger().Out
+	previousLogLevel := log.GetLevel()
+	log.SetOutput(&logOutput)
+	log.SetLevel(log.DebugLevel)
+	defer log.SetOutput(previousLogOutput)
+	defer log.SetLevel(previousLogLevel)
+
+	requestCount := 0
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", qoderRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requestCount++
+		switch requestCount {
+		case 1:
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"id":"u1","name":"Qoder User","securityOauthToken":"session-token","refreshToken":"refresh-token","userType":"personal_standard"}`)),
+				Request:    req,
+			}, nil
+		case 2:
+			return &http.Response{
+				StatusCode: http.StatusInternalServerError,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"tool context too large"}}`)),
+				Request:    req,
+			}, nil
+		default:
+			t.Fatalf("unexpected request %d: %s %s", requestCount, req.Method, req.URL.String())
+			return nil, nil
+		}
+	}))
+
+	e := NewQoderExecutor(&config.Config{})
+	_, err := e.Execute(ctx, &cliproxyauth.Auth{
+		Metadata: map[string]any{
+			"auth_method":           "pat",
+			"personal_access_token": "qdr_pat_token",
+			"uid":                   "u1",
+			"machine_id":            "m1",
+		},
+	}, cliproxyexecutor.Request{
+		Model:   "qmodel_latest",
+		Payload: []byte(`{"messages":[{"role":"user","content":"read the full repo and update multiple files"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestedModelMetadataKey: "qwen3.7-max",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected upstream 500 error")
+	}
+
+	logText := logOutput.String()
+	if !strings.Contains(logText, "qoder executor: upstream error diagnostics") {
+		t.Fatalf("expected upstream error diagnostics log, got: %s", logText)
+	}
+	for _, want := range []string{"status=500", "requested_model=qwen3.7-max", "upstream_model=qmodel_latest", "body_bytes=", "tool context too large"} {
+		if !strings.Contains(logText, want) {
+			t.Fatalf("expected upstream error diagnostics log to contain %q, got: %s", want, logText)
+		}
+	}
+}
+
+func TestQoderExecutorExecuteStream_LogsBootstrapDiagnostics(t *testing.T) {
+	var logOutput bytes.Buffer
+	previousLogOutput := log.StandardLogger().Out
+	previousLogLevel := log.GetLevel()
+	log.SetOutput(&logOutput)
+	log.SetLevel(log.DebugLevel)
+	defer log.SetOutput(previousLogOutput)
+	defer log.SetLevel(previousLogLevel)
+
+	requestCount := 0
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", qoderRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requestCount++
+		switch requestCount {
+		case 1:
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"id":"u1","name":"Qoder User","securityOauthToken":"session-token","refreshToken":"refresh-token","userType":"personal_standard"}`)),
+				Request:    req,
+			}, nil
+		case 2:
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body: io.NopCloser(strings.NewReader(strings.Join([]string{
+					``,
+					`data: {"body":"{\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}"}`,
+					`data: {"body":"[DONE]"}`,
+				}, "\n"))),
+				Request: req,
+			}, nil
+		default:
+			t.Fatalf("unexpected request %d: %s %s", requestCount, req.Method, req.URL.String())
+			return nil, nil
+		}
+	}))
+
+	e := NewQoderExecutor(&config.Config{})
+	streamResult, err := e.ExecuteStream(ctx, &cliproxyauth.Auth{
+		Metadata: map[string]any{
+			"auth_method":           "pat",
+			"personal_access_token": "qdr_pat_token",
+			"uid":                   "u1",
+			"machine_id":            "m1",
+		},
+	}, cliproxyexecutor.Request{
+		Model:   "qmodel_latest",
+		Payload: []byte(`{"messages":[{"role":"user","content":"read the full repo"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestedModelMetadataKey: "qwen3.7-max",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	for chunk := range streamResult.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected stream chunk error: %v", chunk.Err)
+		}
+	}
+
+	logText := logOutput.String()
+	for _, want := range []string{
+		"qoder executor: stream bootstrap diagnostics stage=stream_loop_exit",
+		"ctx_err=none",
+		"scanner_err=none",
+		"requested_model=qwen3.7-max",
+		"upstream_model=qmodel_latest",
+	} {
+		if !strings.Contains(logText, want) {
+			t.Fatalf("expected stream bootstrap diagnostics log to contain %q, got: %s", want, logText)
+		}
+	}
+}
+
 func TestQoderExecutorExecute_NonStreamUsesStreamTransportSemantics(t *testing.T) {
 	requestCount := 0
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", qoderRoundTripFunc(func(req *http.Request) (*http.Response, error) {

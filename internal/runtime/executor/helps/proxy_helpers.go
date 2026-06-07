@@ -69,12 +69,14 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	if proxyURL != "" {
 		transport := buildProxyTransport(proxyURL)
 		if transport != nil {
-			httpClient.Transport = transport
-			// Cache the client
+			baseClient := &http.Client{Transport: transport}
 			httpClientCacheMutex.Lock()
-			httpClientCache[proxyURL] = httpClient
+			httpClientCache[proxyURL] = baseClient
 			httpClientCacheMutex.Unlock()
-			return httpClient
+			if timeout > 0 {
+				return &http.Client{Transport: transport, Timeout: timeout}
+			}
+			return baseClient
 		}
 		// If proxy setup failed, log and fall through to context RoundTripper
 		log.Debugf("failed to setup proxy from URL: %s, falling back to context transport", proxyutil.Redact(proxyURL))
