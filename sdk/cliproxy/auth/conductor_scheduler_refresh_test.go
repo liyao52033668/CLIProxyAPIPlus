@@ -90,6 +90,54 @@ func TestManager_RefreshAuthUnauthorizedFailureStopsAutoRefreshRetry(t *testing.
 	}
 }
 
+func TestManager_RefreshAuthSuccessfulNoOpClearsPendingBackoff(t *testing.T) {
+	ctx := context.Background()
+	lead := 5 * time.Minute
+	setRefreshLeadFactory(t, "no-op-refresh", func() *time.Duration {
+		d := lead
+		return &d
+	})
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(schedulerProviderTestExecutor{provider: "no-op-refresh"})
+
+	auth := &Auth{
+		ID:       "no-op-refresh-auth",
+		Provider: "no-op-refresh",
+		Metadata: map[string]any{
+			"email": "x@example.com",
+		},
+	}
+	if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	if !manager.markRefreshPending(auth.ID, time.Now()) {
+		t.Fatal("expected markRefreshPending to succeed")
+	}
+	manager.refreshAuth(ctx, auth.ID)
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatalf("expected auth %q after refresh", auth.ID)
+	}
+	if updated.LastRefreshedAt.IsZero() {
+		t.Fatal("expected LastRefreshedAt to be set after successful refresh")
+	}
+	if !updated.NextRefreshAfter.IsZero() {
+		t.Fatalf("NextRefreshAfter = %s, want zero after successful no-op refresh", updated.NextRefreshAfter)
+	}
+
+	got, shouldSchedule := nextRefreshCheckAt(updated.LastRefreshedAt, updated, time.Second)
+	if !shouldSchedule {
+		t.Fatal("expected auth to remain scheduled after successful refresh")
+	}
+	want := updated.LastRefreshedAt.Add(lead)
+	if !got.Equal(want) {
+		t.Fatalf("nextRefreshCheckAt() = %s, want %s", got, want)
+	}
+}
+
 func TestManager_RefreshSchedulerEntry_RebuildsSupportedModelSetAfterModelRegistration(t *testing.T) {
 	ctx := context.Background()
 

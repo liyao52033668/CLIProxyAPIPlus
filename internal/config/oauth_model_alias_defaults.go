@@ -25,6 +25,18 @@ func defaultKiroAliases() []OAuthModelAlias {
 	}
 }
 
+func defaultQoderAliases() []OAuthModelAlias {
+	return []OAuthModelAlias{
+		{Name: "qmodel_latest", Alias: "qwen3.7-max"},
+		{Name: "qmodel", Alias: "qwen3.7-plus"},
+		{Name: "dmodel", Alias: "deepseek-v4-pro"},
+		{Name: "dfmodel", Alias: "deepseek-v4-flash"},
+		{Name: "gm51model", Alias: "glm-5.1"},
+		{Name: "kmodel", Alias: "kimi-k2.6"},
+		{Name: "mmodel", Alias: "minimax-m3"},
+	}
+}
+
 // GitHubCopilotAliasesFromModels generates oauth-model-alias entries from a dynamic
 // list of model IDs fetched from the Copilot API. It auto-creates aliases for
 // models whose ID contains a dot (e.g. "claude-opus-4.6" → "claude-opus-4-6"),

@@ -4377,9 +4377,11 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 		updated.Runtime = auth.Runtime
 	}
 	updated.LastRefreshedAt = now
-	// Preserve NextRefreshAfter set by the Authenticator
-	// If the Authenticator set a reasonable refresh time, it should not be overwritten
-	// If the Authenticator did not set it (zero value), shouldRefresh will use default logic
+	// Clear the temporary pending gate unless the executor/authenticator set a new value.
+	// Otherwise a no-op refresh can inherit the pending backoff and retrigger too early.
+	if !cloned.NextRefreshAfter.IsZero() && updated.NextRefreshAfter.Equal(cloned.NextRefreshAfter) {
+		updated.NextRefreshAfter = time.Time{}
+	}
 	updated.LastError = nil
 	updated.UpdatedAt = now
 	if m.shouldRefresh(updated, now) {

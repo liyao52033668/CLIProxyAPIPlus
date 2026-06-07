@@ -92,11 +92,20 @@ func BuildAuthURLWithRedirectAndState(nonce, challenge, machineID, redirectURI, 
 
 // FetchUserStatus retrieves user info using a device token.
 func (o *QoderAuth) FetchUserStatus(deviceToken string) (*UserStatusResponse, error) {
+	return o.FetchUserStatusWithBaseURL(OpenAPIBase, deviceToken)
+}
+
+// FetchUserStatusWithBaseURL retrieves user info using a device token against the provided base URL.
+func (o *QoderAuth) FetchUserStatusWithBaseURL(baseURL, deviceToken string) (*UserStatusResponse, error) {
 	deviceToken = strings.TrimSpace(deviceToken)
 	if deviceToken == "" {
 		return nil, fmt.Errorf("qoder user status: missing device token")
 	}
-	reqURL := OpenAPIBase + UserStatusPath
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if baseURL == "" {
+		baseURL = OpenAPIBase
+	}
+	reqURL := baseURL + UserStatusPath
 	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("qoder user status: create request: %w", err)

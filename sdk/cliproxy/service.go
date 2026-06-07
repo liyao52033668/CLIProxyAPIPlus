@@ -332,6 +332,7 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 		log.Errorf("failed to %s auth %s: %v", op, auth.ID, err)
 		current, ok := s.coreManager.GetByID(auth.ID)
 		if !ok || current.Disabled {
+			s.clearQoderContractsForAuth(auth)
 			GlobalModelRegistry().UnregisterClient(auth.ID)
 			return
 		}
@@ -358,6 +359,7 @@ func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
 	if s.coreManager == nil {
 		return
 	}
+	executor.ClearQoderModelContracts(id)
 	GlobalModelRegistry().UnregisterClient(id)
 	if existing, ok := s.coreManager.GetByID(id); ok && existing != nil {
 		existing.Disabled = true
@@ -1116,6 +1118,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		return
 	}
 	if a.Disabled {
+		s.clearQoderContractsForAuth(a)
 		GlobalModelRegistry().UnregisterClient(a.ID)
 		return
 	}
@@ -1127,6 +1130,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	}
 	if a.Attributes != nil {
 		if v := strings.TrimSpace(a.Attributes["gemini_virtual_primary"]); strings.EqualFold(v, "true") {
+			s.clearQoderContractsForAuth(a)
 			GlobalModelRegistry().UnregisterClient(a.ID)
 			return
 		}
@@ -1143,6 +1147,9 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	compatProviderKey, compatDisplayName, compatDetected := openAICompatInfoFromAuth(a)
 	if compatDetected {
 		provider = "openai-compatibility"
+	}
+	if provider != "qoder" {
+		executor.ClearQoderModelContracts(a.ID)
 	}
 	excluded := s.oauthExcludedModels(provider, authKind)
 	// The synthesizer pre-merges per-account and global exclusions into the "excluded_models" attribute.
@@ -1279,7 +1286,16 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		}
 		models = applyExcludedModels(models, excluded)
 	case "qoder":
-		models = registry.GetQoderModels()
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		catalog := fetchQoderCatalog(ctx, a, s.cfg)
+		if len(catalog.Models) > 0 {
+			executor.StoreQoderModelContracts(a.ID, catalog.Contracts)
+			models = catalog.Models
+		} else {
+			executor.ClearQoderModelContracts(a.ID)
+			models = registry.GetQoderModels()
+		}
 	case "xai":
 		models = registry.GetXAIModels()
 		models = applyExcludedModels(models, excluded)
@@ -1361,7 +1377,18 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		return
 	}
 
+	s.clearQoderContractsForAuth(a)
 	GlobalModelRegistry().UnregisterClient(a.ID)
+}
+
+func (s *Service) clearQoderContractsForAuth(a *coreauth.Auth) {
+	if a == nil || a.ID == "" {
+		return
+	}
+	if !strings.EqualFold(strings.TrimSpace(a.Provider), "qoder") {
+		return
+	}
+	executor.ClearQoderModelContracts(a.ID)
 }
 
 // refreshModelRegistrationForAuth re-applies the latest model registration for
@@ -1384,6 +1411,7 @@ func (s *Service) refreshModelRegistrationForAuth(current *coreauth.Auth) bool {
 
 	latest, ok := s.latestAuthForModelRegistration(current.ID)
 	if !ok || latest.Disabled {
+		s.clearQoderContractsForAuth(current)
 		GlobalModelRegistry().UnregisterClient(current.ID)
 		s.coreManager.RefreshSchedulerEntry(current.ID)
 		return false

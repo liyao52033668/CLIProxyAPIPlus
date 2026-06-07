@@ -5297,6 +5297,106 @@ func (h *Handler) RequestCodeArtsToken(c *gin.Context) {
 	})
 }
 
+func (h *Handler) RequestQoderPATToken(c *gin.Context) {
+	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
+
+	var payload struct {
+		BaseURL             string `json:"base_url"`
+		PersonalAccessToken string `json:"personal_access_token"`
+		Token               string `json:"token"`
+	}
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "invalid body"})
+		return
+	}
+
+	baseURL := strings.TrimRight(strings.TrimSpace(payload.BaseURL), "/")
+	if baseURL == "" {
+		baseURL = qoderauth.OpenAPIBase
+	}
+	pat := strings.TrimSpace(payload.PersonalAccessToken)
+	if pat == "" {
+		pat = strings.TrimSpace(payload.Token)
+	}
+	if pat == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "personal_access_token is required"})
+		return
+	}
+
+	authSvc := qoderauth.NewQoderAuth(nil)
+	user, err := authSvc.FetchUserStatusWithBaseURL(baseURL, pat)
+	warning := ""
+	uid := ""
+	name := ""
+	email := ""
+	if err != nil {
+		warning = err.Error()
+	} else if user != nil {
+		uid = strings.TrimSpace(user.ID)
+		name = strings.TrimSpace(user.Name)
+		email = strings.TrimSpace(user.Email)
+	}
+	if uid == "" {
+		tokenHash := sha256.Sum256([]byte(pat))
+		uid = hex.EncodeToString(tokenHash[:16])
+	}
+	machineID := qoderauth.GenerateMachineID("cliproxy", "00:00:00:00:00:00", "server", "x86_64")
+	metadata := map[string]any{
+		"type":                  "qoder",
+		"auth_method":           "pat",
+		"login_mode":            "pat",
+		"access_token":          pat,
+		"personal_access_token": pat,
+		"machine_id":            machineID,
+		"uid":                   uid,
+		"timestamp":             time.Now().UnixMilli(),
+	}
+	if name != "" {
+		metadata["name"] = name
+	}
+	if email != "" {
+		metadata["email"] = email
+	}
+	if baseURL != qoderauth.OpenAPIBase {
+		metadata["base_url"] = baseURL
+	}
+
+	fileName := qoderauth.CredentialFileName(uid, email)
+	label := name
+	if strings.TrimSpace(label) == "" {
+		label = uid
+	}
+	if strings.TrimSpace(label) == "" {
+		label = "qoder"
+	}
+	record := &coreauth.Auth{
+		ID:       fileName,
+		Provider: "qoder",
+		FileName: fileName,
+		Label:    label + " (PAT)",
+		Metadata: metadata,
+	}
+
+	savedPath, err := h.saveTokenRecord(ctx, record)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "error": "failed to save authentication tokens"})
+		return
+	}
+
+	response := gin.H{
+		"status":     "ok",
+		"saved_path": savedPath,
+		"uid":        uid,
+		"name":       name,
+		"email":      email,
+	}
+	if warning != "" {
+		response["warning"] = warning
+	}
+	c.JSON(http.StatusOK, response)
+}
+
 func (h *Handler) RequestQoderToken(c *gin.Context) {
 	ctx := context.Background()
 	ctx = PopulateAuthContext(ctx, c)

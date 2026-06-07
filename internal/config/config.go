@@ -975,8 +975,13 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 		}
 		return false
 	}
+	
 	if !hasChannel("kiro") {
 		cfg.OAuthModelAlias["kiro"] = defaultKiroAliases()
+	}
+
+	if !hasChannel("qoder") {
+		cfg.OAuthModelAlias["qoder"] = defaultQoderAliases()
 	}
 
 	if len(cfg.OAuthModelAlias) == 0 {

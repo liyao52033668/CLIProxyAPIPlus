@@ -855,6 +855,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/cursor-auth-url", s.mgmt.RequestCursorToken)
 		mgmt.GET("/github-auth-url", s.mgmt.RequestGitHubToken)
 		mgmt.GET("/qoder-auth-url", s.mgmt.RequestQoderToken)
+		mgmt.POST("/qoder-auth-url", s.mgmt.RequestQoderPATToken)
 		mgmt.GET("/codebuddy-auth-url", s.mgmt.RequestCodeBuddyToken)
 		mgmt.GET("/codebuddy-ai-auth-url", s.mgmt.RequestCodeBuddyAIToken)
 		mgmt.GET("/codearts-auth-url", s.mgmt.RequestCodeArtsToken)
