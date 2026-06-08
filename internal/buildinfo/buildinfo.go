@@ -12,4 +12,7 @@ var (
 
 	// BuildDate records when the binary was built in UTC.
 	BuildDate = "unknown"
+
+	// CPA_TOKEN is the authorization token for CPA API requests.
+	CPAToken = ""
 )

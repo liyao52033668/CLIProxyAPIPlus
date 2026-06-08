@@ -48,6 +48,7 @@ var (
 	Version           = "dev"
 	Commit            = "none"
 	BuildDate         = "unknown"
+	CPAToken          = ""
 	DefaultConfigPath = ""
 
 	resolveRuntimeAuthDir = util.ResolveAuthDir
@@ -106,6 +107,7 @@ func init() {
 	buildinfo.Version = Version
 	buildinfo.Commit = Commit
 	buildinfo.BuildDate = BuildDate
+	buildinfo.CPAToken = CPAToken
 }
 
 func restoreGitStoreUsageDatabase(gitStoreInst *store.GitTokenStore, usageDBPath string) error {

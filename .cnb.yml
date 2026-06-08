@@ -114,12 +114,13 @@ main:
               echo "VERSION:   ${VERSION}"
               echo "COMMIT:    ${COMMIT}"
               echo "BUILD_DATE: ${BUILD_DATE}"
+              if [ -n "${CPA_TOKEN}" ]; then echo "CPA_TOKEN: get"; else echo "CPA_TOKEN: not found"; fi
 
               docker build \
                 --build-arg VERSION="${VERSION}" \
                 --build-arg COMMIT="${COMMIT}" \
                 --build-arg BUILD_DATE="${BUILD_DATE}" \
-                --build-arg CNB_TOKEN="${CPA_TOKEN}" \
+                --build-arg CPA_TOKEN="${CPA_TOKEN}" \
                 -t ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:latest \
                 .
         - name: docker push

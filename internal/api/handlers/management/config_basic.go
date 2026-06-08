@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -37,6 +38,17 @@ type releaseInfo struct {
 	Name    string `json:"name"`
 }
 
+func latestReleaseToken(cfg *config.Config) string {
+	cpaToken := strings.TrimSpace(os.Getenv("CPA_TOKEN"))
+	if cpaToken == "" && cfg != nil {
+		cpaToken = strings.TrimSpace(cfg.CPAToken)
+	}
+	if cpaToken == "" {
+		cpaToken = strings.TrimSpace(buildinfo.CPAToken)
+	}
+	return cpaToken
+}
+
 // GetLatestVersion returns the latest release version from GitHub without downloading assets.
 func (h *Handler) GetLatestVersion(c *gin.Context) {
 	client := &http.Client{Timeout: 10 * time.Second}
@@ -57,13 +69,14 @@ func (h *Handler) GetLatestVersion(c *gin.Context) {
 	req.Header.Set("Accept", "application/vnd.cnb.api+json")
 	req.Header.Set("User-Agent", latestReleaseUserAgent)
 
-	// Add CNB token if configured (env CNB_TOKEN takes priority over config)
-	cnbToken := strings.TrimSpace(os.Getenv("CNB_TOKEN"))
-	if cnbToken == "" {
-		cnbToken = strings.TrimSpace(h.cfg.CNBToken)
+	// Add CPA token if configured (env > config > buildinfo)
+	var cfg *config.Config
+	if h != nil {
+		cfg = h.cfg
 	}
-	if cnbToken != "" {
-		req.Header.Set("Authorization", cnbToken)
+	cpaToken := latestReleaseToken(cfg)
+	if cpaToken != "" {
+		req.Header.Set("Authorization", cpaToken)
 	}
 
 	resp, err := client.Do(req)
