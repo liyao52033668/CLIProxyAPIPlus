@@ -383,6 +383,11 @@ func main() {
 	var cfg *config.Config
 	var isCloudDeploy bool
 	var configLoadedFromHome bool
+
+	// Bootstrap timeouts (used before config is loaded).
+	// After config is loaded, cfg.Timeouts values are used in other modules.
+	bootstrapTimeout := 30 * time.Second
+	objectStoreBootstrapTimeout := 300 * time.Second
 	var (
 		usePostgresStore     bool
 		pgStoreDSN           string
@@ -502,7 +507,7 @@ func main() {
 	var configFilePath string
 	if strings.TrimSpace(homeJWT) != "" {
 		configLoadedFromHome = true
-		ctxHome, cancelHome := context.WithTimeout(context.Background(), 30*time.Second)
+		ctxHome, cancelHome := context.WithTimeout(context.Background(), bootstrapTimeout)
 		homeCfg, errHomeCfg := home.ConfigFromJWT(ctxHome, homeJWT)
 		cancelHome()
 		if errHomeCfg != nil {
@@ -512,19 +517,20 @@ func main() {
 		if homeDisableClusterDiscovery {
 			homeCfg.DisableClusterDiscovery = true
 		}
-		homeClient := home.New(homeCfg)
-		defer homeClient.Close()
+		tempHomeClient := home.New(homeCfg, 0, 0)
 
-		ctxHomeConfig, cancelHomeConfig := context.WithTimeout(context.Background(), 30*time.Second)
-		raw, errGetConfig := homeClient.GetConfig(ctxHomeConfig)
+		ctxHomeConfig, cancelHomeConfig := context.WithTimeout(context.Background(), bootstrapTimeout)
+		raw, errGetConfig := tempHomeClient.GetConfig(ctxHomeConfig)
 		cancelHomeConfig()
 		if errGetConfig != nil {
+			tempHomeClient.Close()
 			log.Errorf("failed to fetch config from home: %v", errGetConfig)
 			return
 		}
 
 		parsed, errParseConfig := config.ParseConfigBytes(raw)
 		if errParseConfig != nil {
+			tempHomeClient.Close()
 			log.Errorf("failed to parse config payload from home: %v", errParseConfig)
 			return
 		}
@@ -535,6 +541,10 @@ func main() {
 		parsed.Port = 8317 // Default to 8317 for home mode, can be overridden by home config
 		parsed.UsageStatisticsEnabled = true
 		cfg = parsed
+
+		tempHomeClient.Close()
+		homeClient := home.New(homeCfg, parsed.Timeouts.HomeRedisOperationSeconds, parsed.Timeouts.HomeSubscriptionReceiveSeconds)
+		defer homeClient.Close()
 
 		// Keep a non-empty config path for downstream components (log paths, management assets, etc),
 		// but do not require the file to exist when loading config from home.
@@ -553,7 +563,7 @@ func main() {
 			pgStoreLocalPath = wd
 		}
 		pgStoreLocalPath = filepath.Join(pgStoreLocalPath, "pgstore")
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), bootstrapTimeout)
 		pgStoreInst, err = store.NewPostgresStore(ctx, store.PostgresStoreConfig{
 			DSN:      pgStoreDSN,
 			Schema:   pgStoreSchema,
@@ -565,7 +575,7 @@ func main() {
 			return
 		}
 		examplePath := filepath.Join(wd, "config.example.yaml")
-		ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel = context.WithTimeout(context.Background(), bootstrapTimeout)
 		if errBootstrap := pgStoreInst.Bootstrap(ctx, examplePath); errBootstrap != nil {
 			cancel()
 			log.Errorf("failed to bootstrap postgres-backed config: %v", errBootstrap)
@@ -630,7 +640,7 @@ func main() {
 		}
 		examplePath := filepath.Join(wd, "config.example.yaml")
 		log.Infof("Starting object store bootstrap (timeout: 5 minutes)...")
-		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), objectStoreBootstrapTimeout)
 		if errBootstrap := objectStoreInst.Bootstrap(ctx, examplePath); errBootstrap != nil {
 			cancel()
 			log.Errorf("failed to bootstrap object-backed config: %v", errBootstrap)
@@ -879,8 +889,17 @@ func main() {
 			if standalone {
 				// Standalone mode: start an embedded local server and connect TUI client to it.
 				managementasset.StartAutoUpdater(context.Background(), configFilePath)
+				if cfg.Timeouts.AntigravityVersionFetchSeconds > 0 {
+					misc.SetAntigravityFetchTimeout(time.Duration(cfg.Timeouts.AntigravityVersionFetchSeconds) * time.Second)
+				}
 				misc.StartAntigravityVersionUpdater(context.Background())
 				if !localModel && !cfg.Home.Enabled {
+					if cfg.Timeouts.ModelRegistryFetchSeconds > 0 {
+						registry.SetModelsFetchTimeout(time.Duration(cfg.Timeouts.ModelRegistryFetchSeconds) * time.Second)
+					}
+					if cfg.Timeouts.ModelRegistryRefreshIntervalHours > 0 {
+						registry.SetModelsRefreshInterval(time.Duration(cfg.Timeouts.ModelRegistryRefreshIntervalHours) * time.Hour)
+					}
 					registry.StartModelsUpdater(context.Background())
 				} else if cfg.Home.Enabled {
 					log.Info("Home mode: remote model updates disabled")
@@ -957,8 +976,17 @@ func main() {
 		} else {
 			// Start the main proxy service
 			managementasset.StartAutoUpdater(context.Background(), configFilePath)
+			if cfg.Timeouts.AntigravityVersionFetchSeconds > 0 {
+				misc.SetAntigravityFetchTimeout(time.Duration(cfg.Timeouts.AntigravityVersionFetchSeconds) * time.Second)
+			}
 			misc.StartAntigravityVersionUpdater(context.Background())
 			if !localModel && !cfg.Home.Enabled {
+				if cfg.Timeouts.ModelRegistryFetchSeconds > 0 {
+					registry.SetModelsFetchTimeout(time.Duration(cfg.Timeouts.ModelRegistryFetchSeconds) * time.Second)
+				}
+				if cfg.Timeouts.ModelRegistryRefreshIntervalHours > 0 {
+					registry.SetModelsRefreshInterval(time.Duration(cfg.Timeouts.ModelRegistryRefreshIntervalHours) * time.Hour)
+				}
 				registry.StartModelsUpdater(context.Background())
 			} else if cfg.Home.Enabled {
 				log.Info("Home mode: remote model updates disabled")

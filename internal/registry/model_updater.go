@@ -14,10 +14,25 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-const (
-	modelsFetchTimeout    = 30 * time.Second
-	modelsRefreshInterval = 3 * time.Hour
+const defaultModelsFetchTimeout = 30 * time.Second
+const defaultModelsRefreshInterval = 3 * time.Hour
+
+var (
+	modelsFetchTimeout    = defaultModelsFetchTimeout
+	modelsRefreshInterval = defaultModelsRefreshInterval
 )
+
+func SetModelsFetchTimeout(d time.Duration) {
+	if d > 0 {
+		modelsFetchTimeout = d
+	}
+}
+
+func SetModelsRefreshInterval(d time.Duration) {
+	if d > 0 {
+		modelsRefreshInterval = d
+	}
+}
 
 var modelsURLs = []string{
 	"https://raw.githubusercontent.com/router-for-me/models/refs/heads/main/models.json",

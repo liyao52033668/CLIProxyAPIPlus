@@ -25,6 +25,10 @@ type Manager struct {
 	onConnected     func(string)
 	onDisconnected  func(string, error)
 
+	readTimeout       time.Duration
+	writeTimeout      time.Duration
+	heartbeatInterval time.Duration
+
 	logDebugf func(string, ...any)
 	logInfof  func(string, ...any)
 	logWarnf  func(string, ...any)
@@ -32,13 +36,16 @@ type Manager struct {
 
 // Options configures a Manager instance.
 type Options struct {
-	Path            string
-	ProviderFactory func(*http.Request) (string, error)
-	OnConnected     func(string)
-	OnDisconnected  func(string, error)
-	LogDebugf       func(string, ...any)
-	LogInfof        func(string, ...any)
-	LogWarnf        func(string, ...any)
+	Path              string
+	ProviderFactory   func(*http.Request) (string, error)
+	OnConnected       func(string)
+	OnDisconnected    func(string, error)
+	ReadTimeout       time.Duration
+	WriteTimeout      time.Duration
+	HeartbeatInterval time.Duration
+	LogDebugf         func(string, ...any)
+	LogInfof          func(string, ...any)
+	LogWarnf          func(string, ...any)
 }
 
 // NewManager builds a websocket relay manager with the supplied options.
@@ -50,6 +57,18 @@ func NewManager(opts Options) *Manager {
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
+	readTimeout := opts.ReadTimeout
+	if readTimeout <= 0 {
+		readTimeout = 60 * time.Second
+	}
+	writeTimeout := opts.WriteTimeout
+	if writeTimeout <= 0 {
+		writeTimeout = 10 * time.Second
+	}
+	heartbeatInterval := opts.HeartbeatInterval
+	if heartbeatInterval <= 0 {
+		heartbeatInterval = 30 * time.Second
+	}
 	mgr := &Manager{
 		path:     path,
 		sessions: make(map[string]*session),
@@ -60,12 +79,15 @@ func NewManager(opts Options) *Manager {
 				return true
 			},
 		},
-		providerFactory: opts.ProviderFactory,
-		onConnected:     opts.OnConnected,
-		onDisconnected:  opts.OnDisconnected,
-		logDebugf:       opts.LogDebugf,
-		logInfof:        opts.LogInfof,
-		logWarnf:        opts.LogWarnf,
+		providerFactory:   opts.ProviderFactory,
+		onConnected:       opts.OnConnected,
+		onDisconnected:    opts.OnDisconnected,
+		readTimeout:       readTimeout,
+		writeTimeout:      writeTimeout,
+		heartbeatInterval: heartbeatInterval,
+		logDebugf:         opts.LogDebugf,
+		logInfof:          opts.LogInfof,
+		logWarnf:          opts.LogWarnf,
 	}
 	if mgr.logDebugf == nil {
 		mgr.logDebugf = func(string, ...any) {}

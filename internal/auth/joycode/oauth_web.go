@@ -42,10 +42,10 @@ type jcWebSession struct {
 }
 
 type OAuthWebHandler struct {
-	cfg                *config.Config
-	sessions           map[string]*jcWebSession
-	mu                 sync.RWMutex
-	auth               *JoyCodeAuth
+	cfg                 *config.Config
+	sessions            map[string]*jcWebSession
+	mu                  sync.RWMutex
+	auth                *JoyCodeAuth
 	authSuccessCallback AuthSuccessCallback
 }
 

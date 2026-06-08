@@ -35,9 +35,34 @@ import (
 
 const (
 	codexResponsesWebsocketBetaHeaderValue = "responses_websockets=2026-02-06"
-	codexResponsesWebsocketIdleTimeout     = 5 * time.Minute
-	codexResponsesWebsocketHandshakeTO     = 30 * time.Second
 )
+
+// codexWebsocketIdleTimeout returns the configured idle timeout for Codex websocket connections.
+// Falls back to 5 minutes if config is not available.
+func codexWebsocketIdleTimeout(cfg *config.Config) time.Duration {
+	if cfg != nil && cfg.Timeouts.CodexWebsocketIdleSeconds > 0 {
+		return time.Duration(cfg.Timeouts.CodexWebsocketIdleSeconds) * time.Second
+	}
+	return 5 * time.Minute
+}
+
+// codexWebsocketHandshakeTimeout returns the configured handshake timeout for Codex websocket connections.
+// Falls back to 30 seconds if config is not available.
+func codexWebsocketHandshakeTimeout(cfg *config.Config) time.Duration {
+	if cfg != nil && cfg.Timeouts.CodexWebsocketHandshakeSeconds > 0 {
+		return time.Duration(cfg.Timeouts.CodexWebsocketHandshakeSeconds) * time.Second
+	}
+	return 30 * time.Second
+}
+
+// codexWebsocketNetDialTimeout returns the configured net dial timeout for Codex websocket connections.
+// Falls back to 30 seconds if config is not available.
+func codexWebsocketNetDialTimeout(cfg *config.Config) time.Duration {
+	if cfg != nil && cfg.Timeouts.CodexNetDialSeconds > 0 {
+		return time.Duration(cfg.Timeouts.CodexNetDialSeconds) * time.Second
+	}
+	return 30 * time.Second
+}
 
 // CodexWebsocketsExecutor executes Codex Responses requests using a WebSocket transport.
 //
@@ -334,7 +359,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		if ctx != nil && ctx.Err() != nil {
 			return resp, ctx.Err()
 		}
-		msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh)
+		msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh, e.cfg)
 		if errRead != nil {
 			helps.RecordAPIWebsocketError(ctx, e.cfg, "read", errRead)
 			return resp, errRead
@@ -569,7 +594,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				_ = send(cliproxyexecutor.StreamChunk{Err: ctx.Err()})
 				return
 			}
-			msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh)
+			msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh, e.cfg)
 			if errRead != nil {
 				if sess != nil && ctx != nil && ctx.Err() != nil {
 					terminateReason = "context_done"
@@ -646,7 +671,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 func (e *CodexWebsocketsExecutor) dialCodexWebsocket(ctx context.Context, auth *cliproxyauth.Auth, wsURL string, headers http.Header) (*websocket.Conn, *http.Response, error) {
 	dialer := newProxyAwareWebsocketDialer(e.cfg, auth)
-	dialer.HandshakeTimeout = codexResponsesWebsocketHandshakeTO
+	dialer.HandshakeTimeout = codexWebsocketHandshakeTimeout(e.cfg)
 	dialer.EnableCompression = true
 	if ctx == nil {
 		ctx = context.Background()
@@ -687,12 +712,12 @@ func buildCodexWebsocketRequestBody(body []byte) []byte {
 	return fallback
 }
 
-func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, readCh chan codexWebsocketRead) (int, []byte, error) {
+func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, readCh chan codexWebsocketRead, cfg *config.Config) (int, []byte, error) {
 	if sess == nil {
 		if conn == nil {
 			return 0, nil, fmt.Errorf("codex websockets executor: websocket conn is nil")
 		}
-		_ = conn.SetReadDeadline(time.Now().Add(codexResponsesWebsocketIdleTimeout))
+		_ = conn.SetReadDeadline(time.Now().Add(codexWebsocketIdleTimeout(cfg)))
 		msgType, payload, errRead := conn.ReadMessage()
 		return msgType, payload, errRead
 	}
@@ -724,10 +749,10 @@ func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession,
 func newProxyAwareWebsocketDialer(cfg *config.Config, auth *cliproxyauth.Auth) *websocket.Dialer {
 	dialer := &websocket.Dialer{
 		Proxy:             http.ProxyFromEnvironment,
-		HandshakeTimeout:  codexResponsesWebsocketHandshakeTO,
+		HandshakeTimeout:  codexWebsocketHandshakeTimeout(cfg),
 		EnableCompression: true,
 		NetDialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
+			Timeout:   codexWebsocketNetDialTimeout(cfg),
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
 	}
@@ -1307,7 +1332,7 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 		return
 	}
 	for {
-		_ = conn.SetReadDeadline(time.Now().Add(codexResponsesWebsocketIdleTimeout))
+		_ = conn.SetReadDeadline(time.Now().Add(codexWebsocketIdleTimeout(e.cfg)))
 		msgType, payload, errRead := conn.ReadMessage()
 		if errRead != nil {
 			sess.activeMu.Lock()

@@ -66,6 +66,9 @@ type Client struct {
 	seedHost string
 	seedPort int
 
+	redisOperationTimeout time.Duration
+	subscriptionTimeout   time.Duration
+
 	cmd *redis.Client
 	sub *redis.Client
 
@@ -74,11 +77,21 @@ type Client struct {
 	reconnectFailures int
 }
 
-func New(homeCfg config.HomeConfig) *Client {
+func New(homeCfg config.HomeConfig, redisOpSecs, subRecvSecs int) *Client {
+	redisOpTimeout := homeRedisOperationTimeout
+	subTimeout := homeSubscriptionReceiveTimeout
+	if redisOpSecs > 0 {
+		redisOpTimeout = time.Duration(redisOpSecs) * time.Second
+	}
+	if subRecvSecs > 0 {
+		subTimeout = time.Duration(subRecvSecs) * time.Second
+	}
 	return &Client{
-		homeCfg:  homeCfg,
-		seedHost: strings.TrimSpace(homeCfg.Host),
-		seedPort: homeCfg.Port,
+		homeCfg:               homeCfg,
+		seedHost:              strings.TrimSpace(homeCfg.Host),
+		seedPort:              homeCfg.Port,
+		redisOperationTimeout: redisOpTimeout,
+		subscriptionTimeout:   subTimeout,
 	}
 }
 
@@ -179,12 +192,16 @@ func (c *Client) redisOptionsLocked(addr string) (*redis.Options, error) {
 	if errTLS != nil {
 		return nil, errTLS
 	}
+	opTimeout := c.redisOperationTimeout
+	if opTimeout <= 0 {
+		opTimeout = homeRedisOperationTimeout
+	}
 	return &redis.Options{
 		Addr:                  addr,
 		TLSConfig:             tlsConfig,
-		DialTimeout:           homeRedisOperationTimeout,
-		ReadTimeout:           homeRedisOperationTimeout,
-		WriteTimeout:          homeRedisOperationTimeout,
+		DialTimeout:           opTimeout,
+		ReadTimeout:           opTimeout,
+		WriteTimeout:          opTimeout,
 		MaxRetries:            -1,
 		DialerRetries:         1,
 		ContextTimeoutEnabled: true,
@@ -752,8 +769,12 @@ func (c *Client) StartConfigSubscriber(ctx context.Context, onConfig func([]byte
 			continue
 		}
 
+		subTimeout := c.subscriptionTimeout
+		if subTimeout <= 0 {
+			subTimeout = homeSubscriptionReceiveTimeout
+		}
 		// Ensure the subscription is established before marking heartbeat OK.
-		if _, errReceive := pubsub.ReceiveTimeout(ctx, homeSubscriptionReceiveTimeout); errReceive != nil {
+		if _, errReceive := pubsub.ReceiveTimeout(ctx, subTimeout); errReceive != nil {
 			_ = pubsub.Close()
 			c.markReconnectFailure("subscribe")
 			sleepWithContext(ctx, homeReconnectInterval)
@@ -764,7 +785,7 @@ func (c *Client) StartConfigSubscriber(ctx context.Context, onConfig func([]byte
 		c.heartbeatOK.Store(true)
 
 		for {
-			event, errMsg := pubsub.ReceiveTimeout(ctx, homeSubscriptionReceiveTimeout)
+			event, errMsg := pubsub.ReceiveTimeout(ctx, subTimeout)
 			if errMsg != nil {
 				_ = pubsub.Close()
 				c.heartbeatOK.Store(false)

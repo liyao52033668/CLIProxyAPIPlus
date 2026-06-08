@@ -11,12 +11,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	usageconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/entities"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/repository"
 	repodto "github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/repository/dto"
 	keeperservice "github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/service"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"gorm.io/gorm"
 )
 
@@ -207,9 +207,6 @@ func TestImportUsageStatisticsRejectsAggregateOnlySnapshot(t *testing.T) {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
 	}
 }
-
-
-
 
 func TestGetUsageQueuePopsRequestedRecords(t *testing.T) {
 	gin.SetMode(gin.TestMode)

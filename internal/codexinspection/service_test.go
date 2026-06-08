@@ -274,6 +274,164 @@ func TestService_ExecuteActionsDeletesSuccessfulItemsAndPreservesFailures(t *tes
 	}
 }
 
+func TestService_ExecuteActionsRebuildsSummaryAfterMutation(t *testing.T) {
+	repo := &fakeRepository{snapshot: LatestSnapshot{
+		Run: InspectionRunState{Summary: InspectionSummary{
+			TotalFiles:   2,
+			SampledCount: 2,
+			DisableCount: 1,
+			EnabledCount: 2,
+		}},
+		Results: []InspectionResultItem{
+			{FileName: "alpha.json", DisplayName: "Alpha", Action: ActionDisable, Disabled: false},
+			{FileName: "beta.json", DisplayName: "Beta", Action: ActionKeep, Disabled: false},
+		},
+	}}
+	service := NewService(repo, &fakeGateway{}, &fakeProber{})
+
+	result, err := service.ExecuteActions(context.Background(), ExecuteActionsRequest{
+		Action:    ActionDisable,
+		FileNames: []string{"alpha.json"},
+	})
+	if err != nil {
+		t.Fatalf("ExecuteActions(disable) error = %v", err)
+	}
+
+	summary := result.Snapshot.Run.Summary
+	if summary.TotalFiles != 2 {
+		t.Fatalf("Summary.TotalFiles = %d, want 2", summary.TotalFiles)
+	}
+	if summary.SampledCount != 2 {
+		t.Fatalf("Summary.SampledCount = %d, want 2", summary.SampledCount)
+	}
+	if summary.DisableCount != 0 {
+		t.Fatalf("Summary.DisableCount = %d, want 0", summary.DisableCount)
+	}
+	if summary.DisabledCount != 1 {
+		t.Fatalf("Summary.DisabledCount = %d, want 1", summary.DisabledCount)
+	}
+	if summary.EnabledCount != 1 {
+		t.Fatalf("Summary.EnabledCount = %d, want 1", summary.EnabledCount)
+	}
+	if repo.saved.Run.Summary.DisabledCount != 1 {
+		t.Fatalf("saved Summary.DisabledCount = %d, want 1", repo.saved.Run.Summary.DisabledCount)
+	}
+}
+
+func TestService_ExecuteActionsClearsResolvedActionState(t *testing.T) {
+	repo := &fakeRepository{snapshot: LatestSnapshot{
+		Run: InspectionRunState{Summary: InspectionSummary{TotalFiles: 1, SampledCount: 1, DisableCount: 1, EnabledCount: 1}},
+		Results: []InspectionResultItem{{
+			FileName:     "alpha.json",
+			DisplayName:  "Alpha",
+			Action:       ActionDisable,
+			ActionReason: "usedPercent >= 85",
+			Disabled:     false,
+		}},
+	}}
+	service := NewService(repo, &fakeGateway{}, &fakeProber{})
+
+	result, err := service.ExecuteActions(context.Background(), ExecuteActionsRequest{
+		Action:    ActionDisable,
+		FileNames: []string{"alpha.json"},
+	})
+	if err != nil {
+		t.Fatalf("ExecuteActions(disable) error = %v", err)
+	}
+	if result.Snapshot.Results[0].Action != ActionKeep {
+		t.Fatalf("result action = %q, want %q", result.Snapshot.Results[0].Action, ActionKeep)
+	}
+	if result.Snapshot.Results[0].ActionReason != "no issue detected" {
+		t.Fatalf("result action reason = %q, want no issue detected", result.Snapshot.Results[0].ActionReason)
+	}
+}
+
+func TestService_GetSnapshotReconcilesMissingAuthFiles(t *testing.T) {
+	repo := &fakeRepository{snapshot: LatestSnapshot{
+		Run: InspectionRunState{Summary: InspectionSummary{
+			TotalFiles:    3,
+			SampledCount:  3,
+			KeepCount:     3,
+			DisabledCount: 1,
+			EnabledCount:  2,
+		}},
+		Results: []InspectionResultItem{
+			{FileName: "alpha.json", DisplayName: "Alpha", Action: ActionKeep, Disabled: false},
+			{FileName: "beta.json", DisplayName: "Beta", Action: ActionKeep, Disabled: true},
+			{FileName: "gamma.json", DisplayName: "Gamma", Action: ActionKeep, Disabled: false},
+		},
+	}}
+	gateway := &fakeGateway{files: []AuthFileRecord{
+		{FileName: "alpha.json", DisplayName: "Alpha", Disabled: false},
+		{FileName: "beta.json", DisplayName: "Beta", Disabled: false},
+	}}
+	service := NewService(repo, gateway, &fakeProber{})
+
+	snapshot, err := service.GetSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("GetSnapshot() error = %v", err)
+	}
+	if len(snapshot.Results) != 2 {
+		t.Fatalf("len(snapshot.Results) = %d, want 2", len(snapshot.Results))
+	}
+	if snapshot.Results[0].FileName != "alpha.json" || snapshot.Results[1].FileName != "beta.json" {
+		t.Fatalf("snapshot.Results = %#v, want alpha and beta", snapshot.Results)
+	}
+	if snapshot.Results[1].Disabled {
+		t.Fatal("snapshot beta Disabled = true, want false")
+	}
+	if snapshot.Run.Summary.TotalFiles != 2 {
+		t.Fatalf("Summary.TotalFiles = %d, want 2", snapshot.Run.Summary.TotalFiles)
+	}
+	if snapshot.Run.Summary.SampledCount != 2 {
+		t.Fatalf("Summary.SampledCount = %d, want 2", snapshot.Run.Summary.SampledCount)
+	}
+	if snapshot.Run.Summary.KeepCount != 2 {
+		t.Fatalf("Summary.KeepCount = %d, want 2", snapshot.Run.Summary.KeepCount)
+	}
+	if snapshot.Run.Summary.DisabledCount != 0 {
+		t.Fatalf("Summary.DisabledCount = %d, want 0", snapshot.Run.Summary.DisabledCount)
+	}
+	if snapshot.Run.Summary.EnabledCount != 2 {
+		t.Fatalf("Summary.EnabledCount = %d, want 2", snapshot.Run.Summary.EnabledCount)
+	}
+	if len(repo.saves) != 1 {
+		t.Fatalf("len(repo.saves) = %d, want 1", len(repo.saves))
+	}
+}
+
+func TestService_GetSnapshotClearsResolvedDisableRecommendation(t *testing.T) {
+	repo := &fakeRepository{snapshot: LatestSnapshot{
+		Run: InspectionRunState{Summary: InspectionSummary{TotalFiles: 1, SampledCount: 1, DisableCount: 1, EnabledCount: 1}},
+		Results: []InspectionResultItem{{
+			FileName:     "alpha.json",
+			DisplayName:  "Alpha",
+			Action:       ActionDisable,
+			ActionReason: "usedPercent >= 85",
+			Disabled:     false,
+		}},
+	}}
+	gateway := &fakeGateway{files: []AuthFileRecord{{FileName: "alpha.json", DisplayName: "Alpha", Disabled: true}}}
+	service := NewService(repo, gateway, &fakeProber{})
+
+	snapshot, err := service.GetSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("GetSnapshot() error = %v", err)
+	}
+	if snapshot.Results[0].Action != ActionKeep {
+		t.Fatalf("snapshot action = %q, want %q", snapshot.Results[0].Action, ActionKeep)
+	}
+	if snapshot.Results[0].ActionReason != "no issue detected" {
+		t.Fatalf("snapshot action reason = %q, want no issue detected", snapshot.Results[0].ActionReason)
+	}
+	if snapshot.Run.Summary.DisableCount != 0 {
+		t.Fatalf("Summary.DisableCount = %d, want 0", snapshot.Run.Summary.DisableCount)
+	}
+	if snapshot.Run.Summary.DisabledCount != 1 {
+		t.Fatalf("Summary.DisabledCount = %d, want 1", snapshot.Run.Summary.DisabledCount)
+	}
+}
+
 func TestService_RunScheduledAutoDeletesUnauthorizedResults(t *testing.T) {
 	repo := &fakeRepository{snapshot: DefaultSnapshot()}
 	gateway := &fakeGateway{}

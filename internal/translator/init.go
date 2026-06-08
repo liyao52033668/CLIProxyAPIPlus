@@ -29,15 +29,13 @@ import (
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/openai/openai/chat-completions"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/openai/openai/responses"
 
-	
-
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/claude"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/openai"
 
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/codearts/openai"
 
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/joycode/openai"
-	
+
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/antigravity/claude"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/antigravity/gemini"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/antigravity/openai/chat-completions"

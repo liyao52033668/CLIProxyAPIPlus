@@ -10,12 +10,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const (
-	readTimeout          = 60 * time.Second
-	writeTimeout         = 10 * time.Second
-	maxInboundMessageLen = 64 << 20 // 64 MiB
-	heartbeatInterval    = 30 * time.Second
-)
+const maxInboundMessageLen = 64 << 20 // 64 MiB
 
 var errClosed = errors.New("websocket session closed")
 
@@ -34,23 +29,43 @@ func (pr *pendingRequest) close() {
 }
 
 type session struct {
-	conn       *websocket.Conn
-	manager    *Manager
-	provider   string
-	id         string
-	closed     chan struct{}
-	closeOnce  sync.Once
-	writeMutex sync.Mutex
-	pending    sync.Map // map[string]*pendingRequest
+	conn              *websocket.Conn
+	manager           *Manager
+	provider          string
+	id                string
+	closed            chan struct{}
+	closeOnce         sync.Once
+	writeMutex        sync.Mutex
+	pending           sync.Map // map[string]*pendingRequest
+	readTimeout       time.Duration
+	writeTimeout      time.Duration
+	heartbeatInterval time.Duration
 }
 
 func newSession(conn *websocket.Conn, mgr *Manager, id string) *session {
+	readTimeout := 60 * time.Second
+	writeTimeout := 10 * time.Second
+	heartbeatInterval := 30 * time.Second
+	if mgr != nil {
+		if mgr.readTimeout > 0 {
+			readTimeout = mgr.readTimeout
+		}
+		if mgr.writeTimeout > 0 {
+			writeTimeout = mgr.writeTimeout
+		}
+		if mgr.heartbeatInterval > 0 {
+			heartbeatInterval = mgr.heartbeatInterval
+		}
+	}
 	s := &session{
-		conn:     conn,
-		manager:  mgr,
-		provider: "",
-		id:       id,
-		closed:   make(chan struct{}),
+		conn:              conn,
+		manager:           mgr,
+		provider:          "",
+		id:                id,
+		closed:            make(chan struct{}),
+		readTimeout:       readTimeout,
+		writeTimeout:      writeTimeout,
+		heartbeatInterval: heartbeatInterval,
 	}
 	conn.SetReadLimit(maxInboundMessageLen)
 	conn.SetReadDeadline(time.Now().Add(readTimeout))
@@ -66,7 +81,7 @@ func (s *session) startHeartbeat() {
 	if s == nil || s.conn == nil {
 		return
 	}
-	ticker := time.NewTicker(heartbeatInterval)
+	ticker := time.NewTicker(s.heartbeatInterval)
 	go func() {
 		defer ticker.Stop()
 		for {
@@ -75,7 +90,7 @@ func (s *session) startHeartbeat() {
 				return
 			case <-ticker.C:
 				s.writeMutex.Lock()
-				err := s.conn.WriteControl(websocket.PingMessage, []byte("ping"), time.Now().Add(writeTimeout))
+				err := s.conn.WriteControl(websocket.PingMessage, []byte("ping"), time.Now().Add(s.writeTimeout))
 				s.writeMutex.Unlock()
 				if err != nil {
 					s.cleanup(err)
@@ -129,7 +144,7 @@ func (s *session) send(ctx context.Context, msg Message) error {
 	}
 	s.writeMutex.Lock()
 	defer s.writeMutex.Unlock()
-	if err := s.conn.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
+	if err := s.conn.SetWriteDeadline(time.Now().Add(s.writeTimeout)); err != nil {
 		return fmt.Errorf("set write deadline: %w", err)
 	}
 	if err := s.conn.WriteJSON(msg); err != nil {

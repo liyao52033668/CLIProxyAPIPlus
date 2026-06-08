@@ -55,7 +55,11 @@ type SSOOIDCClient struct {
 
 // NewSSOOIDCClient creates a new SSO OIDC client.
 func NewSSOOIDCClient(cfg *config.Config) *SSOOIDCClient {
-	client := &http.Client{Timeout: 30 * time.Second}
+	httpTimeout := 30 * time.Second
+	if cfg != nil && cfg.Timeouts.KiroHTTPClientSeconds > 0 {
+		httpTimeout = time.Duration(cfg.Timeouts.KiroHTTPClientSeconds) * time.Second
+	}
+	client := &http.Client{Timeout: httpTimeout}
 	if cfg != nil {
 		client = util.SetProxy(&cfg.SDKConfig, client)
 	}

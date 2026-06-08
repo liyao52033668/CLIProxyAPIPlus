@@ -103,7 +103,72 @@ func TestCodexInspectionUpdateSettingsDoesNotReloadWorkerWhenSaveFails(t *testin
 	}
 }
 
+func TestCodexInspectionGetSnapshotUsesServiceReconciliation(t *testing.T) {
+	repo := &memorySnapshotRepository{snapshot: codexinspection.LatestSnapshot{
+		Run: codexinspection.InspectionRunState{Summary: codexinspection.InspectionSummary{
+			TotalFiles:    2,
+			SampledCount:  2,
+			KeepCount:     2,
+			DisabledCount: 1,
+			EnabledCount:  1,
+		}},
+		Results: []codexinspection.InspectionResultItem{
+			{FileName: "alpha.json", DisplayName: "Alpha", Action: codexinspection.ActionKeep, Disabled: false},
+			{FileName: "beta.json", DisplayName: "Beta", Action: codexinspection.ActionKeep, Disabled: true},
+		},
+	}}
+	gateway := &stubCodexInspectionGateway{files: []codexinspection.AuthFileRecord{
+		{FileName: "alpha.json", DisplayName: "Alpha", Disabled: false},
+		{FileName: "beta.json", DisplayName: "Beta", Disabled: false},
+	}}
+	service := codexinspection.NewService(repo, gateway, &codexinspection.DefaultProber{})
+	adapter := newCodexInspectionServiceAdapter(repo, service, nil)
+
+	snapshot, err := adapter.GetSnapshot()
+	if err != nil {
+		t.Fatalf("GetSnapshot() error = %v", err)
+	}
+	if snapshot.Run.Summary.DisabledCount != 0 {
+		t.Fatalf("Summary.DisabledCount = %d, want 0", snapshot.Run.Summary.DisabledCount)
+	}
+	if snapshot.Run.Summary.EnabledCount != 2 {
+		t.Fatalf("Summary.EnabledCount = %d, want 2", snapshot.Run.Summary.EnabledCount)
+	}
+	if snapshot.Results[1].Disabled {
+		t.Fatal("snapshot beta Disabled = true, want false")
+	}
+}
+
 type failingSnapshotRepository struct{}
+
+type memorySnapshotRepository struct {
+	snapshot codexinspection.LatestSnapshot
+}
+
+type stubCodexInspectionGateway struct {
+	files []codexinspection.AuthFileRecord
+}
+
+func (r *memorySnapshotRepository) Load(context.Context) (codexinspection.LatestSnapshot, error) {
+	return r.snapshot, nil
+}
+
+func (r *memorySnapshotRepository) Save(_ context.Context, snapshot codexinspection.LatestSnapshot) error {
+	r.snapshot = snapshot
+	return nil
+}
+
+func (g *stubCodexInspectionGateway) ListCodexAuthFiles(context.Context) ([]codexinspection.AuthFileRecord, error) {
+	return g.files, nil
+}
+
+func (g *stubCodexInspectionGateway) SetDisabled(context.Context, string, bool) error {
+	return nil
+}
+
+func (g *stubCodexInspectionGateway) DeleteFiles(context.Context, []string) error {
+	return nil
+}
 
 func (f *failingSnapshotRepository) Load(context.Context) (codexinspection.LatestSnapshot, error) {
 	return codexinspection.DefaultSnapshot(), nil

@@ -40,7 +40,7 @@ func TestRedisOptionsHomeTLSDisabled(t *testing.T) {
 		Enabled: true,
 		Host:    "127.0.0.1",
 		Port:    6379,
-	})
+	}, 0, 0)
 
 	client.mu.Lock()
 	options, err := client.redisOptionsLocked("127.0.0.1:6379")
@@ -65,7 +65,7 @@ func TestRedisOptionsHomeTLSEnabledUsesSeedHostAsServerName(t *testing.T) {
 		TLS: config.HomeTLSConfig{
 			Enable: true,
 		},
-	})
+	}, 0, 0)
 	client.homeCfg.Host = "127.0.0.1"
 
 	client.mu.Lock()
@@ -96,7 +96,9 @@ func TestRedisOptionsHomeTLSEnabledUsesExplicitServerName(t *testing.T) {
 			ServerName:         "home.example.com",
 			InsecureSkipVerify: true,
 		},
-	})
+	}, 0, 0)
+
+
 
 	client.mu.Lock()
 	options, err := client.redisOptionsLocked("127.0.0.1:444")
@@ -122,7 +124,7 @@ func TestRefreshClusterNodesDisabledSkipsRedisCommand(t *testing.T) {
 		Host:                    "127.0.0.1",
 		Port:                    1,
 		DisableClusterDiscovery: true,
-	})
+	}, 0, 0)
 
 	switched, err := client.refreshClusterNodes(context.Background())
 	if err != nil {
@@ -142,7 +144,7 @@ func TestFailoverAfterReconnectFailureDisabledDoesNotSwitchToClusterNode(t *test
 		Host:                    "seed.example.com",
 		Port:                    8327,
 		DisableClusterDiscovery: true,
-	})
+	}, 0, 0)
 	client.mu.Lock()
 	client.clusterNodes = []clusterNode{{IP: "other.example.com", Port: 8327}}
 	client.reconnectFailures = homeReconnectFailoverThreshold - 1

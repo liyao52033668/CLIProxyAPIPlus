@@ -246,6 +246,15 @@ func (s *Service) ensureWebsocketGateway() {
 		LogInfof:       log.Infof,
 		LogWarnf:       log.Warnf,
 	}
+	if s.cfg != nil && s.cfg.Timeouts.WSRelayReadSeconds > 0 {
+		opts.ReadTimeout = time.Duration(s.cfg.Timeouts.WSRelayReadSeconds) * time.Second
+	}
+	if s.cfg != nil && s.cfg.Timeouts.WSRelayWriteSeconds > 0 {
+		opts.WriteTimeout = time.Duration(s.cfg.Timeouts.WSRelayWriteSeconds) * time.Second
+	}
+	if s.cfg != nil && s.cfg.Timeouts.WSRelayHeartbeatSeconds > 0 {
+		opts.HeartbeatInterval = time.Duration(s.cfg.Timeouts.WSRelayHeartbeatSeconds) * time.Second
+	}
 	s.wsGateway = wsrelay.NewManager(opts)
 }
 
@@ -770,7 +779,7 @@ func (s *Service) startHomeSubscriber(ctx context.Context) {
 	homeCtx, cancel := context.WithCancel(homeCtx)
 	s.homeCancel = cancel
 
-	client := home.New(cfg.Home)
+	client := home.New(cfg.Home, cfg.Timeouts.HomeRedisOperationSeconds, cfg.Timeouts.HomeSubscriptionReceiveSeconds)
 	s.homeClient = client
 	home.SetCurrent(client)
 

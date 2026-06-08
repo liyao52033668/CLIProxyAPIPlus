@@ -15,13 +15,21 @@ import (
 )
 
 const (
-	antigravityReleasesURL     = "https://antigravity-auto-updater-974169037036.us-central1.run.app/releases"
-	antigravityFallbackVersion = "1.21.9"
-	antigravityVersionCacheTTL = 6 * time.Hour
-	antigravityFetchTimeout    = 10 * time.Second
-	AntigravityNodeAPIClientUA = "google-api-nodejs-client/10.3.0"
-	AntigravityGoogAPIClientUA = "gl-node/22.21.1"
+	antigravityReleasesURL         = "https://antigravity-auto-updater-974169037036.us-central1.run.app/releases"
+	antigravityFallbackVersion     = "1.21.9"
+	antigravityVersionCacheTTL     = 6 * time.Hour
+	defaultAntigravityFetchTimeout = 10 * time.Second
+	AntigravityNodeAPIClientUA     = "google-api-nodejs-client/10.3.0"
+	AntigravityGoogAPIClientUA     = "gl-node/22.21.1"
 )
+
+var antigravityFetchTimeout = defaultAntigravityFetchTimeout
+
+func SetAntigravityFetchTimeout(d time.Duration) {
+	if d > 0 {
+		antigravityFetchTimeout = d
+	}
+}
 
 type antigravityRelease struct {
 	Version     string `json:"version"`

@@ -65,6 +65,14 @@ func NewService(repo SnapshotRepository, gateway AuthFileGateway, prober Prober)
 	}
 }
 
+func (s *Service) GetSnapshot(ctx context.Context) (LatestSnapshot, error) {
+	snapshot, err := s.repo.Load(ctx)
+	if err != nil {
+		return LatestSnapshot{}, err
+	}
+	return s.reconcileSnapshot(ctx, snapshot)
+}
+
 func (s *Service) Run(ctx context.Context, req RunRequest) (snapshot LatestSnapshot, err error) {
 	s.lock()
 	if s.active {
@@ -198,11 +206,70 @@ func (s *Service) ExecuteActions(ctx context.Context, req ExecuteActionsRequest)
 	}
 
 	snapshot.ActionLogs = logs
+	autoDeletedCount := snapshot.Run.Summary.AutoDeletedCount
+	snapshot.Run.Summary = buildSummary(snapshot.Results, len(snapshot.Results))
+	snapshot.Run.Summary.AutoDeletedCount = autoDeletedCount
 	if err := s.repo.Save(ctx, snapshot); err != nil {
 		return ExecuteActionsResult{}, err
 	}
 
 	return ExecuteActionsResult{Snapshot: snapshot, Logs: logs}, nil
+}
+
+func (s *Service) reconcileSnapshot(ctx context.Context, snapshot LatestSnapshot) (LatestSnapshot, error) {
+	if s.gateway == nil {
+		return snapshot, nil
+	}
+
+	files, err := s.gateway.ListCodexAuthFiles(ctx)
+	if err != nil {
+		return LatestSnapshot{}, err
+	}
+
+	current := make(map[string]AuthFileRecord, len(files))
+	for _, file := range files {
+		current[file.FileName] = file
+	}
+
+	changed := false
+	results := make([]InspectionResultItem, 0, len(snapshot.Results))
+	for _, result := range snapshot.Results {
+		file, ok := current[result.FileName]
+		if !ok {
+			changed = true
+			continue
+		}
+		if result.Disabled != file.Disabled {
+			result.Disabled = file.Disabled
+			changed = true
+		}
+		if result.DisplayName != file.DisplayName && file.DisplayName != "" {
+			result.DisplayName = file.DisplayName
+			changed = true
+		}
+		normalized := resolveActionState(result)
+		if normalized != result {
+			result = normalized
+			changed = true
+		}
+		results = append(results, result)
+	}
+
+	summary := buildSummary(results, len(files))
+	summary.AutoDeletedCount = snapshot.Run.Summary.AutoDeletedCount
+	if snapshot.Run.Summary != summary {
+		changed = true
+	}
+
+	if !changed {
+		return snapshot, nil
+	}
+	snapshot.Results = results
+	snapshot.Run.Summary = summary
+	if err := s.repo.Save(ctx, snapshot); err != nil {
+		return LatestSnapshot{}, err
+	}
+	return snapshot, nil
 }
 
 func (s *Service) autoDeleteUnauthorizedResults(ctx context.Context, results []InspectionResultItem) ([]InspectionResultItem, []InspectionActionLog, int) {
@@ -236,10 +303,25 @@ func (s *Service) autoDeleteUnauthorizedResults(ctx context.Context, results []I
 	return nextResults, logs, autoDeletedCount
 }
 
+func resolveActionState(result InspectionResultItem) InspectionResultItem {
+	if result.Disabled && result.Action == ActionDisable {
+		result.Action = ActionKeep
+		result.ActionReason = "no issue detected"
+		result.Executable = false
+	}
+	if !result.Disabled && result.Action == ActionEnable {
+		result.Action = ActionKeep
+		result.ActionReason = "no issue detected"
+		result.Executable = false
+	}
+	return result
+}
+
 func updateResultDisabled(results []InspectionResultItem, fileName string, disabled bool) {
 	for i := range results {
 		if results[i].FileName == fileName {
 			results[i].Disabled = disabled
+			results[i] = resolveActionState(results[i])
 			return
 		}
 	}

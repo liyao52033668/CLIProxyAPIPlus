@@ -82,6 +82,10 @@ type Config struct {
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 
+	// Timeouts contains all configurable timeout values for the application.
+	// All values are in seconds unless otherwise specified.
+	Timeouts TimeoutsConfig `yaml:"timeouts" json:"timeouts"`
+
 	// AuthAutoRefreshWorkers overrides the size of the core auth auto-refresh worker pool.
 	// When <= 0, the default worker count is used.
 	AuthAutoRefreshWorkers int `yaml:"auth-auto-refresh-workers" json:"auth-auto-refresh-workers"`
@@ -250,6 +254,93 @@ type QuotaExceeded struct {
 	// When all free-tier auths are exhausted (429/503), the conductor retries with
 	// an auth that has available Google One AI credits.
 	AntigravityCredits bool `yaml:"antigravity-credits" json:"antigravity-credits"`
+}
+
+// TimeoutsConfig contains all configurable timeout values in seconds.
+type TimeoutsConfig struct {
+	// BootstrapSeconds is the timeout for store bootstrap operations (Home, Postgres, Object store).
+	// Default: 30 seconds (300 for object store).
+	BootstrapSeconds int `yaml:"bootstrap-seconds,omitempty" json:"bootstrap-seconds,omitempty"`
+
+	// ObjectStoreBootstrapSeconds is the timeout for object store bootstrap operations.
+	// Default: 300 seconds (5 minutes).
+	ObjectStoreBootstrapSeconds int `yaml:"object-store-bootstrap-seconds,omitempty" json:"object-store-bootstrap-seconds,omitempty"`
+
+	// ManagementAPICallSeconds is the timeout for management API HTTP calls.
+	// Default: 60 seconds.
+	ManagementAPICallSeconds int `yaml:"management-api-call-seconds,omitempty" json:"management-api-call-seconds,omitempty"`
+
+	// ModelRegistryFetchSeconds is the timeout for fetching model registry from remote URLs.
+	// Default: 30 seconds.
+	ModelRegistryFetchSeconds int `yaml:"model-registry-fetch-seconds,omitempty" json:"model-registry-fetch-seconds,omitempty"`
+
+	// ModelRegistryRefreshIntervalHours is the interval for refreshing the model registry.
+	ModelRegistryRefreshIntervalHours int `yaml:"model-registry-refresh-interval-hours,omitempty" json:"model-registry-refresh-interval-hours,omitempty"`
+
+	// AntigravityVersionFetchSeconds is the timeout for fetching the latest Antigravity version.
+	// Default: 10 seconds.
+	AntigravityVersionFetchSeconds int `yaml:"antigravity-version-fetch-seconds,omitempty" json:"antigravity-version-fetch-seconds,omitempty"`
+
+	// AntigravityCreditsRefreshSeconds is the timeout for refreshing Antigravity credits hint.
+	// Default: 5 seconds.
+	AntigravityCreditsRefreshSeconds int `yaml:"antigravity-credits-refresh-seconds,omitempty" json:"antigravity-credits-refresh-seconds,omitempty"`
+
+	// ManagementAssetFetchSeconds is the timeout for fetching management assets (remote config).
+	// Default: 15 seconds.
+	ManagementAssetFetchSeconds int `yaml:"management-asset-fetch-seconds,omitempty" json:"management-asset-fetch-seconds,omitempty"`
+
+	// CodexWebsocketIdleSeconds is the idle timeout for Codex websocket connections.
+	// Default: 300 seconds (5 minutes).
+	CodexWebsocketIdleSeconds int `yaml:"codex-websocket-idle-seconds,omitempty" json:"codex-websocket-idle-seconds,omitempty"`
+
+	// CodexWebsocketHandshakeSeconds is the handshake timeout for Codex websocket connections.
+	// Default: 30 seconds.
+	CodexWebsocketHandshakeSeconds int `yaml:"codex-websocket-handshake-seconds,omitempty" json:"codex-websocket-handshake-seconds,omitempty"`
+
+	// CodexNetDialSeconds is the network dial timeout for Codex websocket connections.
+	// Default: 30 seconds.
+	CodexNetDialSeconds int `yaml:"codex-net-dial-seconds,omitempty" json:"codex-net-dial-seconds,omitempty"`
+
+	// WSRelayReadSeconds is the read timeout for WebSocket relay sessions.
+	// Default: 60 seconds.
+	WSRelayReadSeconds int `yaml:"ws-relay-read-seconds,omitempty" json:"ws-relay-read-seconds,omitempty"`
+
+	// WSRelayWriteSeconds is the write timeout for WebSocket relay sessions.
+	// Default: 10 seconds.
+	WSRelayWriteSeconds int `yaml:"ws-relay-write-seconds,omitempty" json:"ws-relay-write-seconds,omitempty"`
+
+	// WSRelayHeartbeatSeconds is the heartbeat interval for WebSocket relay sessions.
+	// Default: 30 seconds.
+	WSRelayHeartbeatSeconds int `yaml:"ws-relay-heartbeat-seconds,omitempty" json:"ws-relay-heartbeat-seconds,omitempty"`
+
+	// KiroAuthSeconds is the timeout for Kiro OAuth authentication flow.
+	// Default: 600 seconds (10 minutes).
+	KiroAuthSeconds int `yaml:"kiro-auth-seconds,omitempty" json:"kiro-auth-seconds,omitempty"`
+
+	// KiroHTTPClientSeconds is the HTTP client timeout for Kiro OAuth operations.
+	// Default: 30 seconds.
+	KiroHTTPClientSeconds int `yaml:"kiro-http-client-seconds,omitempty" json:"kiro-http-client-seconds,omitempty"`
+
+	// KiroServerReadHeaderSeconds is the read header timeout for Kiro OAuth server.
+	// Default: 10 seconds.
+	KiroServerReadHeaderSeconds int `yaml:"kiro-server-read-header-seconds,omitempty" json:"kiro-server-read-header-seconds,omitempty"`
+
+	// ClaudeAPIRequestSeconds is the default request timeout sent to Claude API
+	// via the X-Stainless-Timeout header.
+	// Default: 600 seconds (10 minutes).
+	ClaudeAPIRequestSeconds int `yaml:"claude-api-request-seconds,omitempty" json:"claude-api-request-seconds,omitempty"`
+
+	// HomeRedisOperationSeconds is the Redis operation timeout for Home client.
+	// Default: 3 seconds.
+	HomeRedisOperationSeconds int `yaml:"home-redis-operation-seconds,omitempty" json:"home-redis-operation-seconds,omitempty"`
+
+	// HomeSubscriptionReceiveSeconds is the subscription message receive timeout for Home client.
+	// Default: 3 seconds.
+	HomeSubscriptionReceiveSeconds int `yaml:"home-subscription-receive-seconds,omitempty" json:"home-subscription-receive-seconds,omitempty"`
+
+	// CodexInspectionSeconds is the timeout for Codex inspection (latency probe) operations.
+	// Default: 20 seconds.
+	CodexInspectionSeconds int `yaml:"codex-inspection-seconds,omitempty" json:"codex-inspection-seconds,omitempty"`
 }
 
 // RoutingConfig configures how credentials are selected for requests.
@@ -749,6 +840,26 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.UsageStatisticsEnabled = false
 	cfg.RedisUsageQueueRetentionSeconds = 60
 	cfg.DisableCooling = false
+	cfg.Timeouts.BootstrapSeconds = 30
+	cfg.Timeouts.ObjectStoreBootstrapSeconds = 300
+	cfg.Timeouts.ManagementAPICallSeconds = 60
+	cfg.Timeouts.ModelRegistryFetchSeconds = 30
+	cfg.Timeouts.AntigravityVersionFetchSeconds = 10
+	cfg.Timeouts.AntigravityCreditsRefreshSeconds = 5
+	cfg.Timeouts.ManagementAssetFetchSeconds = 15
+	cfg.Timeouts.CodexWebsocketIdleSeconds = 300
+	cfg.Timeouts.CodexWebsocketHandshakeSeconds = 30
+	cfg.Timeouts.CodexNetDialSeconds = 30
+	cfg.Timeouts.WSRelayReadSeconds = 60
+	cfg.Timeouts.WSRelayWriteSeconds = 10
+	cfg.Timeouts.WSRelayHeartbeatSeconds = 30
+	cfg.Timeouts.KiroAuthSeconds = 600
+	cfg.Timeouts.KiroHTTPClientSeconds = 30
+	cfg.Timeouts.KiroServerReadHeaderSeconds = 10
+	cfg.Timeouts.ClaudeAPIRequestSeconds = 600
+	cfg.Timeouts.HomeRedisOperationSeconds = 3
+	cfg.Timeouts.HomeSubscriptionReceiveSeconds = 3
+	cfg.Timeouts.CodexInspectionSeconds = 20
 	cfg.DisableImageGeneration = DisableImageGenerationOff
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr

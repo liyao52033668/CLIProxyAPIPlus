@@ -24,8 +24,6 @@ import (
 	"golang.org/x/oauth2/google"
 )
 
-const defaultAPICallTimeout = 60 * time.Second
-
 const (
 	geminiOAuthClientID     = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
 	geminiOAuthClientSecret = "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"
@@ -226,7 +224,7 @@ func (h *Handler) APICall(c *gin.Context) {
 	}
 
 	httpClient := &http.Client{
-		Timeout: defaultAPICallTimeout,
+		Timeout: h.apiCallTimeout(),
 	}
 	httpClient.Transport = h.apiCallTransport(auth)
 
@@ -383,7 +381,7 @@ func (h *Handler) refreshGeminiOAuthAccessToken(ctx context.Context, auth *corea
 
 	ctxToken := ctx
 	httpClient := &http.Client{
-		Timeout:   defaultAPICallTimeout,
+		Timeout:   h.apiCallTimeout(),
 		Transport: h.apiCallTransport(auth),
 	}
 	ctxToken = context.WithValue(ctxToken, oauth2.HTTPClient, httpClient)
@@ -442,7 +440,7 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	httpClient := &http.Client{
-		Timeout:   defaultAPICallTimeout,
+		Timeout:   h.apiCallTimeout(),
 		Transport: h.apiCallTransport(auth),
 	}
 	resp, errDo := httpClient.Do(req)
@@ -689,6 +687,15 @@ func (h *Handler) authByIndex(authIndex string) *coreauth.Auth {
 		}
 	}
 	return nil
+}
+
+// apiCallTimeout returns the configured timeout for management API calls.
+// Falls back to 60 seconds if config is not available.
+func (h *Handler) apiCallTimeout() time.Duration {
+	if h != nil && h.cfg != nil && h.cfg.Timeouts.ManagementAPICallSeconds > 0 {
+		return time.Duration(h.cfg.Timeouts.ManagementAPICallSeconds) * time.Second
+	}
+	return 60 * time.Second
 }
 
 func (h *Handler) apiCallTransport(auth *coreauth.Auth) http.RoundTripper {
@@ -1021,7 +1028,7 @@ func (h *Handler) GetCopilotQuota(c *gin.Context) {
 	req.Header.Set("Accept", "application/json")
 
 	httpClient := &http.Client{
-		Timeout:   defaultAPICallTimeout,
+		Timeout:   h.apiCallTimeout(),
 		Transport: h.apiCallTransport(auth),
 	}
 
@@ -1238,7 +1245,7 @@ func (h *Handler) enrichCopilotTokenResponse(ctx context.Context, response apiCa
 	req.Header.Set("Accept", "application/json")
 
 	httpClient := &http.Client{
-		Timeout:   defaultAPICallTimeout,
+		Timeout:   h.apiCallTimeout(),
 		Transport: h.apiCallTransport(auth),
 	}
 

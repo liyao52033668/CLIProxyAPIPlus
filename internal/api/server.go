@@ -1767,7 +1767,7 @@ func newCodexInspectionServiceAdapter(repo codexinspection.SnapshotRepository, s
 }
 
 func (a *codexInspectionServiceAdapter) GetSnapshot() (codexinspection.LatestSnapshot, error) {
-	return a.repo.Load(context.Background())
+	return a.service.GetSnapshot(context.Background())
 }
 
 func (a *codexInspectionServiceAdapter) Run(ctx context.Context, req codexinspection.RunRequest) (codexinspection.LatestSnapshot, error) {

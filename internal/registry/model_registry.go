@@ -221,6 +221,14 @@ func (r *ModelRegistry) SetHook(hook ModelRegistryHook) {
 const defaultModelRegistryHookTimeout = 5 * time.Second
 const modelQuotaExceededWindow = 5 * time.Minute
 
+var modelRegistryHookTimeout = defaultModelRegistryHookTimeout
+
+func SetModelRegistryHookTimeout(d time.Duration) {
+	if d > 0 {
+		modelRegistryHookTimeout = d
+	}
+}
+
 func (r *ModelRegistry) triggerModelsRegistered(provider, clientID string, models []*ModelInfo) {
 	hook := r.hook
 	if hook == nil {
@@ -233,7 +241,7 @@ func (r *ModelRegistry) triggerModelsRegistered(provider, clientID string, model
 				log.Errorf("model registry hook OnModelsRegistered panic: %v", recovered)
 			}
 		}()
-		ctx, cancel := context.WithTimeout(context.Background(), defaultModelRegistryHookTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), modelRegistryHookTimeout)
 		defer cancel()
 		hook.OnModelsRegistered(ctx, provider, clientID, modelsCopy)
 	}()
@@ -250,7 +258,7 @@ func (r *ModelRegistry) triggerModelsUnregistered(provider, clientID string) {
 				log.Errorf("model registry hook OnModelsUnregistered panic: %v", recovered)
 			}
 		}()
-		ctx, cancel := context.WithTimeout(context.Background(), defaultModelRegistryHookTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), modelRegistryHookTimeout)
 		defer cancel()
 		hook.OnModelsUnregistered(ctx, provider, clientID)
 	}()

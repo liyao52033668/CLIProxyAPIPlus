@@ -105,6 +105,50 @@ max-retry-interval: 30
 # When true, disable auth/model cooldown scheduling globally (prevents blackout windows after failure states).
 disable-cooling: false
 
+# Timeout configuration (all values in seconds). Uncomment and adjust as needed.
+# timeouts:
+#   # Store bootstrap operations (Home config, Postgres, Object store)
+#   bootstrap-seconds: 30
+#   object-store-bootstrap-seconds: 300
+#
+#   # Management API HTTP calls
+#   management-api-call-seconds: 60
+#
+#   # Remote model registry fetch
+#   model-registry-fetch-seconds: 30
+#
+#   # Antigravity version and credits refresh
+#   antigravity-version-fetch-seconds: 10
+#   antigravity-credits-refresh-seconds: 5
+#
+#   # Management asset (remote config) fetch
+#   management-asset-fetch-seconds: 15
+#
+#   # Codex websocket connections
+#   codex-websocket-idle-seconds: 300
+#   codex-websocket-handshake-seconds: 30
+#   codex-net-dial-seconds: 30
+#
+#   # WebSocket relay session
+#   ws-relay-read-seconds: 60
+#   ws-relay-write-seconds: 10
+#   ws-relay-heartbeat-seconds: 30
+#
+#   # Kiro (AWS CodeWhisperer) OAuth
+#   kiro-auth-seconds: 600
+#   kiro-http-client-seconds: 30
+#   kiro-server-read-header-seconds: 10
+#
+#   # Claude API request timeout (sent as X-Stainless-Timeout header)
+#   claude-api-request-seconds: 600
+#
+#   # Home client Redis operations
+#   home-redis-operation-seconds: 3
+#   home-subscription-receive-seconds: 3
+#
+#   # Codex inspection (latency probe)
+#   codex-inspection-seconds: 20
+
 # disable-image-generation supports: false (default), true, or "chat".
 # - true: disable image_generation everywhere (also returns 404 for /v1/images/generations and /v1/images/edits).
 # - "chat": disable image_generation injection on non-images endpoints, but keep /v1/images/generations and /v1/images/edits enabled.

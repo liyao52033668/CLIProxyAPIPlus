@@ -51,7 +51,11 @@ func latestReleaseToken(cfg *config.Config) string {
 
 // GetLatestVersion returns the latest release version from GitHub without downloading assets.
 func (h *Handler) GetLatestVersion(c *gin.Context) {
-	client := &http.Client{Timeout: 10 * time.Second}
+	timeout := 10 * time.Second
+	if h != nil && h.cfg != nil && h.cfg.Timeouts.ManagementAssetFetchSeconds > 0 {
+		timeout = time.Duration(h.cfg.Timeouts.ManagementAssetFetchSeconds) * time.Second
+	}
+	client := &http.Client{Timeout: timeout}
 	proxyURL := ""
 	if h != nil && h.cfg != nil {
 		proxyURL = strings.TrimSpace(h.cfg.ProxyURL)

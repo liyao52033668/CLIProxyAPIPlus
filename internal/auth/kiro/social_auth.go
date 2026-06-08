@@ -90,7 +90,11 @@ type SocialAuthClient struct {
 
 // NewSocialAuthClient creates a new social auth client.
 func NewSocialAuthClient(cfg *config.Config) *SocialAuthClient {
-	client := &http.Client{Timeout: 30 * time.Second}
+	httpTimeout := 30 * time.Second
+	if cfg != nil && cfg.Timeouts.KiroHTTPClientSeconds > 0 {
+		httpTimeout = time.Duration(cfg.Timeouts.KiroHTTPClientSeconds) * time.Second
+	}
+	client := &http.Client{Timeout: httpTimeout}
 	if cfg != nil {
 		client = util.SetProxy(&cfg.SDKConfig, client)
 	}
@@ -123,8 +127,12 @@ func (c *SocialAuthClient) startWebCallbackServer(ctx context.Context, expectedS
 	redirectURI := fmt.Sprintf("http://localhost:%d/oauth/callback", port)
 	resultChan := make(chan WebCallbackResult, 1)
 
+	readHeaderTimeout := 10 * time.Second
+	if c.cfg != nil && c.cfg.Timeouts.KiroServerReadHeaderSeconds > 0 {
+		readHeaderTimeout = time.Duration(c.cfg.Timeouts.KiroServerReadHeaderSeconds) * time.Second
+	}
 	server := &http.Server{
-		ReadHeaderTimeout: 10 * time.Second,
+		ReadHeaderTimeout: readHeaderTimeout,
 	}
 
 	mux := http.NewServeMux()
@@ -170,9 +178,13 @@ func (c *SocialAuthClient) startWebCallbackServer(ctx context.Context, expectedS
 	}()
 
 	go func() {
+		authTimeout := socialAuthTimeout
+		if c.cfg != nil && c.cfg.Timeouts.KiroAuthSeconds > 0 {
+			authTimeout = time.Duration(c.cfg.Timeouts.KiroAuthSeconds) * time.Second
+		}
 		select {
 		case <-ctx.Done():
-		case <-time.After(socialAuthTimeout):
+		case <-time.After(authTimeout):
 		case <-resultChan:
 		}
 		_ = server.Shutdown(context.Background())
@@ -383,10 +395,14 @@ func (c *SocialAuthClient) LoginWithSocial(ctx context.Context, provider SocialP
 	fmt.Println("\n  Waiting for authentication callback...")
 
 	// Step 7: Wait for callback from HTTP server
+	authTimeout := socialAuthTimeout
+	if c.cfg != nil && c.cfg.Timeouts.KiroAuthSeconds > 0 {
+		authTimeout = time.Duration(c.cfg.Timeouts.KiroAuthSeconds) * time.Second
+	}
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
-	case <-time.After(socialAuthTimeout):
+	case <-time.After(authTimeout):
 		return nil, fmt.Errorf("authentication timed out")
 	case callback := <-resultChan:
 		if callback.Error != "" {

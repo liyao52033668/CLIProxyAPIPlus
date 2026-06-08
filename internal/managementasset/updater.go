@@ -121,7 +121,12 @@ func runAutoUpdater(ctx context.Context) {
 }
 
 func newHTTPClient(proxyURL string) *http.Client {
-	client := &http.Client{Timeout: 15 * time.Second}
+	timeout := 15 * time.Second
+	cfg := currentConfigPtr.Load()
+	if cfg != nil && cfg.Timeouts.ManagementAssetFetchSeconds > 0 {
+		timeout = time.Duration(cfg.Timeouts.ManagementAssetFetchSeconds) * time.Second
+	}
+	client := &http.Client{Timeout: timeout}
 
 	sdkCfg := &sdkconfig.SDKConfig{ProxyURL: strings.TrimSpace(proxyURL)}
 	util.SetProxy(sdkCfg, client)
