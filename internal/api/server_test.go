@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	gin "github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/codexinspection"
 	proxyconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
@@ -46,7 +48,69 @@ func newTestServer(t *testing.T) *Server {
 	accessManager := sdkaccess.NewManager()
 
 	configPath := filepath.Join(tmpDir, "config.yaml")
-	return NewServer(cfg, authManager, accessManager, configPath)
+	server := NewServer(cfg, authManager, accessManager, configPath)
+	if server.codexWorkerCancel != nil {
+		t.Cleanup(server.codexWorkerCancel)
+	}
+	return server
+}
+
+func TestCodexInspectionUpdateSettingsReloadsWorker(t *testing.T) {
+	repo := codexinspection.NewFileSnapshotRepository(filepath.Join(t.TempDir(), "codex-inspection-latest.json"))
+	service := codexinspection.NewService(repo, newCodexInspectionGatewayAdapter(nil), &codexinspection.DefaultProber{})
+	worker := codexinspection.NewWorker(service)
+	adapter := newCodexInspectionServiceAdapter(repo, service, worker)
+
+	settings := codexinspection.DefaultSettings()
+	settings.Schedule.Enabled = true
+	settings.Schedule.IntervalMinutes = 7
+
+	snapshot, err := adapter.UpdateSettings(context.Background(), settings)
+	if err != nil {
+		t.Fatalf("UpdateSettings: %v", err)
+	}
+	if !worker.Enabled() {
+		t.Fatal("worker.Enabled() = false, want true")
+	}
+	if !snapshot.Settings.Schedule.Enabled || snapshot.Settings.Schedule.IntervalMinutes != 7 {
+		t.Fatalf("snapshot settings = %+v, want enabled interval 7", snapshot.Settings.Schedule)
+	}
+
+	loaded, err := repo.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !loaded.Settings.Schedule.Enabled || loaded.Settings.Schedule.IntervalMinutes != 7 {
+		t.Fatalf("persisted settings = %+v, want enabled interval 7", loaded.Settings.Schedule)
+	}
+}
+
+func TestCodexInspectionUpdateSettingsDoesNotReloadWorkerWhenSaveFails(t *testing.T) {
+	repo := &failingSnapshotRepository{}
+	service := codexinspection.NewService(repo, newCodexInspectionGatewayAdapter(nil), &codexinspection.DefaultProber{})
+	worker := codexinspection.NewWorker(service)
+	adapter := newCodexInspectionServiceAdapter(repo, service, worker)
+
+	settings := codexinspection.DefaultSettings()
+	settings.Schedule.Enabled = true
+	settings.Schedule.IntervalMinutes = 7
+
+	if _, err := adapter.UpdateSettings(context.Background(), settings); err == nil {
+		t.Fatal("UpdateSettings error = nil, want save failure")
+	}
+	if worker.Enabled() {
+		t.Fatal("worker.Enabled() = true, want false after save failure")
+	}
+}
+
+type failingSnapshotRepository struct{}
+
+func (f *failingSnapshotRepository) Load(context.Context) (codexinspection.LatestSnapshot, error) {
+	return codexinspection.DefaultSnapshot(), nil
+}
+
+func (f *failingSnapshotRepository) Save(context.Context, codexinspection.LatestSnapshot) error {
+	return context.DeadlineExceeded
 }
 
 func TestHealthz(t *testing.T) {

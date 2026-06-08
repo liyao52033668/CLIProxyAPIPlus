@@ -35,6 +35,11 @@ remote-management:
 # Authentication directory (supports ~ for home directory)
 auth-dir: '~/.cli-proxy-api'
 
+# Relative JSON paths under auth-dir that should be hidden from auth file enumeration.
+# The Codex inspection snapshot paths are ignored by default; add custom auxiliary files here.
+ignored-auth-json-paths:
+   - '.management/codex-inspection-latest.json'
+
 # API keys for authentication
 api-keys:
   - 'your-api-key-1'

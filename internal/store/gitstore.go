@@ -367,6 +367,9 @@ func (s *GitTokenStore) List(_ context.Context) ([]*cliproxyauth.Auth, error) {
 		if !strings.HasSuffix(strings.ToLower(d.Name()), ".json") {
 			return nil
 		}
+		if shouldIgnoreAuxiliaryJSON(path, dir) {
+			return nil
+		}
 		auth, err := s.readAuthFile(path, dir)
 		if err != nil {
 			return nil

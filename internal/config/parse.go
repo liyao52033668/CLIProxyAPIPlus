@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/authfiles"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
@@ -83,6 +84,7 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	cfg.SanitizeOpenAICompatibility()
 	cfg.OAuthExcludedModels = NormalizeOAuthExcludedModels(cfg.OAuthExcludedModels)
 	cfg.SanitizeOAuthModelAlias()
+	cfg.IgnoredAuthJSONPaths = authfiles.NormalizeAuxiliaryJSONPaths(cfg.IgnoredAuthJSONPaths)
 	cfg.SanitizePayloadRules()
 
 	return &cfg, nil

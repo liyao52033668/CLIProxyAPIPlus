@@ -35,6 +35,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/joycode"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/codexinspection"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
@@ -205,6 +206,8 @@ type Server struct {
 
 	// codeArtsOAuthHandler handles CodeArts OAuth web login flow.
 	codeArtsOAuthHandler *codearts.OAuthWebHandler
+
+	codexWorkerCancel context.CancelFunc
 }
 
 // NewServer creates and initializes a new API server instance.
@@ -302,6 +305,27 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		s.mgmt.SetPostAuthHook(optionState.postAuthHook)
 	}
 	s.localPassword = optionState.localPassword
+
+	snapshotPath := filepath.Join(filepath.Dir(cfg.AuthDir), ".management", "codex-inspection-latest.json")
+	var codexSnapshotStore codexinspection.SnapshotExternalStore
+	if tokenStore, ok := sdkAuth.GetTokenStore().(codexinspection.SnapshotExternalStore); ok {
+		codexSnapshotStore = tokenStore
+		if storePath := tokenStore.CodexInspectionSnapshotPath(); storePath != "" {
+			snapshotPath = storePath
+		}
+	}
+	codexRepo := codexinspection.NewFileSnapshotRepository(snapshotPath, codexSnapshotStore)
+	codexGateway := newCodexInspectionGatewayAdapter(authManager)
+	codexBaseService := codexinspection.NewService(codexRepo, codexGateway, newCodexInspectionProber(cfg, authManager))
+	codexWorker := codexinspection.NewWorker(codexBaseService)
+	codexService := newCodexInspectionServiceAdapter(codexRepo, codexBaseService, codexWorker)
+	if snapshot, errLoad := codexService.GetSnapshot(); errLoad == nil {
+		codexWorker.Reload(snapshot.Settings)
+	}
+	codexWorkerCtx, codexWorkerCancel := context.WithCancel(context.Background())
+	s.codexWorkerCancel = codexWorkerCancel
+	codexWorker.Start(codexWorkerCtx)
+	s.mgmt.SetCodexInspectionService(codexService)
 
 	// Home heartbeat gate: when home is enabled, block all endpoints with 503 until the
 	// subscribe-config heartbeat connection is healthy.
@@ -840,6 +864,11 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.POST("/vertex/import", s.mgmt.ImportVertexCredential)
 
 		mgmt.GET("/oauth-providers", s.mgmt.GetOAuthProviders)
+		mgmt.GET("/codex-inspection", s.mgmt.GetCodexInspectionSnapshot)
+		mgmt.POST("/codex-inspection/run", s.mgmt.RunCodexInspection)
+		mgmt.GET("/codex-inspection/settings", s.mgmt.GetCodexInspectionSnapshot)
+		mgmt.PUT("/codex-inspection/settings", s.mgmt.UpdateCodexInspectionSettings)
+		mgmt.POST("/codex-inspection/actions", s.mgmt.ExecuteCodexInspectionActions)
 
 		mgmt.GET("/anthropic-auth-url", s.mgmt.RequestAnthropicToken)
 		mgmt.GET("/codex-auth-url", s.mgmt.RequestCodexToken)
@@ -1467,6 +1496,9 @@ func (s *Server) Stop(ctx context.Context) error {
 		default:
 		}
 	}
+	if s.codexWorkerCancel != nil {
+		s.codexWorkerCancel()
+	}
 
 	if s.muxHTTPListener != nil {
 		_ = s.muxHTTPListener.Close()
@@ -1718,6 +1750,146 @@ func (s *Server) SetInvalidAuthSnapshot(fn func() []internalwatcher.InvalidAuthE
 		return
 	}
 	s.mgmt.SetInvalidAuthSnapshot(fn)
+}
+
+type codexInspectionServiceAdapter struct {
+	repo    codexinspection.SnapshotRepository
+	service *codexinspection.Service
+	worker  *codexinspection.Worker
+}
+
+func newCodexInspectionServiceAdapter(repo codexinspection.SnapshotRepository, service *codexinspection.Service, worker *codexinspection.Worker) *codexInspectionServiceAdapter {
+	return &codexInspectionServiceAdapter{
+		repo:    repo,
+		service: service,
+		worker:  worker,
+	}
+}
+
+func (a *codexInspectionServiceAdapter) GetSnapshot() (codexinspection.LatestSnapshot, error) {
+	return a.repo.Load(context.Background())
+}
+
+func (a *codexInspectionServiceAdapter) Run(ctx context.Context, req codexinspection.RunRequest) (codexinspection.LatestSnapshot, error) {
+	return a.service.Run(ctx, req)
+}
+
+func (a *codexInspectionServiceAdapter) UpdateSettings(ctx context.Context, settings codexinspection.InspectionSettings) (codexinspection.LatestSnapshot, error) {
+	snapshot, err := a.repo.Load(ctx)
+	if err != nil {
+		return codexinspection.LatestSnapshot{}, err
+	}
+	snapshot.Settings = settings
+	if settings.Schedule.Enabled && settings.Schedule.IntervalMinutes > 0 {
+		snapshot.Run.NextTriggerAtMS = time.Now().UnixMilli() + int64(time.Duration(settings.Schedule.IntervalMinutes)*time.Minute/time.Millisecond)
+	} else {
+		snapshot.Run.NextTriggerAtMS = 0
+	}
+	if err := a.repo.Save(ctx, snapshot); err != nil {
+		return codexinspection.LatestSnapshot{}, err
+	}
+	if a.worker != nil {
+		a.worker.Reload(settings)
+	}
+	return snapshot, nil
+}
+
+func (a *codexInspectionServiceAdapter) ExecuteActions(ctx context.Context, req codexinspection.ExecuteActionsRequest) (codexinspection.ExecuteActionsResult, error) {
+	return a.service.ExecuteActions(ctx, req)
+}
+
+type codexInspectionGatewayAdapter struct {
+	manager *auth.Manager
+}
+
+func newCodexInspectionGatewayAdapter(manager *auth.Manager) *codexInspectionGatewayAdapter {
+	return &codexInspectionGatewayAdapter{manager: manager}
+}
+
+func (g *codexInspectionGatewayAdapter) ListCodexAuthFiles(context.Context) ([]codexinspection.AuthFileRecord, error) {
+	if g == nil || g.manager == nil {
+		return []codexinspection.AuthFileRecord{}, nil
+	}
+
+	auths := g.manager.List()
+	records := make([]codexinspection.AuthFileRecord, 0, len(auths))
+	for _, item := range auths {
+		if item == nil || !strings.EqualFold(strings.TrimSpace(item.Provider), "codex") {
+			continue
+		}
+		name := strings.TrimSpace(item.FileName)
+		if name == "" {
+			name = item.ID
+		}
+		displayName := strings.TrimSpace(item.Label)
+		accountType, account := item.AccountInfo()
+		if displayName == "" {
+			displayName = strings.TrimSpace(account)
+		}
+		if displayName == "" {
+			displayName = name
+		}
+		if accountType != "" && account == "" {
+			account = accountType
+		}
+		records = append(records, codexinspection.AuthFileRecord{
+			FileName:    name,
+			DisplayName: displayName,
+			Provider:    item.Provider,
+			AuthIndex:   item.Index,
+			AccountID:   account,
+			Disabled:    item.Disabled,
+		})
+	}
+	return records, nil
+}
+
+func (g *codexInspectionGatewayAdapter) SetDisabled(ctx context.Context, name string, disabled bool) error {
+	target, ok := g.findAuth(name)
+	if !ok {
+		return fmt.Errorf("auth file not found: %s", name)
+	}
+	target.Disabled = disabled
+	if disabled {
+		target.Status = auth.StatusDisabled
+		target.StatusMessage = "disabled via codex inspection"
+	} else {
+		target.Status = auth.StatusActive
+		target.StatusMessage = ""
+	}
+	target.UpdatedAt = time.Now()
+	_, err := g.manager.Update(ctx, target)
+	return err
+}
+
+func (g *codexInspectionGatewayAdapter) DeleteFiles(ctx context.Context, names []string) error {
+	for _, name := range names {
+		target, ok := g.findAuth(name)
+		if !ok {
+			return fmt.Errorf("auth file not found: %s", name)
+		}
+		g.manager.Remove(ctx, target.ID)
+	}
+	return nil
+}
+
+func (g *codexInspectionGatewayAdapter) findAuth(name string) (*auth.Auth, bool) {
+	if g == nil || g.manager == nil {
+		return nil, false
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, false
+	}
+	if target, ok := g.manager.GetByID(name); ok {
+		return target, true
+	}
+	for _, item := range g.manager.List() {
+		if item != nil && item.FileName == name {
+			return item, true
+		}
+	}
+	return nil, false
 }
 
 // (management handlers moved to internal/api/handlers/management)

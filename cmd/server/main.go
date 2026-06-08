@@ -20,6 +20,7 @@ import (
 	"github.com/joho/godotenv"
 	configaccess "github.com/router-for-me/CLIProxyAPI/v7/internal/access/config_access"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/authfiles"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cmd"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -707,6 +708,10 @@ func main() {
 	if cfg == nil {
 		cfg = &config.Config{}
 	}
+	if value, ok := lookupEnv("IGNORED_AUTH_JSON_PATHS", "ignored_auth_json_paths"); ok {
+		cfg.IgnoredAuthJSONPaths = append(cfg.IgnoredAuthJSONPaths, authfiles.ParseAuxiliaryJSONPathsEnv(value)...)
+	}
+	authfiles.SetIgnoredAuxiliaryJSONPaths(cfg.IgnoredAuthJSONPaths)
 
 	// In cloud deploy mode, check if we have a valid configuration
 	var configFileExists bool

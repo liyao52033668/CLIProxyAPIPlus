@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/authfiles"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
@@ -141,6 +142,9 @@ func (s *FileTokenStore) List(ctx context.Context) ([]*cliproxyauth.Auth, error)
 			return nil
 		}
 		if !strings.HasSuffix(strings.ToLower(d.Name()), ".json") {
+			return nil
+		}
+		if authfiles.ShouldIgnoreAuxiliaryJSON(path, dir) {
 			return nil
 		}
 		auth, err := s.readAuthFile(path, dir)

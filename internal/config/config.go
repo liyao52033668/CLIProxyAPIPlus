@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/authfiles"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/bcrypt"
@@ -46,6 +47,9 @@ type Config struct {
 
 	// AuthDir is the directory where authentication token files are stored.
 	AuthDir string `yaml:"auth-dir" json:"-"`
+
+	// IgnoredAuthJSONPaths lists relative JSON paths that should be excluded from auth file enumeration.
+	IgnoredAuthJSONPaths []string `yaml:"ignored-auth-json-paths,omitempty" json:"ignored-auth-json-paths,omitempty"`
 
 	// Debug enables or disables debug-level logging and other debug features.
 	Debug bool `yaml:"debug" json:"debug"`
@@ -851,6 +855,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Normalize global OAuth model name aliases.
 	cfg.SanitizeOAuthModelAlias()
 
+	cfg.IgnoredAuthJSONPaths = authfiles.NormalizeAuxiliaryJSONPaths(cfg.IgnoredAuthJSONPaths)
+
 	// Validate raw payload rules and drop invalid entries.
 	cfg.SanitizePayloadRules()
 
@@ -975,7 +981,7 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 		}
 		return false
 	}
-	
+
 	if !hasChannel("kiro") {
 		cfg.OAuthModelAlias["kiro"] = defaultKiroAliases()
 	}

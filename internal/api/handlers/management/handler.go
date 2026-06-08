@@ -3,6 +3,7 @@
 package management
 
 import (
+	"context"
 	"crypto/subtle"
 	"fmt"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codearts"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/joycode"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
+	codexsvc "github.com/router-for-me/CLIProxyAPI/v7/internal/codexinspection"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/service"
@@ -29,6 +31,13 @@ type attemptInfo struct {
 	count        int
 	blockedUntil time.Time
 	lastActivity time.Time // track last activity for cleanup
+}
+
+type CodexInspectionService interface {
+	GetSnapshot() (codexsvc.LatestSnapshot, error)
+	Run(ctx context.Context, req codexsvc.RunRequest) (codexsvc.LatestSnapshot, error)
+	UpdateSettings(ctx context.Context, settings codexsvc.InspectionSettings) (codexsvc.LatestSnapshot, error)
+	ExecuteActions(ctx context.Context, req codexsvc.ExecuteActionsRequest) (codexsvc.ExecuteActionsResult, error)
 }
 
 // attemptCleanupInterval controls how often stale IP entries are purged
@@ -57,6 +66,7 @@ type Handler struct {
 	postAuthHook             coreauth.PostAuthHook
 	codeArtsOAuthHandler     *codearts.OAuthWebHandler
 	joyCodeOAuthHandler      *joycode.OAuthWebHandler
+	codexInspectionService   CodexInspectionService
 	onOAuthModelAliasUpdated func() // 回调：当 OAuthModelAlias 更新后调用
 }
 
@@ -182,6 +192,10 @@ func (h *Handler) SetLogDirectory(dir string) {
 // SetPostAuthHook registers a hook to be called after auth record creation but before persistence.
 func (h *Handler) SetPostAuthHook(hook coreauth.PostAuthHook) {
 	h.postAuthHook = hook
+}
+
+func (h *Handler) SetCodexInspectionService(service CodexInspectionService) {
+	h.codexInspectionService = service
 }
 
 // Middleware enforces access control for management endpoints.

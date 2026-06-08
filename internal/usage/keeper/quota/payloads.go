@@ -42,6 +42,10 @@ func parseAntigravityQuotaPayload(response *apicall.Response) (*AntigravityQuota
 	return payload, nil
 }
 
+func ParseCodexUsagePayload(response *apicall.Response) (*CodexUsagePayload, error) {
+	return parseCodexUsagePayload(response)
+}
+
 func parseCodexUsagePayload(response *apicall.Response) (*CodexUsagePayload, error) {
 	object, err := parseResponseObject(response)
 	if err != nil {
