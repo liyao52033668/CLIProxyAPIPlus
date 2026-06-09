@@ -16,12 +16,13 @@ func TestFileSnapshotRepositorySaveAndLoadRoundTrip(t *testing.T) {
 
 	snapshot := LatestSnapshot{
 		Settings: InspectionSettings{
-			TargetType:           "server",
-			Workers:              8,
-			TimeoutSeconds:       25,
-			Retries:              2,
-			SampleSize:           5,
-			UsedPercentThreshold: 90,
+			TargetType:                   "server",
+			Workers:                      8,
+			TimeoutSeconds:               25,
+			Retries:                      2,
+			SampleSize:                   5,
+			FiveHourUsedPercentThreshold: 90,
+			WeeklyUsedPercentThreshold:   95,
 			Schedule: InspectionSchedule{
 				Enabled:         true,
 				Mode:            "interval",
@@ -87,6 +88,12 @@ func TestFileSnapshotRepositorySaveAndLoadRoundTrip(t *testing.T) {
 	}
 	if loaded.Settings.TimeoutSeconds != 25 {
 		t.Fatalf("Load().Settings.TimeoutSeconds = %d, want 25", loaded.Settings.TimeoutSeconds)
+	}
+	if loaded.Settings.FiveHourUsedPercentThreshold != 90 {
+		t.Fatalf("Load().Settings.FiveHourUsedPercentThreshold = %d, want 90", loaded.Settings.FiveHourUsedPercentThreshold)
+	}
+	if loaded.Settings.WeeklyUsedPercentThreshold != 95 {
+		t.Fatalf("Load().Settings.WeeklyUsedPercentThreshold = %d, want 95", loaded.Settings.WeeklyUsedPercentThreshold)
 	}
 	if loaded.Settings.Schedule.Mode != "interval" {
 		t.Fatalf("Load().Settings.Schedule.Mode = %q, want %q", loaded.Settings.Schedule.Mode, "interval")
@@ -205,6 +212,50 @@ func TestFileSnapshotRepositoryLoadBackfillsDefaultSettingsWhenTargetTypeMissing
 	}
 	if loaded.ActionLogs == nil {
 		t.Fatal("Load().ActionLogs = nil, want empty slice")
+	}
+}
+
+func TestFileSnapshotRepositoryLoadMapsLegacyThresholdToBothWindows(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "state", "latest-snapshot.json")
+	repo := NewFileSnapshotRepository(path)
+
+	legacy := `{
+  "settings": {
+    "targetType": "codex",
+    "workers": 6,
+    "timeoutSeconds": 22,
+    "retries": 3,
+    "sampleSize": 4,
+    "usedPercentThreshold": 91,
+    "schedule": {
+      "enabled": false,
+      "mode": "interval",
+      "intervalMinutes": 60
+    }
+  },
+  "run": {
+    "status": "idle"
+  },
+  "results": [],
+  "actionLogs": []
+}`
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	loaded, err := repo.Load(ctx)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if loaded.Settings.FiveHourUsedPercentThreshold != 91 {
+		t.Fatalf("Load().Settings.FiveHourUsedPercentThreshold = %d, want 91", loaded.Settings.FiveHourUsedPercentThreshold)
+	}
+	if loaded.Settings.WeeklyUsedPercentThreshold != 91 {
+		t.Fatalf("Load().Settings.WeeklyUsedPercentThreshold = %d, want 91", loaded.Settings.WeeklyUsedPercentThreshold)
 	}
 }
 

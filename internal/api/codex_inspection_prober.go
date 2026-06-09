@@ -140,16 +140,7 @@ func (p *codexInspectionProber) inspectFile(ctx context.Context, file codexinspe
 	if ok {
 		result.UsedPercent = usedPercent
 	}
-	if ok && file.Disabled && *usedPercent < settings.UsedPercentThreshold {
-		result.Action = codexinspection.ActionEnable
-		result.ActionReason = fmt.Sprintf("usedPercent < %d", settings.UsedPercentThreshold)
-		return result
-	}
-	if ok && !file.Disabled && *usedPercent >= settings.UsedPercentThreshold {
-		result.Action = codexinspection.ActionDisable
-		result.ActionReason = fmt.Sprintf("usedPercent >= %d", settings.UsedPercentThreshold)
-		return result
-	}
+	result.Action, result.ActionReason = codexInspectionActionForUsage(file.Disabled, fiveHourUsedPercent, weeklyUsedPercent, settings)
 	return result
 }
 
@@ -351,6 +342,28 @@ func codexInspectionTokenFromMetadata(metadata map[string]any) string {
 	return ""
 }
 
+func codexInspectionActionForUsage(disabled bool, fiveHourUsedPercent *int, weeklyUsedPercent *int, settings codexinspection.InspectionSettings) (codexinspection.Action, string) {
+	if disabled {
+		if weeklyUsedPercent != nil && *weeklyUsedPercent < settings.WeeklyUsedPercentThreshold {
+			return codexinspection.ActionEnable, fmt.Sprintf("weeklyUsedPercent < %d", settings.WeeklyUsedPercentThreshold)
+		}
+		if weeklyUsedPercent == nil && fiveHourUsedPercent != nil && *fiveHourUsedPercent < settings.FiveHourUsedPercentThreshold {
+			return codexinspection.ActionEnable, fmt.Sprintf("fiveHourUsedPercent < %d", settings.FiveHourUsedPercentThreshold)
+		}
+		return codexinspection.ActionKeep, "no issue detected"
+	}
+	if weeklyUsedPercent != nil {
+		if *weeklyUsedPercent >= settings.WeeklyUsedPercentThreshold {
+			return codexinspection.ActionDisable, fmt.Sprintf("weeklyUsedPercent >= %d", settings.WeeklyUsedPercentThreshold)
+		}
+		return codexinspection.ActionKeep, "no issue detected"
+	}
+	if fiveHourUsedPercent != nil && *fiveHourUsedPercent >= settings.FiveHourUsedPercentThreshold {
+		return codexinspection.ActionDisable, fmt.Sprintf("fiveHourUsedPercent >= %d", settings.FiveHourUsedPercentThreshold)
+	}
+	return codexinspection.ActionKeep, "no issue detected"
+}
+
 func codexInspectionUsagePercents(payload *quota.CodexUsagePayload) (*int, *int, *int, bool) {
 	if payload == nil || payload.RateLimit == nil {
 		return nil, nil, nil, false
@@ -387,11 +400,11 @@ func codexInspectionUsagePercents(payload *quota.CodexUsagePayload) (*int, *int,
 		weeklyUsedPercent = &usedPercent
 	}
 
-	if fiveHourUsedPercent != nil {
-		return fiveHourUsedPercent, weeklyUsedPercent, fiveHourUsedPercent, true
-	}
 	if weeklyUsedPercent != nil {
 		return fiveHourUsedPercent, weeklyUsedPercent, weeklyUsedPercent, true
+	}
+	if fiveHourUsedPercent != nil {
+		return fiveHourUsedPercent, weeklyUsedPercent, fiveHourUsedPercent, true
 	}
 	return fiveHourUsedPercent, weeklyUsedPercent, nil, false
 }

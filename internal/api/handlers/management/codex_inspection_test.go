@@ -208,6 +208,34 @@ func TestRunCodexInspectionRejectsInvalidBodyWithUnknownContentLength(t *testing
 	}
 }
 
+func TestUpdateCodexInspectionSettingsAcceptsDualThresholds(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	stub := &stubCodexInspectionService{
+		snapshot: codexsvc.DefaultSnapshot(),
+	}
+	h := &Handler{}
+	h.SetCodexInspectionService(stub)
+
+	body := bytes.NewBufferString(`{"targetType":"codex","workers":4,"timeoutSeconds":20,"retries":1,"sampleSize":0,"fiveHourUsedPercentThreshold":81,"weeklyUsedPercentThreshold":93,"schedule":{"enabled":false,"mode":"interval","intervalMinutes":60}}`)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPut, "/v0/management/codex-inspection/settings", body)
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	h.UpdateCodexInspectionSettings(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if stub.snapshot.Settings.FiveHourUsedPercentThreshold != 81 {
+		t.Fatalf("FiveHourUsedPercentThreshold = %d, want 81", stub.snapshot.Settings.FiveHourUsedPercentThreshold)
+	}
+	if stub.snapshot.Settings.WeeklyUsedPercentThreshold != 93 {
+		t.Fatalf("WeeklyUsedPercentThreshold = %d, want 93", stub.snapshot.Settings.WeeklyUsedPercentThreshold)
+	}
+}
+
 func TestExecuteCodexInspectionActionsRequiresDeleteConfirmation(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

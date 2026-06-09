@@ -1,5 +1,7 @@
 package codexinspection
 
+import "encoding/json"
+
 type RunStatus string
 
 const (
@@ -27,13 +29,36 @@ const (
 )
 
 type InspectionSettings struct {
-	TargetType           string             `json:"targetType"`
-	Workers              int                `json:"workers"`
-	TimeoutSeconds       int                `json:"timeoutSeconds"`
-	Retries              int                `json:"retries"`
-	SampleSize           int                `json:"sampleSize"`
-	UsedPercentThreshold int                `json:"usedPercentThreshold"`
-	Schedule             InspectionSchedule `json:"schedule"`
+	TargetType                   string             `json:"targetType"`
+	Workers                      int                `json:"workers"`
+	TimeoutSeconds               int                `json:"timeoutSeconds"`
+	Retries                      int                `json:"retries"`
+	SampleSize                   int                `json:"sampleSize"`
+	FiveHourUsedPercentThreshold int                `json:"fiveHourUsedPercentThreshold"`
+	WeeklyUsedPercentThreshold   int                `json:"weeklyUsedPercentThreshold"`
+	Schedule                     InspectionSchedule `json:"schedule"`
+}
+
+type inspectionSettingsAlias InspectionSettings
+
+func (s *InspectionSettings) UnmarshalJSON(data []byte) error {
+	aux := struct {
+		inspectionSettingsAlias
+		UsedPercentThreshold *int `json:"usedPercentThreshold"`
+	}{}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	*s = InspectionSettings(aux.inspectionSettingsAlias)
+	if aux.UsedPercentThreshold != nil {
+		if s.FiveHourUsedPercentThreshold == 0 {
+			s.FiveHourUsedPercentThreshold = *aux.UsedPercentThreshold
+		}
+		if s.WeeklyUsedPercentThreshold == 0 {
+			s.WeeklyUsedPercentThreshold = *aux.UsedPercentThreshold
+		}
+	}
+	return nil
 }
 
 type InspectionSchedule struct {
@@ -100,12 +125,13 @@ type LatestSnapshot struct {
 
 func DefaultSettings() InspectionSettings {
 	return InspectionSettings{
-		TargetType:           "codex",
-		Workers:              4,
-		TimeoutSeconds:       20,
-		Retries:              1,
-		SampleSize:           0,
-		UsedPercentThreshold: 85,
+		TargetType:                   "codex",
+		Workers:                      4,
+		TimeoutSeconds:               20,
+		Retries:                      1,
+		SampleSize:                   0,
+		FiveHourUsedPercentThreshold: 85,
+		WeeklyUsedPercentThreshold:   85,
 		Schedule: InspectionSchedule{
 			Enabled:         false,
 			Mode:            "interval",
