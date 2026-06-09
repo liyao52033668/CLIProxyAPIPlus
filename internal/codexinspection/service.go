@@ -35,6 +35,7 @@ type Prober interface {
 
 type RunRequest struct {
 	TriggerType TriggerType
+	FileNames   []string
 }
 
 type ExecuteActionsRequest struct {
@@ -112,14 +113,22 @@ func (s *Service) Run(ctx context.Context, req RunRequest) (snapshot LatestSnaps
 	if err != nil {
 		return LatestSnapshot{}, err
 	}
+	probeFiles := filterAuthFilesByName(files, req.FileNames)
+	if len(req.FileNames) > 0 {
+		snapshot.Results = filterResultsByCurrentFiles(snapshot.Results, files)
+	}
 
-	results, probeErr := s.prober.ProbeCodexAccounts(ctx, files, snapshot.Settings)
+	results, probeErr := s.prober.ProbeCodexAccounts(ctx, probeFiles, snapshot.Settings)
 	if probeErr != nil {
-		snapshot.Results = results
+		if len(req.FileNames) == 0 {
+			snapshot.Results = results
+		} else {
+			snapshot.Results = mergeRunResults(snapshot.Results, results)
+		}
 		snapshot.Run.Status = RunStatusFailed
 		snapshot.Run.FinishedAtMS = nowMillis()
 		snapshot.Run.Error = probeErr.Error()
-		snapshot.Run.Summary = buildSummary(results, len(files))
+		snapshot.Run.Summary = buildSummary(snapshot.Results, len(files))
 		if saveErr := s.repo.Save(ctx, snapshot); saveErr != nil {
 			return LatestSnapshot{}, saveErr
 		}
@@ -132,12 +141,16 @@ func (s *Service) Run(ctx context.Context, req RunRequest) (snapshot LatestSnaps
 		results, autoDeleteLogs, autoDeletedCount = s.autoDeleteUnauthorizedResults(ctx, results)
 	}
 
-	snapshot.Results = results
+	if len(req.FileNames) == 0 {
+		snapshot.Results = results
+	} else {
+		snapshot.Results = mergeRunResults(snapshot.Results, results)
+	}
 	snapshot.ActionLogs = autoDeleteLogs
 	snapshot.Run.Status = RunStatusCompleted
 	snapshot.Run.FinishedAtMS = nowMillis()
 	snapshot.Run.Error = ""
-	snapshot.Run.Summary = buildSummary(results, len(files))
+	snapshot.Run.Summary = buildSummary(snapshot.Results, len(files))
 	snapshot.Run.Summary.AutoDeletedCount = autoDeletedCount
 	if snapshot.Settings.Schedule.Enabled && snapshot.Settings.Schedule.IntervalMinutes > 0 {
 		if req.TriggerType == TriggerTypeScheduled {
@@ -335,6 +348,74 @@ func deleteResultByFileName(results []InspectionResultItem, fileName string) []I
 		}
 	}
 	return filtered
+}
+
+func filterResultsByCurrentFiles(results []InspectionResultItem, files []AuthFileRecord) []InspectionResultItem {
+	if len(results) == 0 {
+		return results
+	}
+
+	current := make(map[string]struct{}, len(files))
+	for _, file := range files {
+		current[file.FileName] = struct{}{}
+	}
+
+	filtered := results[:0]
+	for _, result := range results {
+		if _, ok := current[result.FileName]; ok {
+			filtered = append(filtered, result)
+		}
+	}
+	return filtered
+}
+
+func filterAuthFilesByName(files []AuthFileRecord, wanted []string) []AuthFileRecord {
+	if len(wanted) == 0 {
+		return files
+	}
+
+	wantedSet := make(map[string]struct{}, len(wanted))
+	for _, fileName := range wanted {
+		wantedSet[fileName] = struct{}{}
+	}
+
+	filtered := make([]AuthFileRecord, 0, len(files))
+	for _, file := range files {
+		if _, ok := wantedSet[file.FileName]; ok {
+			filtered = append(filtered, file)
+		}
+	}
+	return filtered
+}
+
+func mergeRunResults(existing []InspectionResultItem, incoming []InspectionResultItem) []InspectionResultItem {
+	if len(existing) == 0 {
+		return incoming
+	}
+	if len(incoming) == 0 {
+		return existing
+	}
+
+	incomingByFileName := make(map[string]InspectionResultItem, len(incoming))
+	for _, item := range incoming {
+		incomingByFileName[item.FileName] = item
+	}
+
+	merged := make([]InspectionResultItem, 0, len(existing)+len(incoming))
+	for _, item := range existing {
+		if replacement, ok := incomingByFileName[item.FileName]; ok {
+			merged = append(merged, replacement)
+			delete(incomingByFileName, item.FileName)
+			continue
+		}
+		merged = append(merged, item)
+	}
+	for _, item := range incoming {
+		if _, ok := incomingByFileName[item.FileName]; ok {
+			merged = append(merged, item)
+		}
+	}
+	return merged
 }
 
 func (s *Service) lock() {

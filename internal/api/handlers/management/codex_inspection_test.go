@@ -39,6 +39,175 @@ func TestGetCodexInspectionSnapshotReturnsOK(t *testing.T) {
 	}
 }
 
+func TestRunCodexInspectionWithoutBodyReturnsOK(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	stub := &stubCodexInspectionService{
+		snapshot: codexsvc.DefaultSnapshot(),
+	}
+	h := &Handler{}
+	h.SetCodexInspectionService(stub)
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v0/management/codex-inspection/run", nil)
+
+	h.RunCodexInspection(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if stub.lastRunRequest.TriggerType != codexsvc.TriggerTypeManual {
+		t.Fatalf("TriggerType = %q, want %q", stub.lastRunRequest.TriggerType, codexsvc.TriggerTypeManual)
+	}
+	if len(stub.lastRunRequest.FileNames) != 0 {
+		t.Fatalf("FileNames = %v, want empty", stub.lastRunRequest.FileNames)
+	}
+}
+
+func TestRunCodexInspectionRejectsInvalidBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	stub := &stubCodexInspectionService{
+		snapshot: codexsvc.DefaultSnapshot(),
+	}
+	h := &Handler{}
+	h.SetCodexInspectionService(stub)
+
+	body := bytes.NewBufferString(`{"fileNames":`)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v0/management/codex-inspection/run", body)
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	h.RunCodexInspection(ctx)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	var resp map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["error"] != "invalid request body" {
+		t.Fatalf("error = %q, want %q", resp["error"], "invalid request body")
+	}
+}
+
+func TestRunCodexInspectionForwardsFileNames(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	stub := &stubCodexInspectionService{
+		snapshot: codexsvc.DefaultSnapshot(),
+	}
+	h := &Handler{}
+	h.SetCodexInspectionService(stub)
+
+	body := bytes.NewBufferString(`{"fileNames":["alpha.json","beta.json"]}`)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v0/management/codex-inspection/run", body)
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	h.RunCodexInspection(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if stub.lastRunRequest.TriggerType != codexsvc.TriggerTypeManual {
+		t.Fatalf("TriggerType = %q, want %q", stub.lastRunRequest.TriggerType, codexsvc.TriggerTypeManual)
+	}
+	want := []string{"alpha.json", "beta.json"}
+	if len(stub.lastRunRequest.FileNames) != len(want) {
+		t.Fatalf("FileNames len = %d, want %d (%v)", len(stub.lastRunRequest.FileNames), len(want), stub.lastRunRequest.FileNames)
+	}
+	for i := range want {
+		if stub.lastRunRequest.FileNames[i] != want[i] {
+			t.Fatalf("FileNames[%d] = %q, want %q", i, stub.lastRunRequest.FileNames[i], want[i])
+		}
+	}
+}
+
+func TestRunCodexInspectionIgnoresTriggerTypeFromBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	stub := &stubCodexInspectionService{
+		snapshot: codexsvc.DefaultSnapshot(),
+	}
+	h := &Handler{}
+	h.SetCodexInspectionService(stub)
+
+	body := bytes.NewBufferString(`{"triggerType":"scheduled","fileNames":["alpha.json"]}`)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v0/management/codex-inspection/run", body)
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	h.RunCodexInspection(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if stub.lastRunRequest.TriggerType != codexsvc.TriggerTypeManual {
+		t.Fatalf("TriggerType = %q, want %q", stub.lastRunRequest.TriggerType, codexsvc.TriggerTypeManual)
+	}
+	if len(stub.lastRunRequest.FileNames) != 1 || stub.lastRunRequest.FileNames[0] != "alpha.json" {
+		t.Fatalf("FileNames = %v, want [alpha.json]", stub.lastRunRequest.FileNames)
+	}
+}
+
+func TestRunCodexInspectionWithUnknownContentLengthForwardsFileNames(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	stub := &stubCodexInspectionService{
+		snapshot: codexsvc.DefaultSnapshot(),
+	}
+	h := &Handler{}
+	h.SetCodexInspectionService(stub)
+
+	body := bytes.NewBufferString(`{"fileNames":["alpha.json"]}`)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v0/management/codex-inspection/run", body)
+	ctx.Request.ContentLength = -1
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	h.RunCodexInspection(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if stub.lastRunRequest.TriggerType != codexsvc.TriggerTypeManual {
+		t.Fatalf("TriggerType = %q, want %q", stub.lastRunRequest.TriggerType, codexsvc.TriggerTypeManual)
+	}
+	if len(stub.lastRunRequest.FileNames) != 1 || stub.lastRunRequest.FileNames[0] != "alpha.json" {
+		t.Fatalf("FileNames = %v, want [alpha.json]", stub.lastRunRequest.FileNames)
+	}
+}
+
+func TestRunCodexInspectionRejectsInvalidBodyWithUnknownContentLength(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	stub := &stubCodexInspectionService{
+		snapshot: codexsvc.DefaultSnapshot(),
+	}
+	h := &Handler{}
+	h.SetCodexInspectionService(stub)
+
+	body := bytes.NewBufferString(`{"fileNames":`)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v0/management/codex-inspection/run", body)
+	ctx.Request.ContentLength = -1
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	h.RunCodexInspection(ctx)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
 func TestExecuteCodexInspectionActionsRequiresDeleteConfirmation(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -61,18 +230,20 @@ func TestExecuteCodexInspectionActionsRequiresDeleteConfirmation(t *testing.T) {
 }
 
 type stubCodexInspectionService struct {
-	snapshot      codexsvc.LatestSnapshot
-	runErr        error
-	updateErr     error
-	executeErr    error
-	executeResult codexsvc.ExecuteActionsResult
+	snapshot       codexsvc.LatestSnapshot
+	lastRunRequest codexsvc.RunRequest
+	runErr         error
+	updateErr      error
+	executeErr     error
+	executeResult  codexsvc.ExecuteActionsResult
 }
 
 func (s *stubCodexInspectionService) GetSnapshot() (codexsvc.LatestSnapshot, error) {
 	return s.snapshot, nil
 }
 
-func (s *stubCodexInspectionService) Run(_ context.Context, _ codexsvc.RunRequest) (codexsvc.LatestSnapshot, error) {
+func (s *stubCodexInspectionService) Run(_ context.Context, req codexsvc.RunRequest) (codexsvc.LatestSnapshot, error) {
+	s.lastRunRequest = req
 	return s.snapshot, s.runErr
 }
 

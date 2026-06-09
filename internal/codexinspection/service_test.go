@@ -519,6 +519,210 @@ func TestService_RunManualDoesNotAutoDeleteUnauthorizedResults(t *testing.T) {
 	}
 }
 
+func TestService_RunPartialMergesResultsAndRebuildsSummary(t *testing.T) {
+	repo := &fakeRepository{snapshot: LatestSnapshot{
+		Run: InspectionRunState{Summary: InspectionSummary{
+			TotalFiles:    3,
+			SampledCount:  3,
+			KeepCount:     1,
+			DisableCount:  1,
+			DeleteCount:   1,
+			DisabledCount: 1,
+			EnabledCount:  2,
+		}},
+		Results: []InspectionResultItem{
+			{FileName: "alpha.json", DisplayName: "Alpha", Action: ActionKeep, ActionReason: "no issue detected", Disabled: false},
+			{FileName: "beta.json", DisplayName: "Beta", Action: ActionDisable, ActionReason: "quota exhausted", Disabled: false},
+			{FileName: "gamma.json", DisplayName: "Gamma", Action: ActionDelete, ActionReason: "401 response", Disabled: true},
+		},
+		Settings: DefaultSettings(),
+	}}
+	gateway := &fakeGateway{files: []AuthFileRecord{
+		{FileName: "alpha.json", DisplayName: "Alpha", Disabled: false},
+		{FileName: "beta.json", DisplayName: "Beta", Disabled: false},
+		{FileName: "gamma.json", DisplayName: "Gamma", Disabled: true},
+	}}
+	prober := &fakeProber{results: []InspectionResultItem{{
+		FileName:     "beta.json",
+		DisplayName:  "Beta",
+		Action:       ActionEnable,
+		ActionReason: "account recovered",
+		Disabled:     true,
+	}}}
+	service := NewService(repo, gateway, prober)
+
+	snapshot, err := service.Run(context.Background(), RunRequest{
+		TriggerType: TriggerTypeManual,
+		FileNames:   []string{"beta.json", "missing.json"},
+	})
+	if err != nil {
+		t.Fatalf("Run(partial) error = %v", err)
+	}
+	if len(prober.receivedFiles) != 1 {
+		t.Fatalf("len(receivedFiles) = %d, want 1", len(prober.receivedFiles))
+	}
+	if prober.receivedFiles[0].FileName != "beta.json" {
+		t.Fatalf("receivedFiles[0].FileName = %q, want beta.json", prober.receivedFiles[0].FileName)
+	}
+	if len(snapshot.Results) != 3 {
+		t.Fatalf("len(snapshot.Results) = %d, want 3", len(snapshot.Results))
+	}
+	if snapshot.Results[0].FileName != "alpha.json" || snapshot.Results[0].Action != ActionKeep {
+		t.Fatalf("snapshot.Results[0] = %+v, want alpha keep", snapshot.Results[0])
+	}
+	if snapshot.Results[1].FileName != "beta.json" || snapshot.Results[1].Action != ActionEnable {
+		t.Fatalf("snapshot.Results[1] = %+v, want beta enable", snapshot.Results[1])
+	}
+	if snapshot.Results[2].FileName != "gamma.json" || snapshot.Results[2].Action != ActionDelete {
+		t.Fatalf("snapshot.Results[2] = %+v, want gamma delete", snapshot.Results[2])
+	}
+	if snapshot.Run.Summary.TotalFiles != 3 {
+		t.Fatalf("Summary.TotalFiles = %d, want 3", snapshot.Run.Summary.TotalFiles)
+	}
+	if snapshot.Run.Summary.SampledCount != 3 {
+		t.Fatalf("Summary.SampledCount = %d, want 3", snapshot.Run.Summary.SampledCount)
+	}
+	if snapshot.Run.Summary.KeepCount != 1 {
+		t.Fatalf("Summary.KeepCount = %d, want 1", snapshot.Run.Summary.KeepCount)
+	}
+	if snapshot.Run.Summary.DeleteCount != 1 {
+		t.Fatalf("Summary.DeleteCount = %d, want 1", snapshot.Run.Summary.DeleteCount)
+	}
+	if snapshot.Run.Summary.EnableCount != 1 {
+		t.Fatalf("Summary.EnableCount = %d, want 1", snapshot.Run.Summary.EnableCount)
+	}
+	if snapshot.Run.Summary.DisableCount != 0 {
+		t.Fatalf("Summary.DisableCount = %d, want 0", snapshot.Run.Summary.DisableCount)
+	}
+	if snapshot.Run.Summary.DisabledCount != 2 {
+		t.Fatalf("Summary.DisabledCount = %d, want 2", snapshot.Run.Summary.DisabledCount)
+	}
+	if snapshot.Run.Summary.EnabledCount != 1 {
+		t.Fatalf("Summary.EnabledCount = %d, want 1", snapshot.Run.Summary.EnabledCount)
+	}
+}
+
+func TestService_RunPartialDropsResultsForFilesMissingFromCurrentList(t *testing.T) {
+	repo := &fakeRepository{snapshot: LatestSnapshot{
+		Run: InspectionRunState{Summary: InspectionSummary{
+			TotalFiles:    2,
+			SampledCount:  2,
+			KeepCount:     2,
+			DisabledCount: 0,
+			EnabledCount:  2,
+		}},
+		Results: []InspectionResultItem{
+			{FileName: "alpha.json", DisplayName: "Alpha", Action: ActionKeep, ActionReason: "no issue detected", Disabled: false},
+			{FileName: "beta.json", DisplayName: "Beta", Action: ActionKeep, ActionReason: "no issue detected", Disabled: false},
+		},
+		Settings: DefaultSettings(),
+	}}
+	gateway := &fakeGateway{files: []AuthFileRecord{
+		{FileName: "alpha.json", DisplayName: "Alpha", Disabled: false},
+		{FileName: "gamma.json", DisplayName: "Gamma", Disabled: false},
+	}}
+	prober := &fakeProber{results: []InspectionResultItem{{
+		FileName:     "alpha.json",
+		DisplayName:  "Alpha",
+		Action:       ActionDisable,
+		ActionReason: "quota exhausted",
+		Disabled:     false,
+		Executable:   true,
+	}}}
+	service := NewService(repo, gateway, prober)
+
+	snapshot, err := service.Run(context.Background(), RunRequest{
+		TriggerType: TriggerTypeManual,
+		FileNames:   []string{"alpha.json"},
+	})
+	if err != nil {
+		t.Fatalf("Run(partial missing file cleanup) error = %v", err)
+	}
+	if len(snapshot.Results) != 1 {
+		t.Fatalf("len(snapshot.Results) = %d, want 1", len(snapshot.Results))
+	}
+	if snapshot.Results[0].FileName != "alpha.json" {
+		t.Fatalf("snapshot.Results[0].FileName = %q, want alpha.json", snapshot.Results[0].FileName)
+	}
+	if snapshot.Results[0].Action != ActionDisable {
+		t.Fatalf("snapshot.Results[0].Action = %q, want %q", snapshot.Results[0].Action, ActionDisable)
+	}
+	if snapshot.Run.Summary.TotalFiles != 2 {
+		t.Fatalf("Summary.TotalFiles = %d, want 2", snapshot.Run.Summary.TotalFiles)
+	}
+	if snapshot.Run.Summary.SampledCount != 1 {
+		t.Fatalf("Summary.SampledCount = %d, want 1", snapshot.Run.Summary.SampledCount)
+	}
+}
+
+func TestService_RunPartialProbeErrorMergesResultsAndRebuildsSummary(t *testing.T) {
+	repo := &fakeRepository{snapshot: LatestSnapshot{
+		Run: InspectionRunState{Summary: InspectionSummary{
+			TotalFiles:    2,
+			SampledCount:  2,
+			KeepCount:     1,
+			DisableCount:  1,
+			DisabledCount: 0,
+			EnabledCount:  2,
+		}},
+		Results: []InspectionResultItem{
+			{FileName: "alpha.json", DisplayName: "Alpha", Action: ActionKeep, ActionReason: "no issue detected", Disabled: false},
+			{FileName: "beta.json", DisplayName: "Beta", Action: ActionDisable, ActionReason: "quota exhausted", Disabled: false},
+		},
+		Settings: DefaultSettings(),
+	}}
+	gateway := &fakeGateway{files: []AuthFileRecord{
+		{FileName: "alpha.json", DisplayName: "Alpha", Disabled: false},
+		{FileName: "beta.json", DisplayName: "Beta", Disabled: false},
+	}}
+	prober := &fakeProber{
+		results: []InspectionResultItem{{
+			FileName:     "alpha.json",
+			DisplayName:  "Alpha",
+			Action:       ActionDelete,
+			ActionReason: "401 response",
+			Disabled:     false,
+		}},
+		probeErr: errors.New("probe failed"),
+	}
+	service := NewService(repo, gateway, prober)
+
+	snapshot, err := service.Run(context.Background(), RunRequest{
+		TriggerType: TriggerTypeManual,
+		FileNames:   []string{"alpha.json"},
+	})
+	if err == nil || err.Error() != "probe failed" {
+		t.Fatalf("Run(partial error) error = %v, want probe failed", err)
+	}
+	if snapshot.Run.Status != RunStatusFailed {
+		t.Fatalf("Run(partial error).Run.Status = %q, want %q", snapshot.Run.Status, RunStatusFailed)
+	}
+	if len(snapshot.Results) != 2 {
+		t.Fatalf("len(snapshot.Results) = %d, want 2", len(snapshot.Results))
+	}
+	if snapshot.Results[0].FileName != "alpha.json" || snapshot.Results[0].Action != ActionDelete {
+		t.Fatalf("snapshot.Results[0] = %+v, want alpha delete", snapshot.Results[0])
+	}
+	if snapshot.Results[1].FileName != "beta.json" || snapshot.Results[1].Action != ActionDisable {
+		t.Fatalf("snapshot.Results[1] = %+v, want beta disable", snapshot.Results[1])
+	}
+	if snapshot.Run.Summary.TotalFiles != 2 {
+		t.Fatalf("Summary.TotalFiles = %d, want 2", snapshot.Run.Summary.TotalFiles)
+	}
+	if snapshot.Run.Summary.SampledCount != 2 {
+		t.Fatalf("Summary.SampledCount = %d, want 2", snapshot.Run.Summary.SampledCount)
+	}
+	if snapshot.Run.Summary.DeleteCount != 1 {
+		t.Fatalf("Summary.DeleteCount = %d, want 1", snapshot.Run.Summary.DeleteCount)
+	}
+	if snapshot.Run.Summary.DisableCount != 1 {
+		t.Fatalf("Summary.DisableCount = %d, want 1", snapshot.Run.Summary.DisableCount)
+	}
+	if snapshot.Run.Summary.KeepCount != 0 {
+		t.Fatalf("Summary.KeepCount = %d, want 0", snapshot.Run.Summary.KeepCount)
+	}
+}
+
 func TestService_RunScheduledKeepsUnauthorizedResultWhenAutoDeleteFails(t *testing.T) {
 	repo := &fakeRepository{snapshot: DefaultSnapshot()}
 	gateway := &fakeGateway{deleteErrors: map[string]error{"expired.json": errors.New("delete failed")}}

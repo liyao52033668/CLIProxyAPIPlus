@@ -1,7 +1,10 @@
 package management
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -29,7 +32,23 @@ func (h *Handler) RunCodexInspection(c *gin.Context) {
 		return
 	}
 
-	snapshot, err := h.codexInspectionService.Run(c.Request.Context(), codexsvc.RunRequest{TriggerType: codexsvc.TriggerTypeManual})
+	var req codexsvc.RunRequest
+	if c.Request.Body != nil && c.Request.Body != http.NoBody {
+		body, err := io.ReadAll(c.Request.Body)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+			return
+		}
+		if len(bytes.TrimSpace(body)) > 0 {
+			if err := json.Unmarshal(body, &req); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+				return
+			}
+		}
+	}
+	req.TriggerType = codexsvc.TriggerTypeManual
+
+	snapshot, err := h.codexInspectionService.Run(c.Request.Context(), req)
 	if errors.Is(err, codexsvc.ErrRunAlreadyActive) {
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 		return
