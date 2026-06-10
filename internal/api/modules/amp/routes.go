@@ -3,9 +3,11 @@ package amp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"runtime/debug"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -173,13 +175,41 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *ha
 					// Upstream already wrote the status (often 404) before the client/stream ended.
 					return
 				}
+
+				// Log detailed panic information for debugging
+				log.WithFields(log.Fields{
+					"panic":  rec,
+					"stack":  string(debug.Stack()),
+					"path":   c.Request.URL.Path,
+					"method": c.Request.Method,
+				}).Error("AMP proxy handler recovered from panic")
+
+				// Return a friendly error response using the standard error format
+				if err, ok := rec.(error); ok {
+					c.JSON(http.StatusBadGateway, handlers.ErrorResponse{
+						Error: handlers.ErrorDetail{
+							Message: fmt.Sprintf("proxy error: %v", err),
+							Type:    "proxy_error",
+							Code:    "bad_gateway",
+						},
+					})
+					return
+				}
+
+				// For non-error panics, re-throw to let global recovery handle it
 				panic(rec)
 			}
 		}()
 
 		proxy := m.getProxy()
 		if proxy == nil {
-			c.JSON(503, gin.H{"error": "amp upstream proxy not available"})
+			c.JSON(http.StatusServiceUnavailable, handlers.ErrorResponse{
+				Error: handlers.ErrorDetail{
+					Message: "amp upstream proxy not available",
+					Type:    "service_unavailable",
+					Code:    "service_unavailable",
+				},
+			})
 			return
 		}
 		proxy.ServeHTTP(c.Writer, c.Request)

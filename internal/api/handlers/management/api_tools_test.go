@@ -3,6 +3,7 @@ package management
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -13,8 +14,14 @@ import (
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
 
+func resetManagementTransportCacheForTest() {
+	managementTransportCacheMutex.Lock()
+	defer managementTransportCacheMutex.Unlock()
+	managementTransportCache = make(map[string]http.RoundTripper)
+}
+
 func TestAPICallTransportDirectBypassesGlobalProxy(t *testing.T) {
-	t.Parallel()
+	resetManagementTransportCacheForTest()
 
 	h := &Handler{
 		cfg: &config.Config{
@@ -33,7 +40,7 @@ func TestAPICallTransportDirectBypassesGlobalProxy(t *testing.T) {
 }
 
 func TestAPICallTransportInvalidAuthFallsBackToGlobalProxy(t *testing.T) {
-	t.Parallel()
+	resetManagementTransportCacheForTest()
 
 	h := &Handler{
 		cfg: &config.Config{
@@ -62,7 +69,7 @@ func TestAPICallTransportInvalidAuthFallsBackToGlobalProxy(t *testing.T) {
 }
 
 func TestAPICallTransportAPIKeyAuthFallsBackToConfigProxyURL(t *testing.T) {
-	t.Parallel()
+	resetManagementTransportCacheForTest()
 
 	h := &Handler{
 		cfg: &config.Config{
@@ -156,6 +163,24 @@ func TestAPICallTransportAPIKeyAuthFallsBackToConfigProxyURL(t *testing.T) {
 				t.Fatalf("proxy URL = %v, want %s", proxyURL, tc.wantProxy)
 			}
 		})
+	}
+}
+
+func TestGetOrBuildManagementTransportCapsCacheSize(t *testing.T) {
+	resetManagementTransportCacheForTest()
+
+	for i := 0; i < 130; i++ {
+		proxyURL := fmt.Sprintf("http://proxy-%d.example.com:8080", i)
+		transport := getOrBuildManagementTransport(proxyURL)
+		if transport == nil {
+			t.Fatalf("getOrBuildManagementTransport(%q) returned nil", proxyURL)
+		}
+	}
+
+	managementTransportCacheMutex.RLock()
+	defer managementTransportCacheMutex.RUnlock()
+	if got := len(managementTransportCache); got > 128 {
+		t.Fatalf("cache size = %d, want <= 128", got)
 	}
 }
 

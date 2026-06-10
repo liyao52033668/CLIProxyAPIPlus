@@ -55,14 +55,20 @@ func (h *Handler) GetLatestVersion(c *gin.Context) {
 	if h != nil && h.cfg != nil && h.cfg.Timeouts.ManagementAssetFetchSeconds > 0 {
 		timeout = time.Duration(h.cfg.Timeouts.ManagementAssetFetchSeconds) * time.Second
 	}
-	client := &http.Client{Timeout: timeout}
+
 	proxyURL := ""
 	if h != nil && h.cfg != nil {
 		proxyURL = strings.TrimSpace(h.cfg.ProxyURL)
 	}
+
+	client := &http.Client{Timeout: timeout}
 	if proxyURL != "" {
-		sdkCfg := &sdkconfig.SDKConfig{ProxyURL: proxyURL}
-		util.SetProxy(sdkCfg, client)
+		if transport := getOrBuildManagementTransport(proxyURL); transport != nil {
+			client.Transport = transport
+		} else {
+			sdkCfg := &sdkconfig.SDKConfig{ProxyURL: proxyURL}
+			util.SetProxy(sdkCfg, client)
+		}
 	}
 
 	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, latestReleaseURL, nil)

@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fxamacker/cbor/v2"
@@ -23,6 +24,41 @@ import (
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 )
+
+// managementTransportCacheMaxEntries is the maximum number of proxy transports kept in cache.
+const managementTransportCacheMaxEntries = 128
+
+// managementTransportCache caches http.RoundTripper by proxy URL to enable connection reuse
+var (
+	managementTransportCache      = make(map[string]http.RoundTripper)
+	managementTransportCacheMutex sync.RWMutex
+)
+
+// getOrBuildManagementTransport returns a cached RoundTripper for proxyStr, or builds and caches one.
+// When the cache exceeds managementTransportCacheMaxEntries, one arbitrary entry is evicted.
+func getOrBuildManagementTransport(proxyStr string) http.RoundTripper {
+	managementTransportCacheMutex.RLock()
+	if cached, ok := managementTransportCache[proxyStr]; ok {
+		managementTransportCacheMutex.RUnlock()
+		return cached
+	}
+	managementTransportCacheMutex.RUnlock()
+
+	transport := buildProxyTransport(proxyStr)
+	if transport == nil {
+		return nil
+	}
+	managementTransportCacheMutex.Lock()
+	if len(managementTransportCache) >= managementTransportCacheMaxEntries {
+		for k := range managementTransportCache {
+			delete(managementTransportCache, k)
+			break
+		}
+	}
+	managementTransportCache[proxyStr] = transport
+	managementTransportCacheMutex.Unlock()
+	return transport
+}
 
 const (
 	geminiOAuthClientID     = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
@@ -717,11 +753,12 @@ func (h *Handler) apiCallTransport(auth *coreauth.Auth) http.RoundTripper {
 	}
 
 	for _, proxyStr := range proxyCandidates {
-		if transport := buildProxyTransport(proxyStr); transport != nil {
+		if transport := getOrBuildManagementTransport(proxyStr); transport != nil {
 			return transport
 		}
 	}
 
+	// Return default transport without proxy
 	transport, ok := http.DefaultTransport.(*http.Transport)
 	if !ok || transport == nil {
 		return &http.Transport{Proxy: nil}
