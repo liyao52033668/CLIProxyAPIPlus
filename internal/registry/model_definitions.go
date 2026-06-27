@@ -423,8 +423,8 @@ func GetQoderModels() []*ModelInfo {
 			Created:     now,
 			OwnedBy:     "qoder",
 			Type:        "qoder",
-			DisplayName: "GLM-5.1",
-			Description: "GLM 5.1 via Qoder",
+			DisplayName: "GLM-5.2",
+			Description: "GLM 5.2 via Qoder",
 			Thinking:    &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
 		},
 		{
@@ -433,8 +433,8 @@ func GetQoderModels() []*ModelInfo {
 			Created:     now,
 			OwnedBy:     "qoder",
 			Type:        "qoder",
-			DisplayName: "Kimi-K2.6",
-			Description: "Kimi K2.6 via Qoder",
+			DisplayName: "Kimi-K2.7-Code",
+			Description: "Kimi K2.7 Code via Qoder",
 			Thinking:    &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
 		},
 		{
@@ -474,6 +474,12 @@ func GetCodeBuddyModels() []*ModelInfo {
 			SupportedInputModalities: []string{"TEXT", "IMAGE"},
 		},
 		{
+			ID: "glm-5.2", Object: "model", Created: now, OwnedBy: "tencent",
+			Type: "codebuddy", DisplayName: "GLM-5.2", Description: "GLM-5.2 via CodeBuddy",
+			ContextLength: 200000, MaxCompletionTokens: 48000, SupportedEndpoints: []string{"/chat/completions"},
+			Thinking: &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
+		},
+		{
 			ID: "glm-5.1", Object: "model", Created: now, OwnedBy: "tencent",
 			Type: "codebuddy", DisplayName: "GLM-5.1", Description: "GLM-5.1 via CodeBuddy",
 			ContextLength: 200000, MaxCompletionTokens: 48000, SupportedEndpoints: []string{"/chat/completions"},
@@ -490,6 +496,13 @@ func GetCodeBuddyModels() []*ModelInfo {
 			Type: "codebuddy", DisplayName: "GLM-4.6", Description: "GLM-4.6 via CodeBuddy",
 			ContextLength: 128000, MaxCompletionTokens: 32000, SupportedEndpoints: []string{"/chat/completions"},
 			Thinking: &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
+		},
+		{
+			ID: "kimi-k2.7", Object: "model", Created: now, OwnedBy: "tencent",
+			Type: "codebuddy", DisplayName: "Kimi K2.7", Description: "Kimi K2.7 via CodeBuddy",
+			ContextLength: 256000, MaxCompletionTokens: 32000, SupportedEndpoints: []string{"/chat/completions"},
+			Thinking:                 &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
+			SupportedInputModalities: []string{"TEXT", "IMAGE"},
 		},
 		{
 			ID: "kimi-k2.6", Object: "model", Created: now, OwnedBy: "tencent",
@@ -523,13 +536,6 @@ func GetCodeBuddyModels() []*ModelInfo {
 			Type: "codebuddy", DisplayName: "DeepSeek V4 Pro", Description: "DeepSeek V4 Pro via CodeBuddy",
 			ContextLength: 128000, MaxCompletionTokens: 32000, SupportedEndpoints: []string{"/chat/completions"},
 			Thinking: &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
-		},
-		{
-			ID: "deepseek-v3.2", Object: "model", Created: now, OwnedBy: "tencent",
-			Type: "codebuddy", DisplayName: "DeepSeek V3.2", Description: "DeepSeek V3.2 via CodeBuddy",
-			ContextLength: 96000, MaxCompletionTokens: 32000, SupportedEndpoints: []string{"/chat/completions"},
-			Thinking:                 &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
-			SupportedInputModalities: []string{"TEXT", "IMAGE"},
 		},
 	}
 }
