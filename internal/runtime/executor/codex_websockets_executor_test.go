@@ -151,6 +151,83 @@ func TestCodexWebsocketsUpstreamDisconnectChanSignalsOnInvalidate(t *testing.T) 
 	}
 }
 
+func TestCodexWebsocketsUpstreamDisconnectChanRecreatesChannelAfterInvalidate(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade websocket: %v", err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		for {
+			if _, _, errRead := conn.ReadMessage(); errRead != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	const sessionID = "sess-recreate-disconnect-channel"
+	globalCodexWebsocketSessionStore.mu.Lock()
+	delete(globalCodexWebsocketSessionStore.sessions, sessionID)
+	globalCodexWebsocketSessionStore.mu.Unlock()
+	t.Cleanup(func() {
+		globalCodexWebsocketSessionStore.mu.Lock()
+		delete(globalCodexWebsocketSessionStore.sessions, sessionID)
+		globalCodexWebsocketSessionStore.mu.Unlock()
+	})
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{})
+	firstCh := exec.UpstreamDisconnectChan(sessionID)
+	if firstCh == nil {
+		t.Fatal("expected first disconnect channel")
+	}
+
+	sess := exec.getOrCreateSession(sessionID)
+	if sess == nil {
+		t.Fatal("expected session")
+	}
+	sess.connMu.Lock()
+	sess.conn = conn
+	sess.readerConn = conn
+	sess.authID = "auth-1"
+	sess.wsURL = "ws://example.test/responses"
+	sess.connMu.Unlock()
+
+	exec.invalidateUpstreamConn(sess, conn, "test_invalidate", errors.New("upstream gone"))
+
+	select {
+	case <-firstCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for first disconnect signal")
+	}
+
+	secondCh := exec.UpstreamDisconnectChan(sessionID)
+	if secondCh == nil {
+		t.Fatal("expected second disconnect channel")
+	}
+	if secondCh == firstCh {
+		t.Fatal("expected a new disconnect channel after invalidation")
+	}
+
+	select {
+	case _, ok := <-secondCh:
+		if !ok {
+			t.Fatal("expected recreated disconnect channel to remain open")
+		}
+		t.Fatal("expected recreated disconnect channel to have no pending signal")
+	default:
+	}
+}
+
 func TestApplyCodexWebsocketHeadersDefaultsToCurrentResponsesBeta(t *testing.T) {
 	headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, nil, "", nil)
 
