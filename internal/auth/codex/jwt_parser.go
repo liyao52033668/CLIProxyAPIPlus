@@ -8,12 +8,45 @@ import (
 	"time"
 )
 
+// Audience stores JWT aud values regardless of whether the token encodes them as
+// one string or an array of strings.
+type Audience []string
+
+// UnmarshalJSON decodes either a single string or a string array into Audience.
+func (a *Audience) UnmarshalJSON(data []byte) error {
+	var single string
+	if err := json.Unmarshal(data, &single); err == nil {
+		trimmed := strings.TrimSpace(single)
+		if trimmed == "" {
+			*a = nil
+			return nil
+		}
+		*a = Audience{trimmed}
+		return nil
+	}
+
+	var many []string
+	if err := json.Unmarshal(data, &many); err != nil {
+		return err
+	}
+	out := make(Audience, 0, len(many))
+	for _, value := range many {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		out = append(out, trimmed)
+	}
+	*a = out
+	return nil
+}
+
 // JWTClaims represents the claims section of a JSON Web Token (JWT).
 // It includes standard claims like issuer, subject, and expiration time, as well as
 // custom claims specific to OpenAI's authentication.
 type JWTClaims struct {
 	AtHash        string        `json:"at_hash"`
-	Aud           []string      `json:"aud"`
+	Aud           Audience      `json:"aud"`
 	AuthProvider  string        `json:"auth_provider"`
 	AuthTime      int           `json:"auth_time"`
 	Email         string        `json:"email"`
