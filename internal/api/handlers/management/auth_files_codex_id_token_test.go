@@ -2,6 +2,7 @@ package management
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,25 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
+
+func syntheticJWTToken(t *testing.T, claims map[string]any) string {
+	t.Helper()
+
+	headerJSON, err := json.Marshal(map[string]any{
+		"alg":           "none",
+		"typ":           "JWT",
+		"cpa_synthetic": true,
+	})
+	if err != nil {
+		t.Fatalf("failed to marshal jwt header: %v", err)
+	}
+	payloadJSON, err := json.Marshal(claims)
+	if err != nil {
+		t.Fatalf("failed to marshal jwt payload: %v", err)
+	}
+
+	return base64.RawURLEncoding.EncodeToString(headerJSON) + "." + base64.RawURLEncoding.EncodeToString(payloadJSON) + ".synthetic"
+}
 
 func TestListAuthFilesIncludesCodexIDTokenClaimsFromNestedJWT(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
@@ -66,5 +86,66 @@ func TestListAuthFilesIncludesCodexIDTokenClaimsFromNestedJWT(t *testing.T) {
 	}
 	if got := idToken["plan_type"]; got != "k12" {
 		t.Fatalf("plan_type = %#v, want %q", got, "k12")
+	}
+}
+
+func TestListAuthFilesFallsBackToCodexMetadataAccountID(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "codex-account-id-only.json",
+		FileName: "codex-account-id-only.json",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"path": "/tmp/codex-account-id-only.json",
+		},
+		Metadata: map[string]any{
+			"type":       "codex",
+			"email":      "madam.kreyes0221+d715e@outlook.com",
+			"account_id": "255de4a6-96a4-430a-b660-358954424e79",
+			"id_token": syntheticJWTToken(t, map[string]any{
+				"aud":            []string{"app_2SKx67EdpoN0G6j64rFvigXD"},
+				"auth_provider":  "password",
+				"email":          "madam.kreyes0221+d715e@outlook.com",
+				"email_verified": true,
+				"https://api.openai.com/auth": map[string]any{
+					"user_id": "user-cZPi12PvLqM5j3E6R386IDWD",
+				},
+			}),
+		},
+	}); err != nil {
+		t.Fatalf("failed to register codex auth: %v", err)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files", nil)
+	h.ListAuthFiles(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		Files []map[string]any `json:"files"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(payload.Files) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(payload.Files))
+	}
+
+	idToken, ok := payload.Files[0]["id_token"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected id_token object, got %#v", payload.Files[0]["id_token"])
+	}
+	if got := idToken["chatgpt_account_id"]; got != "255de4a6-96a4-430a-b660-358954424e79" {
+		t.Fatalf("chatgpt_account_id = %#v, want %q", got, "255de4a6-96a4-430a-b660-358954424e79")
 	}
 }
