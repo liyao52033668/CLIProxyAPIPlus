@@ -72,32 +72,29 @@ func TestSanitizeOAuthModelAlias_InjectsDefaultKiroAliases(t *testing.T) {
 		t.Fatal("expected default kiro aliases to be injected")
 	}
 
-	// Check that standard Claude model names are present
-	aliasSet := make(map[string]bool)
-	for _, a := range kiroAliases {
-		aliasSet[a.Alias] = true
-	}
-	expectedAliases := []string{
-		"claude-sonnet-4-5-20250929",
-		"claude-sonnet-4-5",
-		"claude-sonnet-4-20250514",
-		"claude-sonnet-4",
-		"claude-opus-4-6",
-		"claude-opus-4-5-20251101",
-		"claude-opus-4-5",
-		"claude-haiku-4-5-20251001",
-		"claude-haiku-4-5",
-	}
-	for _, expected := range expectedAliases {
-		if !aliasSet[expected] {
-			t.Fatalf("expected default kiro alias %q to be present", expected)
-		}
+	expectedAliases := defaultKiroAliases()
+	if len(kiroAliases) != len(expectedAliases) {
+		t.Fatalf("expected %d default kiro aliases, got %d", len(expectedAliases), len(kiroAliases))
 	}
 
-	// All should have fork=true
+	actualByAlias := make(map[string]OAuthModelAlias, len(kiroAliases))
 	for _, a := range kiroAliases {
-		if !a.Fork {
-			t.Fatalf("expected all default kiro aliases to have fork=true, got fork=false for %q", a.Alias)
+		actualByAlias[a.Alias] = a
+	}
+	for _, expected := range expectedAliases {
+		actual, ok := actualByAlias[expected.Alias]
+		if !ok {
+			t.Fatalf("expected default kiro alias %q to be present", expected.Alias)
+		}
+		if actual.Name != expected.Name || actual.Fork != expected.Fork {
+			t.Fatalf(
+				"expected default kiro alias %q to be name=%q fork=%v, got name=%q fork=%v",
+				expected.Alias,
+				expected.Name,
+				expected.Fork,
+				actual.Name,
+				actual.Fork,
+			)
 		}
 	}
 
