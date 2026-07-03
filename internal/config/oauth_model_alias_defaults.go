@@ -7,21 +7,17 @@ import "strings"
 func defaultKiroAliases() []OAuthModelAlias {
 	return []OAuthModelAlias{
 		// Sonnet 4.6
-		{Name: "kiro-claude-sonnet-4-6", Alias: "claude-sonnet-4-6", Fork: true},
+		{Name: "kiro-claude-sonnet-4-6", Alias: "claude-sonnet-4-6", Fork: false},
 		// Sonnet 4.5
-		{Name: "kiro-claude-sonnet-4-5", Alias: "claude-sonnet-4-5-20250929", Fork: true},
-		{Name: "kiro-claude-sonnet-4-5", Alias: "claude-sonnet-4-5", Fork: true},
+		{Name: "kiro-claude-sonnet-4-5", Alias: "claude-sonnet-4-5", Fork: false},
 		// Sonnet 4
-		{Name: "kiro-claude-sonnet-4", Alias: "claude-sonnet-4-20250514", Fork: true},
-		{Name: "kiro-claude-sonnet-4", Alias: "claude-sonnet-4", Fork: true},
+		{Name: "kiro-claude-sonnet-4", Alias: "claude-sonnet-4", Fork: false},
 		// Opus 4.6
-		{Name: "kiro-claude-opus-4-6", Alias: "claude-opus-4-6", Fork: true},
+		{Name: "kiro-claude-opus-4-6", Alias: "claude-opus-4-6", Fork: false},
 		// Opus 4.5
-		{Name: "kiro-claude-opus-4-5", Alias: "claude-opus-4-5-20251101", Fork: true},
-		{Name: "kiro-claude-opus-4-5", Alias: "claude-opus-4-5", Fork: true},
+		{Name: "kiro-claude-opus-4-5", Alias: "claude-opus-4-5", Fork: false},
 		// Haiku 4.5
-		{Name: "kiro-claude-haiku-4-5", Alias: "claude-haiku-4-5-20251001", Fork: true},
-		{Name: "kiro-claude-haiku-4-5", Alias: "claude-haiku-4-5", Fork: true},
+		{Name: "kiro-claude-haiku-4-5", Alias: "claude-haiku-4-5", Fork: false},
 	}
 }
 
