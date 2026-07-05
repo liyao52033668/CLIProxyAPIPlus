@@ -902,11 +902,91 @@ func codexStatusErrorClassification(statusCode int, body []byte) (code string, e
 }
 
 func normalizeCodexInstructions(body []byte) []byte {
-	instructions := gjson.GetBytes(body, "instructions")
-	if !instructions.Exists() || instructions.Type == gjson.Null {
-		body, _ = sjson.SetBytes(body, "instructions", "")
+	instructions := strings.TrimSpace(gjson.GetBytes(body, "instructions").String())
+	var moved []string
+
+	body, movedFromInput := moveCodexSystemMessagesToInstructions(body, "input")
+	moved = append(moved, movedFromInput...)
+	body, movedFromMessages := moveCodexSystemMessagesToInstructions(body, "messages")
+	moved = append(moved, movedFromMessages...)
+
+	if len(moved) > 0 {
+		parts := make([]string, 0, len(moved)+1)
+		if instructions != "" {
+			parts = append(parts, instructions)
+		}
+		parts = append(parts, moved...)
+		instructions = strings.Join(parts, "\n\n")
 	}
+	body, _ = sjson.SetBytes(body, "instructions", instructions)
 	return body
+}
+
+func moveCodexSystemMessagesToInstructions(body []byte, path string) ([]byte, []string) {
+	itemsResult := gjson.GetBytes(body, path)
+	if !itemsResult.Exists() || !itemsResult.IsArray() {
+		return body, nil
+	}
+
+	items := itemsResult.Array()
+	kept := make([][]byte, 0, len(items))
+	moved := make([]string, 0)
+	changed := false
+	for _, item := range items {
+		role := strings.ToLower(strings.TrimSpace(item.Get("role").String()))
+		if role == "system" || role == "developer" {
+			changed = true
+			if text := codexInstructionTextFromMessage(item); text != "" {
+				moved = append(moved, text)
+			}
+			continue
+		}
+		kept = append(kept, []byte(item.Raw))
+	}
+	if !changed {
+		return body, nil
+	}
+
+	var buf bytes.Buffer
+	buf.WriteByte('[')
+	for i, raw := range kept {
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		buf.Write(raw)
+	}
+	buf.WriteByte(']')
+	body, _ = sjson.SetRawBytes(body, path, buf.Bytes())
+	return body, moved
+}
+
+func codexInstructionTextFromMessage(item gjson.Result) string {
+	content := item.Get("content")
+	if !content.Exists() || content.Type == gjson.Null {
+		return ""
+	}
+	if content.Type == gjson.String {
+		return strings.TrimSpace(content.String())
+	}
+	if !content.IsArray() {
+		return strings.TrimSpace(content.String())
+	}
+
+	parts := make([]string, 0)
+	content.ForEach(func(_, part gjson.Result) bool {
+		text := strings.TrimSpace(part.Get("text").String())
+		if text == "" {
+			text = strings.TrimSpace(part.Get("input_text").String())
+		}
+		if text == "" && part.Type == gjson.String {
+			text = strings.TrimSpace(part.String())
+		}
+		if text != "" {
+			parts = append(parts, text)
+		}
+		return true
+	})
+	return strings.Join(parts, "\n")
 }
 
 var imageGenToolJSON = []byte(`{"type":"image_generation","output_format":"png"}`)

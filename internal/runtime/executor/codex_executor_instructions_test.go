@@ -94,6 +94,59 @@ func TestCodexExecutorExecuteStreamNormalizesNullInstructions(t *testing.T) {
 	}
 }
 
+func TestCodexExecutorMovesSystemMessagesToInstructions(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":0,\"status\":\"completed\",\"background\":false,\"error\":null}}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","instructions":"existing","input":[{"role":"system","content":"sys"},{"role":"developer","content":[{"type":"input_text","text":"dev"}]},{"role":"user","content":"hello"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+
+	if got := gjson.GetBytes(gotBody, "instructions").String(); got != "existing\n\nsys\n\ndev" {
+		t.Fatalf("instructions = %q, want merged system/developer instructions; body=%s", got, string(gotBody))
+	}
+	input := gjson.GetBytes(gotBody, "input")
+	if !input.IsArray() || len(input.Array()) != 1 {
+		t.Fatalf("input = %s, want only user message", input.Raw)
+	}
+	if got := input.Array()[0].Get("role").String(); got != "user" {
+		t.Fatalf("remaining input role = %q, want user", got)
+	}
+}
+
+func TestCodexExecutorMovesMessagesSystemMessagesToInstructions(t *testing.T) {
+	body := normalizeCodexInstructions([]byte(`{"messages":[{"role":"system","content":"sys"},{"role":"user","content":"hello"}]}`))
+	if got := gjson.GetBytes(body, "instructions").String(); got != "sys" {
+		t.Fatalf("instructions = %q, want sys; body=%s", got, string(body))
+	}
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.IsArray() || len(messages.Array()) != 1 {
+		t.Fatalf("messages = %s, want only user message", messages.Raw)
+	}
+	if got := messages.Array()[0].Get("role").String(); got != "user" {
+		t.Fatalf("remaining message role = %q, want user", got)
+	}
+}
+
 func TestCodexExecutorCountTokensTreatsNullInstructionsAsEmpty(t *testing.T) {
 	executor := NewCodexExecutor(&config.Config{})
 
