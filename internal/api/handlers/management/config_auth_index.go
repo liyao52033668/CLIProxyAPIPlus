@@ -45,6 +45,7 @@ type openAICompatibilityWithAuthIndex struct {
 	Models        []config.OpenAICompatibilityModel        `json:"models,omitempty"`
 	Headers       map[string]string                        `json:"headers,omitempty"`
 	AuthIndex     string                                   `json:"auth-index,omitempty"`
+	ForceStream   bool                                     `json:"force-stream,omitempty"`
 }
 
 func (h *Handler) liveAuthIndexByID() map[string]string {
@@ -216,15 +217,16 @@ func (h *Handler) openAICompatibilityWithAuthIndex() []openAICompatibilityWithAu
 		idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
 
 		response := openAICompatibilityWithAuthIndex{
-			Name:      entry.Name,
-			Priority:  entry.Priority,
-			Disabled:  entry.Disabled,
-			UpdatedAt: entry.UpdatedAt,
-			Prefix:    entry.Prefix,
-			BaseURL:   entry.BaseURL,
-			Models:    entry.Models,
-			Headers:   entry.Headers,
-			AuthIndex: "",
+			Name:        entry.Name,
+			Priority:    entry.Priority,
+			Disabled:    entry.Disabled,
+			UpdatedAt:   entry.UpdatedAt,
+			Prefix:      entry.Prefix,
+			BaseURL:     entry.BaseURL,
+			Models:      entry.Models,
+			Headers:     entry.Headers,
+			AuthIndex:   "",
+			ForceStream: entry.ForceStream,
 		}
 		if len(entry.APIKeyEntries) == 0 {
 			id, _ := idGen.Next(idKind, entry.BaseURL)
