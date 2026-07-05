@@ -11,6 +11,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
+	"sort"
 	"strings"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -101,6 +103,11 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
 	endpoint := "/chat/completions"
+	if opts.Alt != "responses/compact" {
+		if compat := e.resolveCompatConfig(auth); compat != nil && compat.ForceStream {
+			return e.executeChatCompletionsViaForcedStream(ctx, auth, req, opts)
+		}
+	}
 	if opts.Alt == "responses/compact" {
 		to = sdktranslator.FromString("openai-response")
 		endpoint = "/responses/compact"
@@ -193,6 +200,147 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, body, &param)
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
+}
+
+func (e *OpenAICompatExecutor) executeChatCompletionsViaForcedStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+
+	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
+
+	baseURL, apiKey := e.resolveCredentials(auth)
+	if baseURL == "" {
+		return resp, statusErr{code: http.StatusUnauthorized, msg: "missing provider baseURL"}
+	}
+
+	from := opts.SourceFormat
+	to := sdktranslator.FromString("openai")
+	originalPayloadSource := req.Payload
+	if len(opts.OriginalRequest) > 0 {
+		originalPayloadSource = opts.OriginalRequest
+	}
+	originalPayload := originalPayloadSource
+	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
+	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
+
+	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
+	if err != nil {
+		return resp, err
+	}
+
+	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
+	requestPath := helps.PayloadRequestPath(opts)
+	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
+	translated, _ = sjson.SetBytes(translated, "stream", true)
+	translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
+
+	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
+	if err != nil {
+		return resp, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	httpReq.Header.Set("Accept", "text/event-stream")
+	httpReq.Header.Set("Cache-Control", "no-cache")
+	var authID, authLabel, authType, authValue string
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
+	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+		URL:       url,
+		Method:    http.MethodPost,
+		Headers:   httpReq.Header.Clone(),
+		Body:      translated,
+		Provider:  e.Identifier(),
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	})
+
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpResp, err := httpClient.Do(httpReq)
+	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		return resp, err
+	}
+	defer func() {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("openai compat executor: close response body error: %v", errClose)
+		}
+	}()
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		b, _ := io.ReadAll(httpResp.Body)
+		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		return resp, statusErr{code: httpResp.StatusCode, msg: string(b)}
+	}
+
+	aggregator := newOpenAIChatStreamAggregator(baseModel)
+	scanner := bufio.NewScanner(httpResp.Body)
+	scanner.Buffer(nil, 52_428_800) // 50MB
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+		if detail, ok := helps.ParseOpenAIStreamUsage(line); ok {
+			reporter.Publish(ctx, detail)
+		}
+		trimmedLine := bytes.TrimSpace(line)
+		if len(trimmedLine) == 0 {
+			continue
+		}
+		if !bytes.HasPrefix(trimmedLine, []byte("data:")) {
+			if bytes.HasPrefix(trimmedLine, []byte(":")) || bytes.HasPrefix(trimmedLine, []byte("event:")) ||
+				bytes.HasPrefix(trimmedLine, []byte("id:")) || bytes.HasPrefix(trimmedLine, []byte("retry:")) {
+				continue
+			}
+			if bytes.HasPrefix(trimmedLine, []byte("{")) || bytes.HasPrefix(trimmedLine, []byte("[")) {
+				streamErr := statusErr{code: http.StatusBadGateway, msg: string(trimmedLine)}
+				helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
+				reporter.PublishFailure(ctx, streamErr)
+				return resp, streamErr
+			}
+			continue
+		}
+		data := bytes.TrimSpace(trimmedLine[len("data:"):])
+		if bytes.Equal(data, []byte("[DONE]")) {
+			break
+		}
+		if errAdd := aggregator.Add(data); errAdd != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errAdd)
+			reporter.PublishFailure(ctx, errAdd)
+			return resp, errAdd
+		}
+	}
+	if errScan := scanner.Err(); errScan != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+		reporter.PublishFailure(ctx, errScan)
+		return resp, errScan
+	}
+
+	body, err := aggregator.Build()
+	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		reporter.PublishFailure(ctx, err)
+		return resp, err
+	}
+	helps.AppendAPIResponseChunk(ctx, e.cfg, body)
+	reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
+	reporter.EnsurePublished(ctx)
+	var param any
+	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, body, &param)
+	return cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}, nil
 }
 
 func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, endpointPath string) (resp cliproxyexecutor.Response, err error) {
@@ -600,6 +748,183 @@ func (e *OpenAICompatExecutor) Refresh(ctx context.Context, auth *cliproxyauth.A
 		return refreshed, err
 	}
 	return auth, nil
+}
+
+type openAIChatStreamAggregator struct {
+	id      string
+	created int64
+	model   string
+	usage   string
+	choices map[int]*openAIChatAggregatedChoice
+}
+
+type openAIChatAggregatedChoice struct {
+	index            int
+	role             string
+	content          strings.Builder
+	reasoningContent strings.Builder
+	finishReason     string
+	toolCalls        map[int]*openAIChatAggregatedToolCall
+}
+
+type openAIChatAggregatedToolCall struct {
+	index     int
+	id        string
+	callType  string
+	name      string
+	arguments strings.Builder
+}
+
+func newOpenAIChatStreamAggregator(model string) *openAIChatStreamAggregator {
+	return &openAIChatStreamAggregator{
+		model:   model,
+		choices: make(map[int]*openAIChatAggregatedChoice),
+	}
+}
+
+func (a *openAIChatStreamAggregator) Add(rawJSON []byte) error {
+	if len(bytes.TrimSpace(rawJSON)) == 0 {
+		return nil
+	}
+	if !gjson.ValidBytes(rawJSON) {
+		return fmt.Errorf("invalid OpenAI stream data JSON: %q", string(rawJSON))
+	}
+	root := gjson.ParseBytes(rawJSON)
+	if id := root.Get("id"); id.Exists() && a.id == "" {
+		a.id = id.String()
+	}
+	if created := root.Get("created"); created.Exists() && a.created == 0 {
+		a.created = created.Int()
+	}
+	if model := root.Get("model"); model.Exists() && a.model == "" {
+		a.model = model.String()
+	}
+	if usage := root.Get("usage"); usage.Exists() && usage.Type != gjson.Null {
+		a.usage = usage.Raw
+	}
+	choices := root.Get("choices")
+	if !choices.Exists() || !choices.IsArray() {
+		return nil
+	}
+	choices.ForEach(func(_, choice gjson.Result) bool {
+		index := int(choice.Get("index").Int())
+		aggregated := a.choice(index)
+		delta := choice.Get("delta")
+		if role := delta.Get("role"); role.Exists() && role.String() != "" {
+			aggregated.role = role.String()
+		}
+		if content := delta.Get("content"); content.Exists() {
+			aggregated.content.WriteString(content.String())
+		}
+		if reasoning := delta.Get("reasoning_content"); reasoning.Exists() {
+			aggregated.reasoningContent.WriteString(reasoning.String())
+		}
+		if finishReason := choice.Get("finish_reason"); finishReason.Exists() && finishReason.Type != gjson.Null {
+			aggregated.finishReason = finishReason.String()
+		}
+		toolCalls := delta.Get("tool_calls")
+		if toolCalls.Exists() && toolCalls.IsArray() {
+			toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
+				toolIndex := int(toolCall.Get("index").Int())
+				aggregatedTool := aggregated.toolCall(toolIndex)
+				if id := toolCall.Get("id"); id.Exists() && id.String() != "" {
+					aggregatedTool.id = id.String()
+				}
+				if callType := toolCall.Get("type"); callType.Exists() && callType.String() != "" {
+					aggregatedTool.callType = callType.String()
+				}
+				function := toolCall.Get("function")
+				if name := function.Get("name"); name.Exists() && name.String() != "" {
+					aggregatedTool.name = name.String()
+				}
+				if arguments := function.Get("arguments"); arguments.Exists() {
+					aggregatedTool.arguments.WriteString(arguments.String())
+				}
+				return true
+			})
+		}
+		return true
+	})
+	return nil
+}
+
+func (a *openAIChatStreamAggregator) Build() ([]byte, error) {
+	if len(a.choices) == 0 && a.usage == "" {
+		return nil, fmt.Errorf("openai compat executor: forced stream returned no chat completion chunks")
+	}
+	out := []byte(`{"id":"","object":"chat.completion","created":0,"model":"","choices":[]}`)
+	out, _ = sjson.SetBytes(out, "id", a.id)
+	out, _ = sjson.SetBytes(out, "created", a.created)
+	out, _ = sjson.SetBytes(out, "model", a.model)
+	choiceIndexes := make([]int, 0, len(a.choices))
+	for index := range a.choices {
+		choiceIndexes = append(choiceIndexes, index)
+	}
+	sort.Ints(choiceIndexes)
+	for _, index := range choiceIndexes {
+		choice := a.choices[index]
+		choiceJSON := []byte(`{"index":0,"message":{"role":"assistant","content":""},"finish_reason":"stop"}`)
+		choiceJSON, _ = sjson.SetBytes(choiceJSON, "index", choice.index)
+		role := choice.role
+		if role == "" {
+			role = "assistant"
+		}
+		choiceJSON, _ = sjson.SetBytes(choiceJSON, "message.role", role)
+		choiceJSON, _ = sjson.SetBytes(choiceJSON, "message.content", choice.content.String())
+		if choice.reasoningContent.Len() > 0 {
+			choiceJSON, _ = sjson.SetBytes(choiceJSON, "message.reasoning_content", choice.reasoningContent.String())
+		}
+		finishReason := choice.finishReason
+		if finishReason == "" {
+			finishReason = "stop"
+		}
+		choiceJSON, _ = sjson.SetBytes(choiceJSON, "finish_reason", finishReason)
+		if len(choice.toolCalls) > 0 {
+			toolIndexes := make([]int, 0, len(choice.toolCalls))
+			for toolIndex := range choice.toolCalls {
+				toolIndexes = append(toolIndexes, toolIndex)
+			}
+			sort.Ints(toolIndexes)
+			for outIndex, toolIndex := range toolIndexes {
+				toolCall := choice.toolCalls[toolIndex]
+				path := fmt.Sprintf("message.tool_calls.%d", outIndex)
+				choiceJSON, _ = sjson.SetBytes(choiceJSON, path+".id", toolCall.id)
+				callType := toolCall.callType
+				if callType == "" {
+					callType = "function"
+				}
+				choiceJSON, _ = sjson.SetBytes(choiceJSON, path+".type", callType)
+				choiceJSON, _ = sjson.SetBytes(choiceJSON, path+".function.name", toolCall.name)
+				choiceJSON, _ = sjson.SetBytes(choiceJSON, path+".function.arguments", toolCall.arguments.String())
+			}
+		}
+		out, _ = sjson.SetRawBytes(out, "choices.-1", choiceJSON)
+	}
+	if a.usage != "" {
+		out, _ = sjson.SetRawBytes(out, "usage", []byte(a.usage))
+	}
+	return out, nil
+}
+
+func (a *openAIChatStreamAggregator) choice(index int) *openAIChatAggregatedChoice {
+	if choice, ok := a.choices[index]; ok {
+		return choice
+	}
+	choice := &openAIChatAggregatedChoice{
+		index:     index,
+		toolCalls: make(map[int]*openAIChatAggregatedToolCall),
+	}
+	a.choices[index] = choice
+	return choice
+}
+
+func (c *openAIChatAggregatedChoice) toolCall(index int) *openAIChatAggregatedToolCall {
+	if toolCall, ok := c.toolCalls[index]; ok {
+		return toolCall
+	}
+	toolCall := &openAIChatAggregatedToolCall{index: index}
+	c.toolCalls[index] = toolCall
+	return toolCall
 }
 
 func openAICompatImageEndpointPath(opts cliproxyexecutor.Options) string {

@@ -762,6 +762,10 @@ type OpenAICompatibility struct {
 	// Headers optionally adds extra HTTP headers for requests sent to this provider.
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
 
+	// ForceStream sends non-streaming chat completion requests upstream as SSE streams
+	// and aggregates them back into a non-streaming response locally.
+	ForceStream bool `yaml:"force-stream,omitempty" json:"force-stream,omitempty"`
+
 	// DisableCooling disables auth/model cooldown scheduling for this provider when true.
 	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
 }

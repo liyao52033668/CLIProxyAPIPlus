@@ -472,6 +472,7 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 		APIKeyEntries *[]config.OpenAICompatibilityAPIKey `json:"api-key-entries"`
 		Models        *[]config.OpenAICompatibilityModel  `json:"models"`
 		Headers       *map[string]string                  `json:"headers"`
+		ForceStream   *bool                               `json:"force-stream"`
 	}
 	var body struct {
 		Name  *string            `json:"name"`
@@ -531,6 +532,9 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	}
 	if body.Value.Headers != nil {
 		entry.Headers = config.NormalizeHeaders(*body.Value.Headers)
+	}
+	if body.Value.ForceStream != nil {
+		entry.ForceStream = *body.Value.ForceStream
 	}
 	normalizeOpenAICompatibilityEntry(&entry)
 	now := time.Now().UTC()
