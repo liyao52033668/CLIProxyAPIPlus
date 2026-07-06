@@ -5,6 +5,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -93,5 +94,45 @@ func TestCodexExecutorExecuteStream_EmptyStreamCompletionOutputUsesOutputItemDon
 	gotContent := gjson.GetBytes(completed, "response.output.0.content.0.text").String()
 	if gotContent != "ok" {
 		t.Fatalf("response.output[0].content[0].text = %q, want %q; completed=%s", gotContent, "ok", string(completed))
+	}
+}
+
+func TestCodexExecutorExecuteStream_IncompleteUpstreamEOFReturnsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n"))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4-mini",
+		Payload: []byte(`{"model":"gpt-5.4-mini","input":"Say ok"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var gotErr error
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			gotErr = chunk.Err
+			break
+		}
+	}
+
+	if gotErr == nil {
+		t.Fatal("expected terminal stream error")
+	}
+	if !strings.Contains(gotErr.Error(), "stream disconnected before completion") {
+		t.Fatalf("stream error = %v, want incomplete stream error", gotErr)
 	}
 }

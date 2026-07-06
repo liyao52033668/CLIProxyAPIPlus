@@ -278,6 +278,11 @@ func clampBudget(value int, modelInfo *registry.ModelInfo, provider string) int 
 	}
 
 	min, max := support.Min, support.Max
+	// Some models are level-only and do not define numeric budget ranges.
+	if min == 0 && max == 0 {
+		return value
+	}
+
 	if value == 0 && !support.ZeroAllowed {
 		log.WithFields(log.Fields{
 			"provider":       provider,
@@ -288,11 +293,6 @@ func clampBudget(value int, modelInfo *registry.ModelInfo, provider string) int 
 			"max":            max,
 		}).Warn("thinking: budget zero not allowed |")
 		return min
-	}
-
-	// Some models are level-only and do not define numeric budget ranges.
-	if min == 0 && max == 0 {
-		return value
 	}
 
 	if value < min {

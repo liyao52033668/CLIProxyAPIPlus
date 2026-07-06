@@ -470,6 +470,60 @@ func TestOpenAICompatExecutorForceStreamAggregatesOpenAINonStream(t *testing.T) 
 	}
 }
 
+func TestOpenAICompatExecutorForceStreamAppliesNonStreamPayloadRulesBeforeStreamingUpstream(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","created":123,"model":"upstream-model","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}` + "\n\n"))
+		_, _ = w.Write([]byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","created":123,"model":"upstream-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:        "compat",
+			BaseURL:     server.URL + "/v1",
+			ForceStream: true,
+		}},
+		Payload: config.PayloadConfig{
+			Filter: []config.PayloadFilterRule{
+				{
+					Models: []config.PayloadModelRule{{
+						Name:     "upstream-model",
+						Protocol: "openai",
+						Match:    []map[string]any{{"stream": false}},
+					}},
+					Params: []string{"messages.#(role==\"system\")"},
+				},
+			},
+		},
+	})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url":    server.URL + "/v1",
+		"api_key":     "test",
+		"compat_name": "compat",
+	}}
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "upstream-model",
+		Payload: []byte(`{"model":"upstream-model","instructions":"sys","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if !gjson.GetBytes(gotBody, "stream").Bool() {
+		t.Fatalf("stream flag missing from upstream body: %s", string(gotBody))
+	}
+	if gjson.GetBytes(gotBody, "messages.#(role==\"system\")").Exists() {
+		t.Fatalf("system message was not filtered before forcing stream: %s", string(gotBody))
+	}
+}
+
 func TestOpenAICompatExecutorForceStreamDisabledKeepsNonStreamingUpstream(t *testing.T) {
 	var gotAccept string
 	var gotBody []byte

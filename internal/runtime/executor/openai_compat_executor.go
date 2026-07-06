@@ -219,8 +219,8 @@ func (e *OpenAICompatExecutor) executeChatCompletionsViaForcedStream(ctx context
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
-	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
+	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, opts.Stream)
+	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, opts.Stream)
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
