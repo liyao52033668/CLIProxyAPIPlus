@@ -127,17 +127,25 @@ main:
           script: |
             docker push ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:latest
         - name: sync to github
-          image: tencentcom/git-sync
           imports: https://cnb.cool/liyao52033/envs/-/blob/main/github-env.yml
-          settings:
-            target_url: https://github.com/liyao52033668/CLIProxyAPIPlus.git
-            auth_type: https
-            branch: main
-            git_user: ${GIT_USERNAME_NEW}
-            git_email: ${GIT_EMAIL_NEW}
-            username: ${GIT_USERNAME_NEW}
-            password: ${GIT_ACCESS_TOKEN_NEW}
-            push_tags: true
+          script: |
+            set -e
+            TARGET_URL="https://github.com/liyao52033668/CLIProxyAPIPlus.git"
+
+            echo "Configuring Git..."
+            git config user.name "${GIT_USERNAME_NEW}"
+            git config user.email "${GIT_EMAIL_NEW}"
+
+            # Disable LFS locksverify — GitHub does not support the LFS locking API
+            git config lfs.${TARGET_URL}/info/lfs.locksverify false
+
+            echo "Adding GitHub remote..."
+            git remote add github "https://${GIT_USERNAME_NEW}:${GIT_ACCESS_TOKEN_NEW}@github.com/liyao52033668/CLIProxyAPIPlus.git" || git remote set-url github "https://${GIT_USERNAME_NEW}:${GIT_ACCESS_TOKEN_NEW}@github.com/liyao52033668/CLIProxyAPIPlus.git"
+
+            echo "Pushing main branch and tags..."
+            git push github main --tags --force
+
+            echo "✅ Sync to GitHub completed"
   
    
   pull_request:
