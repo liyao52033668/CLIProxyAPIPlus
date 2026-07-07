@@ -137,6 +137,25 @@ func TestConvertOpenAIResponseToClaude_StreamIgnoresNullToolNameDelta(t *testing
 	}
 }
 
+func TestConvertOpenAIResponseToClaude_StreamContentBlockArrayUsesText(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant"}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"content":[{"text":"hello","type":"text"}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+	)
+
+	for _, e := range events {
+		if e.Type != "content_block_delta" {
+			continue
+		}
+		if got := gjson.Get(e.Payload, "delta.text").String(); got != "hello" {
+			t.Fatalf("delta text = %q, want hello; payload=%s", got, e.Payload)
+		}
+		return
+	}
+	t.Fatalf("expected content_block_delta event, got %+v", events)
+}
+
 func TestStreamingTool_EmptyNameThroughout(t *testing.T) {
 	events := runStream(t, streamReq,
 		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_a","function":{"name":"","arguments":""}}]}}]}`,

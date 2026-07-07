@@ -712,6 +712,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/usage/db/filter-options", s.mgmt.GetDBUsageEventFilterOptions)
 		mgmt.GET("/pricing", s.mgmt.ListPricing)
 		mgmt.PUT("/pricing", s.mgmt.UpdatePricing)
+		mgmt.DELETE("/pricing", s.mgmt.DeletePricing)
 		mgmt.GET("/config", s.mgmt.GetConfig)
 		mgmt.GET("/config.yaml", s.mgmt.GetConfigYAML)
 		mgmt.PUT("/config.yaml", s.mgmt.PutConfigYAML)

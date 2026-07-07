@@ -193,29 +193,32 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 		}
 
 		// Handle content delta
-		if content := delta.Get("content"); content.Exists() && content.String() != "" {
-			// Send content_block_start for text if not already sent
-			if !param.TextContentBlockStarted {
-				stopThinkingContentBlock(param, &results)
-				if param.TextContentBlockIndex == -1 {
-					param.TextContentBlockIndex = param.NextContentBlockIndex
-					param.NextContentBlockIndex++
+		if content := delta.Get("content"); content.Exists() {
+			contentText := openAIResponseContentText(content)
+			if contentText != "" {
+				// Send content_block_start for text if not already sent
+				if !param.TextContentBlockStarted {
+					stopThinkingContentBlock(param, &results)
+					if param.TextContentBlockIndex == -1 {
+						param.TextContentBlockIndex = param.NextContentBlockIndex
+						param.NextContentBlockIndex++
+					}
+					contentBlockStartJSON := `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`
+					contentBlockStartJSONBytes := []byte(contentBlockStartJSON)
+					contentBlockStartJSONBytes, _ = sjson.SetBytes(contentBlockStartJSONBytes, "index", param.TextContentBlockIndex)
+					results = append(results, translatorcommon.AppendSSEEventBytes(nil, "content_block_start", contentBlockStartJSONBytes, 2))
+					param.TextContentBlockStarted = true
 				}
-				contentBlockStartJSON := `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`
-				contentBlockStartJSONBytes := []byte(contentBlockStartJSON)
-				contentBlockStartJSONBytes, _ = sjson.SetBytes(contentBlockStartJSONBytes, "index", param.TextContentBlockIndex)
-				results = append(results, translatorcommon.AppendSSEEventBytes(nil, "content_block_start", contentBlockStartJSONBytes, 2))
-				param.TextContentBlockStarted = true
+
+				contentDeltaJSON := `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":""}}`
+				contentDeltaJSONBytes := []byte(contentDeltaJSON)
+				contentDeltaJSONBytes, _ = sjson.SetBytes(contentDeltaJSONBytes, "index", param.TextContentBlockIndex)
+				contentDeltaJSONBytes, _ = sjson.SetBytes(contentDeltaJSONBytes, "delta.text", contentText)
+				results = append(results, translatorcommon.AppendSSEEventBytes(nil, "content_block_delta", contentDeltaJSONBytes, 2))
+
+				// Accumulate content
+				param.ContentAccumulator.WriteString(contentText)
 			}
-
-			contentDeltaJSON := `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":""}}`
-			contentDeltaJSONBytes := []byte(contentDeltaJSON)
-			contentDeltaJSONBytes, _ = sjson.SetBytes(contentDeltaJSONBytes, "index", param.TextContentBlockIndex)
-			contentDeltaJSONBytes, _ = sjson.SetBytes(contentDeltaJSONBytes, "delta.text", content.String())
-			results = append(results, translatorcommon.AppendSSEEventBytes(nil, "content_block_delta", contentDeltaJSONBytes, 2))
-
-			// Accumulate content
-			param.ContentAccumulator.WriteString(content.String())
 		}
 
 		// Handle tool calls
@@ -513,6 +516,30 @@ func (p *ConvertOpenAIResponseToAnthropicParams) toolContentBlockIndex(openAIToo
 	p.NextContentBlockIndex++
 	p.ToolCallBlockIndexes[openAIToolIndex] = idx
 	return idx
+}
+
+func openAIResponseContentText(content gjson.Result) string {
+	if content.Type == gjson.String {
+		return content.String()
+	}
+	if content.IsArray() {
+		var builder strings.Builder
+		content.ForEach(func(_, item gjson.Result) bool {
+			if item.Type == gjson.String {
+				builder.WriteString(item.String())
+				return true
+			}
+			if item.Get("type").String() == "text" {
+				builder.WriteString(item.Get("text").String())
+			}
+			return true
+		})
+		return builder.String()
+	}
+	if content.Get("type").String() == "text" {
+		return content.Get("text").String()
+	}
+	return content.String()
 }
 
 func collectOpenAIReasoningTexts(node gjson.Result) []string {

@@ -34,6 +34,7 @@ func newManagementPricingHandler(t *testing.T) (*Handler, *gin.Engine) {
 	router := gin.New()
 	router.GET("/pricing", h.ListPricing)
 	router.PUT("/pricing", h.UpdatePricing)
+	router.DELETE("/pricing", h.DeletePricing)
 	return h, router
 }
 
@@ -73,5 +74,41 @@ func TestUpdatePricingStoresModelPriceSetting(t *testing.T) {
 	setting := payload.Pricing[0]
 	if setting.Model != "claude-sonnet" || setting.PromptPricePer1M != 3 || setting.CompletionPricePer1M != 15 || setting.CachePricePer1M != 0.3 {
 		t.Fatalf("unexpected pricing setting: %+v", setting)
+	}
+}
+
+func TestDeletePricingRemovesModelPriceSetting(t *testing.T) {
+	_, router := newManagementPricingHandler(t)
+	body := bytes.NewReader([]byte(`{"model":"claude-sonnet","prompt_price_per_1m":3,"completion_price_per_1m":15,"cache_price_per_1m":0.3}`))
+	putRec := httptest.NewRecorder()
+	putReq := httptest.NewRequest(http.MethodPut, "/pricing", body)
+	putReq.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(putRec, putReq)
+	if putRec.Code != http.StatusOK {
+		t.Fatalf("put status = %d, want %d; body=%s", putRec.Code, http.StatusOK, putRec.Body.String())
+	}
+
+	deleteRec := httptest.NewRecorder()
+	router.ServeHTTP(deleteRec, httptest.NewRequest(http.MethodDelete, "/pricing?model=claude-sonnet", nil))
+	if deleteRec.Code != http.StatusNoContent {
+		t.Fatalf("delete status = %d, want %d; body=%s", deleteRec.Code, http.StatusNoContent, deleteRec.Body.String())
+	}
+
+	listRec := httptest.NewRecorder()
+	router.ServeHTTP(listRec, httptest.NewRequest(http.MethodGet, "/pricing", nil))
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list status = %d, want %d; body=%s", listRec.Code, http.StatusOK, listRec.Body.String())
+	}
+
+	var payload struct {
+		Pricing []struct {
+			Model string `json:"model"`
+		} `json:"pricing"`
+	}
+	if err := json.Unmarshal(listRec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("json.Unmarshal returned error: %v", err)
+	}
+	if len(payload.Pricing) != 0 {
+		t.Fatalf("pricing len = %d, want 0", len(payload.Pricing))
 	}
 }

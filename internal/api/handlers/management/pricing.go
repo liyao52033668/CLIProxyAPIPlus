@@ -89,3 +89,27 @@ func (h *Handler) UpdatePricing(c *gin.Context) {
 		CachePricePer1M:      setting.CachePricePer1M,
 	})
 }
+
+func (h *Handler) DeletePricing(c *gin.Context) {
+	if h == nil || h.pricingService == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "pricing service not available"})
+		return
+	}
+
+	model := strings.TrimSpace(c.Query("model"))
+	if model == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "model is required"})
+		return
+	}
+
+	if err := h.pricingService.DeletePricing(c.Request.Context(), model); err != nil {
+		if strings.Contains(err.Error(), "required") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.Status(http.StatusNoContent)
+}
