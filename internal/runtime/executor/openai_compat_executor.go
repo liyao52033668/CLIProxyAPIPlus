@@ -814,7 +814,7 @@ func (a *openAIChatStreamAggregator) Add(rawJSON []byte) error {
 			aggregated.role = role.String()
 		}
 		if content := delta.Get("content"); content.Exists() {
-			aggregated.content.WriteString(content.String())
+			aggregated.content.WriteString(openAIChatStreamContentText(content))
 		}
 		if reasoning := delta.Get("reasoning_content"); reasoning.Exists() {
 			aggregated.reasoningContent.WriteString(reasoning.String())
@@ -846,6 +846,30 @@ func (a *openAIChatStreamAggregator) Add(rawJSON []byte) error {
 		return true
 	})
 	return nil
+}
+
+func openAIChatStreamContentText(content gjson.Result) string {
+	if content.Type == gjson.String {
+		return content.String()
+	}
+	if content.IsArray() {
+		var builder strings.Builder
+		content.ForEach(func(_, item gjson.Result) bool {
+			if item.Type == gjson.String {
+				builder.WriteString(item.String())
+				return true
+			}
+			if item.Get("type").String() == "text" {
+				builder.WriteString(item.Get("text").String())
+			}
+			return true
+		})
+		return builder.String()
+	}
+	if content.Get("type").String() == "text" {
+		return content.Get("text").String()
+	}
+	return content.String()
 }
 
 func (a *openAIChatStreamAggregator) Build() ([]byte, error) {

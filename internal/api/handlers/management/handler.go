@@ -57,6 +57,7 @@ type Handler struct {
 	sdkAuthManager           *sdkAuth.Manager
 	usageStats               *usage.RequestStatistics
 	usageService             service.UsageProvider
+	pricingService           service.PricingProvider
 	tokenStore               coreauth.Store
 	invalidAuthSnapshot      func() []internalwatcher.InvalidAuthEntry
 	localPassword            string
@@ -67,7 +68,7 @@ type Handler struct {
 	codeArtsOAuthHandler     *codearts.OAuthWebHandler
 	joyCodeOAuthHandler      *joycode.OAuthWebHandler
 	codexInspectionService   CodexInspectionService
-	onOAuthModelAliasUpdated func() // 回调：当 OAuthModelAlias 更新后调用
+	onOAuthModelAliasUpdated func()
 }
 
 // NewHandler creates a new management handler instance.
@@ -88,7 +89,7 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 	return h
 }
 
-// SetOnOAuthModelAliasUpdated 设置 OAuthModelAlias 更新后调用的回调
+// SetOnOAuthModelAliasUpdated sets the callback triggered after OAuthModelAlias updates.
 func (h *Handler) SetOnOAuthModelAliasUpdated(fn func()) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -151,6 +152,9 @@ func (h *Handler) SetUsageStatistics(stats *usage.RequestStatistics) { h.usageSt
 
 // SetUsageService sets the usage service for database operations.
 func (h *Handler) SetUsageService(us service.UsageProvider) { h.usageService = us }
+
+// SetPricingService sets the pricing service for database operations.
+func (h *Handler) SetPricingService(ps service.PricingProvider) { h.pricingService = ps }
 
 // SetInvalidAuthSnapshot registers a watcher-backed invalid auth snapshot provider.
 func (h *Handler) SetInvalidAuthSnapshot(fn func() []internalwatcher.InvalidAuthEntry) {

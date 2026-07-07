@@ -710,6 +710,8 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/usage/db/events", s.mgmt.GetDBUsageEvents)
 		mgmt.GET("/usage/db/analysis", s.mgmt.GetDBUsageAnalysis)
 		mgmt.GET("/usage/db/filter-options", s.mgmt.GetDBUsageEventFilterOptions)
+		mgmt.GET("/pricing", s.mgmt.ListPricing)
+		mgmt.PUT("/pricing", s.mgmt.UpdatePricing)
 		mgmt.GET("/config", s.mgmt.GetConfig)
 		mgmt.GET("/config.yaml", s.mgmt.GetConfigYAML)
 		mgmt.PUT("/config.yaml", s.mgmt.PutConfigYAML)
@@ -1743,6 +1745,14 @@ func (s *Server) SetUsageService(usageService service.UsageProvider) {
 		return
 	}
 	s.mgmt.SetUsageService(usageService)
+}
+
+// SetPricingService sets the pricing service for database-backed pricing queries.
+func (s *Server) SetPricingService(pricingService service.PricingProvider) {
+	if s == nil || s.mgmt == nil {
+		return
+	}
+	s.mgmt.SetPricingService(pricingService)
 }
 
 func (s *Server) SetInvalidAuthSnapshot(fn func() []internalwatcher.InvalidAuthEntry) {

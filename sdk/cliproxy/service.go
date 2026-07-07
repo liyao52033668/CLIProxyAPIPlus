@@ -119,6 +119,13 @@ func (s *Service) SetUsageService(usageService service.UsageProvider) {
 	}
 }
 
+// SetPricingService sets the pricing service for the management handler.
+func (s *Service) SetPricingService(pricingService service.PricingProvider) {
+	if s.server != nil {
+		s.server.SetPricingService(pricingService)
+	}
+}
+
 // GetWatcher returns the underlying WatcherWrapper instance.
 // This allows external components (e.g., RefreshManager) to interact with the watcher.
 // Returns nil if the service or watcher is not initialized.
@@ -869,6 +876,7 @@ func (s *Service) Run(ctx context.Context) error {
 	// Set usage service if database is configured
 	if db := usage.DefaultManager().GetDB(); db != nil {
 		s.server.SetUsageService(service.NewUsageService(db))
+		s.server.SetPricingService(service.NewPricingService(db))
 		log.Info("usage service initialized for management API")
 	}
 
