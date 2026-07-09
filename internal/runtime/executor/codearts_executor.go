@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
@@ -178,7 +179,7 @@ func (e *CodeArtsExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 
 		delta := gjson.Get(data, "delta")
 		if delta.Exists() {
-			if c := delta.Get("content").String(); c != "" {
+			if c := translatorcommon.TextFromContentBlocks(delta.Get("content")); c != "" {
 				contentBuilder.WriteString(c)
 			}
 			if r := delta.Get("reasoning_content").String(); r != "" {
@@ -833,7 +834,7 @@ func convertCodeArtsSSEToOpenAI(data string, model string) codeartsStreamResult 
 	toolCallsResult := delta.Get("tool_calls")
 
 	contentExists := contentResult.Exists()
-	contentValue := contentResult.String()
+	contentValue := translatorcommon.TextFromContentBlocks(contentResult)
 	reasoningExists := reasoningResult.Exists()
 	reasoningValue := reasoningResult.String()
 	hasToolCalls := toolCallsResult.Exists() && len(toolCallsResult.Array()) > 0

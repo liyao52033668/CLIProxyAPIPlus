@@ -523,6 +523,92 @@ func TestConvertCodexResponseToClaude_ShortensLongToolUseIDs(t *testing.T) {
 	})
 }
 
+func TestConvertCodexResponseToClaude_StreamTextDeltaContentBlocksExtractText(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"messages":[]}`)
+	var param any
+
+	chunks := [][]byte{
+		[]byte(`data: {"type":"response.content_part.added"}`),
+		[]byte(`data: {"type":"response.output_text.delta","delta":[{"type":"text","text":"hello"},{"type":"output_text","text":" world"},{"type":"image_url","image_url":{"url":"ignored"}}]}`),
+	}
+
+	var outputs [][]byte
+	for _, chunk := range chunks {
+		outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, chunk, &param)...)
+	}
+
+	text := collectClaudeStreamTextDeltas(outputs)
+	if text != "hello world" {
+		t.Fatalf("text deltas = %q, want hello world. Outputs=%q", text, outputs)
+	}
+	if strings.Contains(text, `"type":"text"`) {
+		t.Fatalf("content blocks were serialized into text: %q", text)
+	}
+}
+
+func TestConvertCodexResponseToClaude_StreamOutputItemDoneContentBlocksExtractText(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"messages":[]}`)
+	var param any
+
+	chunks := [][]byte{
+		[]byte(`data: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":[{"type":"text","text":"fallback"},{"type":"output_text","text":" text"}]}]},"output_index":0}`),
+	}
+
+	var outputs [][]byte
+	for _, chunk := range chunks {
+		outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, chunk, &param)...)
+	}
+
+	text := collectClaudeStreamTextDeltas(outputs)
+	if text != "fallback text" {
+		t.Fatalf("text deltas = %q, want fallback text. Outputs=%q", text, outputs)
+	}
+	if strings.Contains(text, `"type":"text"`) {
+		t.Fatalf("content blocks were serialized into text: %q", text)
+	}
+}
+
+func TestConvertCodexResponseToClaudeNonStream_ContentBlocksExtractText(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"messages":[]}`)
+	response := []byte(`{
+		"type":"response.completed",
+		"response":{
+			"id":"resp_1",
+			"model":"gpt-5",
+			"usage":{"input_tokens":1,"output_tokens":1},
+			"output":[{"type":"message","content":[{"type":"output_text","text":[{"type":"text","text":"hello"},{"type":"output_text","text":" world"}]}]}]
+		}
+	}`)
+
+	out := ConvertCodexResponseToClaudeNonStream(ctx, "", originalRequest, nil, response, nil)
+	text := gjson.GetBytes(out, "content.0.text").String()
+	if text != "hello world" {
+		t.Fatalf("content text = %q, want hello world. Output=%s", text, string(out))
+	}
+	if strings.Contains(text, `"type":"text"`) {
+		t.Fatalf("content blocks were serialized into text: %q", text)
+	}
+}
+
+func collectClaudeStreamTextDeltas(outputs [][]byte) string {
+	var builder strings.Builder
+	for _, out := range outputs {
+		for line := range strings.SplitSeq(string(out), "\n") {
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			if data.Get("type").String() == "content_block_delta" && data.Get("delta.type").String() == "text_delta" {
+				builder.WriteString(data.Get("delta.text").String())
+			}
+		}
+	}
+	return builder.String()
+}
+
 func TestConvertCodexResponseToClaude_StreamStopReasonMapping(t *testing.T) {
 	tests := []struct {
 		name       string

@@ -16,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
@@ -443,7 +444,7 @@ func aggregateOpenAIChatCompletionStream(raw []byte) ([]byte, usage.Detail, erro
 			if role := delta.Get("role").String(); role != "" {
 				choice.Role = role
 			}
-			if content := delta.Get("content").String(); content != "" {
+			if content := translatorcommon.TextFromContentBlocks(delta.Get("content")); content != "" {
 				choice.ContentParts = append(choice.ContentParts, content)
 			}
 			if reasoning := delta.Get("reasoning_content").String(); reasoning != "" {
@@ -587,7 +588,7 @@ func cleanDeltaChunk(raw []byte) []byte {
 	if finishReason == "stop" || finishReason == "tool_calls" {
 		return raw
 	}
-	content := delta.Get("content").String()
+	content := translatorcommon.TextFromContentBlocks(delta.Get("content"))
 	reasoning := delta.Get("reasoning_content").String()
 	hasRole := delta.Get("role").Exists()
 	toolCalls := delta.Get("tool_calls")

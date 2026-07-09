@@ -15,6 +15,7 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/tidwall/gjson"
 )
 
 type delayedChatExecutor struct {
@@ -81,5 +82,34 @@ func TestOpenAIChatCompletionsNonStreamEmitsKeepAliveWhileWaiting(t *testing.T) 
 	}
 	if resp.Body.String() == strings.TrimSpace(resp.Body.String()) {
 		t.Fatalf("body = %q, want keep-alive whitespace before final payload", resp.Body.String())
+	}
+}
+
+func TestConvertChatCompletionsResponseToCompletions_ContentBlocksExtractText(t *testing.T) {
+	response := []byte(`{"id":"chatcmpl_1","object":"chat.completion","created":1,"model":"model","choices":[{"index":0,"message":{"role":"assistant","content":[{"type":"text","text":"hello"},{"type":"output_text","text":" world"},{"type":"image_url","image_url":{"url":"ignored"}}]},"finish_reason":"stop"}]}`)
+
+	out := convertChatCompletionsResponseToCompletions(response)
+	text := gjson.GetBytes(out, "choices.0.text").String()
+	if text != "hello world" {
+		t.Fatalf("completion text = %q, want hello world. Output=%s", text, string(out))
+	}
+	if strings.Contains(text, `"type":"text"`) {
+		t.Fatalf("content blocks were serialized into text: %q", text)
+	}
+}
+
+func TestConvertChatCompletionsStreamChunkToCompletions_ContentBlocksExtractText(t *testing.T) {
+	chunk := []byte(`{"id":"chatcmpl_1","object":"chat.completion.chunk","created":1,"model":"model","choices":[{"index":0,"delta":{"content":[{"type":"text","text":"hello"},{"type":"output_text","text":" world"}]},"finish_reason":null}]}`)
+
+	out := convertChatCompletionsStreamChunkToCompletions(chunk)
+	if len(out) == 0 {
+		t.Fatal("expected converted stream chunk")
+	}
+	text := gjson.GetBytes(out, "choices.0.text").String()
+	if text != "hello world" {
+		t.Fatalf("completion text = %q, want hello world. Output=%s", text, string(out))
+	}
+	if strings.Contains(text, `"type":"text"`) {
+		t.Fatalf("content blocks were serialized into text: %q", text)
 	}
 }

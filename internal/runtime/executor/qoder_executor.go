@@ -33,6 +33,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -1296,7 +1297,7 @@ func (e *QoderExecutor) parseQoderSSEToCompletion(data []byte, model string) []b
 		choice := choices[0]
 		delta := choice.Get("delta")
 		if delta.Exists() {
-			content := delta.Get("content").String()
+			content := translatorcommon.TextFromContentBlocks(delta.Get("content"))
 			fullContent.WriteString(content)
 		}
 		if fr := choice.Get("finish_reason").String(); fr != "" && fr != "null" {

@@ -137,8 +137,11 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 			}
 
 			// Handle content delta
-			if content := delta.Get("content"); content.Exists() && content.String() != "" {
-				contentText := content.String()
+			if content := delta.Get("content"); content.Exists() {
+				contentText := translatorcommon.TextFromContentBlocks(content)
+				if contentText == "" {
+					return true
+				}
 				(*param).(*ConvertOpenAIResponseToGeminiParams).ContentAccumulator.WriteString(contentText)
 
 				// Create text part for this delta
@@ -572,9 +575,12 @@ func ConvertOpenAIResponseToGeminiNonStream(_ context.Context, _ string, origina
 			}
 
 			// Handle content first
-			if content := message.Get("content"); content.Exists() && content.String() != "" {
-				out, _ = sjson.SetBytes(out, fmt.Sprintf("candidates.0.content.parts.%d.text", partIndex), content.String())
-				partIndex++
+			if content := message.Get("content"); content.Exists() {
+				contentText := translatorcommon.TextFromContentBlocks(content)
+				if contentText != "" {
+					out, _ = sjson.SetBytes(out, fmt.Sprintf("candidates.0.content.parts.%d.text", partIndex), contentText)
+					partIndex++
+				}
 			}
 
 			// Handle tool calls

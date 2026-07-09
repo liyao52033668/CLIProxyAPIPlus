@@ -2,9 +2,30 @@ package common
 
 import (
 	"strconv"
+	"strings"
 
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+func TextFromContentBlocks(result gjson.Result) string {
+	if !result.Exists() || result.Type == gjson.Null {
+		return ""
+	}
+	if !result.IsArray() {
+		return result.String()
+	}
+
+	var builder strings.Builder
+	result.ForEach(func(_, part gjson.Result) bool {
+		switch part.Get("type").String() {
+		case "text", "output_text":
+			builder.WriteString(part.Get("text").String())
+		}
+		return true
+	})
+	return builder.String()
+}
 
 func WrapGeminiCLIResponse(response []byte) []byte {
 	out, err := sjson.SetRawBytes([]byte(`{"response":{}}`), "response", response)

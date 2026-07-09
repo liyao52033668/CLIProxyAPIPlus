@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	codexconverter "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/codex/openai/chat-completions"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	responsesconverter "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/openai/openai/responses"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	"github.com/tidwall/gjson"
@@ -380,12 +381,12 @@ func convertChatCompletionsResponseToCompletions(rawJSON []byte) []byte {
 			// Extract text content from message.content
 			if message := choice.Get("message"); message.Exists() {
 				if content := message.Get("content"); content.Exists() {
-					completionsChoice["text"] = content.String()
+					completionsChoice["text"] = translatorcommon.TextFromContentBlocks(content)
 				}
 			} else if delta := choice.Get("delta"); delta.Exists() {
 				// For streaming responses, use delta.content
 				if content := delta.Get("content"); content.Exists() {
-					completionsChoice["text"] = content.String()
+					completionsChoice["text"] = translatorcommon.TextFromContentBlocks(content)
 				}
 			}
 
@@ -430,7 +431,7 @@ func convertChatCompletionsStreamChunkToCompletions(chunkData []byte) []byte {
 		chatChoices.ForEach(func(_, choice gjson.Result) bool {
 			// Check if delta has content or finish_reason
 			if delta := choice.Get("delta"); delta.Exists() {
-				if content := delta.Get("content"); content.Exists() && content.String() != "" {
+				if content := delta.Get("content"); content.Exists() && translatorcommon.TextFromContentBlocks(content) != "" {
 					hasContent = true
 					return false // Break out of forEach
 				}
@@ -475,8 +476,8 @@ func convertChatCompletionsStreamChunkToCompletions(chunkData []byte) []byte {
 
 			// Extract text content from delta.content
 			if delta := choice.Get("delta"); delta.Exists() {
-				if content := delta.Get("content"); content.Exists() && content.String() != "" {
-					completionsChoice["text"] = content.String()
+				if content := delta.Get("content"); content.Exists() {
+					completionsChoice["text"] = translatorcommon.TextFromContentBlocks(content)
 				} else {
 					completionsChoice["text"] = ""
 				}

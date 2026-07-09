@@ -105,9 +105,13 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		output = translatorcommon.AppendSSEEventBytes(output, "content_block_start", template, 2)
 	} else if typeStr == "response.output_text.delta" {
 		params.HasTextDelta = true
+		text := codexTextResultString(rootResult.Get("delta"))
+		if text == "" {
+			return [][]byte{output}
+		}
 		template = []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":""}}`)
 		template, _ = sjson.SetBytes(template, "index", params.BlockIndex)
-		template, _ = sjson.SetBytes(template, "delta.text", rootResult.Get("delta").String())
+		template, _ = sjson.SetBytes(template, "delta.text", text)
 
 		output = translatorcommon.AppendSSEEventBytes(output, "content_block_delta", template, 2)
 	} else if typeStr == "response.content_part.done" {
@@ -176,7 +180,7 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 				if part.Get("type").String() != "output_text" {
 					return true
 				}
-				if txt := part.Get("text").String(); txt != "" {
+				if txt := codexTextResultString(part.Get("text")); txt != "" {
 					textBuilder.WriteString(txt)
 				}
 				return true
@@ -324,7 +328,7 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 					if content.IsArray() {
 						content.ForEach(func(_, part gjson.Result) bool {
 							if part.Get("type").String() == "output_text" {
-								text := part.Get("text").String()
+								text := codexTextResultString(part.Get("text"))
 								if text != "" {
 									block := []byte(`{"type":"text","text":""}`)
 									block, _ = sjson.SetBytes(block, "text", text)
@@ -462,6 +466,25 @@ func buildReverseMapFromClaudeOriginalShortToOriginal(original []byte) map[strin
 		}
 	}
 	return rev
+}
+
+func codexTextResultString(result gjson.Result) string {
+	if !result.Exists() || result.Type == gjson.Null {
+		return ""
+	}
+	if !result.IsArray() {
+		return result.String()
+	}
+
+	var builder strings.Builder
+	result.ForEach(func(_, part gjson.Result) bool {
+		switch part.Get("type").String() {
+		case "text", "output_text":
+			builder.WriteString(part.Get("text").String())
+		}
+		return true
+	})
+	return builder.String()
 }
 
 func ClaudeTokenCount(_ context.Context, count int64) []byte {
