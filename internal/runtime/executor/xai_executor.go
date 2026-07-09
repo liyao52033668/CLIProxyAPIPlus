@@ -292,6 +292,30 @@ func xaiInputHasItemType(body []byte, itemType string) bool {
 	return false
 }
 
+func validateXAIToolOutputsHavePriorCalls(body []byte, hasPreviousResponseID bool) error {
+	input := gjson.GetBytes(body, "input")
+	if !input.IsArray() {
+		return nil
+	}
+	seenCalls := map[string]struct{}{}
+	for _, item := range input.Array() {
+		itemType := item.Get("type").String()
+		callID := strings.TrimSpace(item.Get("call_id").String())
+		if callID == "" {
+			continue
+		}
+		switch itemType {
+		case "function_call", "custom_tool_call":
+			seenCalls[callID] = struct{}{}
+		case "function_call_output", "custom_tool_call_output":
+			if _, ok := seenCalls[callID]; !ok && !hasPreviousResponseID {
+				return fmt.Errorf("xai executor: tool output call_id %q has no prior tool call", callID)
+			}
+		}
+	}
+	return nil
+}
+
 func xaiRemoveInputItemsByType(body []byte, itemType string) []byte {
 	input := gjson.GetBytes(body, "input")
 	if !input.IsArray() {
@@ -843,6 +867,7 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body, _ = sjson.SetBytes(body, "stream", stream)
+	hasPreviousResponseID := strings.TrimSpace(gjson.GetBytes(body, "previous_response_id").String()) != ""
 	body, _ = sjson.DeleteBytes(body, "previous_response_id")
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
@@ -858,6 +883,9 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	body = sanitizeXAIInputEncryptedContent(body)
 	body = normalizeCodexInstructions(body)
 	body = sanitizeXAIResponsesBody(body, baseModel)
+	if errValidate := validateXAIToolOutputsHavePriorCalls(body, hasPreviousResponseID); errValidate != nil {
+		return nil, errValidate
+	}
 
 	sessionID, errSession := xaiResolveComposerSessionID(ctx, req, opts, baseModel)
 	if errSession != nil {

@@ -811,6 +811,90 @@ func TestXAIExecutorExecuteStreamSynthesizesMissingTextContentPart(t *testing.T)
 	}
 }
 
+func TestXAIExecutorExecuteStreamEmitsToolUseBlockForFunctionCall(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: response.created\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":0,\"status\":\"in_progress\",\"model\":\"grok-4.3\",\"output\":[]}}\n\n"))
+		_, _ = w.Write([]byte("event: response.output_item.added\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.added\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"lookup\",\"arguments\":\"\",\"status\":\"in_progress\"}}\n\n"))
+		_, _ = w.Write([]byte("event: response.function_call_arguments.delta\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.function_call_arguments.delta\",\"sequence_number\":2,\"item_id\":\"fc_1\",\"output_index\":0,\"delta\":\"{\\\"query\\\":\"}\n\n"))
+		_, _ = w.Write([]byte("event: response.function_call_arguments.done\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.function_call_arguments.done\",\"sequence_number\":3,\"item_id\":\"fc_1\",\"output_index\":0,\"arguments\":\"{\\\"query\\\":\\\"hello\\\"}\"}\n\n"))
+		_, _ = w.Write([]byte("event: response.output_item.done\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"sequence_number\":4,\"output_index\":0,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"lookup\",\"arguments\":\"{\\\"query\\\":\\\"hello\\\"}\",\"status\":\"completed\"}}\n\n"))
+		_, _ = w.Write([]byte("event: response.completed\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"sequence_number\":5,\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":0,\"status\":\"completed\",\"model\":\"grok-4.3\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"))
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata:   map[string]any{"access_token": "xai-token"},
+	}
+
+	result, err := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "grok-4.3",
+		Payload: []byte(`{"model":"grok-4.3","messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}],"tools":[{"name":"lookup","description":"Lookup","input_schema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	var streamed bytes.Buffer
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+		streamed.Write(chunk.Payload)
+	}
+	output := streamed.String()
+	for _, want := range []string{
+		`"type":"message_start"`,
+		`"type":"content_block_start"`,
+		`"type":"tool_use"`,
+		`"type":"content_block_delta"`,
+		`"type":"input_json_delta"`,
+		`"type":"content_block_stop"`,
+		`"stop_reason":"tool_use"`,
+		`"type":"message_stop"`,
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("stream missing %q: %s", want, output)
+		}
+	}
+	startIndex := strings.Index(output, `"type":"content_block_start"`)
+	deltaIndex := strings.Index(output, `"type":"input_json_delta"`)
+	stopIndex := strings.Index(output, `"type":"content_block_stop"`)
+	messageDeltaIndex := strings.Index(output, `"stop_reason":"tool_use"`)
+	if startIndex < 0 || deltaIndex < 0 || stopIndex < 0 || messageDeltaIndex < 0 || startIndex > deltaIndex || deltaIndex > stopIndex || stopIndex > messageDeltaIndex {
+		t.Fatalf("tool block events are out of order: %s", output)
+	}
+}
+
+func TestXAIExecutorRejectsToolOutputWithoutPriorCall(t *testing.T) {
+	exec := NewXAIExecutor(&config.Config{})
+	_, err := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+		Model:   "grok-4.3",
+		Payload: []byte(`{"model":"grok-4.3","input":[{"type":"function_call_output","call_id":"call_missing","output":"{}"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       true,
+	}, true)
+	if err == nil {
+		t.Fatal("prepareResponsesRequest() error = nil, want orphan tool output error")
+	}
+	if !strings.Contains(err.Error(), `call_missing`) {
+		t.Fatalf("error = %v, want missing call_id", err)
+	}
+}
+
 func TestXAIExecutorExecuteNormalizesReasoningOutputForNonStreamTranslation(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

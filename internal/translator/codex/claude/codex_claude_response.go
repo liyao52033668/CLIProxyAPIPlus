@@ -24,6 +24,7 @@ var (
 // ConvertCodexResponseToClaudeParams holds parameters for response conversion.
 type ConvertCodexResponseToClaudeParams struct {
 	HasToolCall               bool
+	ToolBlockOpen             bool
 	BlockIndex                int
 	HasReceivedArgumentsDelta bool
 	HasTextDelta              bool
@@ -141,6 +142,7 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		if itemType == "function_call" {
 			output = append(output, finalizeCodexThinkingBlock(params)...)
 			params.HasToolCall = true
+			params.ToolBlockOpen = true
 			params.HasReceivedArgumentsDelta = false
 			template = []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"","name":"","input":{}}}`)
 			template, _ = sjson.SetBytes(template, "index", params.BlockIndex)
@@ -210,8 +212,12 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 			params.HasTextDelta = true
 			output = translatorcommon.AppendSSEEventBytes(output, "content_block_stop", template, 2)
 		} else if itemType == "function_call" {
+			if !params.ToolBlockOpen {
+				return [][]byte{output}
+			}
 			template = []byte(`{"type":"content_block_stop","index":0}`)
 			template, _ = sjson.SetBytes(template, "index", params.BlockIndex)
+			params.ToolBlockOpen = false
 			params.BlockIndex++
 
 			output = translatorcommon.AppendSSEEventBytes(output, "content_block_stop", template, 2)
@@ -228,6 +234,9 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 			params.ThinkingSummarySeen = false
 		}
 	} else if typeStr == "response.function_call_arguments.delta" {
+		if !params.ToolBlockOpen {
+			return [][]byte{output}
+		}
 		params.HasReceivedArgumentsDelta = true
 		template = []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`)
 		template, _ = sjson.SetBytes(template, "index", params.BlockIndex)
@@ -235,6 +244,9 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 
 		output = translatorcommon.AppendSSEEventBytes(output, "content_block_delta", template, 2)
 	} else if typeStr == "response.function_call_arguments.done" {
+		if !params.ToolBlockOpen {
+			return [][]byte{output}
+		}
 		if !params.HasReceivedArgumentsDelta {
 			if args := rootResult.Get("arguments").String(); args != "" {
 				template = []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`)
