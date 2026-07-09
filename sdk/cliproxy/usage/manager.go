@@ -17,14 +17,18 @@ import (
 
 // Record contains the usage statistics captured for a single provider request.
 type Record struct {
-	Provider    string
-	Model       string
-	Alias       string
-	APIKey      string
-	AuthID      string
-	AuthIndex   string
-	AuthType    string
-	Source      string
+	Provider  string
+	Model     string
+	Alias     string
+	APIKey    string
+	AuthID    string
+	AuthIndex string
+	AuthType  string
+	Source    string
+	// ReasoningEffort stores the translated upstream thinking level for request event logs.
+	ReasoningEffort string
+	// ServiceTier stores the client-requested service tier for request event logs.
+	ServiceTier string
 	RequestedAt time.Time
 	Latency     time.Duration
 	TTFT        time.Duration

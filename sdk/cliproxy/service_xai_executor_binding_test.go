@@ -27,8 +27,8 @@ func TestEnsureExecutorsForAuth_XAIBindsIndependentExecutor(t *testing.T) {
 	if !ok || resolved == nil {
 		t.Fatal("expected xai executor after bind")
 	}
-	if _, isXAI := resolved.(*executor.XAIExecutor); !isXAI {
-		t.Fatalf("executor type = %T, want *executor.XAIExecutor", resolved)
+	if _, isXAIAuto := resolved.(*executor.XAIAutoExecutor); !isXAIAuto {
+		t.Fatalf("executor type = %T, want *executor.XAIAutoExecutor", resolved)
 	}
 	if _, isCodex := resolved.(*executor.CodexAutoExecutor); isCodex {
 		t.Fatal("xai must not bind the codex auto executor")

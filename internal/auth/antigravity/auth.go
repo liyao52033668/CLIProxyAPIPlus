@@ -35,10 +35,6 @@ type AntigravityAuth struct {
 	httpClient *http.Client
 }
 
-func (o *AntigravityAuth) RefreshLead() {
-	panic("unimplemented")
-}
-
 // NewAntigravityAuth creates a new Antigravity auth service.
 func NewAntigravityAuth(cfg *config.Config, httpClient *http.Client) *AntigravityAuth {
 	if cfg == nil {
@@ -57,7 +53,7 @@ func (o *AntigravityAuth) shortUserAgent() string {
 }
 
 func (o *AntigravityAuth) nodeUserAgent() string {
-	return misc.AntigravityLoadCodeAssistUserAgent("")
+	return misc.AntigravityOnboardUserUserAgent("")
 }
 
 func antigravityLoadCodeAssistMetadata() map[string]string {
@@ -96,21 +92,30 @@ func extractCloudaicompanionProject(data map[string]any) string {
 }
 
 func defaultAntigravityTierID(loadResp map[string]any) string {
-	tierID := "legacy-tier"
 	if tiers, okTiers := loadResp["allowedTiers"].([]any); okTiers {
 		for _, rawTier := range tiers {
 			tier, okTier := rawTier.(map[string]any)
 			if !okTier {
 				continue
 			}
-			if isDefault, okDefault := tier["isDefault"].(bool); okDefault && isDefault {
-				if id, okID := tier["id"].(string); okID && strings.TrimSpace(id) != "" {
-					return strings.TrimSpace(id)
+			if isDefault, okDefault := tier["isDefault"].(bool); !okDefault || !isDefault {
+				continue
+			}
+			if id, okID := tier["id"].(string); okID {
+				if trimmed := strings.TrimSpace(id); trimmed != "" {
+					return trimmed
 				}
 			}
 		}
 	}
-	return tierID
+	if currentTier, okTier := loadResp["currentTier"].(map[string]any); okTier {
+		if id, okID := currentTier["id"].(string); okID {
+			if trimmed := strings.TrimSpace(id); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return "free-tier"
 }
 
 // BuildAuthURL generates the OAuth authorization URL.
@@ -265,6 +270,7 @@ func (o *AntigravityAuth) FetchProjectID(ctx context.Context, accessToken string
 	}
 
 	projectID := extractCloudaicompanionProject(loadResp)
+
 	if projectID == "" {
 		projectID, err = o.OnboardUser(ctx, accessToken, defaultAntigravityTierID(loadResp))
 		if err != nil {

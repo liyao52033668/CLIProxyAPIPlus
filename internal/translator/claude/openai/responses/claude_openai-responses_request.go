@@ -358,7 +358,8 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				if argsStr != "" && gjson.Valid(argsStr) {
 					argsJSON := gjson.Parse(argsStr)
 					if argsJSON.IsObject() {
-						toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte(argsJSON.Raw))
+						inputRaw := sanitizeResponsesToolUseInput(name, []byte(argsJSON.Raw))
+						toolUse, _ = sjson.SetRawBytes(toolUse, "input", inputRaw)
 					}
 				}
 
@@ -499,6 +500,21 @@ func convertResponsesNamespaceToolToClaude(tool gjson.Result, toolNameMap map[st
 		return true
 	})
 	return out
+}
+
+func sanitizeResponsesToolUseInput(name string, inputRaw []byte) []byte {
+	if strings.TrimSpace(name) != "Read" {
+		return inputRaw
+	}
+	pages := gjson.GetBytes(inputRaw, "pages")
+	if pages.Type != gjson.String || pages.String() != "" {
+		return inputRaw
+	}
+	cleaned, err := sjson.DeleteBytes(inputRaw, "pages")
+	if err != nil {
+		return inputRaw
+	}
+	return cleaned
 }
 
 func convertResponsesFunctionToolToClaude(tool gjson.Result, overrideName string) ([]byte, bool) {

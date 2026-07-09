@@ -94,7 +94,7 @@ func (AntigravityAuthenticator) Login(ctx context.Context, cfg *config.Config, o
 	var manualPromptTimer *time.Timer
 	var manualPromptC <-chan time.Time
 	if opts.Prompt != nil {
-		manualPromptTimer = time.NewTimer(30 * time.Second)
+		manualPromptTimer = time.NewTimer(15 * time.Second)
 		manualPromptC = manualPromptTimer.C
 		defer manualPromptTimer.Stop()
 	}
@@ -173,16 +173,19 @@ waitForCallback:
 		return nil, fmt.Errorf("antigravity: empty email returned from user info")
 	}
 
-	// Fetch project ID via loadCodeAssist (same approach as Gemini CLI)
+	// Fetch project ID via loadCodeAssist.
 	projectID := ""
 	if accessToken != "" {
 		fetchedProjectID, errProject := authSvc.FetchProjectID(ctx, accessToken)
 		if errProject != nil {
-			log.Warnf("antigravity: failed to fetch project ID: %v", errProject)
+			return nil, fmt.Errorf("antigravity: failed to fetch project ID: %w", errProject)
 		} else {
 			projectID = fetchedProjectID
-			log.Infof("antigravity: obtained project ID %s", projectID)
+			log.Infof("antigravity: obtained project ID %s", util.HideAPIKey(projectID))
 		}
+	}
+	if strings.TrimSpace(projectID) == "" {
+		return nil, fmt.Errorf("antigravity: project ID discovery returned empty project")
 	}
 
 	now := time.Now()
@@ -209,7 +212,7 @@ waitForCallback:
 
 	fmt.Println("Antigravity authentication successful")
 	if projectID != "" {
-		fmt.Printf("Using GCP project: %s\n", projectID)
+		fmt.Printf("Using GCP project: %s\n", util.HideAPIKey(projectID))
 	}
 	return &coreauth.Auth{
 		ID:       fileName,

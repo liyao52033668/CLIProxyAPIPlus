@@ -4,16 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"net/http"
-	"net/http/httptest"
-	"sync/atomic"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	log "github.com/sirupsen/logrus"
+	"github.com/sirupsen/logrus/hooks/test"
+	"github.com/tidwall/gjson"
 )
 
 func testGeminiSignaturePayload() string {
@@ -56,7 +57,38 @@ func invalidClaudeThinkingPayload() []byte {
 	}`)
 }
 
-func TestAntigravityExecutor_StrictBypassRejectsInvalidSignature(t *testing.T) {
+func newSignatureDebugHook(t *testing.T) *test.Hook {
+	t.Helper()
+
+	previousLevel := log.GetLevel()
+	log.SetLevel(log.DebugLevel)
+	hook := test.NewLocal(log.StandardLogger())
+	t.Cleanup(func() {
+		hook.Reset()
+		log.SetLevel(previousLevel)
+	})
+	return hook
+}
+
+func assertSignatureDebugDoesNotLeak(t *testing.T, hook *test.Hook, forbidden string) {
+	t.Helper()
+
+	if forbidden == "" {
+		return
+	}
+	for _, entry := range hook.AllEntries() {
+		if strings.Contains(entry.Message, forbidden) {
+			t.Fatalf("debug log leaked signature in message: %q", entry.Message)
+		}
+		for key, value := range entry.Data {
+			if strings.Contains(fmt.Sprint(value), forbidden) {
+				t.Fatalf("debug log leaked signature in field %q: %v", key, value)
+			}
+		}
+	}
+}
+
+func TestAntigravityExecutor_StrictBypassStripsInvalidSignature(t *testing.T) {
 	previousCache := cache.SignatureCacheEnabled()
 	previousStrict := cache.SignatureBypassStrictMode()
 	cache.SetSignatureCacheEnabled(false)
@@ -66,66 +98,72 @@ func TestAntigravityExecutor_StrictBypassRejectsInvalidSignature(t *testing.T) {
 		cache.SetSignatureBypassStrictMode(previousStrict)
 	})
 
-	var hits atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits.Add(1)
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}}`))
-	}))
-	defer server.Close()
-
-	executor := NewAntigravityExecutor(nil)
-	auth := testAntigravityAuth(server.URL)
 	payload := invalidClaudeThinkingPayload()
-	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude"), OriginalRequest: payload}
-	req := cliproxyexecutor.Request{Model: "claude-sonnet-4-5-thinking", Payload: payload}
+	from := sdktranslator.FromString("claude")
 
-	tests := []struct {
-		name   string
-		invoke func() error
-	}{
-		{
-			name: "execute",
-			invoke: func() error {
-				_, err := executor.Execute(context.Background(), auth, req, opts)
-				return err
-			},
-		},
-		{
-			name: "stream",
-			invoke: func() error {
-				_, err := executor.ExecuteStream(context.Background(), auth, req, cliproxyexecutor.Options{SourceFormat: opts.SourceFormat, OriginalRequest: payload, Stream: true})
-				return err
-			},
-		},
-		{
-			name: "count tokens",
-			invoke: func() error {
-				_, err := executor.CountTokens(context.Background(), auth, req, opts)
-				return err
-			},
-		},
+	output, err := validateAntigravityRequestSignatures(context.Background(), "claude-sonnet-4-5-thinking", from, payload)
+	if err != nil {
+		t.Fatalf("strict bypass should strip invalid signatures instead of rejecting request: %v", err)
+	}
+	parts := gjson.GetBytes(output, "messages.0.content").Array()
+	if len(parts) != 1 {
+		t.Fatalf("content length = %d, want 1 after invalid thinking strip: %s", len(parts), output)
+	}
+	if got := parts[0].Get("type").String(); got != "text" {
+		t.Fatalf("remaining part type = %q, want text: %s", got, output)
+	}
+}
+
+func TestAntigravityExecutor_StrictBypassLogsStrippedInvalidSignature(t *testing.T) {
+	previousCache := cache.SignatureCacheEnabled()
+	previousStrict := cache.SignatureBypassStrictMode()
+	cache.SetSignatureCacheEnabled(false)
+	cache.SetSignatureBypassStrictMode(true)
+	t.Cleanup(func() {
+		cache.SetSignatureCacheEnabled(previousCache)
+		cache.SetSignatureBypassStrictMode(previousStrict)
+	})
+
+	hook := newSignatureDebugHook(t)
+	rawSignature := testFakeClaudeSignature()
+	payload := []byte(`{
+		"model": "claude-sonnet-4-5-thinking",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "thinking", "thinking": "bad", "signature": "` + rawSignature + `"},
+					{"type": "text", "text": "hello"}
+				]
+			}
+		]
+	}`)
+	from := sdktranslator.FromString("claude")
+
+	if _, err := validateAntigravityRequestSignatures(context.Background(), "claude-sonnet-4-5-thinking", from, payload); err != nil {
+		t.Fatalf("strict bypass should strip invalid signatures instead of rejecting request: %v", err)
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := tt.invoke()
-			if err == nil {
-				t.Fatal("expected invalid signature to return an error")
-			}
-			statusProvider, ok := err.(interface{ StatusCode() int })
-			if !ok {
-				t.Fatalf("expected status error, got %T: %v", err, err)
-			}
-			if statusProvider.StatusCode() != http.StatusBadRequest {
-				t.Fatalf("status = %d, want %d", statusProvider.StatusCode(), http.StatusBadRequest)
-			}
-		})
+	found := false
+	for _, entry := range hook.AllEntries() {
+		if entry.Level != log.DebugLevel {
+			continue
+		}
+		if entry.Data["component"] != "signature_sanitizer" ||
+			entry.Data["executor"] != "antigravity" ||
+			entry.Data["action"] != "drop_thinking_blocks" ||
+			entry.Data["stage"] != "strict_bypass" {
+			continue
+		}
+		if entry.Data["count"] != 1 {
+			t.Fatalf("debug drop count = %v, want 1", entry.Data["count"])
+		}
+		found = true
 	}
-
-	if got := hits.Load(); got != 0 {
-		t.Fatalf("expected invalid signature to be rejected before upstream request, got %d upstream hits", got)
+	if !found {
+		t.Fatal("expected debug log for stripped Antigravity Claude thinking signature")
 	}
+	assertSignatureDebugDoesNotLeak(t, hook, rawSignature)
 }
 
 func TestAntigravityExecutor_NonStrictBypassSkipsPrecheck(t *testing.T) {
@@ -141,7 +179,7 @@ func TestAntigravityExecutor_NonStrictBypassSkipsPrecheck(t *testing.T) {
 	payload := invalidClaudeThinkingPayload()
 	from := sdktranslator.FromString("claude")
 
-	_, err := validateAntigravityRequestSignatures(from, payload)
+	_, err := validateAntigravityRequestSignatures(context.Background(), "claude-sonnet-4-5-thinking", from, payload)
 	if err != nil {
 		t.Fatalf("non-strict bypass should skip precheck, got: %v", err)
 	}
@@ -157,7 +195,7 @@ func TestAntigravityExecutor_CacheModeSkipsPrecheck(t *testing.T) {
 	payload := invalidClaudeThinkingPayload()
 	from := sdktranslator.FromString("claude")
 
-	_, err := validateAntigravityRequestSignatures(from, payload)
+	_, err := validateAntigravityRequestSignatures(context.Background(), "claude-sonnet-4-5-thinking", from, payload)
 	if err != nil {
 		t.Fatalf("cache mode should skip precheck, got: %v", err)
 	}

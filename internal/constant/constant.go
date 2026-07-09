@@ -25,6 +25,9 @@ const (
 	// Antigravity represents the Antigravity response format identifier.
 	Antigravity = "antigravity"
 
+	// Interactions represents the Google Interactions API format identifier.
+	Interactions = "interactions"
+
 	// Kiro represents the AWS CodeWhisperer (Kiro) provider identifier.
 	Kiro = "kiro"
 

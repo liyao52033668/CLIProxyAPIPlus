@@ -125,6 +125,66 @@ func TestConvertOpenAIResponsesRequestToClaude_DropsIncompatibleReasoningSignatu
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToClaude_DropsEmptyReadPages(t *testing.T) {
+	raw := []byte(`{
+		"model":"claude-test",
+		"input":[{
+			"type":"function_call",
+			"call_id":"call_read",
+			"name":"Read",
+			"arguments":"{\"file_path\":\"/tmp/file.go\",\"limit\":2000,\"offset\":0,\"pages\":\"\"}"
+		}]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	input := gjson.GetBytes(out, "messages.0.content.0.input")
+
+	if input.Get("pages").Exists() {
+		t.Fatalf("empty Read.pages should be removed. Output: %s", string(out))
+	}
+	if got := input.Get("file_path").String(); got != "/tmp/file.go" {
+		t.Fatalf("file_path = %q, want /tmp/file.go. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_KeepsNonReadEmptyPages(t *testing.T) {
+	raw := []byte(`{
+		"model":"claude-test",
+		"input":[{
+			"type":"function_call",
+			"call_id":"call_other",
+			"name":"Other",
+			"arguments":"{\"pages\":\"\"}"
+		}]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	pages := gjson.GetBytes(out, "messages.0.content.0.input.pages")
+
+	if !pages.Exists() || pages.String() != "" {
+		t.Fatalf("non-Read empty pages should be preserved. Output: %s", string(out))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_KeepsNonEmptyReadPages(t *testing.T) {
+	raw := []byte(`{
+		"model":"claude-test",
+		"input":[{
+			"type":"function_call",
+			"call_id":"call_read_pdf",
+			"name":"Read",
+			"arguments":"{\"file_path\":\"/tmp/file.pdf\",\"pages\":\"1-5\"}"
+		}]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	pages := gjson.GetBytes(out, "messages.0.content.0.input.pages")
+
+	if got := pages.String(); got != "1-5" {
+		t.Fatalf("Read.pages = %q, want 1-5. Output: %s", got, string(out))
+	}
+}
+
 func testClaudeResponsesThinkingSignature(t *testing.T) (string, string) {
 	t.Helper()
 	channelBlock := []byte{}

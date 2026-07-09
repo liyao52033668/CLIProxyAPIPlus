@@ -298,7 +298,8 @@ func normalizeUserDefinedConfig(config ThinkingConfig, fromFormat, toFormat stri
 	if config.Mode != ModeLevel {
 		return config
 	}
-	if toFormat == "claude" {
+	// Keep discrete levels for Gemini-family providers; they support thinkingLevel.
+	if toFormat == "claude" || toFormat == "gemini" || toFormat == "gemini-cli" || toFormat == "antigravity" {
 		return config
 	}
 	if !isBudgetCapableProvider(toFormat) {
@@ -325,6 +326,8 @@ func extractThinkingConfig(body []byte, provider string) ThinkingConfig {
 		return extractClaudeConfig(body)
 	case "gemini", "gemini-cli", "antigravity":
 		return extractGeminiConfig(body, provider)
+	case "interactions":
+		return extractInteractionsConfig(body)
 	case "openai", "codebuddy", "codebuddy-ai":
 		return extractOpenAIConfig(body)
 	case "codex", "xai", "openai-response":
@@ -380,6 +383,23 @@ func thinkingConfigEffort(config ThinkingConfig) string {
 
 func hasThinkingConfig(config ThinkingConfig) bool {
 	return config.Mode != ModeBudget || config.Budget != 0 || config.Level != ""
+}
+
+// ExtractTranslatedReasoningEffort reads thinking config from an already-translated
+// provider payload and returns a canonical reasoning effort label for usage logs.
+func ExtractTranslatedReasoningEffort(body []byte, provider string) string {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	config := extractThinkingConfig(body, provider)
+	if !hasThinkingConfig(config) {
+		switch provider {
+		case "openai", "openai-response":
+			config = extractCodexConfig(body)
+			if !hasThinkingConfig(config) {
+				config = extractOpenAIConfig(body)
+			}
+		}
+	}
+	return thinkingConfigEffort(config)
 }
 
 // extractClaudeConfig extracts thinking configuration from Claude format request body.
@@ -479,6 +499,61 @@ func extractGeminiConfig(body []byte, provider string) ThinkingConfig {
 		budget = gjson.GetBytes(body, prefix+".thinking_budget")
 	}
 	if budget.Exists() {
+		value := int(budget.Int())
+		switch value {
+		case 0:
+			return ThinkingConfig{Mode: ModeNone, Budget: 0}
+		case -1:
+			return ThinkingConfig{Mode: ModeAuto, Budget: -1}
+		default:
+			return ThinkingConfig{Mode: ModeBudget, Budget: value}
+		}
+	}
+
+	return ThinkingConfig{}
+}
+
+// extractInteractionsConfig extracts thinking configuration from Interactions API format.
+func extractInteractionsConfig(body []byte) ThinkingConfig {
+	for _, path := range []string{
+		"generation_config.thinking_level",
+		"generation_config.thinkingLevel",
+		"generation_config.thinking_config.thinking_level",
+		"generation_config.thinking_config.thinkingLevel",
+		"generation_config.thinkingConfig.thinking_level",
+		"generation_config.thinkingConfig.thinkingLevel",
+		"request.generationConfig.thinkingConfig.thinkingLevel",
+		"request.generationConfig.thinkingConfig.thinking_level",
+	} {
+		level := gjson.GetBytes(body, path)
+		if !level.Exists() {
+			continue
+		}
+		value := strings.ToLower(strings.TrimSpace(level.String()))
+		switch value {
+		case "none":
+			return ThinkingConfig{Mode: ModeNone, Budget: 0}
+		case "auto":
+			return ThinkingConfig{Mode: ModeAuto, Budget: -1}
+		default:
+			return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
+		}
+	}
+
+	for _, path := range []string{
+		"generation_config.thinking_budget",
+		"generation_config.thinkingBudget",
+		"generation_config.thinking_config.thinking_budget",
+		"generation_config.thinking_config.thinkingBudget",
+		"generation_config.thinkingConfig.thinking_budget",
+		"generation_config.thinkingConfig.thinkingBudget",
+		"request.generationConfig.thinkingConfig.thinkingBudget",
+		"request.generationConfig.thinkingConfig.thinking_budget",
+	} {
+		budget := gjson.GetBytes(body, path)
+		if !budget.Exists() {
+			continue
+		}
 		value := int(budget.Int())
 		switch value {
 		case 0:

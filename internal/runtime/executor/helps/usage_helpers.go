@@ -5,12 +5,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
@@ -26,8 +28,23 @@ type UsageReporter struct {
 	authType    string
 	apiKey      string
 	source      string
+	reasoning   string
+	serviceTier string
 	requestedAt time.Time
 	once        sync.Once
+}
+
+type usageExecutor interface {
+	Identifier() string
+}
+
+// NewExecutorUsageReporter builds a usage reporter from an executor identifier.
+func NewExecutorUsageReporter(ctx context.Context, executor usageExecutor, model string, auth *cliproxyauth.Auth) *UsageReporter {
+	provider := ""
+	if executor != nil {
+		provider = executor.Identifier()
+	}
+	return NewUsageReporter(ctx, provider, model, auth)
 }
 
 func NewUsageReporter(ctx context.Context, provider, model string, auth *cliproxyauth.Auth) *UsageReporter {
@@ -44,12 +61,28 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		apiKey:      apiKey,
 		source:      resolveUsageSource(auth, apiKey),
 		authType:    resolveUsageAuthType(auth),
+		reasoning:   usage.ReasoningEffortFromContext(ctx),
+		serviceTier: usage.ServiceTierFromContext(ctx),
 	}
 	if auth != nil {
 		reporter.authID = auth.ID
 		reporter.authIndex = auth.EnsureIndex()
 	}
 	return reporter
+}
+
+// SetTranslatedReasoningEffort records the translated thinking level for usage logs.
+func (r *UsageReporter) SetTranslatedReasoningEffort(payload []byte, format string) {
+	if r == nil {
+		return
+	}
+	r.reasoning = thinking.ExtractTranslatedReasoningEffort(payload, format)
+}
+
+// TrackHTTPClient returns the client unchanged.
+// Local UsageReporter does not yet instrument per-byte TTFT transports.
+func (r *UsageReporter) TrackHTTPClient(client *http.Client) *http.Client {
+	return client
 }
 
 func (r *UsageReporter) Publish(ctx context.Context, detail usage.Detail) {
@@ -156,20 +189,22 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		return usage.Record{Model: model, Detail: detail, Failed: failed, Fail: fail}
 	}
 	return usage.Record{
-		Provider:    r.provider,
-		Model:       model,
-		Alias:       r.alias,
-		Source:      r.source,
-		APIKey:      r.apiKey,
-		AuthID:      r.authID,
-		AuthIndex:   r.authIndex,
-		AuthType:    r.authType,
-		RequestedAt: r.requestedAt,
-		Latency:     r.latency(),
-		TTFT:        r.latency(),
-		Failed:      failed,
-		Fail:        fail,
-		Detail:      detail,
+		Provider:        r.provider,
+		Model:           model,
+		Alias:           r.alias,
+		Source:          r.source,
+		APIKey:          r.apiKey,
+		AuthID:          r.authID,
+		AuthIndex:       r.authIndex,
+		AuthType:        r.authType,
+		ReasoningEffort: r.reasoning,
+		ServiceTier:     r.serviceTier,
+		RequestedAt:     r.requestedAt,
+		Latency:         r.latency(),
+		TTFT:            r.latency(),
+		Failed:          failed,
+		Fail:            fail,
+		Detail:          detail,
 	}
 }
 

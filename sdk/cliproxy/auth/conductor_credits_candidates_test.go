@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -32,7 +33,10 @@ func TestFindAllAntigravityCreditsCandidateAuths_PrefersKnownCreditsThenUnknown(
 
 	opts := cliproxyexecutor.Options{}
 
-	candidates := m.findAllAntigravityCreditsCandidateAuths("claude-sonnet-4-6", opts)
+	candidates, errCandidates := m.findAllAntigravityCreditsCandidateAuths(context.Background(), "claude-sonnet-4-6", opts)
+	if errCandidates != nil {
+		t.Fatalf("findAll: %v", errCandidates)
+	}
 	if len(candidates) != 2 {
 		t.Fatalf("candidates len = %d, want 2", len(candidates))
 	}
@@ -43,7 +47,10 @@ func TestFindAllAntigravityCreditsCandidateAuths_PrefersKnownCreditsThenUnknown(
 		t.Fatalf("candidates[1].auth.ID = %q, want %q", candidates[1].auth.ID, "aa-unknown")
 	}
 
-	nonClaude := m.findAllAntigravityCreditsCandidateAuths("gemini-3-flash", opts)
+	nonClaude, errCandidates := m.findAllAntigravityCreditsCandidateAuths(context.Background(), "gemini-3-flash", opts)
+	if errCandidates != nil {
+		t.Fatalf("findAll: %v", errCandidates)
+	}
 	if len(nonClaude) != 0 {
 		t.Fatalf("nonClaude len = %d, want 0", len(nonClaude))
 	}
@@ -51,7 +58,10 @@ func TestFindAllAntigravityCreditsCandidateAuths_PrefersKnownCreditsThenUnknown(
 	pinnedOpts := cliproxyexecutor.Options{
 		Metadata: map[string]any{cliproxyexecutor.PinnedAuthMetadataKey: "aa-unknown"},
 	}
-	pinned := m.findAllAntigravityCreditsCandidateAuths("claude-sonnet-4-6", pinnedOpts)
+	pinned, errCandidates := m.findAllAntigravityCreditsCandidateAuths(context.Background(), "claude-sonnet-4-6", pinnedOpts)
+	if errCandidates != nil {
+		t.Fatalf("findAll: %v", errCandidates)
+	}
 	if len(pinned) != 1 {
 		t.Fatalf("pinned len = %d, want 1", len(pinned))
 	}

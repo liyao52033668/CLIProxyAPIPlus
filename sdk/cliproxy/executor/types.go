@@ -61,6 +61,9 @@ type Options struct {
 	OriginalRequest []byte
 	// SourceFormat identifies the inbound schema.
 	SourceFormat sdktranslator.Format
+	// ResponseFormat identifies the downstream response schema.
+	// Empty means responses should use SourceFormat for backward compatibility.
+	ResponseFormat sdktranslator.Format
 	// Metadata carries extra execution hints shared across selection and executors.
 	Metadata map[string]any
 	// IsAuto indicates this request used auto model resolution.
@@ -100,4 +103,12 @@ type StreamResult struct {
 type StatusError interface {
 	error
 	StatusCode() int
+}
+
+// ResponseFormatOrSource returns the response target format for an execution.
+func ResponseFormatOrSource(opts Options) sdktranslator.Format {
+	if opts.ResponseFormat != "" {
+		return opts.ResponseFormat
+	}
+	return opts.SourceFormat
 }

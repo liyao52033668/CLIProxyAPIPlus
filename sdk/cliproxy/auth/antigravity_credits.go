@@ -5,6 +5,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	homekv "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 )
 
 type antigravityUseCreditsContextKey struct{}
@@ -45,31 +47,69 @@ func SetAntigravityCreditsHint(authID string, hint AntigravityCreditsHint) {
 	if hint.UpdatedAt.IsZero() {
 		hint.UpdatedAt = time.Now()
 	}
+	if _, homeMode, errClient := homekv.CurrentKVClient(); homeMode && errClient == nil {
+		// Home is healthy: prefer shared KV and skip process-local state.
+		homekv.KVSetJSONBestEffort(context.Background(), antigravityCreditsHintKey(authID), hint, 30*time.Minute)
+		return
+	}
+	// Home disabled/unavailable: keep a process-local hint so non-Required readers still work.
 	antigravityCreditsHintByAuth.Store(authID, hint)
 }
 
 // GetAntigravityCreditsHint returns the latest known AI credits state for an auth.
+// Best-effort: if home KV is unavailable, fall back to the process-local map.
 func GetAntigravityCreditsHint(authID string) (AntigravityCreditsHint, bool) {
+	hint, ok, err := GetAntigravityCreditsHintRequired(context.Background(), authID)
+	if err == nil {
+		return hint, ok
+	}
 	authID = strings.TrimSpace(authID)
 	if authID == "" {
 		return AntigravityCreditsHint{}, false
 	}
-	value, ok := antigravityCreditsHintByAuth.Load(authID)
-	if !ok {
+	value, loaded := antigravityCreditsHintByAuth.Load(authID)
+	if !loaded {
 		return AntigravityCreditsHint{}, false
 	}
-	hint, ok := value.(AntigravityCreditsHint)
+	local, ok := value.(AntigravityCreditsHint)
 	if !ok {
 		antigravityCreditsHintByAuth.Delete(authID)
 		return AntigravityCreditsHint{}, false
 	}
-	return hint, true
+	return local, true
+}
+
+// GetAntigravityCreditsHintRequired returns the latest known AI credits state for request-time paths.
+func GetAntigravityCreditsHintRequired(ctx context.Context, authID string) (AntigravityCreditsHint, bool, error) {
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return AntigravityCreditsHint{}, false, nil
+	}
+	var homeHint AntigravityCreditsHint
+	homeMode, found, errGet := homekv.KVGetJSONRequired(ctx, antigravityCreditsHintKey(authID), &homeHint)
+	if homeMode {
+		return homeHint, found, errGet
+	}
+	value, ok := antigravityCreditsHintByAuth.Load(authID)
+	if !ok {
+		return AntigravityCreditsHint{}, false, nil
+	}
+	hint, ok := value.(AntigravityCreditsHint)
+	if !ok {
+		antigravityCreditsHintByAuth.Delete(authID)
+		return AntigravityCreditsHint{}, false, nil
+	}
+	return hint, true, nil
 }
 
 // HasKnownAntigravityCreditsHint reports whether credits state has been discovered for an auth.
 func HasKnownAntigravityCreditsHint(authID string) bool {
 	hint, ok := GetAntigravityCreditsHint(authID)
 	return ok && hint.Known
+}
+
+func antigravityCreditsHintKey(authID string) string {
+	return "cpa:antigravity:credits-hint:" + strings.TrimSpace(authID)
 }
 
 func antigravityCreditsAvailableForModel(auth *Auth, model string) bool {

@@ -1282,20 +1282,59 @@ func claudeToolResultOutputsByCallID(payload []byte) map[string][]byte {
 					if entry.Get("type").String() != "text" {
 						continue
 					}
+					text := entry.Get("text").String()
+					if isResponsesContent(text) {
+						for _, block := range gjson.Parse(text).Array() {
+							toolResultContent, _ = sjson.SetRawBytes(toolResultContent, fmt.Sprintf("%d", toolResultIndex), []byte(block.Raw))
+							toolResultIndex++
+						}
+						continue
+					}
 					toolResultContent, _ = sjson.SetBytes(toolResultContent, fmt.Sprintf("%d.type", toolResultIndex), "input_text")
-					toolResultContent, _ = sjson.SetBytes(toolResultContent, fmt.Sprintf("%d.text", toolResultIndex), entry.Get("text").String())
+					toolResultContent, _ = sjson.SetBytes(toolResultContent, fmt.Sprintf("%d.text", toolResultIndex), text)
 					toolResultIndex++
 				}
 				if toolResultIndex > 0 {
 					output, _ = sjson.SetRawBytes(output, "output", toolResultContent)
 				}
 			} else {
-				output, _ = sjson.SetBytes(output, "output", content.Get("content").String())
+				text := content.Get("content").String()
+				if isResponsesContent(text) {
+					output, _ = sjson.SetRawBytes(output, "output", []byte(text))
+				} else {
+					output, _ = sjson.SetBytes(output, "output", text)
+				}
 			}
 			matched[callID] = output
 		}
 	}
 	return matched
+}
+
+func isResponsesContent(text string) bool {
+	if !gjson.Valid(text) {
+		return false
+	}
+	content := gjson.Parse(text)
+	if !content.IsArray() {
+		return false
+	}
+	blocks := content.Array()
+	if len(blocks) == 0 {
+		return false
+	}
+	if !blocks[0].Get("type").Exists() {
+		return false
+	}
+	for _, block := range blocks {
+		switch block.Get("type").String() {
+		case "input_text", "input_image", "text", "image", "output_text":
+			continue
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func filterReplayItemsForClaudeOutputs(cachedItems [][]byte, outputs map[string][]byte) [][]byte {

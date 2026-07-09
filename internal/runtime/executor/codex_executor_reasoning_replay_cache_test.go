@@ -849,3 +849,87 @@ func TestCodexExecutorReasoningReplayCacheMatchesShortenedClaudeToolResultCallID
 		t.Fatalf("input.3.call_id = %q, want shortened call_id %q; body=%s", got, shortCallID, string(secondBody))
 	}
 }
+
+func TestClaudeToolResultOutputsByCallIDPreservesResponsesContentBlocks(t *testing.T) {
+	payload := []byte(`{
+		"messages":[{
+			"role":"user",
+			"content":[{
+				"type":"tool_result",
+				"tool_use_id":"call_1",
+				"content":"[{\"type\":\"text\",\"text\":\"hello\"}]"
+			}]
+		}]
+	}`)
+
+	outputs := claudeToolResultOutputsByCallID(payload)
+	output := outputs["call_1"]
+	if len(output) == 0 {
+		t.Fatalf("missing output for call_1")
+	}
+	if got := gjson.GetBytes(output, "output.0.type").String(); got != "text" {
+		t.Fatalf("output.0.type = %q, want text; output=%s", got, string(output))
+	}
+	if got := gjson.GetBytes(output, "output.0.text").String(); got != "hello" {
+		t.Fatalf("output.0.text = %q, want hello; output=%s", got, string(output))
+	}
+}
+
+func TestClaudeToolResultOutputsByCallIDPreservesResponsesContentBlocksFromTextEntry(t *testing.T) {
+	payload := []byte(`{
+		"messages":[{
+			"role":"user",
+			"content":[{
+				"type":"tool_result",
+				"tool_use_id":"call_1",
+				"content":[{"type":"text","text":"[{\"type\":\"input_text\",\"text\":\"hello\"}]"}]
+			}]
+		}]
+	}`)
+
+	outputs := claudeToolResultOutputsByCallID(payload)
+	output := outputs["call_1"]
+	if len(output) == 0 {
+		t.Fatalf("missing output for call_1")
+	}
+	if got := gjson.GetBytes(output, "output.0.type").String(); got != "input_text" {
+		t.Fatalf("output.0.type = %q, want input_text; output=%s", got, string(output))
+	}
+	if got := gjson.GetBytes(output, "output.0.text").String(); got != "hello" {
+		t.Fatalf("output.0.text = %q, want hello; output=%s", got, string(output))
+	}
+}
+
+func TestClaudeToolResultOutputsByCallIDWrapsPlainTextAndNonContentJSON(t *testing.T) {
+	payload := []byte(`{
+		"messages":[{
+			"role":"user",
+			"content":[{
+				"type":"tool_result",
+				"tool_use_id":"call_1",
+				"content":[
+					{"type":"text","text":"hello"},
+					{"type":"text","text":"[{\"name\":\"not-content\"}]"}
+				]
+			}]
+		}]
+	}`)
+
+	outputs := claudeToolResultOutputsByCallID(payload)
+	output := outputs["call_1"]
+	if len(output) == 0 {
+		t.Fatalf("missing output for call_1")
+	}
+	if got := gjson.GetBytes(output, "output.0.type").String(); got != "input_text" {
+		t.Fatalf("output.0.type = %q, want input_text; output=%s", got, string(output))
+	}
+	if got := gjson.GetBytes(output, "output.0.text").String(); got != "hello" {
+		t.Fatalf("output.0.text = %q, want hello; output=%s", got, string(output))
+	}
+	if got := gjson.GetBytes(output, "output.1.type").String(); got != "input_text" {
+		t.Fatalf("output.1.type = %q, want input_text; output=%s", got, string(output))
+	}
+	if got := gjson.GetBytes(output, "output.1.text").String(); got != `[{"name":"not-content"}]` {
+		t.Fatalf("output.1.text = %q, want original JSON string; output=%s", got, string(output))
+	}
+}
