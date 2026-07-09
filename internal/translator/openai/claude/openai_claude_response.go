@@ -539,7 +539,13 @@ func openAIResponseContentText(content gjson.Result) string {
 
 func openAIContentBlockText(content gjson.Result) (string, bool) {
 	if content.Type == gjson.String {
-		return content.String(), true
+		text := content.String()
+		if parsed := gjson.Parse(text); gjson.Valid(text) && (parsed.IsArray() || parsed.IsObject()) {
+			if parsedText, ok := openAIContentBlockText(parsed); ok {
+				return parsedText, true
+			}
+		}
+		return text, true
 	}
 	if content.IsArray() {
 		var builder strings.Builder
@@ -555,7 +561,7 @@ func openAIContentBlockText(content gjson.Result) (string, bool) {
 	}
 	switch content.Get("type").String() {
 	case "text", "output_text":
-		return content.Get("text").String(), true
+		return openAIContentBlockText(content.Get("text"))
 	}
 	return "", false
 }
@@ -705,7 +711,9 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 						switch item.Get("type").String() {
 						case "text", "output_text":
 							flushThinking()
-							textBuilder.WriteString(item.Get("text").String())
+							if text, ok := openAIContentBlockText(item); ok {
+								textBuilder.WriteString(text)
+							}
 						case "tool_calls":
 							flushThinking()
 							flushText()

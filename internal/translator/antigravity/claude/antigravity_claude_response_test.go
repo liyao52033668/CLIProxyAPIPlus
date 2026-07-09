@@ -180,6 +180,46 @@ func TestConvertAntigravityResponseToClaudeStream_WebSearchMessageStartOutputTok
 	}
 }
 
+func TestConvertAntigravityResponseToClaudeStream_StringifiedContentBlocksExtractText(t *testing.T) {
+	var param any
+	responseJSON := []byte(`{
+		"response": {
+			"modelVersion": "gemini-3.1-flash-lite",
+			"responseId": "resp-content-blocks",
+			"candidates": [{
+				"content": {
+					"parts": [{"text": "[{\"type\":\"text\",\"text\":\"收到，我跳过设计流程\"},{\"type\":\"output_text\",\"text\":\"，直接找改动。\"}]"}]
+				}
+			}],
+			"usageMetadata": {"promptTokenCount": 1, "candidatesTokenCount": 1, "totalTokenCount": 2}
+		}
+	}`)
+
+	output := bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "gemini-3.1-flash-lite", nil, nil, responseJSON, &param), nil)
+	text := collectAntigravityClaudeTextDeltas(string(output))
+	if text != "收到，我跳过设计流程，直接找改动。" {
+		t.Fatalf("text delta = %q, want plain text. Output:\n%s", text, string(output))
+	}
+	if strings.Contains(text, `"type":"text"`) {
+		t.Fatalf("content blocks were serialized into text: %q", text)
+	}
+}
+
+func collectAntigravityClaudeTextDeltas(output string) string {
+	var builder strings.Builder
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		if gjson.Get(data, "type").String() == "content_block_delta" {
+			builder.WriteString(gjson.Get(data, "delta.text").String())
+		}
+	}
+	return builder.String()
+}
+
 func TestWebSearchResultsFromGrounding_DeduplicatesAndSkipsEmptyURLs(t *testing.T) {
 	groundingMetadata := gjson.Parse(`{
 		"groundingChunks": [

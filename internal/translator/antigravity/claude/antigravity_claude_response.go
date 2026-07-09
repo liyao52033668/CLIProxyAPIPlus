@@ -212,7 +212,7 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 
 			// Handle text content (both regular content and thinking)
 			if partTextResult.Exists() {
-				partText := partTextResult.String()
+				partText := translatorcommon.TextFromContentBlocks(partTextResult)
 				if partResult.Get("thought").Bool() {
 					if partText != "" {
 						if params.ResponseType == 2 {
@@ -344,7 +344,7 @@ func appendWebSearchBufferedText(partsResult gjson.Result, buffer *strings.Build
 			continue
 		}
 		if partTextResult := partResult.Get("text"); partTextResult.Exists() {
-			buffer.WriteString(partTextResult.String())
+			buffer.WriteString(translatorcommon.TextFromContentBlocks(partTextResult))
 		}
 	}
 }

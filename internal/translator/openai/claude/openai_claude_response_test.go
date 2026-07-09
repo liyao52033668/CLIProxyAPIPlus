@@ -156,6 +156,29 @@ func TestConvertOpenAIResponseToClaude_StreamContentBlockArrayUsesText(t *testin
 	t.Fatalf("expected content_block_delta event, got %+v", events)
 }
 
+func TestConvertOpenAIResponseToClaude_StreamNestedStringifiedContentBlockArrayUsesText(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant"}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"content":[{"text":"[{\"text\":\"hello\",\"type\":\"text\"}]","type":"text"}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+	)
+
+	for _, e := range events {
+		if e.Type != "content_block_delta" {
+			continue
+		}
+		text := gjson.Get(e.Payload, "delta.text").String()
+		if text != "hello" {
+			t.Fatalf("delta text = %q, want hello; payload=%s", text, e.Payload)
+		}
+		if strings.Contains(text, `"type":"text"`) {
+			t.Fatalf("content blocks were serialized into text: %q", text)
+		}
+		return
+	}
+	t.Fatalf("expected content_block_delta event, got %+v", events)
+}
+
 func TestConvertOpenAIResponseToClaudeNonStream_ContentBlockArrayUsesText(t *testing.T) {
 	out := ConvertOpenAIResponseToClaudeNonStream(
 		context.Background(),
@@ -188,6 +211,25 @@ func TestConvertOpenAIResponseToClaudeNonStream_StringifiedContentBlockArrayUses
 	text := gjson.GetBytes(out, "content.0.text").String()
 	if text != "hello world" {
 		t.Fatalf("content text = %q, want hello world; output=%s", text, string(out))
+	}
+	if strings.Contains(text, `"type":"text"`) {
+		t.Fatalf("content blocks were serialized into text: %q", text)
+	}
+}
+
+func TestConvertOpenAIResponseToClaudeNonStream_NestedStringifiedContentBlockArrayUsesText(t *testing.T) {
+	out := ConvertOpenAIResponseToClaudeNonStream(
+		context.Background(),
+		"",
+		[]byte(`{"stream":false}`),
+		nil,
+		[]byte(`{"id":"chatcmpl_1","model":"m","choices":[{"message":{"role":"assistant","content":[{"type":"text","text":"[{\"text\":\"hello\",\"type\":\"text\"}]"}]},"finish_reason":"stop"}]}`),
+		nil,
+	)
+
+	text := gjson.GetBytes(out, "content.0.text").String()
+	if text != "hello" {
+		t.Fatalf("content text = %q, want hello; output=%s", text, string(out))
 	}
 	if strings.Contains(text, `"type":"text"`) {
 		t.Fatalf("content blocks were serialized into text: %q", text)
