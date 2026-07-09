@@ -632,6 +632,21 @@ func collectClaudeStreamTextDeltas(outputs [][]byte) string {
 	return builder.String()
 }
 
+func TestConvertCodexResponseToClaude_StreamStopReasonToolUseWithoutToolBlockFallsBackToEndTurn(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"tools":[{"name":"lookup","input_schema":{"type":"object","properties":{}}}]}`)
+	var param any
+
+	outputs := ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, []byte(`data: {"type":"response.completed","response":{"stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}}}`), &param)
+	got, ok := findClaudeStreamStopReason(outputs)
+	if !ok {
+		t.Fatalf("did not find message_delta stop_reason; outputs=%q", outputs)
+	}
+	if got != "end_turn" {
+		t.Fatalf("stop_reason = %q, want end_turn. Outputs=%q", got, outputs)
+	}
+}
+
 func TestConvertCodexResponseToClaude_StreamStopReasonMapping(t *testing.T) {
 	tests := []struct {
 		name       string
