@@ -383,8 +383,13 @@ func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
 		if _, err := s.coreManager.Update(ctx, existing); err != nil {
 			log.Errorf("failed to disable auth %s: %v", id, err)
 		}
-		if strings.EqualFold(strings.TrimSpace(existing.Provider), "codex") {
+		providerName := strings.ToLower(strings.TrimSpace(existing.Provider))
+		if providerName == "codex" {
 			executor.CloseCodexWebsocketSessionsForAuthID(existing.ID, "auth_removed")
+			s.ensureExecutorsForAuth(existing)
+		}
+		if providerName == "xai" {
+			executor.CloseXAIWebsocketSessionsForAuthID(existing.ID, "auth_removed")
 			s.ensureExecutorsForAuth(existing)
 		}
 	}
@@ -426,7 +431,8 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 	if s == nil || s.coreManager == nil || a == nil {
 		return
 	}
-	if strings.EqualFold(strings.TrimSpace(a.Provider), "codex") {
+	providerName := strings.ToLower(strings.TrimSpace(a.Provider))
+	if providerName == "codex" {
 		if !forceReplace {
 			existingExecutor, hasExecutor := s.coreManager.Executor("codex")
 			if hasExecutor {
@@ -437,6 +443,19 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 			}
 		}
 		s.coreManager.RegisterExecutor(executor.NewCodexAutoExecutor(s.cfg))
+		return
+	}
+	if providerName == "xai" {
+		if !forceReplace {
+			existingExecutor, hasExecutor := s.coreManager.Executor("xai")
+			if hasExecutor {
+				_, isXAIAutoExecutor := existingExecutor.(*executor.XAIAutoExecutor)
+				if isXAIAutoExecutor {
+					return
+				}
+			}
+		}
+		s.coreManager.RegisterExecutor(executor.NewXAIAutoExecutor(s.cfg))
 		return
 	}
 	// Skip disabled auth entries when (re)binding executors.
@@ -495,8 +514,6 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 		s.coreManager.RegisterExecutor(executor.NewBTExecutor(s.cfg))
 	case "qoder":
 		s.coreManager.RegisterExecutor(executor.NewQoderExecutor(s.cfg))
-	case "xai":
-		s.coreManager.RegisterExecutor(executor.NewXAIExecutor(s.cfg))
 	default:
 		providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
 		if providerKey == "" {
