@@ -529,14 +529,16 @@ func openAIResponseContentText(content gjson.Result) string {
 				builder.WriteString(item.String())
 				return true
 			}
-			if item.Get("type").String() == "text" {
+			switch item.Get("type").String() {
+			case "text", "output_text":
 				builder.WriteString(item.Get("text").String())
 			}
 			return true
 		})
 		return builder.String()
 	}
-	if content.Get("type").String() == "text" {
+	switch content.Get("type").String() {
+	case "text", "output_text":
 		return content.Get("text").String()
 	}
 	return content.String()
@@ -685,7 +687,7 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 
 					for _, item := range contentResult.Array() {
 						switch item.Get("type").String() {
-						case "text":
+						case "text", "output_text":
 							flushThinking()
 							textBuilder.WriteString(item.Get("text").String())
 						case "tool_calls":
