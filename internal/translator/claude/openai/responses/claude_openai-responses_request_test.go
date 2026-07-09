@@ -147,6 +147,31 @@ func TestConvertOpenAIResponsesRequestToClaude_DropsEmptyReadPages(t *testing.T)
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToClaude_DropsEmptyReadPagesForStreamingRequest(t *testing.T) {
+	raw := []byte(`{
+		"model":"claude-test",
+		"input":[{
+			"type":"function_call",
+			"call_id":"call_read",
+			"name":"Read",
+			"arguments":"{\"file_path\":\"/tmp/file.go\",\"pages\":\"\"}"
+		}]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, true)
+	input := gjson.GetBytes(out, "messages.0.content.0.input")
+
+	if !gjson.GetBytes(out, "stream").Bool() {
+		t.Fatalf("stream should remain true. Output: %s", string(out))
+	}
+	if input.Get("pages").Exists() {
+		t.Fatalf("empty Read.pages should be removed for streaming requests. Output: %s", string(out))
+	}
+	if got := input.Get("file_path").String(); got != "/tmp/file.go" {
+		t.Fatalf("file_path = %q, want /tmp/file.go. Output: %s", got, string(out))
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToClaude_KeepsNonReadEmptyPages(t *testing.T) {
 	raw := []byte(`{
 		"model":"claude-test",

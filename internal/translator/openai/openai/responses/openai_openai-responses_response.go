@@ -62,6 +62,25 @@ func emitRespEvent(event string, payload []byte) []byte {
 	return translatorcommon.SSEEventData(event, payload)
 }
 
+func chatCompletionContentText(content gjson.Result) string {
+	if !content.Exists() || content.Type == gjson.Null {
+		return ""
+	}
+	if !content.IsArray() {
+		return content.String()
+	}
+
+	var builder strings.Builder
+	content.ForEach(func(_, part gjson.Result) bool {
+		switch part.Get("type").String() {
+		case "text", "output_text":
+			builder.WriteString(part.Get("text").String())
+		}
+		return true
+	})
+	return builder.String()
+}
+
 func buildResponsesCompletedEvent(st *oaiToResponsesState, requestRawJSON []byte, nextSeq func() int) []byte {
 	completed := []byte(`{"type":"response.completed","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null}}`)
 	completed, _ = sjson.SetBytes(completed, "sequence_number", nextSeq())
@@ -354,7 +373,11 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 			idx := int(choice.Get("index").Int())
 			delta := choice.Get("delta")
 			if delta.Exists() {
-				if c := delta.Get("content"); c.Exists() && c.String() != "" {
+				if c := delta.Get("content"); c.Exists() && chatCompletionContentText(c) != "" {
+					contentText := chatCompletionContentText(c)
+					if contentText == "" {
+						return true
+					}
 					// Ensure the message item and its first content part are announced before any text deltas
 					if st.ReasoningID != "" {
 						stopReasoning(st.ReasoningBuf.String())
@@ -387,13 +410,13 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 					msg, _ = sjson.SetBytes(msg, "item_id", fmt.Sprintf("msg_%s_%d", st.ResponseID, idx))
 					msg, _ = sjson.SetBytes(msg, "output_index", msgOutputIndex)
 					msg, _ = sjson.SetBytes(msg, "content_index", 0)
-					msg, _ = sjson.SetBytes(msg, "delta", c.String())
+					msg, _ = sjson.SetBytes(msg, "delta", contentText)
 					out = append(out, emitRespEvent("response.output_text.delta", msg))
 					// aggregate for response.output
 					if st.MsgTextBuf[idx] == nil {
 						st.MsgTextBuf[idx] = &strings.Builder{}
 					}
-					st.MsgTextBuf[idx].WriteString(c.String())
+					st.MsgTextBuf[idx].WriteString(contentText)
 				}
 
 				// reasoning_content (OpenAI reasoning incremental text)
@@ -743,10 +766,14 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 			msg := choice.Get("message")
 			if msg.Exists() {
 				// Text message part
-				if c := msg.Get("content"); c.Exists() && c.String() != "" {
+				if c := msg.Get("content"); c.Exists() {
+					contentText := chatCompletionContentText(c)
+					if contentText == "" {
+						return true
+					}
 					item := []byte(`{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}`)
 					item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("msg_%s_%d", id, int(choice.Get("index").Int())))
-					item, _ = sjson.SetBytes(item, "content.0.text", c.String())
+					item, _ = sjson.SetBytes(item, "content.0.text", contentText)
 					outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
 				}
 

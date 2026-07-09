@@ -622,6 +622,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 		scanner.Buffer(nil, 52_428_800)
 		var param any
 		outputItemsByIndex := make(map[int64][]byte)
+		textContentPartsSeen := make(map[string]struct{})
 		var outputItemsFallback [][]byte
 		var pendingEventLine []byte
 		emitTranslatedLine := func(translatedLine []byte) bool {
@@ -653,6 +654,21 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 				for i, eventData := range eventDataList {
 					normalizedEventName := gjson.GetBytes(eventData, "type").String()
 					switch normalizedEventName {
+					case "response.content_part.added":
+						xaiMarkTextContentPartSeen(eventData, textContentPartsSeen)
+					case "response.output_text.delta":
+						if syntheticEvent := xaiSyntheticTextContentPartAdded(eventData, textContentPartsSeen); syntheticEvent != nil {
+							if hasPendingEventLine {
+								pendingEventLine = nil
+							}
+							if !emitTranslatedLine([]byte("event: response.content_part.added")) {
+								return
+							}
+							if !emitTranslatedLine(append([]byte("data: "), syntheticEvent...)) {
+								return
+							}
+							hasPendingEventLine = true
+						}
 					case "response.output_item.done":
 						xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
 					case "response.completed":
@@ -1553,6 +1569,46 @@ func xaiNormalizeReasoningSummaryItems(items []gjson.Result) ([]byte, bool) {
 	}
 	buf.WriteByte(']')
 	return buf.Bytes(), changed
+}
+
+func xaiTextContentPartKey(eventData []byte) string {
+	outputIndex := gjson.GetBytes(eventData, "output_index").Int()
+	contentIndex := gjson.GetBytes(eventData, "content_index").Int()
+	itemID := strings.TrimSpace(gjson.GetBytes(eventData, "item_id").String())
+	return fmt.Sprintf("%d:%d:%s", outputIndex, contentIndex, itemID)
+}
+
+func xaiMarkTextContentPartSeen(eventData []byte, seen map[string]struct{}) {
+	if seen == nil || gjson.GetBytes(eventData, "part.type").String() != "output_text" {
+		return
+	}
+	seen[xaiTextContentPartKey(eventData)] = struct{}{}
+}
+
+func xaiSyntheticTextContentPartAdded(eventData []byte, seen map[string]struct{}) []byte {
+	if seen == nil {
+		return nil
+	}
+	key := xaiTextContentPartKey(eventData)
+	if _, ok := seen[key]; ok {
+		return nil
+	}
+	seen[key] = struct{}{}
+
+	event := []byte(`{"type":"response.content_part.added","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":""}}`)
+	if sequence := gjson.GetBytes(eventData, "sequence_number"); sequence.Exists() {
+		event, _ = sjson.SetRawBytes(event, "sequence_number", []byte(sequence.Raw))
+	}
+	if itemID := gjson.GetBytes(eventData, "item_id"); itemID.Exists() {
+		event, _ = sjson.SetRawBytes(event, "item_id", []byte(itemID.Raw))
+	}
+	if outputIndex := gjson.GetBytes(eventData, "output_index"); outputIndex.Exists() {
+		event, _ = sjson.SetRawBytes(event, "output_index", []byte(outputIndex.Raw))
+	}
+	if contentIndex := gjson.GetBytes(eventData, "content_index"); contentIndex.Exists() {
+		event, _ = sjson.SetRawBytes(event, "content_index", []byte(contentIndex.Raw))
+	}
+	return event
 }
 
 func xaiCollectOutputItemDone(eventData []byte, outputItemsByIndex map[int64][]byte, outputItemsFallback *[][]byte) {

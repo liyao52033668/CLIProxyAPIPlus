@@ -421,3 +421,52 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_FunctionCallDoneA
 		t.Fatalf("unexpected completed function_call order: %v", completedOrder)
 	}
 }
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_ContentBlocksExtractText(t *testing.T) {
+	request := []byte(`{"model":"gpt-5.4"}`)
+	response := []byte(`{"id":"chatcmpl_content_blocks","object":"chat.completion","created":1773896263,"model":"model","choices":[{"index":0,"message":{"role":"assistant","content":[{"type":"text","text":"hello"},{"type":"output_text","text":" world"},{"type":"image_url","image_url":{"url":"ignored"}}]},"finish_reason":"stop"}]}`)
+
+	out := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "model", request, request, response, nil)
+	text := gjson.GetBytes(out, "output.0.content.0.text").String()
+	if text != "hello world" {
+		t.Fatalf("unexpected output text: %q", text)
+	}
+	if strings.Contains(text, `"type":"text"`) {
+		t.Fatalf("content blocks were serialized into text: %q", text)
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_ContentBlocksExtractText(t *testing.T) {
+	request := []byte(`{"model":"gpt-5.4"}`)
+	in := []string{
+		`data: {"id":"resp_content_blocks","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":[{"type":"text","text":"hello"}]},"finish_reason":null}]}`,
+		`data: {"id":"resp_content_blocks","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"content":[{"type":"output_text","text":" world"},{"type":"image_url","image_url":{"url":"ignored"}}]},"finish_reason":null}]}`,
+		`data: {"id":"resp_content_blocks","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+	}
+
+	var param any
+	var deltas []string
+	var completedText string
+	for _, line := range in {
+		for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", request, request, []byte(line), &param) {
+			event, data := parseOpenAIResponsesSSEEvent(t, chunk)
+			switch event {
+			case "response.output_text.delta":
+				deltas = append(deltas, data.Get("delta").String())
+			case "response.completed":
+				completedText = data.Get("response.output.0.content.0.text").String()
+			}
+		}
+	}
+
+	if strings.Join(deltas, "") != "hello world" {
+		t.Fatalf("unexpected delta text: %q", strings.Join(deltas, ""))
+	}
+	if completedText != "hello world" {
+		t.Fatalf("unexpected completed text: %q", completedText)
+	}
+	if strings.Contains(completedText, `"type":"text"`) {
+		t.Fatalf("content blocks were serialized into completed text: %q", completedText)
+	}
+}
