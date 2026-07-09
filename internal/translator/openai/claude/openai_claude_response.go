@@ -520,28 +520,41 @@ func (p *ConvertOpenAIResponseToAnthropicParams) toolContentBlockIndex(openAIToo
 
 func openAIResponseContentText(content gjson.Result) string {
 	if content.Type == gjson.String {
-		return content.String()
+		text := content.String()
+		if parsed := gjson.Parse(text); gjson.Valid(text) && (parsed.IsArray() || parsed.IsObject()) {
+			if parsedText, ok := openAIContentBlockText(parsed); ok {
+				return parsedText
+			}
+		}
+		return text
+	}
+	if text, ok := openAIContentBlockText(content); ok {
+		return text
+	}
+	return content.String()
+}
+
+func openAIContentBlockText(content gjson.Result) (string, bool) {
+	if content.Type == gjson.String {
+		return content.String(), true
 	}
 	if content.IsArray() {
 		var builder strings.Builder
+		found := false
 		content.ForEach(func(_, item gjson.Result) bool {
-			if item.Type == gjson.String {
-				builder.WriteString(item.String())
-				return true
-			}
-			switch item.Get("type").String() {
-			case "text", "output_text":
-				builder.WriteString(item.Get("text").String())
+			if text, ok := openAIContentBlockText(item); ok {
+				builder.WriteString(text)
+				found = true
 			}
 			return true
 		})
-		return builder.String()
+		return builder.String(), found
 	}
 	switch content.Get("type").String() {
 	case "text", "output_text":
-		return content.Get("text").String()
+		return content.Get("text").String(), true
 	}
-	return content.String()
+	return "", false
 }
 
 func collectOpenAIReasoningTexts(node gjson.Result) []string {
@@ -731,7 +744,7 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 					flushThinking()
 					flushText()
 				} else if contentResult.Type == gjson.String {
-					textContent := contentResult.String()
+					textContent := openAIResponseContentText(contentResult)
 					if textContent != "" {
 						block := []byte(`{"type":"text","text":""}`)
 						block, _ = sjson.SetBytes(block, "text", textContent)

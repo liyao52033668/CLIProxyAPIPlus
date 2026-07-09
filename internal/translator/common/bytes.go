@@ -12,19 +12,42 @@ func TextFromContentBlocks(result gjson.Result) string {
 	if !result.Exists() || result.Type == gjson.Null {
 		return ""
 	}
-	if !result.IsArray() {
-		return result.String()
-	}
-
-	var builder strings.Builder
-	result.ForEach(func(_, part gjson.Result) bool {
-		switch part.Get("type").String() {
-		case "text", "output_text":
-			builder.WriteString(part.Get("text").String())
+	if result.Type == gjson.String {
+		text := result.String()
+		if parsed := gjson.Parse(text); gjson.Valid(text) && (parsed.IsArray() || parsed.IsObject()) {
+			if parsedText, ok := textFromContentBlocks(parsed); ok {
+				return parsedText
+			}
 		}
-		return true
-	})
-	return builder.String()
+		return text
+	}
+	if text, ok := textFromContentBlocks(result); ok {
+		return text
+	}
+	return result.String()
+}
+
+func textFromContentBlocks(result gjson.Result) (string, bool) {
+	if result.Type == gjson.String {
+		return result.String(), true
+	}
+	if result.IsArray() {
+		var builder strings.Builder
+		found := false
+		result.ForEach(func(_, part gjson.Result) bool {
+			if text, ok := textFromContentBlocks(part); ok {
+				builder.WriteString(text)
+				found = true
+			}
+			return true
+		})
+		return builder.String(), found
+	}
+	switch result.Get("type").String() {
+	case "text", "output_text":
+		return result.Get("text").String(), true
+	}
+	return "", false
 }
 
 func WrapGeminiCLIResponse(response []byte) []byte {
