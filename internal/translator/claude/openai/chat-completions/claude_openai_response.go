@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -180,13 +181,13 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 			case "text_delta":
 				// Text content delta - send incremental text updates
 				if text := delta.Get("text"); text.Exists() {
-					template, _ = sjson.SetBytes(template, "choices.0.delta.content", text.String())
+					template, _ = sjson.SetBytes(template, "choices.0.delta.content", translatorcommon.TextFromContentBlocks(text))
 					hasContent = true
 				}
 			case "thinking_delta":
 				// Accumulate reasoning/thinking content
 				if thinking := delta.Get("thinking"); thinking.Exists() {
-					template, _ = sjson.SetBytes(template, "choices.0.delta.reasoning_content", thinking.String())
+					template, _ = sjson.SetBytes(template, "choices.0.delta.reasoning_content", translatorcommon.TextFromContentBlocks(thinking))
 					hasContent = true
 				}
 			case "input_json_delta":

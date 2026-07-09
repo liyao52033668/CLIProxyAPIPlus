@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -117,7 +118,7 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 	if dataType == "response.reasoning_summary_text.delta" {
 		if deltaResult := rootResult.Get("delta"); deltaResult.Exists() {
 			template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
-			template, _ = sjson.SetBytes(template, "choices.0.delta.reasoning_content", deltaResult.String())
+			template, _ = sjson.SetBytes(template, "choices.0.delta.reasoning_content", translatorcommon.TextFromContentBlocks(deltaResult))
 		}
 	} else if dataType == "response.reasoning_summary_text.done" {
 		template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
@@ -125,7 +126,7 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 	} else if dataType == "response.output_text.delta" {
 		if deltaResult := rootResult.Get("delta"); deltaResult.Exists() {
 			template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
-			template, _ = sjson.SetBytes(template, "choices.0.delta.content", deltaResult.String())
+			template, _ = sjson.SetBytes(template, "choices.0.delta.content", translatorcommon.TextFromContentBlocks(deltaResult))
 		}
 	} else if dataType == "response.image_generation_call.partial_image" {
 		itemID := rootResult.Get("item_id").String()

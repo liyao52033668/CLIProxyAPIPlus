@@ -173,12 +173,12 @@ func ConvertCodexResponseToGemini(_ context.Context, modelName string, originalR
 		params.ResponseID = rootResult.Get("response.id").String()
 	} else if typeStr == "response.reasoning_summary_text.delta" { // Handle reasoning/thinking content delta
 		part := []byte(`{"thought":true,"text":""}`)
-		part, _ = sjson.SetBytes(part, "text", rootResult.Get("delta").String())
+		part, _ = sjson.SetBytes(part, "text", translatorcommon.TextFromContentBlocks(rootResult.Get("delta")))
 		template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts.-1", part)
 	} else if typeStr == "response.output_text.delta" { // Handle regular text content delta
 		params.HasOutputTextDelta = true
 		part := []byte(`{"text":""}`)
-		part, _ = sjson.SetBytes(part, "text", rootResult.Get("delta").String())
+		part, _ = sjson.SetBytes(part, "text", translatorcommon.TextFromContentBlocks(rootResult.Get("delta")))
 		template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts.-1", part)
 	} else if typeStr == "response.output_item.done" { // Fallback: emit final message text when no delta chunks were received
 		itemResult := rootResult.Get("item")
@@ -305,7 +305,7 @@ func ConvertCodexResponseToGeminiNonStream(_ context.Context, modelName string, 
 					// Add thinking content
 					if content := value.Get("content"); content.Exists() {
 						part := []byte(`{"text":"","thought":true}`)
-						part, _ = sjson.SetBytes(part, "text", content.String())
+						part, _ = sjson.SetBytes(part, "text", translatorcommon.TextFromContentBlocks(content))
 						template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts.-1", part)
 					}
 
@@ -319,7 +319,7 @@ func ConvertCodexResponseToGeminiNonStream(_ context.Context, modelName string, 
 							if contentItem.Get("type").String() == "output_text" {
 								if text := contentItem.Get("text"); text.Exists() {
 									part := []byte(`{"text":""}`)
-									part, _ = sjson.SetBytes(part, "text", text.String())
+									part, _ = sjson.SetBytes(part, "text", translatorcommon.TextFromContentBlocks(text))
 									template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts.-1", part)
 								}
 							}

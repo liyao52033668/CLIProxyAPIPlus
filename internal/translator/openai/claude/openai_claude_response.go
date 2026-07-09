@@ -441,10 +441,13 @@ func convertOpenAINonStreamingToAnthropic(rawJSON []byte) [][]byte {
 		}
 
 		// Handle text content
-		if content := choice.Get("message.content"); content.Exists() && content.String() != "" {
-			block := []byte(`{"type":"text","text":""}`)
-			block, _ = sjson.SetBytes(block, "text", content.String())
-			out, _ = sjson.SetRawBytes(out, "content.-1", block)
+		if content := choice.Get("message.content"); content.Exists() {
+			text := openAIResponseContentText(content)
+			if text != "" {
+				block := []byte(`{"type":"text","text":""}`)
+				block, _ = sjson.SetBytes(block, "text", text)
+				out, _ = sjson.SetRawBytes(out, "content.-1", block)
+			}
 		}
 
 		// Handle tool calls

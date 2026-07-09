@@ -351,3 +351,24 @@ func TestConvertGeminiResponseToOpenAIResponses_ResponseOutputOrdering(t *testin
 		t.Fatalf("expected response.completed after message added: msgAdded=%d completed=%d", posMsgAdded, posCompleted)
 	}
 }
+
+func TestConvertGeminiResponseToOpenAIResponses_StringifiedTextContentBlocksExtractText(t *testing.T) {
+	in := []byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"[{\"type\":\"text\",\"text\":\"hello\"},{\"type\":\"output_text\",\"text\":\" world\"}]"}]}}],"modelVersion":"test-model","responseId":"req_blocks"},"traceId":"t1"}`)
+
+	var param any
+	out := ConvertGeminiResponseToOpenAIResponses(context.Background(), "test-model", nil, nil, in, &param)
+
+	var text string
+	for _, chunk := range out {
+		event, data := parseSSEEvent(t, chunk)
+		if event == "response.output_text.delta" {
+			text = data.Get("delta").String()
+		}
+	}
+	if text != "hello world" {
+		t.Fatalf("delta = %q, want hello world; outputs=%q", text, out)
+	}
+	if strings.Contains(text, `"type":"text"`) {
+		t.Fatalf("content blocks were serialized into text: %q", text)
+	}
+}

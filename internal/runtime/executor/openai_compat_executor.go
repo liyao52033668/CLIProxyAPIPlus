@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -849,27 +850,7 @@ func (a *openAIChatStreamAggregator) Add(rawJSON []byte) error {
 }
 
 func openAIChatStreamContentText(content gjson.Result) string {
-	if content.Type == gjson.String {
-		return content.String()
-	}
-	if content.IsArray() {
-		var builder strings.Builder
-		content.ForEach(func(_, item gjson.Result) bool {
-			if item.Type == gjson.String {
-				builder.WriteString(item.String())
-				return true
-			}
-			if item.Get("type").String() == "text" {
-				builder.WriteString(item.Get("text").String())
-			}
-			return true
-		})
-		return builder.String()
-	}
-	if content.Get("type").String() == "text" {
-		return content.Get("text").String()
-	}
-	return content.String()
+	return translatorcommon.TextFromContentBlocks(content)
 }
 
 func (a *openAIChatStreamAggregator) Build() ([]byte, error) {

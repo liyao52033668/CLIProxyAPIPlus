@@ -218,19 +218,23 @@ func ensureAntigravityInteractionsStep(out [][]byte, st *antigravityToInteractio
 }
 
 func appendAntigravityPartToInteractionsStream(out [][]byte, st *antigravityToInteractionsStreamState, part gjson.Result) [][]byte {
-	if text := part.Get("text"); text.Exists() && text.String() != "" {
+	if textResult := part.Get("text"); textResult.Exists() {
+		text := translatorcommon.TextFromContentBlocks(textResult)
+		if text == "" {
+			return out
+		}
 		if part.Get("thought").Bool() {
 			out = ensureAntigravityInteractionsStep(out, st, "thought", gjson.Result{})
 			delta := []byte(`{"index":0,"delta":{"content":{"text":"","type":"text"},"type":"thought_summary"},"event_type":"step.delta"}`)
 			delta, _ = sjson.SetBytes(delta, "index", st.ActiveStepIndex)
-			delta, _ = sjson.SetBytes(delta, "delta.content.text", text.String())
+			delta, _ = sjson.SetBytes(delta, "delta.content.text", text)
 			out = append(out, translatorcommon.SSEEventData("step.delta", delta))
 			return appendAntigravityThoughtSignature(out, st, part)
 		}
 		out = ensureAntigravityInteractionsStep(out, st, "model_output", gjson.Result{})
 		delta := []byte(`{"index":0,"delta":{"text":"","type":"text"},"event_type":"step.delta"}`)
 		delta, _ = sjson.SetBytes(delta, "index", st.ActiveStepIndex)
-		delta, _ = sjson.SetBytes(delta, "delta.text", text.String())
+		delta, _ = sjson.SetBytes(delta, "delta.text", text)
 		return append(out, translatorcommon.SSEEventData("step.delta", delta))
 	}
 	if fc := part.Get("functionCall"); fc.Exists() {
@@ -298,13 +302,17 @@ func antigravityPartToInteractionsStep(part gjson.Result) []byte {
 		}
 		return step
 	}
-	if text := part.Get("text"); text.Exists() {
+	if textResult := part.Get("text"); textResult.Exists() {
+		text := translatorcommon.TextFromContentBlocks(textResult)
+		if text == "" {
+			return nil
+		}
 		step := []byte(`{"type":"model_output","content":[]}`)
 		if part.Get("thought").Bool() {
 			step, _ = sjson.SetBytes(step, "type", "thought")
 		}
 		item := []byte(`{"type":"text","text":""}`)
-		item, _ = sjson.SetBytes(item, "text", text.String())
+		item, _ = sjson.SetBytes(item, "text", text)
 		step, _ = sjson.SetRawBytes(step, "content.-1", item)
 		return step
 	}

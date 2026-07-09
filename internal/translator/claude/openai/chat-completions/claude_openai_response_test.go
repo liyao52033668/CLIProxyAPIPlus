@@ -2,6 +2,7 @@ package chat_completions
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -112,5 +113,30 @@ func TestConvertClaudeResponseToOpenAINonStream_UsageMergesMessageStartUsage(t *
 	}
 	if gotCachedTokens := gjson.GetBytes(out, "usage.prompt_tokens_details.cached_tokens").Int(); gotCachedTokens != 22000 {
 		t.Fatalf("expected cached_tokens %d, got %d", 22000, gotCachedTokens)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAI_StreamStringifiedTextDeltaContentBlocksExtractText(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	out := ConvertClaudeResponseToOpenAI(
+		ctx,
+		"claude-opus-4-6",
+		nil,
+		nil,
+		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"[{\"type\":\"text\",\"text\":\"hello\"},{\"type\":\"output_text\",\"text\":\" world\"}]"}}`),
+		&param,
+	)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(out))
+	}
+
+	text := gjson.GetBytes(out[0], "choices.0.delta.content").String()
+	if text != "hello world" {
+		t.Fatalf("content = %q, want hello world; chunk=%s", text, string(out[0]))
+	}
+	if strings.Contains(text, `"type":"text"`) {
+		t.Fatalf("content blocks were serialized into text: %q", text)
 	}
 }

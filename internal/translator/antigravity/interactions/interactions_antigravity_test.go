@@ -3,6 +3,7 @@ package interactions
 import (
 	"bytes"
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -118,4 +119,33 @@ func findAntigravityInteractionsEventPayload(events [][]byte, eventType string) 
 		}
 	}
 	return nil
+}
+
+func TestConvertAntigravityResponseToInteractionsStreamStringifiedContentBlocksExtractText(t *testing.T) {
+	ctx := context.WithValue(context.Background(), "alt", "")
+	var param any
+	events := ConvertAntigravityResponseToInteractions(ctx, "antigravity-test", nil, nil, []byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"[{\"type\":\"text\",\"text\":\"hello\"},{\"type\":\"output_text\",\"text\":\" world\"}]"}]}}]}}`), &param)
+	payload := findAntigravityInteractionsEventPayload(events, "step.delta")
+	if len(payload) == 0 {
+		t.Fatalf("step.delta event not found: %q", events)
+	}
+	text := gjson.GetBytes(payload, "delta.text").String()
+	if text != "hello world" {
+		t.Fatalf("delta.text = %q, want hello world. Payload: %s", text, string(payload))
+	}
+	if strings.Contains(text, `"type":"text"`) {
+		t.Fatalf("content blocks were serialized into text: %q", text)
+	}
+}
+
+func TestConvertAntigravityResponseToInteractionsNonStreamStringifiedContentBlocksExtractText(t *testing.T) {
+	raw := []byte(`{"response":{"responseId":"resp_1","candidates":[{"content":{"role":"model","parts":[{"text":"[{\"type\":\"text\",\"text\":\"hello\"},{\"type\":\"output_text\",\"text\":\" world\"}]"}]},"finishReason":"STOP"}]}}`)
+	out := ConvertAntigravityResponseToInteractionsNonStream(context.Background(), "antigravity-test", nil, nil, raw, nil)
+	text := gjson.GetBytes(out, "steps.0.content.0.text").String()
+	if text != "hello world" {
+		t.Fatalf("steps.0.content.0.text = %q, want hello world. Output: %s", text, string(out))
+	}
+	if strings.Contains(text, `"type":"text"`) {
+		t.Fatalf("content blocks were serialized into text: %q", text)
+	}
 }

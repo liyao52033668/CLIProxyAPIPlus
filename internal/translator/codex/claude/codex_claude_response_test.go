@@ -523,6 +523,29 @@ func TestConvertCodexResponseToClaude_ShortensLongToolUseIDs(t *testing.T) {
 	})
 }
 
+func TestConvertCodexResponseToClaude_StreamStringifiedTextDeltaContentBlocksExtractText(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"messages":[]}`)
+	var param any
+
+	chunks := [][]byte{
+		[]byte(`data: {"type":"response.content_part.added"}`),
+		[]byte(`data: {"type":"response.output_text.delta","delta":"[{\"type\":\"text\",\"text\":\"hello\"},{\"type\":\"output_text\",\"text\":\" world\"}]"}`),
+	}
+
+	var outputs [][]byte
+	for _, chunk := range chunks {
+		outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, chunk, &param)...)
+	}
+
+	text := collectClaudeStreamTextDeltas(outputs)
+	if text != "hello world" {
+		t.Fatalf("text deltas = %q, want hello world. Outputs=%q", text, outputs)
+	}
+	if strings.Contains(text, `"type":"text"`) {
+		t.Fatalf("content blocks were serialized into text: %q", text)
+	}
+}
 func TestConvertCodexResponseToClaude_StreamTextDeltaContentBlocksExtractText(t *testing.T) {
 	ctx := context.Background()
 	originalRequest := []byte(`{"messages":[]}`)

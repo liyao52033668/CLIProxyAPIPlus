@@ -262,20 +262,27 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 					partAdded, _ = sjson.SetBytes(partAdded, "output_index", st.ReasoningIndex)
 					out = append(out, emitEvent("response.reasoning_summary_part.added", partAdded))
 				}
-				if t := part.Get("text"); t.Exists() && t.String() != "" {
-					st.ReasoningBuf.WriteString(t.String())
-					msg := []byte(`{"type":"response.reasoning_summary_text.delta","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"delta":""}`)
-					msg, _ = sjson.SetBytes(msg, "sequence_number", nextSeq())
-					msg, _ = sjson.SetBytes(msg, "item_id", st.ReasoningItemID)
-					msg, _ = sjson.SetBytes(msg, "output_index", st.ReasoningIndex)
-					msg, _ = sjson.SetBytes(msg, "delta", t.String())
-					out = append(out, emitEvent("response.reasoning_summary_text.delta", msg))
+				if t := part.Get("text"); t.Exists() {
+					text := translatorcommon.TextFromContentBlocks(t)
+					if text != "" {
+						st.ReasoningBuf.WriteString(text)
+						msg := []byte(`{"type":"response.reasoning_summary_text.delta","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"delta":""}`)
+						msg, _ = sjson.SetBytes(msg, "sequence_number", nextSeq())
+						msg, _ = sjson.SetBytes(msg, "item_id", st.ReasoningItemID)
+						msg, _ = sjson.SetBytes(msg, "output_index", st.ReasoningIndex)
+						msg, _ = sjson.SetBytes(msg, "delta", text)
+						out = append(out, emitEvent("response.reasoning_summary_text.delta", msg))
+					}
 				}
 				return true
 			}
 
 			// Assistant visible text
-			if t := part.Get("text"); t.Exists() && t.String() != "" {
+			if t := part.Get("text"); t.Exists() {
+				text := translatorcommon.TextFromContentBlocks(t)
+				if text == "" {
+					return true
+				}
 				// Before emitting non-reasoning outputs, finalize reasoning if open.
 				finalizeReasoning()
 				if !st.MsgOpened {
@@ -295,13 +302,13 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 					out = append(out, emitEvent("response.content_part.added", partAdded))
 					st.ItemTextBuf.Reset()
 				}
-				st.TextBuf.WriteString(t.String())
-				st.ItemTextBuf.WriteString(t.String())
+				st.TextBuf.WriteString(text)
+				st.ItemTextBuf.WriteString(text)
 				msg := []byte(`{"type":"response.output_text.delta","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"delta":"","logprobs":[]}`)
 				msg, _ = sjson.SetBytes(msg, "sequence_number", nextSeq())
 				msg, _ = sjson.SetBytes(msg, "item_id", st.CurrentMsgID)
 				msg, _ = sjson.SetBytes(msg, "output_index", st.MsgIndex)
-				msg, _ = sjson.SetBytes(msg, "delta", t.String())
+				msg, _ = sjson.SetBytes(msg, "delta", text)
 				out = append(out, emitEvent("response.output_text.delta", msg))
 				return true
 			}

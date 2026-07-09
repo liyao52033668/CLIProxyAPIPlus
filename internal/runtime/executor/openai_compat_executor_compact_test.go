@@ -218,6 +218,26 @@ func TestOpenAICompatExecutorImagesGenerationsStreamsUpstream(t *testing.T) {
 	}
 }
 
+func TestOpenAIChatStreamAggregatorStringifiedContentBlocksExtractText(t *testing.T) {
+	aggregator := &openAIChatStreamAggregator{choices: make(map[int]*openAIChatAggregatedChoice)}
+	err := aggregator.Add([]byte(`{"id":"chatcmpl_1","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"[{\"type\":\"text\",\"text\":\"hello\"},{\"type\":\"output_text\",\"text\":\" world\"}]"},"finish_reason":"stop"}]}`))
+	if err != nil {
+		t.Fatalf("Add error: %v", err)
+	}
+
+	out, err := aggregator.Build()
+	if err != nil {
+		t.Fatalf("Build error: %v", err)
+	}
+	text := gjson.GetBytes(out, "choices.0.message.content").String()
+	if text != "hello world" {
+		t.Fatalf("content = %q, want hello world; output=%s", text, string(out))
+	}
+	if strings.Contains(text, `"type":"text"`) {
+		t.Fatalf("content blocks were serialized into text: %q", text)
+	}
+}
+
 func TestOpenAICompatExecutorImagesEditsMultipartRewritesModel(t *testing.T) {
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)

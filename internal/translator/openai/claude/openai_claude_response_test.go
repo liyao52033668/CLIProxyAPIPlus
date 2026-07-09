@@ -194,6 +194,27 @@ func TestConvertOpenAIResponseToClaudeNonStream_StringifiedContentBlockArrayUses
 	}
 }
 
+func TestConvertOpenAIResponseToClaudeNonStreamFallback_StringifiedContentBlockArrayUsesText(t *testing.T) {
+	var param any
+	chunks := ConvertOpenAIResponseToClaude(
+		context.Background(),
+		"",
+		[]byte(`{"stream":false}`),
+		nil,
+		[]byte(`data: {"id":"chatcmpl_1","model":"m","choices":[{"message":{"role":"assistant","content":"[{\"type\":\"text\",\"text\":\"hello\"},{\"type\":\"output_text\",\"text\":\" world\"}]"},"finish_reason":"stop"}]}`),
+		&param,
+	)
+	out := bytes.Join(chunks, nil)
+
+	text := gjson.GetBytes(out, "content.0.text").String()
+	if text != "hello world" {
+		t.Fatalf("content text = %q, want hello world; output=%s", text, string(out))
+	}
+	if strings.Contains(text, `"type":"text"`) {
+		t.Fatalf("content blocks were serialized into text: %q", text)
+	}
+}
+
 func TestStreamingTool_EmptyNameThroughout(t *testing.T) {
 	events := runStream(t, streamReq,
 		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_a","function":{"name":"","arguments":""}}]}}]}`,

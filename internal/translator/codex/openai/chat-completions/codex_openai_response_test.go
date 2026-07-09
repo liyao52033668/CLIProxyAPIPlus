@@ -2,6 +2,7 @@ package chat_completions
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -147,5 +148,23 @@ func TestConvertCodexResponseToOpenAI_NonStreamImageGenerationCallAddsMessageIma
 	gotURL := gjson.GetBytes(out, "choices.0.message.images.0.image_url.url").String()
 	if gotURL != "data:image/png;base64,aGVsbG8=" {
 		t.Fatalf("expected image url %q, got %q; chunk=%s", "data:image/png;base64,aGVsbG8=", gotURL, string(out))
+	}
+}
+
+func TestConvertCodexResponseToOpenAI_StreamStringifiedTextDeltaContentBlocksExtractText(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	out := ConvertCodexResponseToOpenAI(ctx, "gpt-5.4", nil, nil, []byte(`data: {"type":"response.output_text.delta","delta":"[{\"type\":\"text\",\"text\":\"hello\"},{\"type\":\"output_text\",\"text\":\" world\"}]"}`), &param)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(out))
+	}
+
+	text := gjson.GetBytes(out[0], "choices.0.delta.content").String()
+	if text != "hello world" {
+		t.Fatalf("content = %q, want hello world; chunk=%s", text, string(out[0]))
+	}
+	if strings.Contains(text, `"type":"text"`) {
+		t.Fatalf("content blocks were serialized into text: %q", text)
 	}
 }

@@ -110,11 +110,12 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, originalReque
 
 			// Handle text content (both regular content and thinking)
 			if partTextResult.Exists() {
+				text := translatorcommon.TextFromContentBlocks(partTextResult)
 				// Process thinking content (internal reasoning)
 				if partResult.Get("thought").Bool() {
 					// Continue existing thinking block if already in thinking state
 					if (*param).(*Params).ResponseType == 2 {
-						data, _ := sjson.SetBytes(fmt.Appendf(nil, `{"type":"content_block_delta","index":%d,"delta":{"type":"thinking_delta","thinking":""}}`, (*param).(*Params).ResponseIndex), "delta.thinking", partTextResult.String())
+						data, _ := sjson.SetBytes(fmt.Appendf(nil, `{"type":"content_block_delta","index":%d,"delta":{"type":"thinking_delta","thinking":""}}`, (*param).(*Params).ResponseIndex), "delta.thinking", text)
 						appendEvent("content_block_delta", string(data))
 						(*param).(*Params).HasContent = true
 					} else {
@@ -132,7 +133,7 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, originalReque
 
 						// Start a new thinking content block
 						appendEvent("content_block_start", fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"thinking","thinking":""}}`, (*param).(*Params).ResponseIndex))
-						data, _ := sjson.SetBytes(fmt.Appendf(nil, `{"type":"content_block_delta","index":%d,"delta":{"type":"thinking_delta","thinking":""}}`, (*param).(*Params).ResponseIndex), "delta.thinking", partTextResult.String())
+						data, _ := sjson.SetBytes(fmt.Appendf(nil, `{"type":"content_block_delta","index":%d,"delta":{"type":"thinking_delta","thinking":""}}`, (*param).(*Params).ResponseIndex), "delta.thinking", text)
 						appendEvent("content_block_delta", string(data))
 						(*param).(*Params).ResponseType = 2 // Set state to thinking
 						(*param).(*Params).HasContent = true
@@ -141,7 +142,7 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, originalReque
 					// Process regular text content (user-visible output)
 					// Continue existing text block if already in content state
 					if (*param).(*Params).ResponseType == 1 {
-						data, _ := sjson.SetBytes(fmt.Appendf(nil, `{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`, (*param).(*Params).ResponseIndex), "delta.text", partTextResult.String())
+						data, _ := sjson.SetBytes(fmt.Appendf(nil, `{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`, (*param).(*Params).ResponseIndex), "delta.text", text)
 						appendEvent("content_block_delta", string(data))
 						(*param).(*Params).HasContent = true
 					} else {
@@ -159,7 +160,7 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, originalReque
 
 						// Start a new text content block
 						appendEvent("content_block_start", fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"text","text":""}}`, (*param).(*Params).ResponseIndex))
-						data, _ := sjson.SetBytes(fmt.Appendf(nil, `{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`, (*param).(*Params).ResponseIndex), "delta.text", partTextResult.String())
+						data, _ := sjson.SetBytes(fmt.Appendf(nil, `{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`, (*param).(*Params).ResponseIndex), "delta.text", text)
 						appendEvent("content_block_delta", string(data))
 						(*param).(*Params).ResponseType = 1 // Set state to content
 						(*param).(*Params).HasContent = true

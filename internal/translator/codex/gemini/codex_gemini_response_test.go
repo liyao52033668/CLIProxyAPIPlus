@@ -109,3 +109,19 @@ func TestConvertCodexResponseToGemini_NonStreamImageGenerationCallAddsInlineData
 		t.Fatalf("expected inlineData.mimeType %q, got %q; chunk=%s", "image/png", gotMime, string(out))
 	}
 }
+
+func TestConvertCodexResponseToGemini_StreamStringifiedTextDeltaContentBlocksExtractText(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"tools":[]}`)
+	var param any
+
+	out := ConvertCodexResponseToGemini(ctx, "gemini-2.5-pro", originalRequest, nil, []byte(`data: {"type":"response.output_text.delta","delta":"[{\"type\":\"text\",\"text\":\"hello\"},{\"type\":\"output_text\",\"text\":\" world\"}]"}`), &param)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(out))
+	}
+
+	text := gjson.GetBytes(out[0], "candidates.0.content.parts.0.text").String()
+	if text != "hello world" {
+		t.Fatalf("text = %q, want hello world; chunk=%s", text, string(out[0]))
+	}
+}

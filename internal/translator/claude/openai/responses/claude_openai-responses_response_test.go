@@ -99,3 +99,31 @@ func TestConvertClaudeResponseToOpenAIResponsesNonStream_ThinkingIncludesSignatu
 		t.Fatalf("non-stream reasoning summary text = %q", got)
 	}
 }
+
+func TestConvertClaudeResponseToOpenAIResponses_StringifiedTextDeltaContentBlocksExtractText(t *testing.T) {
+	chunks := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_123","usage":{"input_tokens":1,"output_tokens":0}}}`),
+		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`),
+		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"[{\"type\":\"text\",\"text\":\"hello\"},{\"type\":\"output_text\",\"text\":\" world\"}]"}}`),
+	}
+
+	var param any
+	var outputs [][]byte
+	for _, chunk := range chunks {
+		outputs = append(outputs, ConvertClaudeResponseToOpenAIResponses(context.Background(), "claude-test", nil, nil, chunk, &param)...)
+	}
+
+	var text string
+	for _, output := range outputs {
+		event, data := parseClaudeResponsesSSEEvent(t, output)
+		if event == "response.output_text.delta" {
+			text = data.Get("delta").String()
+		}
+	}
+	if text != "hello world" {
+		t.Fatalf("delta = %q, want hello world; outputs=%q", text, outputs)
+	}
+	if strings.Contains(text, `"type":"text"`) {
+		t.Fatalf("content blocks were serialized into text: %q", text)
+	}
+}

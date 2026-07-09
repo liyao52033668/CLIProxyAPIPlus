@@ -186,14 +186,15 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 		dt := d.Get("type").String()
 		if dt == "text_delta" {
 			if t := d.Get("text"); t.Exists() {
+				text := translatorcommon.TextFromContentBlocks(t)
 				msg := []byte(`{"type":"response.output_text.delta","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"delta":"","logprobs":[]}`)
 				msg, _ = sjson.SetBytes(msg, "sequence_number", nextSeq())
 				msg, _ = sjson.SetBytes(msg, "item_id", st.CurrentMsgID)
-				msg, _ = sjson.SetBytes(msg, "delta", t.String())
+				msg, _ = sjson.SetBytes(msg, "delta", text)
 				out = append(out, emitEvent("response.output_text.delta", msg))
 				// aggregate text for response.output
-				st.TextBuf.WriteString(t.String())
-				st.CurrentTextBuf.WriteString(t.String())
+				st.TextBuf.WriteString(text)
+				st.CurrentTextBuf.WriteString(text)
 			}
 		} else if dt == "input_json_delta" {
 			idx := int(root.Get("index").Int())
@@ -212,12 +213,13 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 		} else if dt == "thinking_delta" {
 			if st.ReasoningActive {
 				if t := d.Get("thinking"); t.Exists() {
-					st.ReasoningBuf.WriteString(t.String())
+					text := translatorcommon.TextFromContentBlocks(t)
+					st.ReasoningBuf.WriteString(text)
 					msg := []byte(`{"type":"response.reasoning_summary_text.delta","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"delta":""}`)
 					msg, _ = sjson.SetBytes(msg, "sequence_number", nextSeq())
 					msg, _ = sjson.SetBytes(msg, "item_id", st.ReasoningItemID)
 					msg, _ = sjson.SetBytes(msg, "output_index", st.ReasoningIndex)
-					msg, _ = sjson.SetBytes(msg, "delta", t.String())
+					msg, _ = sjson.SetBytes(msg, "delta", text)
 					out = append(out, emitEvent("response.reasoning_summary_text.delta", msg))
 				}
 			}
