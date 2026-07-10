@@ -8,6 +8,7 @@ package claude
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 
@@ -31,6 +32,9 @@ type ConvertOpenAIResponseToAnthropicParams struct {
 	// been emitted on the wire. Using raw upstream tool_calls presence here
 	// can produce stop_reason=tool_use with zero announced tool blocks.
 	SawToolCall bool
+	// PendingToolCall is true once the upstream sends a tool_call delta, even
+	// when its name or id is still missing.
+	PendingToolCall bool
 	// Content accumulator for streaming
 	ContentAccumulator strings.Builder
 	// Tool calls accumulator for streaming
@@ -131,6 +135,9 @@ func effectiveOpenAIFinishReason(param *ConvertOpenAIResponseToAnthropicParams) 
 	}
 	if param.SawToolCall {
 		return "tool_calls"
+	}
+	if param.PendingToolCall && param.FinishReason == "tool_calls" {
+		return "stop"
 	}
 	return param.FinishReason
 }
@@ -236,6 +243,7 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 				}
 
 				accumulator := param.ToolCallsAccumulator[index]
+				param.PendingToolCall = true
 
 				// Handle tool call ID. Only accept JSON-string, non-empty
 				// values so malformed upstream fields do not overwrite a
@@ -283,7 +291,7 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 	if finishReason := root.Get("choices.0.finish_reason"); finishReason.Exists() && finishReason.String() != "" {
 		reason := finishReason.String()
 		switch {
-		case param.SawToolCall:
+		case param.SawToolCall || param.PendingToolCall:
 			param.FinishReason = "tool_calls"
 		case reason == "tool_calls":
 			param.FinishReason = "stop"
@@ -312,7 +320,10 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 					// never sent an id. SanitizeClaudeToolID("") produces the
 					// expected stable synthetic toolu_<nanos>_<n> ID shape.
 					if accumulator.Name == "" {
-						continue
+						if accumulator.Arguments.Len() == 0 {
+							continue
+						}
+						accumulator.Name = fmt.Sprintf("tool_%d", index)
 					}
 					emitToolUseStart(param, index, accumulator, &results)
 				}
@@ -382,9 +393,12 @@ func convertOpenAIDoneToAnthropic(param *ConvertOpenAIResponseToAnthropicParams)
 			accumulator := param.ToolCallsAccumulator[index]
 			if !accumulator.StartEmitted {
 				// Belated emit at [DONE]; same behavior as the finish_reason
-				// path for name-but-no-id streams.
+				// path for incomplete tool call metadata.
 				if accumulator.Name == "" {
-					continue
+					if accumulator.Arguments.Len() == 0 {
+						continue
+					}
+					accumulator.Name = fmt.Sprintf("tool_%d", index)
 				}
 				emitToolUseStart(param, index, accumulator, &results)
 			}
@@ -406,7 +420,7 @@ func convertOpenAIDoneToAnthropic(param *ConvertOpenAIResponseToAnthropicParams)
 	}
 
 	// If we haven't sent message_delta yet (no usage info was received), send it now
-	if param.FinishReason != "" && !param.MessageDeltaSent {
+	if (param.FinishReason != "" || param.SawToolCall) && !param.MessageDeltaSent {
 		messageDeltaJSON := []byte(`{"type":"message_delta","delta":{"stop_reason":"","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
 		messageDeltaJSON, _ = sjson.SetBytes(messageDeltaJSON, "delta.stop_reason", mapOpenAIFinishReasonToAnthropic(effectiveOpenAIFinishReason(param)))
 		results = append(results, translatorcommon.AppendSSEEventBytes(nil, "message_delta", messageDeltaJSON, 2))
