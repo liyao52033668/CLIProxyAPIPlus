@@ -449,6 +449,98 @@ func TestConvertClaudeRequestToOpenAI_ToolResultOrderAndContent(t *testing.T) {
 	}
 }
 
+func TestConvertClaudeRequestToOpenAI_ToolResultEmptyTextContent(t *testing.T) {
+	tests := []struct {
+		name        string
+		content     string
+		wantContent string
+	}{
+		{
+			name:        "single empty text block",
+			content:     `[{"type":"text","text":""}]`,
+			wantContent: "",
+		},
+		{
+			name:        "multiple empty text blocks",
+			content:     `[{"type":"text","text":""},{"type":"text","text":""}]`,
+			wantContent: "\n\n",
+		},
+		{
+			name:        "whitespace text block",
+			content:     `[{"type":"text","text":" \t"}]`,
+			wantContent: " \t",
+		},
+		{
+			name:        "empty and non-empty text blocks",
+			content:     `[{"type":"text","text":""},{"type":"text","text":"value"},{"type":"text","text":""}]`,
+			wantContent: "\n\nvalue\n\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inputJSON := `{
+				"model": "claude-3-opus",
+				"messages": [
+					{
+						"role": "assistant",
+						"content": [{"type":"tool_use","id":"call_1","name":"do_work","input":{}}]
+					},
+					{
+						"role": "user",
+						"content": [{"type":"tool_result","tool_use_id":"call_1","content":` + tt.content + `}]
+					}
+				]
+			}`
+
+			result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+			content := gjson.GetBytes(result, "messages.1.content")
+			if content.Type != gjson.String {
+				t.Fatalf("tool content type = %s, want string; result=%s", content.Type.String(), string(result))
+			}
+			if got := content.String(); got != tt.wantContent {
+				t.Fatalf("tool content = %q, want %q; result=%s", got, tt.wantContent, string(result))
+			}
+		})
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_ToolResultFallbackContent(t *testing.T) {
+	tests := []struct {
+		name        string
+		content     string
+		wantContent string
+	}{
+		{
+			name:        "empty array",
+			content:     `[]`,
+			wantContent: `[]`,
+		},
+		{
+			name:        "unknown object",
+			content:     `[{"type":"unknown","value":1}]`,
+			wantContent: `{"type":"unknown","value":1}`,
+		},
+		{
+			name:        "invalid text block",
+			content:     `[{"type":"text","text":null}]`,
+			wantContent: `[{"type":"text","text":null}]`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, raw := convertClaudeToolResultContent(gjson.Parse(tt.content))
+			if raw {
+				t.Fatalf("raw = true, want false")
+			}
+			if got != tt.wantContent {
+				t.Fatalf("content = %q, want %q", got, tt.wantContent)
+			}
+		})
+	}
+}
+
 func TestConvertClaudeRequestToOpenAI_ToolResultObjectContent(t *testing.T) {
 	inputJSON := `{
 		"model": "claude-3-opus",

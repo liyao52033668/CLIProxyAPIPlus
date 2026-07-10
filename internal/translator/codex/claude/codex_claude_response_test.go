@@ -593,6 +593,111 @@ func TestConvertCodexResponseToClaude_StreamOutputItemDoneContentBlocksExtractTe
 	}
 }
 
+func TestConvertCodexResponseToClaude_StreamEmptyStructuredDeltaUsesCompletedMessageText(t *testing.T) {
+	chunks := [][]byte{
+		[]byte(`data: {"type":"response.content_part.added"}`),
+		[]byte(`data: {"type":"response.output_text.delta","delta":"[{\"text\":\"\",\"type\":\"text\"}]"}`),
+		[]byte(`data: {"type":"response.content_part.done"}`),
+		[]byte(`data: {"type":"response.output_item.done","item":{"type":"message","content":[{"type":"output_text","text":"real answer"}]}}`),
+		[]byte(`data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}`),
+	}
+
+	outputs := convertCodexStreamChunks(t, chunks)
+	assertClaudeStreamEventLabels(t, outputs, "start:text:0,text:real answer:0,stop:0,message_delta:end_turn,message_stop")
+}
+
+func TestConvertCodexResponseToClaude_StreamEmptyTextDoesNotCreateBlock(t *testing.T) {
+	chunks := [][]byte{
+		[]byte(`data: {"type":"response.content_part.added"}`),
+		[]byte(`data: {"type":"response.output_text.delta","delta":[{"type":"text","text":""}]}`),
+		[]byte(`data: {"type":"response.content_part.done"}`),
+		[]byte(`data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":0}}}`),
+	}
+
+	outputs := convertCodexStreamChunks(t, chunks)
+	assertClaudeStreamEventLabels(t, outputs, "message_delta:end_turn,message_stop")
+}
+
+func TestConvertCodexResponseToClaude_StreamOutputItemDoneDoesNotRepeatTextDelta(t *testing.T) {
+	chunks := [][]byte{
+		[]byte(`data: {"type":"response.content_part.added"}`),
+		[]byte(`data: {"type":"response.output_text.delta","delta":"hello"}`),
+		[]byte(`data: {"type":"response.output_item.done","item":{"type":"message","content":[{"type":"output_text","text":"hello"}]}}`),
+		[]byte(`data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}`),
+	}
+
+	outputs := convertCodexStreamChunks(t, chunks)
+	assertClaudeStreamEventLabels(t, outputs, "start:text:0,text:hello:0,stop:0,message_delta:end_turn,message_stop")
+}
+
+func TestConvertCodexResponseToClaude_StreamCompletedClosesOpenTextBlock(t *testing.T) {
+	chunks := [][]byte{
+		[]byte(`data: {"type":"response.content_part.added"}`),
+		[]byte(`data: {"type":"response.output_text.delta","delta":"hello"}`),
+		[]byte(`data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}`),
+	}
+
+	outputs := convertCodexStreamChunks(t, chunks)
+	assertClaudeStreamEventLabels(t, outputs, "start:text:0,text:hello:0,stop:0,message_delta:end_turn,message_stop")
+}
+
+func TestConvertCodexResponseToClaude_StreamToolCallClosesOpenTextBlock(t *testing.T) {
+	chunks := [][]byte{
+		[]byte(`data: {"type":"response.content_part.added"}`),
+		[]byte(`data: {"type":"response.output_text.delta","delta":"before tool"}`),
+		[]byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_1","name":"lookup"}}`),
+		[]byte(`data: {"type":"response.function_call_arguments.delta","delta":"{\"q\":\"x\"}"}`),
+		[]byte(`data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_1","name":"lookup"}}`),
+		[]byte(`data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}`),
+	}
+
+	outputs := convertCodexStreamChunks(t, chunks)
+	assertClaudeStreamEventLabels(t, outputs, "start:text:0,text:before tool:0,stop:0,start:tool_use:1,stop:1,message_delta:tool_use,message_stop")
+}
+
+func convertCodexStreamChunks(t *testing.T, chunks [][]byte) [][]byte {
+	t.Helper()
+	ctx := context.Background()
+	originalRequest := []byte(`{"tools":[{"name":"lookup","input_schema":{"type":"object","properties":{}}}]}`)
+	var param any
+	var outputs [][]byte
+	for _, chunk := range chunks {
+		outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, chunk, &param)...)
+	}
+	return outputs
+}
+
+func assertClaudeStreamEventLabels(t *testing.T, outputs [][]byte, want string) {
+	t.Helper()
+	var labels []string
+	for _, out := range outputs {
+		for line := range strings.SplitSeq(string(out), "\n") {
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			switch data.Get("type").String() {
+			case "content_block_start":
+				labels = append(labels, "start:"+data.Get("content_block.type").String()+":"+data.Get("index").String())
+			case "content_block_delta":
+				if data.Get("delta.type").String() == "text_delta" {
+					labels = append(labels, "text:"+data.Get("delta.text").String()+":"+data.Get("index").String())
+				}
+			case "content_block_stop":
+				labels = append(labels, "stop:"+data.Get("index").String())
+			case "message_delta":
+				labels = append(labels, "message_delta:"+data.Get("delta.stop_reason").String())
+			case "message_stop":
+				labels = append(labels, "message_stop")
+			}
+		}
+	}
+
+	if got := strings.Join(labels, ","); got != want {
+		t.Fatalf("event labels = %q, want %q. Outputs=%q", got, want, outputs)
+	}
+}
+
 func TestConvertCodexResponseToClaudeNonStream_ContentBlocksExtractText(t *testing.T) {
 	ctx := context.Background()
 	originalRequest := []byte(`{"messages":[]}`)

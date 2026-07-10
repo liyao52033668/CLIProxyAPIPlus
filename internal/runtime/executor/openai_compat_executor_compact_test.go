@@ -527,6 +527,70 @@ func TestOpenAICompatExecutorForceStreamAggregatesClaudeTextBlocks(t *testing.T)
 	}
 }
 
+func TestOpenAICompatExecutorForceStreamClaudeEmptyToolResult(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","created":123,"model":"upstream-model","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}` + "\n\n"))
+		_, _ = w.Write([]byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","created":123,"model":"upstream-model","choices":[{"index":0,"delta":{"content":"next answer"},"finish_reason":null}]}` + "\n\n"))
+		_, _ = w.Write([]byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","created":123,"model":"upstream-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:        "compat",
+			BaseURL:     server.URL + "/v1",
+			ForceStream: true,
+		}},
+	})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url":    server.URL + "/v1",
+		"api_key":     "test",
+		"compat_name": "compat",
+	}}
+	payload := []byte(`{
+		"model":"upstream-model",
+		"max_tokens":128,
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"do_work","input":{}}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":[{"type":"text","text":""}]}]}
+		]
+	}`)
+	resp, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "upstream-model",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FromString("claude"),
+		OriginalRequest: payload,
+		Stream:          false,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+
+	messages := gjson.GetBytes(gotBody, "messages").Array()
+	if len(messages) != 2 {
+		t.Fatalf("upstream messages = %s, want 2 messages", gjson.GetBytes(gotBody, "messages").Raw)
+	}
+	if got := messages[1].Get("role").String(); got != "tool" {
+		t.Fatalf("upstream messages[1].role = %q, want tool; body=%s", got, string(gotBody))
+	}
+	toolContent := messages[1].Get("content")
+	if toolContent.Type != gjson.String || toolContent.String() != "" {
+		t.Fatalf("upstream tool content = %s %q, want empty string; body=%s", toolContent.Type.String(), toolContent.String(), string(gotBody))
+	}
+	if strings.Contains(string(gotBody), `[{\"type\":\"text\",\"text\":\"\"}]`) {
+		t.Fatalf("upstream body contains serialized empty content block: %s", string(gotBody))
+	}
+	if got := gjson.GetBytes(resp.Payload, "content.0.text").String(); got != "next answer" {
+		t.Fatalf("Claude response text = %q, want next answer; payload=%s", got, string(resp.Payload))
+	}
+}
+
 func TestOpenAICompatExecutorForceStreamAppliesNonStreamPayloadRulesBeforeStreamingUpstream(t *testing.T) {
 	var gotBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

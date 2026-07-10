@@ -393,7 +393,10 @@ func convertClaudeToolResultContent(content gjson.Result) (string, bool) {
 		var parts []string
 		contentJSON := []byte(`[]`)
 		hasImagePart := false
+		allTextParts := true
+		partCount := 0
 		content.ForEach(func(_, item gjson.Result) bool {
+			partCount++
 			switch {
 			case item.Type == gjson.String:
 				text := item.String()
@@ -402,12 +405,17 @@ func convertClaudeToolResultContent(content gjson.Result) (string, bool) {
 				textContent, _ = sjson.SetBytes(textContent, "text", text)
 				contentJSON, _ = sjson.SetRawBytes(contentJSON, "-1", textContent)
 			case item.IsObject() && item.Get("type").String() == "text":
-				text := item.Get("text").String()
+				textResult := item.Get("text")
+				if textResult.Type != gjson.String {
+					allTextParts = false
+				}
+				text := textResult.String()
 				parts = append(parts, text)
 				textContent := []byte(`{"type":"text","text":""}`)
 				textContent, _ = sjson.SetBytes(textContent, "text", text)
 				contentJSON, _ = sjson.SetRawBytes(contentJSON, "-1", textContent)
 			case item.IsObject() && item.Get("type").String() == "image":
+				allTextParts = false
 				contentItem, ok := convertClaudeContentPart(item)
 				if ok {
 					contentJSON, _ = sjson.SetRawBytes(contentJSON, "-1", []byte(contentItem))
@@ -416,8 +424,10 @@ func convertClaudeToolResultContent(content gjson.Result) (string, bool) {
 					parts = append(parts, item.Raw)
 				}
 			case item.IsObject() && item.Get("text").Exists() && item.Get("text").Type == gjson.String:
+				allTextParts = false
 				parts = append(parts, item.Get("text").String())
 			default:
+				allTextParts = false
 				parts = append(parts, item.Raw)
 			}
 			return true
@@ -428,6 +438,9 @@ func convertClaudeToolResultContent(content gjson.Result) (string, bool) {
 		}
 
 		joined := strings.Join(parts, "\n\n")
+		if partCount > 0 && allTextParts {
+			return joined, false
+		}
 		if strings.TrimSpace(joined) != "" {
 			return joined, false
 		}
