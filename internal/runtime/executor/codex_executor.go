@@ -17,6 +17,7 @@ import (
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -33,9 +34,11 @@ import (
 )
 
 const (
-	codexUserAgent             = "codex_cli_rs/0.118.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9"
+	codexUserAgent             = "codex_cli_rs/0.144.1 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9"
 	codexOriginator            = "codex_cli_rs"
 	codexDefaultImageToolModel = "gpt-image-2"
+	codexResponsesLiteHeader   = "X-OpenAI-Internal-Codex-Responses-Lite"
+	codexResponsesLiteMetadata = "client_metadata.ws_request_header_x_openai_internal_codex_responses_lite"
 )
 
 var dataTag = []byte("data:")
@@ -189,7 +192,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	body, _ = sjson.DeleteBytes(body, "stream_options")
 	body = normalizeCodexInstructions(body)
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
-		body = ensureImageGenerationTool(body, baseModel, auth)
+		body = ensureImageGenerationTool(body, baseModel, auth, opts.Headers)
 	}
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, e.Identifier(), body)
 	body, replayScope := applyCodexReasoningReplayCache(ctx, from, req, opts, body)
@@ -200,6 +203,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		return resp, err
 	}
 	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
+	applyModelHeaderOverrides(httpReq.Header, baseModel)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -327,7 +331,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	body, _ = sjson.DeleteBytes(body, "stream")
 	body = normalizeCodexInstructions(body)
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
-		body = ensureImageGenerationTool(body, baseModel, auth)
+		body = ensureImageGenerationTool(body, baseModel, auth, opts.Headers)
 	}
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, e.Identifier(), body)
 
@@ -337,6 +341,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 		return resp, err
 	}
 	applyCodexHeaders(httpReq, auth, apiKey, false, e.cfg)
+	applyModelHeaderOverrides(httpReq.Header, baseModel)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -429,7 +434,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body = normalizeCodexInstructions(body)
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
-		body = ensureImageGenerationTool(body, baseModel, auth)
+		body = ensureImageGenerationTool(body, baseModel, auth, opts.Headers)
 	}
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, e.Identifier(), body)
 	body, replayScope := applyCodexReasoningReplayCache(ctx, from, req, opts, body)
@@ -440,6 +445,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		return nil, err
 	}
 	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
+	applyModelHeaderOverrides(httpReq.Header, baseModel)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -854,6 +860,39 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
 }
 
+func codexSessionHeaderValue(headers http.Header) string {
+	if headers == nil {
+		return ""
+	}
+	for key, values := range headers {
+		if !strings.EqualFold(key, "Session_id") && !strings.EqualFold(key, "Session-Id") {
+			continue
+		}
+		for _, value := range values {
+			if value = strings.TrimSpace(value); value != "" {
+				return value
+			}
+		}
+	}
+	return ""
+}
+
+func applyModelHeaderOverrides(headers http.Header, modelName string) {
+	if headers == nil {
+		return
+	}
+	overrides := registry.ModelOverrideHeaders(modelName)
+	if len(overrides) == 0 {
+		return
+	}
+	for key, value := range overrides {
+		headers.Set(key, value)
+	}
+	if strings.Contains(headers.Get("User-Agent"), "Mac OS") && codexSessionHeaderValue(headers) == "" {
+		headers.Set("Session_id", uuid.NewString())
+	}
+}
+
 func newCodexStatusErr(statusCode int, body []byte) statusErr {
 	errCode := statusCode
 	if isCodexModelCapacityError(body) {
@@ -1014,7 +1053,21 @@ func isCodexFreePlanAuth(auth *cliproxyauth.Auth) bool {
 	return strings.EqualFold(strings.TrimSpace(auth.Attributes["plan_type"]), "free")
 }
 
-func ensureImageGenerationTool(body []byte, baseModel string, auth *cliproxyauth.Auth) []byte {
+func isCodexResponsesLiteRequest(body []byte, headers http.Header) bool {
+	if strings.EqualFold(strings.TrimSpace(headers.Get(codexResponsesLiteHeader)), "true") {
+		return true
+	}
+	value := gjson.GetBytes(body, codexResponsesLiteMetadata)
+	if !value.Exists() {
+		return false
+	}
+	return value.Type == gjson.True || value.Type == gjson.String && strings.EqualFold(strings.TrimSpace(value.String()), "true")
+}
+
+func ensureImageGenerationTool(body []byte, baseModel string, auth *cliproxyauth.Auth, headers http.Header) []byte {
+	if isCodexResponsesLiteRequest(body, headers) {
+		return body
+	}
 	if strings.HasSuffix(baseModel, "spark") {
 		return body
 	}

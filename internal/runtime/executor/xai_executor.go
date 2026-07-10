@@ -36,23 +36,27 @@ var (
 )
 
 const (
-	xaiImageHandlerType         = "openai-image"
-	xaiVideoHandlerType         = "openai-video"
-	xaiCustomToolType           = "custom"
-	xaiFunctionToolType         = "function"
-	xaiImageGenerationToolType  = "image_generation"
-	xaiNamespaceToolType        = "namespace"
-	xaiToolSearchType           = "tool_search"
-	xaiWebSearchToolType        = "web_search"
-	xaiImagesGenerationsPath    = "/images/generations"
-	xaiImagesEditsPath          = "/images/edits"
-	xaiDefaultImageEndpointPath = xaiImagesGenerationsPath
-	xaiVideosGenerationsPath    = "/videos/generations"
-	xaiVideosEditsPath          = "/videos/edits"
-	xaiVideosExtensionsPath     = "/videos/extensions"
-	xaiVideosPath               = "/videos"
-	xaiIdempotencyKeyMetaKey    = "idempotency_key"
-	xaiComposerModelPrefix      = "grok-composer-"
+	xaiImageHandlerType           = "openai-image"
+	xaiVideoHandlerType           = "openai-video"
+	xaiCustomToolType             = "custom"
+	xaiFunctionToolType           = "function"
+	xaiImageGenerationToolType    = "image_generation"
+	xaiNamespaceToolType          = "namespace"
+	xaiToolSearchType             = "tool_search"
+	xaiWebSearchToolType          = "web_search"
+	xaiImagesGenerationsPath      = "/images/generations"
+	xaiImagesEditsPath            = "/images/edits"
+	xaiDefaultImageEndpointPath   = xaiImagesGenerationsPath
+	xaiVideosGenerationsPath      = "/videos/generations"
+	xaiVideosEditsPath            = "/videos/edits"
+	xaiVideosExtensionsPath       = "/videos/extensions"
+	xaiVideosPath                 = "/videos"
+	xaiIdempotencyKeyMetaKey      = "idempotency_key"
+	xaiComposerModelPrefix        = "grok-composer-"
+	xaiCodexAppNamespaceName      = "codex_app"
+	xaiAutomationUpdateToolName   = "automation_update"
+	xaiSafeFunctionParameters     = `{"type":"object","properties":{},"additionalProperties":true}`
+	xaiFreeUsageExhaustedCooldown = 24 * time.Hour
 )
 
 // XAIExecutor is a stateless executor for xAI Grok's Responses API.
@@ -155,7 +159,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		return resp, statusErr{code: httpResp.StatusCode, msg: string(data)}
+		return resp, xaiStatusErr(httpResp.StatusCode, data)
 	}
 
 	data, err := io.ReadAll(httpResp.Body)
@@ -513,7 +517,7 @@ func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		return resp, statusErr{code: httpResp.StatusCode, msg: string(data)}
+		return resp, xaiStatusErr(httpResp.StatusCode, data)
 	}
 
 	return cliproxyexecutor.Response{Payload: data, Headers: httpResp.Header.Clone()}, nil
@@ -578,7 +582,7 @@ func (e *XAIExecutor) executeVideos(ctx context.Context, auth *cliproxyauth.Auth
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		return resp, statusErr{code: httpResp.StatusCode, msg: string(data)}
+		return resp, xaiStatusErr(httpResp.StatusCode, data)
 	}
 
 	return cliproxyexecutor.Response{Payload: data, Headers: httpResp.Header.Clone()}, nil
@@ -631,7 +635,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		return nil, statusErr{code: httpResp.StatusCode, msg: string(data)}
+		return nil, xaiStatusErr(httpResp.StatusCode, data)
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk)
@@ -1096,9 +1100,10 @@ func normalizeXAITools(body []byte) []byte {
 		toolType := tool.Get("type").String()
 		if toolType == xaiNamespaceToolType {
 			changed = true
+			namespaceName := tool.Get("name").String()
 			if namespaceTools := tool.Get("tools"); namespaceTools.IsArray() {
 				for _, nestedTool := range namespaceTools.Array() {
-					nestedRaw, nestedChanged, ok := normalizeXAITool(nestedTool)
+					nestedRaw, nestedChanged, ok := normalizeXAITool(nestedTool, namespaceName)
 					if !ok {
 						return body
 					}
@@ -1115,7 +1120,7 @@ func normalizeXAITools(body []byte) []byte {
 			}
 			continue
 		}
-		raw, toolChanged, ok := normalizeXAITool(tool)
+		raw, toolChanged, ok := normalizeXAITool(tool, "")
 		if !ok {
 			return body
 		}
@@ -1161,7 +1166,7 @@ func normalizeXAIToolChoiceForTools(body []byte) []byte {
 	return body
 }
 
-func normalizeXAITool(tool gjson.Result) ([]byte, bool, bool) {
+func normalizeXAITool(tool gjson.Result, namespaceName string) ([]byte, bool, bool) {
 	toolType := tool.Get("type").String()
 	changed := false
 	if toolType == xaiToolSearchType || toolType == xaiImageGenerationToolType {
@@ -1196,7 +1201,54 @@ func normalizeXAITool(tool gjson.Result) ([]byte, bool, bool) {
 		raw = updatedTool
 		changed = true
 	}
+	if toolType == xaiFunctionToolType && xaiFunctionParametersNeedSimplification(tool, namespaceName) {
+		updatedTool, errSet := sjson.SetRawBytes(raw, "parameters", []byte(xaiSafeFunctionParameters))
+		if errSet != nil {
+			return nil, false, false
+		}
+		raw = updatedTool
+		if strict := tool.Get("strict"); strict.Exists() && strict.Bool() {
+			updatedTool, errSet = sjson.SetBytes(raw, "strict", false)
+			if errSet != nil {
+				return nil, false, false
+			}
+			raw = updatedTool
+		}
+		changed = true
+		log.Debugf("xai: simplified parameters for tool %s.%s to avoid upstream hang", namespaceName, tool.Get("name").String())
+	}
 	return raw, changed, true
+}
+
+func xaiFunctionParametersNeedSimplification(tool gjson.Result, namespaceName string) bool {
+	return strings.EqualFold(strings.TrimSpace(tool.Get("type").String()), xaiFunctionToolType) &&
+		strings.EqualFold(strings.TrimSpace(namespaceName), xaiCodexAppNamespaceName) &&
+		strings.EqualFold(strings.TrimSpace(tool.Get("name").String()), xaiAutomationUpdateToolName)
+}
+
+func xaiStatusErr(code int, body []byte) statusErr {
+	err := statusErr{code: code, msg: string(body)}
+	if code != http.StatusTooManyRequests || len(body) == 0 {
+		return err
+	}
+	codeStr := strings.ToLower(gjson.GetBytes(body, "code").String())
+	if codeStr == "" {
+		codeStr = strings.ToLower(gjson.GetBytes(body, "error.code").String())
+	}
+	msg := strings.ToLower(gjson.GetBytes(body, "error").String())
+	if msg == "" {
+		msg = strings.ToLower(gjson.GetBytes(body, "error.message").String())
+	}
+	if msg == "" {
+		msg = strings.ToLower(string(body))
+	}
+	if strings.Contains(codeStr, "free-usage-exhausted") ||
+		strings.Contains(msg, "free-usage-exhausted") ||
+		strings.Contains(msg, "included free usage") {
+		d := xaiFreeUsageExhaustedCooldown
+		err.retryAfter = &d
+	}
+	return err
 }
 
 func sanitizeXAIInputEncryptedContent(body []byte) []byte {

@@ -4112,7 +4112,11 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 	provider, status, ok := GetOAuthSession(state)
 	log.Infof("GetAuthStatus: state=%s, provider=%s, status=%s, ok=%v", state, provider, status, ok)
 	if !ok {
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+		if IsOAuthSessionCompleted(state) {
+			c.JSON(http.StatusOK, gin.H{"status": "ok"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "error", "error": "unknown or expired state"})
 		return
 	}
 	if status != "" {

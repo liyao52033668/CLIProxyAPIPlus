@@ -68,7 +68,7 @@ func TestXAIWebsocketsExecuteStreamSendsResponseCreateWithPreviousResponseID(t *
 		Payload: []byte(`{"model":"grok-4.3","stream":true,"previous_response_id":"resp-prev","instructions":"system prompt","input":[{"type":"message","role":"user","content":"hello"}]}`),
 	}
 	opts := cliproxyexecutor.Options{
-		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
 		Metadata: map[string]any{
 			cliproxyexecutor.ExecutionSessionMetadataKey: "execution-session-1",
 		},
@@ -165,8 +165,8 @@ func TestXAIWebsocketsExecuteStreamNormalizesReasoningTextEvents(t *testing.T) {
 		Model:   "grok-4.3",
 		Payload: []byte(`{"model":"grok-4.3","input":"hello"}`),
 	}, cliproxyexecutor.Options{
-		SourceFormat:   sdktranslator.FormatOpenAIResponse,
-		Stream:         true,
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       true,
 	})
 	if err != nil {
 		t.Fatalf("ExecuteStream() error = %v", err)
@@ -247,7 +247,7 @@ func TestXAIWebsocketsExecuteStreamRewritesRepeatedResponseIDForDownstream(t *te
 		Metadata: map[string]any{"access_token": "xai-token"},
 	}
 	opts := cliproxyexecutor.Options{
-		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
 		Metadata: map[string]any{
 			cliproxyexecutor.ExecutionSessionMetadataKey: "xai-id-map-session",
 		},
@@ -370,7 +370,7 @@ func TestXAIWebsocketsExecuteStreamRewritesRepeatedResponseIDWithoutPreviousResp
 		Metadata: map[string]any{"access_token": "xai-token"},
 	}
 	opts := cliproxyexecutor.Options{
-		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
 		Metadata: map[string]any{
 			cliproxyexecutor.ExecutionSessionMetadataKey: "xai-id-map-no-prev-session",
 		},
@@ -485,8 +485,8 @@ func TestXAIWebsocketsExecuteStreamCompactionTriggerUsesHTTPCompactWithRecordedC
 		Metadata: map[string]any{"access_token": "xai-token"},
 	}
 	opts := cliproxyexecutor.Options{
-		SourceFormat:   sdktranslator.FormatOpenAIResponse,
-		Stream:         true,
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       true,
 		Metadata: map[string]any{
 			cliproxyexecutor.ExecutionSessionMetadataKey: "xai-compaction-session",
 		},
@@ -662,7 +662,7 @@ func TestXAIWebsocketsExecuteStreamCompletesGenerateFalseWarmup(t *testing.T) {
 		Payload: []byte(`{"model":"grok-4.3","generate":false,"input":[{"type":"message","role":"user","content":"warm up"}]}`),
 	}
 	opts := cliproxyexecutor.Options{
-		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
 	}
 	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
 
@@ -746,7 +746,7 @@ func TestXAIWebsocketsExecuteStreamStopsOnBareErrorPayload(t *testing.T) {
 		Payload: []byte(`{"model":"grok-4.3","input":"hello"}`),
 	}
 	opts := cliproxyexecutor.Options{
-		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
 	}
 	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
 
@@ -765,5 +765,33 @@ func TestXAIWebsocketsExecuteStreamStopsOnBareErrorPayload(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for bare upstream error")
+	}
+}
+
+func TestParseXAIWebsocketErrorFreeUsageExhaustedSetsRetryAfter(t *testing.T) {
+	err, ok := parseXAIWebsocketError([]byte(`{"type":"error","status":429,"error":{"code":"subscription:free-usage-exhausted","message":"You have exhausted the included free usage"}}`))
+	if !ok {
+		t.Fatal("parseXAIWebsocketError did not parse error")
+	}
+	retryable, ok := err.(interface{ RetryAfter() *time.Duration })
+	if !ok || retryable.RetryAfter() == nil {
+		t.Fatalf("expected RetryAfter for free-usage-exhausted websocket event: %#v", err)
+	}
+	if got := *retryable.RetryAfter(); got != 24*time.Hour {
+		t.Fatalf("RetryAfter = %v, want 24h", got)
+	}
+}
+
+func TestParseXAIWebsocketBareErrorFreeUsageExhaustedSetsRetryAfter(t *testing.T) {
+	err, ok := parseXAIWebsocketError([]byte(`{"error":"You have exhausted the included free usage"}`))
+	if !ok {
+		t.Fatal("parseXAIWebsocketError did not parse bare error")
+	}
+	retryable, ok := err.(interface{ RetryAfter() *time.Duration })
+	if !ok || retryable.RetryAfter() == nil {
+		t.Fatalf("expected RetryAfter for bare free-usage-exhausted websocket event: %#v", err)
+	}
+	if got := *retryable.RetryAfter(); got != 24*time.Hour {
+		t.Fatalf("RetryAfter = %v, want 24h", got)
 	}
 }

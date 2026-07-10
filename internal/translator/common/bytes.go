@@ -89,7 +89,7 @@ func TextFromContentBlocks(result gjson.Result) string {
 
 func textFromContentBlocks(result gjson.Result) (string, bool) {
 	if result.Type == gjson.String {
-		return result.String(), true
+		return textFromPossiblyStringifiedContentBlocks(result.String()), true
 	}
 	if result.IsArray() {
 		var builder strings.Builder
@@ -105,9 +105,27 @@ func textFromContentBlocks(result gjson.Result) (string, bool) {
 	}
 	switch result.Get("type").String() {
 	case "text", "output_text":
-		return result.Get("text").String(), true
+		return textFromPossiblyStringifiedContentBlocks(result.Get("text").String()), true
 	}
 	return "", false
+}
+
+func textFromPossiblyStringifiedContentBlocks(text string) string {
+	trimmed := strings.TrimLeft(text, " \t\r\n")
+	if !strings.HasPrefix(trimmed, "[") && !strings.HasPrefix(trimmed, "{") {
+		return text
+	}
+	if !gjson.Valid(text) {
+		return text
+	}
+	parsed := gjson.Parse(text)
+	if !parsed.IsArray() && !parsed.IsObject() {
+		return text
+	}
+	if parsedText, ok := textFromContentBlocks(parsed); ok {
+		return parsedText
+	}
+	return text
 }
 
 func WrapGeminiCLIResponse(response []byte) []byte {

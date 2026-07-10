@@ -236,7 +236,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body = normalizeCodexInstructions(body)
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
-		body = ensureImageGenerationTool(body, baseModel, auth)
+		body = ensureImageGenerationTool(body, baseModel, auth, opts.Headers)
 	}
 
 	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
@@ -247,6 +247,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 
 	body, wsHeaders := applyCodexPromptCacheHeaders(from, req, body)
 	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg)
+	applyModelHeaderOverrides(wsHeaders, baseModel)
 
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
@@ -436,7 +437,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, body, requestedModel, requestPath, opts.Headers)
 	body = normalizeCodexInstructions(body)
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
-		body = ensureImageGenerationTool(body, baseModel, auth)
+		body = ensureImageGenerationTool(body, baseModel, auth, opts.Headers)
 	}
 
 	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
@@ -447,6 +448,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 	body, wsHeaders := applyCodexPromptCacheHeaders(from, req, body)
 	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg)
+	applyModelHeaderOverrides(wsHeaders, baseModel)
 
 	var authID, authLabel, authType, authValue string
 	authID = auth.ID

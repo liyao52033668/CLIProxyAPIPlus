@@ -171,6 +171,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
 	body = normalizeClaudeTemperatureForThinking(body)
+	body = ensureClaudeThinkingDisplay(body)
 
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
 	if countCacheControls(body) == 0 {
@@ -349,6 +350,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
 	body = normalizeClaudeTemperatureForThinking(body)
+	body = ensureClaudeThinkingDisplay(body)
 
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
 	if countCacheControls(body) == 0 {
@@ -784,6 +786,23 @@ func normalizeClaudeTemperatureForThinking(body []byte) []byte {
 		body, _ = sjson.SetBytes(body, "temperature", 1)
 	}
 	return body
+}
+
+func ensureClaudeThinkingDisplay(body []byte) []byte {
+	thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()))
+	switch thinkingType {
+	case "enabled", "adaptive", "auto":
+	default:
+		return body
+	}
+	if display := strings.TrimSpace(gjson.GetBytes(body, "thinking.display").String()); display != "" {
+		return body
+	}
+	out, err := sjson.SetBytes(body, "thinking.display", "summarized")
+	if err != nil {
+		return body
+	}
+	return out
 }
 
 type compositeReadCloser struct {

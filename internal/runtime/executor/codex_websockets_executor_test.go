@@ -421,6 +421,45 @@ func TestApplyCodexWebsocketHeadersPreservesExplicitAPIKeyUserAgent(t *testing.T
 	}
 }
 
+func TestApplyModelHeaderOverridesFromModelConfig(t *testing.T) {
+	const wantUA = "codex-tui/0.144.0 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.144.0)"
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	cfg := &config.Config{
+		CodexHeaderDefaults: config.CodexHeaderDefaults{
+			UserAgent: "config-ua",
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{"email": "user@example.com"},
+	}
+	applyCodexHeaders(req, auth, "", true, cfg)
+	applyModelHeaderOverrides(req.Header, "gpt-5.6-luna")
+
+	if got := req.Header.Get("User-Agent"); got != wantUA {
+		t.Fatalf("User-Agent = %q, want %q", got, wantUA)
+	}
+	if got := req.Header.Get("Originator"); got != "codex-tui" {
+		t.Fatalf("Originator = %q, want codex-tui", got)
+	}
+	if got := headerValueCaseInsensitive(req.Header, "Session_id"); got == "" {
+		t.Fatalf("Session_id should be generated for Mac OS override headers: %#v", req.Header)
+	}
+}
+
+func TestApplyModelHeaderOverridesNoopForModelsWithoutConfig(t *testing.T) {
+	headers := http.Header{}
+	headers.Set("User-Agent", "existing-ua")
+	applyModelHeaderOverrides(headers, "gpt-5.4")
+
+	if got := headers.Get("User-Agent"); got != "existing-ua" {
+		t.Fatalf("User-Agent = %q, want existing-ua", got)
+	}
+}
+
 func TestApplyCodexPromptCacheHeadersSetsLowercaseSessionAndLegacyConversation(t *testing.T) {
 	req := cliproxyexecutor.Request{Model: "gpt-5-codex", Payload: []byte(`{"prompt_cache_key":"cache-1"}`)}
 

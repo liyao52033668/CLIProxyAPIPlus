@@ -12,8 +12,9 @@ import (
 )
 
 const (
-	oauthSessionTTL     = 10 * time.Minute
-	maxOAuthStateLength = 128
+	oauthSessionTTL          = 10 * time.Minute
+	oauthCompletedSessionTTL = time.Minute
+	maxOAuthStateLength      = 128
 )
 
 var (
@@ -25,23 +26,30 @@ var (
 type oauthSession struct {
 	Provider  string
 	Status    string
+	Completed bool
 	CreatedAt time.Time
 	ExpiresAt time.Time
 }
 
 type oauthSessionStore struct {
-	mu       sync.RWMutex
-	ttl      time.Duration
-	sessions map[string]oauthSession
+	mu           sync.RWMutex
+	ttl          time.Duration
+	completedTTL time.Duration
+	sessions     map[string]oauthSession
 }
 
 func newOAuthSessionStore(ttl time.Duration) *oauthSessionStore {
 	if ttl <= 0 {
 		ttl = oauthSessionTTL
 	}
+	completedTTL := oauthCompletedSessionTTL
+	if ttl < completedTTL {
+		completedTTL = ttl
+	}
 	return &oauthSessionStore{
-		ttl:      ttl,
-		sessions: make(map[string]oauthSession),
+		ttl:          ttl,
+		completedTTL: completedTTL,
+		sessions:     make(map[string]oauthSession),
 	}
 }
 
@@ -89,7 +97,7 @@ func (s *oauthSessionStore) SetError(state, message string) {
 
 	s.purgeExpiredLocked(now)
 	session, ok := s.sessions[state]
-	if !ok {
+	if !ok || session.Completed {
 		return
 	}
 	session.Status = message
@@ -108,7 +116,14 @@ func (s *oauthSessionStore) Complete(state string) {
 	defer s.mu.Unlock()
 
 	s.purgeExpiredLocked(now)
-	delete(s.sessions, state)
+	session, ok := s.sessions[state]
+	if !ok || session.Completed {
+		return
+	}
+	session.Status = ""
+	session.Completed = true
+	session.ExpiresAt = now.Add(s.completedTTL)
+	s.sessions[state] = session
 }
 
 func (s *oauthSessionStore) CompleteProvider(provider string) int {
@@ -124,8 +139,11 @@ func (s *oauthSessionStore) CompleteProvider(provider string) int {
 	s.purgeExpiredLocked(now)
 	removed := 0
 	for state, session := range s.sessions {
-		if strings.EqualFold(session.Provider, provider) {
-			delete(s.sessions, state)
+		if !session.Completed && strings.EqualFold(session.Provider, provider) {
+			session.Status = ""
+			session.Completed = true
+			session.ExpiresAt = now.Add(s.completedTTL)
+			s.sessions[state] = session
 			removed++
 		}
 	}
@@ -157,6 +175,9 @@ func (s *oauthSessionStore) IsPending(state, provider string) bool {
 	if !ok {
 		return false
 	}
+	if session.Completed {
+		return false
+	}
 	if session.Status != "" {
 		// Allow special status prefixes for polling-based auth flows
 		if !strings.HasPrefix(session.Status, "device_code|") && !strings.HasPrefix(session.Status, "auth_url|") {
@@ -167,6 +188,18 @@ func (s *oauthSessionStore) IsPending(state, provider string) bool {
 		return true
 	}
 	return strings.EqualFold(session.Provider, provider)
+}
+
+func (s *oauthSessionStore) IsCompleted(state string) bool {
+	state = strings.TrimSpace(state)
+	now := time.Now()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.purgeExpiredLocked(now)
+	session, ok := s.sessions[state]
+	return ok && session.Completed
 }
 
 var oauthSessions = newOAuthSessionStore(oauthSessionTTL)
@@ -183,11 +216,13 @@ func CompleteOAuthSessionsByProvider(provider string) int {
 
 func GetOAuthSession(state string) (provider string, status string, ok bool) {
 	session, ok := oauthSessions.Get(state)
-	if !ok {
+	if !ok || session.Completed {
 		return "", "", false
 	}
 	return session.Provider, session.Status, true
 }
+
+func IsOAuthSessionCompleted(state string) bool { return oauthSessions.IsCompleted(state) }
 
 func IsOAuthSessionPending(state, provider string) bool {
 	return oauthSessions.IsPending(state, provider)

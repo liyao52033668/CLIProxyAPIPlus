@@ -1260,6 +1260,56 @@ func TestXAIExecutorExecuteVideosUsesNativeEndpointFromRequestPath(t *testing.T)
 	}
 }
 
+func TestNormalizeXAITools_SimplifiesCodexAutomationUpdateSchema(t *testing.T) {
+	params := `{"oneOf":[{"type":"object","properties":{"mode":{"type":"string"}}}],"$defs":{"a":{"type":"string"}},"x":"` + strings.Repeat("y", 1600) + `"}`
+	body := []byte(`{"model":"grok-4.5","tools":[{"type":"namespace","name":"codex_app","tools":[{"type":"function","name":"automation_update","strict":true,"parameters":` + params + `}]},{"type":"namespace","name":"calendar","tools":[{"type":"function","name":"automation_update","parameters":` + params + `}]},{"type":"function","name":"automation_update","parameters":` + params + `}]}`)
+	out := normalizeXAITools(body)
+
+	autoCount := 0
+	for _, tool := range gjson.GetBytes(out, "tools").Array() {
+		if tool.Get("name").String() != "automation_update" {
+			continue
+		}
+		autoCount++
+		paramsRaw := tool.Get("parameters").Raw
+		if autoCount == 1 {
+			if strings.Contains(paramsRaw, `"oneOf"`) || strings.Contains(paramsRaw, `"$defs"`) {
+				t.Fatalf("codex_app automation_update parameters were not simplified: %s", paramsRaw)
+			}
+			if got := tool.Get("parameters.additionalProperties").Type; got != gjson.True {
+				t.Fatalf("codex_app automation_update should allow additionalProperties: %s", tool.Raw)
+			}
+			if tool.Get("strict").Bool() {
+				t.Fatalf("codex_app automation_update strict should be false after simplification: %s", tool.Raw)
+			}
+			continue
+		}
+		if !strings.Contains(paramsRaw, `"oneOf"`) || !strings.Contains(paramsRaw, `"$defs"`) {
+			t.Fatalf("non-codex automation_update schema should be preserved: %s", tool.Raw)
+		}
+	}
+	if autoCount != 3 {
+		t.Fatalf("automation_update count = %d, want 3; body=%s", autoCount, out)
+	}
+}
+
+func TestXAIFunctionParametersNeedSimplification(t *testing.T) {
+	auto := gjson.Parse(`{"type":"function","name":"automation_update","parameters":{"type":"object"}}`)
+	if !xaiFunctionParametersNeedSimplification(auto, "codex_app") {
+		t.Fatal("codex_app automation_update should need simplification")
+	}
+	if xaiFunctionParametersNeedSimplification(auto, "calendar") {
+		t.Fatal("calendar automation_update should not need simplification")
+	}
+	if xaiFunctionParametersNeedSimplification(auto, "") {
+		t.Fatal("top-level automation_update should not need simplification")
+	}
+	custom := gjson.Parse(`{"type":"custom","name":"automation_update","parameters":{"type":"object"}}`)
+	if xaiFunctionParametersNeedSimplification(custom, "codex_app") {
+		t.Fatal("custom automation_update should not need simplification before custom conversion")
+	}
+}
+
 func TestNormalizeXAIToolChoiceForTools_DropsWhenToolsEmpty(t *testing.T) {
 	body := []byte(`{"model":"grok-4","tools":[],"tool_choice":"auto","parallel_tool_calls":true,"input":"hi"}`)
 	out := normalizeXAIToolChoiceForTools(body)

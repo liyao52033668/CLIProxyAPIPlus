@@ -470,7 +470,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 			if sess != nil {
 				sess.reqMu.Unlock()
 			}
-			return nil, statusErr{code: respHS.StatusCode, msg: string(bodyErr)}
+			return nil, xaiStatusErr(respHS.StatusCode, bodyErr)
 		}
 		helps.RecordAPIWebsocketError(ctx, e.cfg, "dial", errDial)
 		if sess != nil {
@@ -811,6 +811,15 @@ func buildXAIWebsocketWarmupCompletedPayload(createdPayload []byte) []byte {
 
 func parseXAIWebsocketError(payload []byte) (error, bool) {
 	if wsErr, ok := parseCodexWebsocketError(payload); ok {
+		if statusWithHeaders, okHeaders := wsErr.(statusErrWithHeaders); okHeaders {
+			return statusErrWithHeaders{
+				statusErr: xaiStatusErr(statusWithHeaders.code, []byte(statusWithHeaders.msg)),
+				headers:   statusWithHeaders.headers,
+			}, true
+		}
+		if statusOnly, okStatus := wsErr.(statusErr); okStatus {
+			return xaiStatusErr(statusOnly.code, []byte(statusOnly.msg)), true
+		}
 		return wsErr, true
 	}
 	if len(payload) == 0 || !gjson.GetBytes(payload, "error").Exists() {
@@ -829,7 +838,7 @@ func parseXAIWebsocketError(payload []byte) (error, bool) {
 	if errNode := gjson.GetBytes(payload, "error"); errNode.Exists() {
 		out, _ = sjson.SetRawBytes(out, "error", []byte(errNode.Raw))
 	}
-	return statusErr{code: status, msg: string(out)}, true
+	return xaiStatusErr(status, out), true
 }
 
 func xaiBareWebsocketErrorStatus(payload []byte) int {
@@ -844,6 +853,14 @@ func xaiBareWebsocketErrorStatus(payload []byte) int {
 		}
 	}
 	message := strings.TrimSpace(gjson.GetBytes(payload, "error.message").String())
+	if message == "" {
+		message = strings.TrimSpace(gjson.GetBytes(payload, "error").String())
+	}
+	code := strings.TrimSpace(gjson.GetBytes(payload, "error.code").String())
+	freeUsageText := strings.ToLower(code + " " + message)
+	if strings.Contains(freeUsageText, "free-usage-exhausted") || strings.Contains(freeUsageText, "included free usage") {
+		return http.StatusTooManyRequests
+	}
 	if strings.Contains(message, `"code":"400"`) || strings.Contains(message, "Request validation error") {
 		return http.StatusBadRequest
 	}
