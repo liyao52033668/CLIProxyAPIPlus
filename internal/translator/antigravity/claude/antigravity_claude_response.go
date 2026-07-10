@@ -72,6 +72,8 @@ type Params struct {
 	HasWebSearchTool     bool
 	WebSearchRequests    int64
 	WebSearchTextBuffer  strings.Builder
+	TextBuffer           translatorcommon.ContentBlockTextBuffer
+	ThinkingBuffer       translatorcommon.ContentBlockTextBuffer
 
 	// Signature caching support
 	CurrentThinkingText strings.Builder // Accumulates thinking text for signature caching
@@ -212,8 +214,9 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 
 			// Handle text content (both regular content and thinking)
 			if partTextResult.Exists() {
-				partText := translatorcommon.TextFromContentBlocks(partTextResult)
+				partText := params.TextBuffer.Text(partTextResult)
 				if partResult.Get("thought").Bool() {
+					partText = params.ThinkingBuffer.Text(partTextResult)
 					if partText != "" {
 						if params.ResponseType == 2 {
 							params.CurrentThinkingText.WriteString(partText)

@@ -29,6 +29,8 @@ type Params struct {
 	ToolNameMap      map[string]string
 	SanitizedNameMap map[string]string
 	SawToolCall      bool
+	TextBuffer       translatorcommon.ContentBlockTextBuffer
+	ThinkingBuffer   translatorcommon.ContentBlockTextBuffer
 }
 
 // toolUseIDCounter provides a process-wide unique counter for tool use identifiers.
@@ -109,9 +111,10 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 
 			// Handle text content (both regular content and thinking)
 			if partTextResult.Exists() {
-				text := translatorcommon.TextFromContentBlocks(partTextResult)
+				text := (*param).(*Params).TextBuffer.Text(partTextResult)
 				// Process thinking content (internal reasoning)
 				if partResult.Get("thought").Bool() {
+					text = (*param).(*Params).ThinkingBuffer.Text(partTextResult)
 					// Continue existing thinking block
 					if (*param).(*Params).ResponseType == 2 {
 						data, _ := sjson.SetBytes(fmt.Appendf(nil, `{"type":"content_block_delta","index":%d,"delta":{"type":"thinking_delta","thinking":""}}`, (*param).(*Params).ResponseIndex), "delta.thinking", text)

@@ -23,6 +23,8 @@ type antigravityToInteractionsStreamState struct {
 	ActiveStepType  string
 	ActiveStepIndex int
 	StepIndex       int
+	TextBuffer      translatorcommon.ContentBlockTextBuffer
+	ThoughtBuffer   translatorcommon.ContentBlockTextBuffer
 }
 
 func ConvertAntigravityResponseToInteractions(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
@@ -219,7 +221,10 @@ func ensureAntigravityInteractionsStep(out [][]byte, st *antigravityToInteractio
 
 func appendAntigravityPartToInteractionsStream(out [][]byte, st *antigravityToInteractionsStreamState, part gjson.Result) [][]byte {
 	if textResult := part.Get("text"); textResult.Exists() {
-		text := translatorcommon.TextFromContentBlocks(textResult)
+		text := st.TextBuffer.Text(textResult)
+		if part.Get("thought").Bool() {
+			text = st.ThoughtBuffer.Text(textResult)
+		}
 		if text == "" {
 			return out
 		}

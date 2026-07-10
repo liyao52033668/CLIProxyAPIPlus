@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
@@ -19,6 +20,8 @@ type OpenAIStreamState struct {
 	Model             string
 	ResponseID        string
 	Created           int64
+	TextBuffer        translatorcommon.ContentBlockTextBuffer
+	ThinkingBuffer    translatorcommon.ContentBlockTextBuffer
 }
 
 // NewOpenAIStreamState creates a new stream state for tracking

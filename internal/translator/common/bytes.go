@@ -8,6 +8,66 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+type ContentBlockTextBuffer struct {
+	pending strings.Builder
+}
+
+func (b *ContentBlockTextBuffer) Text(result gjson.Result) string {
+	if !result.Exists() || result.Type == gjson.Null {
+		return ""
+	}
+	if result.Type != gjson.String {
+		return TextFromContentBlocks(result)
+	}
+	text := result.String()
+	if b.pending.Len() > 0 {
+		b.pending.WriteString(text)
+		return b.flushIfComplete()
+	}
+	trimmed := strings.TrimLeft(text, " \t\r\n")
+	if strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "{") {
+		if parsed := gjson.Parse(text); gjson.Valid(text) && (parsed.IsArray() || parsed.IsObject()) {
+			if parsedText, ok := textFromContentBlocks(parsed); ok {
+				return parsedText
+			}
+		}
+		if looksLikeContentBlocksPrefix(trimmed) {
+			b.pending.WriteString(text)
+			return b.flushIfComplete()
+		}
+	}
+	return text
+}
+
+func (b *ContentBlockTextBuffer) Flush() string {
+	if b.pending.Len() == 0 {
+		return ""
+	}
+	text := b.pending.String()
+	b.pending.Reset()
+	return text
+}
+
+func (b *ContentBlockTextBuffer) flushIfComplete() string {
+	text := b.pending.String()
+	if !gjson.Valid(text) {
+		return ""
+	}
+	parsed := gjson.Parse(text)
+	if !parsed.IsArray() && !parsed.IsObject() {
+		return b.Flush()
+	}
+	if parsedText, ok := textFromContentBlocks(parsed); ok {
+		b.pending.Reset()
+		return parsedText
+	}
+	return b.Flush()
+}
+
+func looksLikeContentBlocksPrefix(text string) bool {
+	return strings.Contains(text, `"type"`) || strings.Contains(text, `"text"`) || strings.Contains(text, `"output_text"`)
+}
+
 func TextFromContentBlocks(result gjson.Result) string {
 	if !result.Exists() || result.Type == gjson.Null {
 		return ""

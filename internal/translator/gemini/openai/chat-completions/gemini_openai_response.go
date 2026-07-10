@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -25,6 +26,8 @@ type convertGeminiResponseToOpenAIChatParams struct {
 	// FunctionIndex tracks tool call indices per candidate index to support multiple candidates.
 	FunctionIndex    map[int]int
 	SanitizedNameMap map[string]string
+	TextBuffer       translatorcommon.ContentBlockTextBuffer
+	ReasoningBuffer  translatorcommon.ContentBlockTextBuffer
 }
 
 // functionCallIDCounter provides a process-wide unique counter for function call identifiers.
@@ -173,9 +176,10 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 					}
 
 					if partTextResult.Exists() {
-						text := partTextResult.String()
+						text := p.TextBuffer.Text(partTextResult)
 						// Handle text content, distinguishing between regular content and reasoning/thoughts.
 						if partResult.Get("thought").Bool() {
+							text = p.ReasoningBuffer.Text(partTextResult)
 							template, _ = sjson.SetBytes(template, "choices.0.delta.reasoning_content", text)
 						} else {
 							template, _ = sjson.SetBytes(template, "choices.0.delta.content", text)

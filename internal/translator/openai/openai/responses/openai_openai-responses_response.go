@@ -28,31 +28,28 @@ type oaiToResponsesState struct {
 	CompletedEmitted  bool
 	ReasoningID       string
 	ReasoningIndex    int
-	// aggregation buffers for response.output
-	// Per-output message text buffers by index
-	MsgTextBuf   map[int]*strings.Builder
-	ReasoningBuf strings.Builder
-	Reasonings   []oaiToResponsesStateReasoning
-	FuncArgsBuf  map[string]*strings.Builder
-	FuncNames    map[string]string
-	FuncCallIDs  map[string]string
-	FuncOutputIx map[string]int
-	MsgOutputIx  map[int]int
-	NextOutputIx int
-	// message item state per output index
-	MsgItemAdded    map[int]bool // whether response.output_item.added emitted for message
-	MsgContentAdded map[int]bool // whether response.content_part.added emitted for message
-	MsgItemDone     map[int]bool // whether message done events were emitted
-	// function item done state
-	FuncArgsDone map[string]bool
-	FuncItemDone map[string]bool
-	// usage aggregation
-	PromptTokens     int64
-	CachedTokens     int64
-	CompletionTokens int64
-	TotalTokens      int64
-	ReasoningTokens  int64
-	UsageSeen        bool
+	MsgTextBuf        map[int]*strings.Builder
+	MsgTextBuffers    map[int]*translatorcommon.ContentBlockTextBuffer
+	ReasoningBuf      strings.Builder
+	ReasoningBuffer   translatorcommon.ContentBlockTextBuffer
+	Reasonings        []oaiToResponsesStateReasoning
+	FuncArgsBuf       map[string]*strings.Builder
+	FuncNames         map[string]string
+	FuncCallIDs       map[string]string
+	FuncOutputIx      map[string]int
+	MsgOutputIx       map[int]int
+	NextOutputIx      int
+	MsgItemAdded      map[int]bool
+	MsgContentAdded   map[int]bool
+	MsgItemDone       map[int]bool
+	FuncArgsDone      map[string]bool
+	FuncItemDone      map[string]bool
+	PromptTokens      int64
+	CachedTokens      int64
+	CompletionTokens  int64
+	TotalTokens       int64
+	ReasoningTokens   int64
+	UsageSeen         bool
 }
 
 // responseIDCounter provides a process-wide unique counter for synthesized response identifiers.
@@ -227,6 +224,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 			FuncOutputIx:    make(map[string]int),
 			MsgOutputIx:     make(map[int]int),
 			MsgTextBuf:      make(map[int]*strings.Builder),
+			MsgTextBuffers:  make(map[int]*translatorcommon.ContentBlockTextBuffer),
 			MsgItemAdded:    make(map[int]bool),
 			MsgContentAdded: make(map[int]bool),
 			MsgItemDone:     make(map[int]bool),
@@ -305,7 +303,9 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		st.Created = root.Get("created").Int()
 		// reset aggregation state for a new streaming response
 		st.MsgTextBuf = make(map[int]*strings.Builder)
+		st.MsgTextBuffers = make(map[int]*translatorcommon.ContentBlockTextBuffer)
 		st.ReasoningBuf.Reset()
+		st.ReasoningBuffer = translatorcommon.ContentBlockTextBuffer{}
 		st.ReasoningID = ""
 		st.ReasoningIndex = 0
 		st.FuncArgsBuf = make(map[string]*strings.Builder)
@@ -373,77 +373,84 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 			idx := int(choice.Get("index").Int())
 			delta := choice.Get("delta")
 			if delta.Exists() {
-				if c := delta.Get("content"); c.Exists() && chatCompletionContentText(c) != "" {
-					contentText := chatCompletionContentText(c)
-					if contentText == "" {
-						return true
+				if c := delta.Get("content"); c.Exists() {
+					textBuffer := st.MsgTextBuffers[idx]
+					if textBuffer == nil {
+						textBuffer = &translatorcommon.ContentBlockTextBuffer{}
+						st.MsgTextBuffers[idx] = textBuffer
 					}
-					// Ensure the message item and its first content part are announced before any text deltas
-					if st.ReasoningID != "" {
-						stopReasoning(st.ReasoningBuf.String())
-						st.ReasoningBuf.Reset()
-					}
-					if _, exists := st.MsgOutputIx[idx]; !exists {
-						st.MsgOutputIx[idx] = allocOutputIndex()
-					}
-					msgOutputIndex := st.MsgOutputIx[idx]
-					if !st.MsgItemAdded[idx] {
-						item := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"message","status":"in_progress","content":[],"role":"assistant"}}`)
-						item, _ = sjson.SetBytes(item, "sequence_number", nextSeq())
-						item, _ = sjson.SetBytes(item, "output_index", msgOutputIndex)
-						item, _ = sjson.SetBytes(item, "item.id", fmt.Sprintf("msg_%s_%d", st.ResponseID, idx))
-						out = append(out, emitRespEvent("response.output_item.added", item))
-						st.MsgItemAdded[idx] = true
-					}
-					if !st.MsgContentAdded[idx] {
-						part := []byte(`{"type":"response.content_part.added","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":""}}`)
-						part, _ = sjson.SetBytes(part, "sequence_number", nextSeq())
-						part, _ = sjson.SetBytes(part, "item_id", fmt.Sprintf("msg_%s_%d", st.ResponseID, idx))
-						part, _ = sjson.SetBytes(part, "output_index", msgOutputIndex)
-						part, _ = sjson.SetBytes(part, "content_index", 0)
-						out = append(out, emitRespEvent("response.content_part.added", part))
-						st.MsgContentAdded[idx] = true
-					}
+					contentText := textBuffer.Text(c)
+					if contentText != "" {
+						// Ensure the message item and its first content part are announced before any text deltas
+						if st.ReasoningID != "" {
+							stopReasoning(st.ReasoningBuf.String())
+							st.ReasoningBuf.Reset()
+						}
+						if _, exists := st.MsgOutputIx[idx]; !exists {
+							st.MsgOutputIx[idx] = allocOutputIndex()
+						}
+						msgOutputIndex := st.MsgOutputIx[idx]
+						if !st.MsgItemAdded[idx] {
+							item := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"message","status":"in_progress","content":[],"role":"assistant"}}`)
+							item, _ = sjson.SetBytes(item, "sequence_number", nextSeq())
+							item, _ = sjson.SetBytes(item, "output_index", msgOutputIndex)
+							item, _ = sjson.SetBytes(item, "item.id", fmt.Sprintf("msg_%s_%d", st.ResponseID, idx))
+							out = append(out, emitRespEvent("response.output_item.added", item))
+							st.MsgItemAdded[idx] = true
+						}
+						if !st.MsgContentAdded[idx] {
+							part := []byte(`{"type":"response.content_part.added","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":""}}`)
+							part, _ = sjson.SetBytes(part, "sequence_number", nextSeq())
+							part, _ = sjson.SetBytes(part, "item_id", fmt.Sprintf("msg_%s_%d", st.ResponseID, idx))
+							part, _ = sjson.SetBytes(part, "output_index", msgOutputIndex)
+							part, _ = sjson.SetBytes(part, "content_index", 0)
+							out = append(out, emitRespEvent("response.content_part.added", part))
+							st.MsgContentAdded[idx] = true
+						}
 
-					msg := []byte(`{"type":"response.output_text.delta","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"delta":"","logprobs":[]}`)
-					msg, _ = sjson.SetBytes(msg, "sequence_number", nextSeq())
-					msg, _ = sjson.SetBytes(msg, "item_id", fmt.Sprintf("msg_%s_%d", st.ResponseID, idx))
-					msg, _ = sjson.SetBytes(msg, "output_index", msgOutputIndex)
-					msg, _ = sjson.SetBytes(msg, "content_index", 0)
-					msg, _ = sjson.SetBytes(msg, "delta", contentText)
-					out = append(out, emitRespEvent("response.output_text.delta", msg))
-					// aggregate for response.output
-					if st.MsgTextBuf[idx] == nil {
-						st.MsgTextBuf[idx] = &strings.Builder{}
+						msg := []byte(`{"type":"response.output_text.delta","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"delta":"","logprobs":[]}`)
+						msg, _ = sjson.SetBytes(msg, "sequence_number", nextSeq())
+						msg, _ = sjson.SetBytes(msg, "item_id", fmt.Sprintf("msg_%s_%d", st.ResponseID, idx))
+						msg, _ = sjson.SetBytes(msg, "output_index", msgOutputIndex)
+						msg, _ = sjson.SetBytes(msg, "content_index", 0)
+						msg, _ = sjson.SetBytes(msg, "delta", contentText)
+						out = append(out, emitRespEvent("response.output_text.delta", msg))
+						// aggregate for response.output
+						if st.MsgTextBuf[idx] == nil {
+							st.MsgTextBuf[idx] = &strings.Builder{}
+						}
+						st.MsgTextBuf[idx].WriteString(contentText)
 					}
-					st.MsgTextBuf[idx].WriteString(contentText)
 				}
 
 				// reasoning_content (OpenAI reasoning incremental text)
-				if rc := delta.Get("reasoning_content"); rc.Exists() && rc.String() != "" {
-					// On first appearance, add reasoning item and part
-					if st.ReasoningID == "" {
-						st.ReasoningID = fmt.Sprintf("rs_%s_%d", st.ResponseID, idx)
-						st.ReasoningIndex = allocOutputIndex()
-						item := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"reasoning","status":"in_progress","summary":[]}}`)
-						item, _ = sjson.SetBytes(item, "sequence_number", nextSeq())
-						item, _ = sjson.SetBytes(item, "output_index", st.ReasoningIndex)
-						item, _ = sjson.SetBytes(item, "item.id", st.ReasoningID)
-						out = append(out, emitRespEvent("response.output_item.added", item))
-						part := []byte(`{"type":"response.reasoning_summary_part.added","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":""}}`)
-						part, _ = sjson.SetBytes(part, "sequence_number", nextSeq())
-						part, _ = sjson.SetBytes(part, "item_id", st.ReasoningID)
-						part, _ = sjson.SetBytes(part, "output_index", st.ReasoningIndex)
-						out = append(out, emitRespEvent("response.reasoning_summary_part.added", part))
+				if rc := delta.Get("reasoning_content"); rc.Exists() {
+					reasoningText := st.ReasoningBuffer.Text(rc)
+					if reasoningText != "" {
+						// On first appearance, add reasoning item and part
+						if st.ReasoningID == "" {
+							st.ReasoningID = fmt.Sprintf("rs_%s_%d", st.ResponseID, idx)
+							st.ReasoningIndex = allocOutputIndex()
+							item := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"reasoning","status":"in_progress","summary":[]}}`)
+							item, _ = sjson.SetBytes(item, "sequence_number", nextSeq())
+							item, _ = sjson.SetBytes(item, "output_index", st.ReasoningIndex)
+							item, _ = sjson.SetBytes(item, "item.id", st.ReasoningID)
+							out = append(out, emitRespEvent("response.output_item.added", item))
+							part := []byte(`{"type":"response.reasoning_summary_part.added","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":""}}`)
+							part, _ = sjson.SetBytes(part, "sequence_number", nextSeq())
+							part, _ = sjson.SetBytes(part, "item_id", st.ReasoningID)
+							part, _ = sjson.SetBytes(part, "output_index", st.ReasoningIndex)
+							out = append(out, emitRespEvent("response.reasoning_summary_part.added", part))
+						}
+						// Append incremental text to reasoning buffer
+						st.ReasoningBuf.WriteString(reasoningText)
+						msg := []byte(`{"type":"response.reasoning_summary_text.delta","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"delta":""}`)
+						msg, _ = sjson.SetBytes(msg, "sequence_number", nextSeq())
+						msg, _ = sjson.SetBytes(msg, "item_id", st.ReasoningID)
+						msg, _ = sjson.SetBytes(msg, "output_index", st.ReasoningIndex)
+						msg, _ = sjson.SetBytes(msg, "delta", reasoningText)
+						out = append(out, emitRespEvent("response.reasoning_summary_text.delta", msg))
 					}
-					// Append incremental text to reasoning buffer
-					st.ReasoningBuf.WriteString(rc.String())
-					msg := []byte(`{"type":"response.reasoning_summary_text.delta","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"delta":""}`)
-					msg, _ = sjson.SetBytes(msg, "sequence_number", nextSeq())
-					msg, _ = sjson.SetBytes(msg, "item_id", st.ReasoningID)
-					msg, _ = sjson.SetBytes(msg, "output_index", st.ReasoningIndex)
-					msg, _ = sjson.SetBytes(msg, "delta", rc.String())
-					out = append(out, emitRespEvent("response.reasoning_summary_text.delta", msg))
 				}
 
 				// tool calls

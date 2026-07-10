@@ -760,12 +760,14 @@ type openAIChatStreamAggregator struct {
 }
 
 type openAIChatAggregatedChoice struct {
-	index            int
-	role             string
-	content          strings.Builder
-	reasoningContent strings.Builder
-	finishReason     string
-	toolCalls        map[int]*openAIChatAggregatedToolCall
+	index           int
+	role            string
+	content         strings.Builder
+	contentBuffer   translatorcommon.ContentBlockTextBuffer
+	reasoning       strings.Builder
+	reasoningBuffer translatorcommon.ContentBlockTextBuffer
+	finishReason    string
+	toolCalls       map[int]*openAIChatAggregatedToolCall
 }
 
 type openAIChatAggregatedToolCall struct {
@@ -815,10 +817,10 @@ func (a *openAIChatStreamAggregator) Add(rawJSON []byte) error {
 			aggregated.role = role.String()
 		}
 		if content := delta.Get("content"); content.Exists() {
-			aggregated.content.WriteString(openAIChatStreamContentText(content))
+			aggregated.content.WriteString(aggregated.contentBuffer.Text(content))
 		}
 		if reasoning := delta.Get("reasoning_content"); reasoning.Exists() {
-			aggregated.reasoningContent.WriteString(reasoning.String())
+			aggregated.reasoning.WriteString(aggregated.reasoningBuffer.Text(reasoning))
 		}
 		if finishReason := choice.Get("finish_reason"); finishReason.Exists() && finishReason.Type != gjson.Null {
 			aggregated.finishReason = finishReason.String()
@@ -849,10 +851,6 @@ func (a *openAIChatStreamAggregator) Add(rawJSON []byte) error {
 	return nil
 }
 
-func openAIChatStreamContentText(content gjson.Result) string {
-	return translatorcommon.TextFromContentBlocks(content)
-}
-
 func (a *openAIChatStreamAggregator) Build() ([]byte, error) {
 	if len(a.choices) == 0 && a.usage == "" {
 		return nil, fmt.Errorf("openai compat executor: forced stream returned no chat completion chunks")
@@ -868,6 +866,8 @@ func (a *openAIChatStreamAggregator) Build() ([]byte, error) {
 	sort.Ints(choiceIndexes)
 	for _, index := range choiceIndexes {
 		choice := a.choices[index]
+		choice.content.WriteString(choice.contentBuffer.Flush())
+		choice.reasoning.WriteString(choice.reasoningBuffer.Flush())
 		choiceJSON := []byte(`{"index":0,"message":{"role":"assistant","content":""},"finish_reason":"stop"}`)
 		choiceJSON, _ = sjson.SetBytes(choiceJSON, "index", choice.index)
 		role := choice.role
@@ -876,8 +876,8 @@ func (a *openAIChatStreamAggregator) Build() ([]byte, error) {
 		}
 		choiceJSON, _ = sjson.SetBytes(choiceJSON, "message.role", role)
 		choiceJSON, _ = sjson.SetBytes(choiceJSON, "message.content", choice.content.String())
-		if choice.reasoningContent.Len() > 0 {
-			choiceJSON, _ = sjson.SetBytes(choiceJSON, "message.reasoning_content", choice.reasoningContent.String())
+		if choice.reasoning.Len() > 0 {
+			choiceJSON, _ = sjson.SetBytes(choiceJSON, "message.reasoning_content", choice.reasoning.String())
 		}
 		finishReason := choice.finishReason
 		if finishReason == "" {

@@ -527,6 +527,90 @@ func TestOpenAICompatExecutorForceStreamAggregatesClaudeTextBlocks(t *testing.T)
 	}
 }
 
+func TestOpenAICompatExecutorForceStreamBuffersSplitStringifiedTextContentBlocks(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","created":123,"model":"upstream-model","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}` + "\n\n"))
+		_, _ = w.Write([]byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","created":123,"model":"upstream-model","choices":[{"index":0,"delta":{"content":"[{\"type\":\"text\",\"text\":\"hel"},"finish_reason":null}]}` + "\n\n"))
+		_, _ = w.Write([]byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","created":123,"model":"upstream-model","choices":[{"index":0,"delta":{"content":"lo\"},{\"type\":\"output_text\",\"text\":\" world\"}]"},"finish_reason":null}]}` + "\n\n"))
+		_, _ = w.Write([]byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","created":123,"model":"upstream-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:        "compat",
+			BaseURL:     server.URL + "/v1",
+			ForceStream: true,
+		}},
+	})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url":    server.URL + "/v1",
+		"api_key":     "test",
+		"compat_name": "compat",
+	}}
+	resp, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "upstream-model",
+		Payload: []byte(`{"model":"upstream-model","messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	content := gjson.GetBytes(resp.Payload, "choices.0.message.content").String()
+	if content != "hello world" {
+		t.Fatalf("content = %q, want hello world; payload=%s", content, string(resp.Payload))
+	}
+	if strings.Contains(content, `"type":"text"`) || strings.Contains(content, "output_text") || strings.Contains(content, `[{`) {
+		t.Fatalf("content block JSON leaked into forced stream response: %q; payload=%s", content, string(resp.Payload))
+	}
+}
+
+func TestOpenAICompatExecutorForceStreamBuffersSplitStringifiedReasoningContentBlocks(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","created":123,"model":"upstream-model","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}` + "\n\n"))
+		_, _ = w.Write([]byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","created":123,"model":"upstream-model","choices":[{"index":0,"delta":{"reasoning_content":"[{\"type\":\"text\",\"text\":\"think"},"finish_reason":null}]}` + "\n\n"))
+		_, _ = w.Write([]byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","created":123,"model":"upstream-model","choices":[{"index":0,"delta":{"reasoning_content":" more\"}]"},"finish_reason":null}]}` + "\n\n"))
+		_, _ = w.Write([]byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","created":123,"model":"upstream-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:        "compat",
+			BaseURL:     server.URL + "/v1",
+			ForceStream: true,
+		}},
+	})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url":    server.URL + "/v1",
+		"api_key":     "test",
+		"compat_name": "compat",
+	}}
+	resp, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "upstream-model",
+		Payload: []byte(`{"model":"upstream-model","messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	reasoning := gjson.GetBytes(resp.Payload, "choices.0.message.reasoning_content").String()
+	if reasoning != "think more" {
+		t.Fatalf("reasoning_content = %q, want think more; payload=%s", reasoning, string(resp.Payload))
+	}
+	if strings.Contains(reasoning, `"type":"text"`) || strings.Contains(reasoning, `[{`) {
+		t.Fatalf("content block JSON leaked into forced stream reasoning: %q; payload=%s", reasoning, string(resp.Payload))
+	}
+}
+
 func TestOpenAICompatExecutorForceStreamClaudeEmptyToolResult(t *testing.T) {
 	var gotBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

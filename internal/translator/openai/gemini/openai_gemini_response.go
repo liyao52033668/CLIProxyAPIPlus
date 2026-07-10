@@ -23,6 +23,8 @@ type ConvertOpenAIResponseToGeminiParams struct {
 	ToolCallsAccumulator map[int]*ToolCallAccumulator
 	// Content accumulator for streaming
 	ContentAccumulator strings.Builder
+	TextBuffer         translatorcommon.ContentBlockTextBuffer
+	ReasoningBuffer    translatorcommon.ContentBlockTextBuffer
 	// Track if this is the first chunk
 	IsFirstChunk bool
 }
@@ -138,7 +140,7 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 
 			// Handle content delta
 			if content := delta.Get("content"); content.Exists() {
-				contentText := translatorcommon.TextFromContentBlocks(content)
+				contentText := (*param).(*ConvertOpenAIResponseToGeminiParams).TextBuffer.Text(content)
 				if contentText == "" {
 					return true
 				}

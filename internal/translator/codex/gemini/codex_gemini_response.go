@@ -28,6 +28,8 @@ type ConvertCodexResponseToGeminiParams struct {
 	LastStorageOutput  []byte
 	HasOutputTextDelta bool
 	LastImageHashByID  map[string][32]byte
+	TextBuffer         translatorcommon.ContentBlockTextBuffer
+	ReasoningBuffer    translatorcommon.ContentBlockTextBuffer
 }
 
 // ConvertCodexResponseToGemini converts Codex streaming response format to Gemini format.
@@ -173,12 +175,12 @@ func ConvertCodexResponseToGemini(_ context.Context, modelName string, originalR
 		params.ResponseID = rootResult.Get("response.id").String()
 	} else if typeStr == "response.reasoning_summary_text.delta" { // Handle reasoning/thinking content delta
 		part := []byte(`{"thought":true,"text":""}`)
-		part, _ = sjson.SetBytes(part, "text", translatorcommon.TextFromContentBlocks(rootResult.Get("delta")))
+		part, _ = sjson.SetBytes(part, "text", params.ReasoningBuffer.Text(rootResult.Get("delta")))
 		template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts.-1", part)
 	} else if typeStr == "response.output_text.delta" { // Handle regular text content delta
 		params.HasOutputTextDelta = true
 		part := []byte(`{"text":""}`)
-		part, _ = sjson.SetBytes(part, "text", translatorcommon.TextFromContentBlocks(rootResult.Get("delta")))
+		part, _ = sjson.SetBytes(part, "text", params.TextBuffer.Text(rootResult.Get("delta")))
 		template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts.-1", part)
 	} else if typeStr == "response.output_item.done" { // Fallback: emit final message text when no delta chunks were received
 		itemResult := rootResult.Get("item")

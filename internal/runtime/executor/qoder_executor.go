@@ -1265,6 +1265,7 @@ func (e *QoderExecutor) extractOpenAIChunkFromSSE(line []byte, model string) []b
 // parseQoderSSEToCompletion parses the full SSE response and assembles a non-streaming completion.
 func (e *QoderExecutor) parseQoderSSEToCompletion(data []byte, model string) []byte {
 	var fullContent strings.Builder
+	var contentBuffer translatorcommon.ContentBlockTextBuffer
 	var finishReason string
 
 	lines := strings.SplitSeq(string(data), "\n")
@@ -1297,7 +1298,7 @@ func (e *QoderExecutor) parseQoderSSEToCompletion(data []byte, model string) []b
 		choice := choices[0]
 		delta := choice.Get("delta")
 		if delta.Exists() {
-			content := translatorcommon.TextFromContentBlocks(delta.Get("content"))
+			content := contentBuffer.Text(delta.Get("content"))
 			fullContent.WriteString(content)
 		}
 		if fr := choice.Get("finish_reason").String(); fr != "" && fr != "null" {
@@ -1308,6 +1309,7 @@ func (e *QoderExecutor) parseQoderSSEToCompletion(data []byte, model string) []b
 	if finishReason == "" {
 		finishReason = "stop"
 	}
+	fullContent.WriteString(contentBuffer.Flush())
 
 	result := map[string]any{
 		"id":      "chatcmpl-" + uuid.NewString(),

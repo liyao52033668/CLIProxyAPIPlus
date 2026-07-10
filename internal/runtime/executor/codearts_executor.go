@@ -146,7 +146,9 @@ func (e *CodeArtsExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 	}
 
 	var contentBuilder strings.Builder
+	var contentBuffer translatorcommon.ContentBlockTextBuffer
 	var reasoningBuilder strings.Builder
+	var reasoningBuffer translatorcommon.ContentBlockTextBuffer
 	var promptTokens, completionTokens int64
 	var respModel string
 	toolCallsAccumulated := make(map[int]map[string]interface{})
@@ -179,10 +181,10 @@ func (e *CodeArtsExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 
 		delta := gjson.Get(data, "delta")
 		if delta.Exists() {
-			if c := translatorcommon.TextFromContentBlocks(delta.Get("content")); c != "" {
+			if c := contentBuffer.Text(delta.Get("content")); c != "" {
 				contentBuilder.WriteString(c)
 			}
-			if r := delta.Get("reasoning_content").String(); r != "" {
+			if r := reasoningBuffer.Text(delta.Get("reasoning_content")); r != "" {
 				reasoningBuilder.WriteString(r)
 			}
 			if tcList := delta.Get("tool_calls"); tcList.Exists() && len(tcList.Array()) > 0 {
@@ -236,6 +238,8 @@ func (e *CodeArtsExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 		}
 	}
 
+	contentBuilder.WriteString(contentBuffer.Flush())
+	reasoningBuilder.WriteString(reasoningBuffer.Flush())
 	fullContent := contentBuilder.String()
 	if len(toolCallsList) == 0 && fullContent != "" && strings.Contains(fullContent, "<tool_call_id>") {
 		xmlToolCalls := parseXMLToolCalls(fullContent)

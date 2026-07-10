@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
 
@@ -28,6 +29,8 @@ type convertCliResponseToOpenAIChatParams struct {
 	SawToolCall          bool   // Tracks if any tool call was seen in the entire stream
 	UpstreamFinishReason string // Caches the upstream finish reason for final chunk
 	SanitizedNameMap     map[string]string
+	TextBuffer           translatorcommon.ContentBlockTextBuffer
+	ReasoningBuffer      translatorcommon.ContentBlockTextBuffer
 }
 
 // functionCallIDCounter provides a process-wide unique counter for function call identifiers.
@@ -143,10 +146,11 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 			}
 
 			if partTextResult.Exists() {
-				textContent := partTextResult.String()
+				textContent := (*param).(*convertCliResponseToOpenAIChatParams).TextBuffer.Text(partTextResult)
 
 				// Handle text content, distinguishing between regular content and reasoning/thoughts.
 				if partResult.Get("thought").Bool() {
+					textContent = (*param).(*convertCliResponseToOpenAIChatParams).ReasoningBuffer.Text(partTextResult)
 					template, _ = sjson.SetBytes(template, "choices.0.delta.reasoning_content", textContent)
 				} else {
 					template, _ = sjson.SetBytes(template, "choices.0.delta.content", textContent)

@@ -107,14 +107,14 @@ func ConvertKiroStreamToOpenAI(ctx context.Context, model string, originalReques
 		deltaType := eventJSON.Get("delta.type").String()
 		switch deltaType {
 		case "text_delta":
-			textDelta := eventJSON.Get("delta.text").String()
+			textDelta := state.TextBuffer.Text(eventJSON.Get("delta.text"))
 			if textDelta != "" {
 				chunk := BuildOpenAISSETextDelta(state, textDelta)
 				results = append(results, []byte(chunk))
 			}
 		case "thinking_delta":
 			// Convert thinking to reasoning_content for o1-style compatibility
-			thinkingDelta := eventJSON.Get("delta.thinking").String()
+			thinkingDelta := state.ThinkingBuffer.Text(eventJSON.Get("delta.thinking"))
 			if thinkingDelta != "" {
 				chunk := BuildOpenAISSEReasoningDelta(state, thinkingDelta)
 				results = append(results, []byte(chunk))
@@ -131,7 +131,14 @@ func ConvertKiroStreamToOpenAI(ctx context.Context, model string, originalReques
 		}
 
 	case "content_block_stop":
-		// Content block ended - nothing to emit for OpenAI
+		if textDelta := state.TextBuffer.Flush(); textDelta != "" {
+			chunk := BuildOpenAISSETextDelta(state, textDelta)
+			results = append(results, []byte(chunk))
+		}
+		if thinkingDelta := state.ThinkingBuffer.Flush(); thinkingDelta != "" {
+			chunk := BuildOpenAISSEReasoningDelta(state, thinkingDelta)
+			results = append(results, []byte(chunk))
+		}
 
 	case "message_delta":
 		// Message delta with stop_reason

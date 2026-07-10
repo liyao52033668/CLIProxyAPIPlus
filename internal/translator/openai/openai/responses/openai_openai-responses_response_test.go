@@ -24,6 +24,64 @@ func parseOpenAIResponsesSSEEvent(t *testing.T, chunk []byte) (string, gjson.Res
 	return event, gjson.Parse(dataLine)
 }
 
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_BuffersSplitStringifiedTextContentBlocks(t *testing.T) {
+	var param any
+	chunks := []string{
+		`data: {"id":"resp_text_blocks","object":"chat.completion.chunk","created":123,"model":"model","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`,
+		`data: {"id":"resp_text_blocks","object":"chat.completion.chunk","created":123,"model":"model","choices":[{"index":0,"delta":{"content":"[{\"type\":\"text\",\"text\":\"hel"},"finish_reason":null}]}`,
+		`data: {"id":"resp_text_blocks","object":"chat.completion.chunk","created":123,"model":"model","choices":[{"index":0,"delta":{"content":"lo\"},{\"type\":\"output_text\",\"text\":\" world\"}]"},"finish_reason":"stop"}]}`,
+	}
+
+	var deltas []string
+	for _, chunk := range chunks {
+		for _, out := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", nil, nil, []byte(chunk), &param) {
+			event, data := parseOpenAIResponsesSSEEvent(t, out)
+			if event == "response.output_text.delta" {
+				deltas = append(deltas, data.Get("delta").String())
+			}
+		}
+	}
+
+	joined := strings.Join(deltas, "")
+	if joined != "hello world" {
+		t.Fatalf("joined output_text deltas = %q, want hello world; deltas=%q", joined, deltas)
+	}
+	for _, delta := range deltas {
+		if strings.Contains(delta, `"type":"text"`) || strings.Contains(delta, "output_text") || strings.Contains(delta, `[{`) {
+			t.Fatalf("content block JSON leaked into response.output_text.delta: %q; deltas=%q", delta, deltas)
+		}
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_BuffersSplitStringifiedReasoningContentBlocks(t *testing.T) {
+	var param any
+	chunks := []string{
+		`data: {"id":"resp_reasoning_blocks","object":"chat.completion.chunk","created":123,"model":"model","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`,
+		`data: {"id":"resp_reasoning_blocks","object":"chat.completion.chunk","created":123,"model":"model","choices":[{"index":0,"delta":{"reasoning_content":"[{\"type\":\"text\",\"text\":\"think"},"finish_reason":null}]}`,
+		`data: {"id":"resp_reasoning_blocks","object":"chat.completion.chunk","created":123,"model":"model","choices":[{"index":0,"delta":{"reasoning_content":" more\"}]"},"finish_reason":"stop"}]}`,
+	}
+
+	var deltas []string
+	for _, chunk := range chunks {
+		for _, out := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", nil, nil, []byte(chunk), &param) {
+			event, data := parseOpenAIResponsesSSEEvent(t, out)
+			if event == "response.reasoning_summary_text.delta" {
+				deltas = append(deltas, data.Get("delta").String())
+			}
+		}
+	}
+
+	joined := strings.Join(deltas, "")
+	if joined != "think more" {
+		t.Fatalf("joined reasoning deltas = %q, want think more; deltas=%q", joined, deltas)
+	}
+	for _, delta := range deltas {
+		if strings.Contains(delta, `"type":"text"`) || strings.Contains(delta, `[{`) {
+			t.Fatalf("content block JSON leaked into reasoning_summary_text.delta: %q; deltas=%q", delta, deltas)
+		}
+	}
+}
+
 func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_ResponseCompletedWaitsForDone(t *testing.T) {
 	t.Parallel()
 

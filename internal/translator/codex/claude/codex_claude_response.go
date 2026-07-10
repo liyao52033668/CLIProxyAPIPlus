@@ -33,6 +33,8 @@ type ConvertCodexResponseToClaudeParams struct {
 	ThinkingStopPending       bool
 	ThinkingSignature         string
 	ThinkingSummarySeen       bool
+	TextBuffer                translatorcommon.ContentBlockTextBuffer
+	ThinkingBuffer            translatorcommon.ContentBlockTextBuffer
 }
 
 // ConvertCodexResponseToClaude performs sophisticated streaming response format conversion.
@@ -101,7 +103,7 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 	} else if typeStr == "response.content_part.added" {
 		return [][]byte{output}
 	} else if typeStr == "response.output_text.delta" {
-		text := codexTextResultString(rootResult.Get("delta"))
+		text := codexTextResultString((*param).(*ConvertCodexResponseToClaudeParams), rootResult.Get("delta"))
 		if text == "" {
 			return [][]byte{output}
 		}
@@ -172,7 +174,7 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 				if part.Get("type").String() != "output_text" {
 					return true
 				}
-				if txt := codexTextResultString(part.Get("text")); txt != "" {
+				if txt := translatorcommon.TextFromContentBlocks(part.Get("text")); txt != "" {
 					textBuilder.WriteString(txt)
 				}
 				return true
@@ -314,7 +316,7 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 					if content.IsArray() {
 						content.ForEach(func(_, part gjson.Result) bool {
 							if part.Get("type").String() == "output_text" {
-								text := codexTextResultString(part.Get("text"))
+								text := translatorcommon.TextFromContentBlocks(part.Get("text"))
 								if text != "" {
 									block := []byte(`{"type":"text","text":""}`)
 									block, _ = sjson.SetBytes(block, "text", text)
@@ -452,8 +454,8 @@ func buildReverseMapFromClaudeOriginalShortToOriginal(original []byte) map[strin
 	return rev
 }
 
-func codexTextResultString(result gjson.Result) string {
-	return translatorcommon.TextFromContentBlocks(result)
+func codexTextResultString(params *ConvertCodexResponseToClaudeParams, result gjson.Result) string {
+	return params.TextBuffer.Text(result)
 }
 
 func ClaudeTokenCount(_ context.Context, count int64) []byte {

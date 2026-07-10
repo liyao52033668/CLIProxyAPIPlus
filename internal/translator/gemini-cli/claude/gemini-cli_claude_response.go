@@ -28,6 +28,8 @@ type Params struct {
 	ResponseType     int  // Current response type: 0=none, 1=content, 2=thinking, 3=function
 	ResponseIndex    int  // Index counter for content blocks in the streaming response
 	HasContent       bool // Tracks whether any content (text, thinking, or tool use) has been output
+	TextBuffer       translatorcommon.ContentBlockTextBuffer
+	ThinkingBuffer   translatorcommon.ContentBlockTextBuffer
 
 	// Reverse map: sanitized Gemini function name → original Claude tool name.
 	ToolNameMap map[string]string
@@ -110,9 +112,10 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, originalReque
 
 			// Handle text content (both regular content and thinking)
 			if partTextResult.Exists() {
-				text := translatorcommon.TextFromContentBlocks(partTextResult)
+				text := (*param).(*Params).TextBuffer.Text(partTextResult)
 				// Process thinking content (internal reasoning)
 				if partResult.Get("thought").Bool() {
+					text = (*param).(*Params).ThinkingBuffer.Text(partTextResult)
 					// Continue existing thinking block if already in thinking state
 					if (*param).(*Params).ResponseType == 2 {
 						data, _ := sjson.SetBytes(fmt.Appendf(nil, `{"type":"content_block_delta","index":%d,"delta":{"type":"thinking_delta","thinking":""}}`, (*param).(*Params).ResponseIndex), "delta.thinking", text)

@@ -29,6 +29,8 @@ type ConvertAnthropicResponseToOpenAIParams struct {
 	Usage        claudeUsageTokens
 	// Tool calls accumulator for streaming
 	ToolCallsAccumulator map[int]*ToolCallAccumulator
+	TextBuffer           translatorcommon.ContentBlockTextBuffer
+	ReasoningBuffer      translatorcommon.ContentBlockTextBuffer
 }
 
 type claudeUsageTokens struct {
@@ -181,13 +183,13 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 			case "text_delta":
 				// Text content delta - send incremental text updates
 				if text := delta.Get("text"); text.Exists() {
-					template, _ = sjson.SetBytes(template, "choices.0.delta.content", translatorcommon.TextFromContentBlocks(text))
+					template, _ = sjson.SetBytes(template, "choices.0.delta.content", (*param).(*ConvertAnthropicResponseToOpenAIParams).TextBuffer.Text(text))
 					hasContent = true
 				}
 			case "thinking_delta":
 				// Accumulate reasoning/thinking content
 				if thinking := delta.Get("thinking"); thinking.Exists() {
-					template, _ = sjson.SetBytes(template, "choices.0.delta.reasoning_content", translatorcommon.TextFromContentBlocks(thinking))
+					template, _ = sjson.SetBytes(template, "choices.0.delta.reasoning_content", (*param).(*ConvertAnthropicResponseToOpenAIParams).ReasoningBuffer.Text(thinking))
 					hasContent = true
 				}
 			case "input_json_delta":

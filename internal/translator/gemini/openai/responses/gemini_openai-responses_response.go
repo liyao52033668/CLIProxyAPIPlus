@@ -27,6 +27,7 @@ type geminiToResponsesState struct {
 	CurrentMsgID string
 	TextBuf      strings.Builder
 	ItemTextBuf  strings.Builder
+	TextBuffer   translatorcommon.ContentBlockTextBuffer
 
 	// reasoning aggregation
 	ReasoningOpened bool
@@ -34,6 +35,7 @@ type geminiToResponsesState struct {
 	ReasoningItemID string
 	ReasoningEnc    string
 	ReasoningBuf    strings.Builder
+	ReasoningBuffer translatorcommon.ContentBlockTextBuffer
 	ReasoningClosed bool
 
 	// function call aggregation (keyed by output_index)
@@ -263,7 +265,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 					out = append(out, emitEvent("response.reasoning_summary_part.added", partAdded))
 				}
 				if t := part.Get("text"); t.Exists() {
-					text := translatorcommon.TextFromContentBlocks(t)
+					text := st.ReasoningBuffer.Text(t)
 					if text != "" {
 						st.ReasoningBuf.WriteString(text)
 						msg := []byte(`{"type":"response.reasoning_summary_text.delta","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"delta":""}`)
@@ -279,7 +281,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 
 			// Assistant visible text
 			if t := part.Get("text"); t.Exists() {
-				text := translatorcommon.TextFromContentBlocks(t)
+				text := st.TextBuffer.Text(t)
 				if text == "" {
 					return true
 				}

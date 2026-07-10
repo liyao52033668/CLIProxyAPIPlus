@@ -371,7 +371,9 @@ func (e *CodeBuddyExecutor) applyHeaders(req *http.Request, accessToken, userID,
 type openAIChatStreamChoiceAccumulator struct {
 	Role               string
 	ContentParts       []string
+	ContentBuffer      translatorcommon.ContentBlockTextBuffer
 	ReasoningParts     []string
+	ReasoningBuffer    translatorcommon.ContentBlockTextBuffer
 	FinishReason       string
 	ToolCalls          map[int]*openAIChatStreamToolCallAccumulator
 	ToolCallOrder      []int
@@ -444,10 +446,10 @@ func aggregateOpenAIChatCompletionStream(raw []byte) ([]byte, usage.Detail, erro
 			if role := delta.Get("role").String(); role != "" {
 				choice.Role = role
 			}
-			if content := translatorcommon.TextFromContentBlocks(delta.Get("content")); content != "" {
+			if content := choice.ContentBuffer.Text(delta.Get("content")); content != "" {
 				choice.ContentParts = append(choice.ContentParts, content)
 			}
-			if reasoning := delta.Get("reasoning_content").String(); reasoning != "" {
+			if reasoning := choice.ReasoningBuffer.Text(delta.Get("reasoning_content")); reasoning != "" {
 				choice.ReasoningParts = append(choice.ReasoningParts, reasoning)
 			}
 			if finishReason := choiceResult.Get("finish_reason").String(); finishReason != "" {
@@ -506,6 +508,12 @@ func aggregateOpenAIChatCompletionStream(raw []byte) ([]byte, usage.Detail, erro
 
 	for _, idx := range choiceOrder {
 		choice := choices[idx]
+		if content := choice.ContentBuffer.Flush(); content != "" {
+			choice.ContentParts = append(choice.ContentParts, content)
+		}
+		if reasoning := choice.ReasoningBuffer.Flush(); reasoning != "" {
+			choice.ReasoningParts = append(choice.ReasoningParts, reasoning)
+		}
 		message := map[string]any{
 			"role":    choice.Role,
 			"content": strings.Join(choice.ContentParts, ""),
