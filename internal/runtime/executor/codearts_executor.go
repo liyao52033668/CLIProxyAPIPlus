@@ -269,6 +269,7 @@ func (e *CodeArtsExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 		InputTokens:  promptTokens,
 		OutputTokens: completionTokens,
 	})
+	reporter.EnsurePublished(ctx)
 
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:      codeartsChatURL,
@@ -440,6 +441,7 @@ func (e *CodeArtsExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 			InputTokens:  totalPromptTokens,
 			OutputTokens: totalCompletionTokens,
 		})
+		reporter.EnsurePublished(ctx)
 
 		helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 			URL:      codeartsChatURL,

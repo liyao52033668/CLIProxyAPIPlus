@@ -189,6 +189,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 			if detail, ok := helps.ParseCodexUsage(eventData); ok {
 				reporter.Publish(ctx, detail)
 			}
+			reporter.EnsurePublished(ctx)
 			completedData := xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
 			completedData = xaiNormalizeReasoningSummaryData(completedData)
 			cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, completedData)
@@ -749,6 +750,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 			case <-ctx.Done():
 			}
 		}
+		reporter.EnsurePublished(ctx)
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 }

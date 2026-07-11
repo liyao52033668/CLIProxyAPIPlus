@@ -231,6 +231,7 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
 			reporter.Publish(ctx, helps.ParseGeminiCLIUsage(data))
+			reporter.EnsurePublished(ctx)
 			var param any
 			out := sdktranslator.TranslateNonStream(respCtx, to, from, attemptModel, opts.OriginalRequest, payload, data, &param)
 			resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
@@ -454,6 +455,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 			}
 			helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 			reporter.Publish(ctx, helps.ParseGeminiCLIUsage(data))
+			reporter.EnsurePublished(ctx)
 			var param any
 			segments := sdktranslator.TranslateStream(respCtx, to, from, attemptModel, opts.OriginalRequest, reqBody, data, &param)
 			for i := range segments {

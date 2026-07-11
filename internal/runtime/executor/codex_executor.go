@@ -285,6 +285,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 			reporter.Publish(ctx, detail)
 		}
 		publishCodexImageToolUsage(ctx, reporter, body, eventData)
+		reporter.EnsurePublished(ctx)
 
 		completedData := patchCodexCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
 		cacheCodexReasoningReplayFromCompleted(replayScope, completedData)
@@ -553,7 +554,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
 			case <-ctx.Done():
 			}
+			return
 		}
+		reporter.EnsurePublished(ctx)
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 }

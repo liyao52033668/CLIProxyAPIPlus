@@ -21,8 +21,10 @@ import (
 	cursorproto "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cursor/proto"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -294,6 +296,13 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 
 	parsed := parseOpenAIRequest(payload)
+	modelName := strings.TrimSpace(parsed.Model)
+	if modelName == "" {
+		modelName = req.Model
+	}
+	reporter := helps.NewUsageReporter(ctx, e.Identifier(), modelName, auth)
+	defer reporter.TrackFailure(ctx, &err)
+
 	ccSessId := extractClaudeCodeSessionId(req.Payload)
 	conversationId := deriveConversationId(apiKeyFromContext(ctx), ccSessId, parsed.SystemPrompt)
 	params := buildRunRequestParams(req.Model, parsed, conversationId)
@@ -319,22 +328,28 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	// Collect full text from streaming response
 	var fullText strings.Builder
+	tokenUsage := &cursorTokenUsage{}
+	tokenUsage.setInputEstimate(len(payload))
 	if streamErr := processH2SessionFrames(sessionCtx, stream, params.BlobStore, nil,
 		func(text string, isThinking bool) {
 			fullText.WriteString(text)
 		},
 		nil,
 		nil,
-		nil, // tokenUsage - non-streaming
+		tokenUsage,
 		nil, // onCheckpoint - non-streaming doesn't persist
 	); streamErr != nil && fullText.Len() == 0 {
 		return resp, classifyCursorError(fmt.Errorf("cursor: stream error: %w", streamErr))
 	}
 
+	inputTok, outputTok := tokenUsage.get()
+	reporter.Publish(ctx, tokenUsage.detail())
+	reporter.EnsurePublished(ctx)
+
 	id := "chatcmpl-" + uuid.New().String()[:28]
 	created := time.Now().Unix()
-	openaiResp := fmt.Sprintf(`{"id":"%s","object":"chat.completion","created":%d,"model":"%s","choices":[{"index":0,"message":{"role":"assistant","content":%s},"finish_reason":"stop"}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`,
-		id, created, parsed.Model, jsonString(fullText.String()))
+	openaiResp := fmt.Sprintf(`{"id":"%s","object":"chat.completion","created":%d,"model":"%s","choices":[{"index":0,"message":{"role":"assistant","content":%s},"finish_reason":"stop"}],"usage":{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d}}`,
+		id, created, parsed.Model, jsonString(fullText.String()), inputTok, outputTok, inputTok+outputTok)
 
 	// Translate response back to source format if needed
 	result := []byte(openaiResp)
@@ -492,6 +507,13 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	requestBytes := cursorproto.EncodeRunRequest(params)
 	framedRequest := cursorproto.FrameConnectMessage(requestBytes, 0)
 
+	modelName := strings.TrimSpace(parsed.Model)
+	if modelName == "" {
+		modelName = req.Model
+	}
+	reporter := helps.NewUsageReporter(ctx, e.Identifier(), modelName, auth)
+	defer reporter.TrackFailure(ctx, &err)
+
 	stream, err := openCursorH2Stream(accessToken)
 	if err != nil {
 		return nil, err
@@ -585,8 +607,8 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		_ = resumeOutCh
 		thinkingActive := false
 		toolCallIndex := 0
-		usage := &cursorTokenUsage{}
-		usage.setInputEstimate(len(payload))
+		tokenUsage := &cursorTokenUsage{}
+		tokenUsage.setInputEstimate(len(payload))
 
 		streamErr := processH2SessionFrames(sessionCtx, stream, params.BlobStore, params.McpTools,
 			func(text string, isThinking bool) {
@@ -657,7 +679,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				// while continuing to handle KV messages
 			},
 			toolResultCh,
-			usage,
+			tokenUsage,
 			func(cpData []byte) {
 				// Save checkpoint keyed by conversationId, tagged with authID for migration detection
 				e.mu.Lock()
@@ -699,10 +721,8 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		if thinkingActive {
 			sendChunkSwitchable(`{"content":"</think>"}`, "")
 		}
-		// Include token usage in the final stop chunk
-		inputTok, outputTok := usage.get()
-		stopDelta := fmt.Sprintf(`{},"usage":{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d}`,
-			inputTok, outputTok, inputTok+outputTok)
+		// Include token usage in the final stop chunk and publish to usage manager.
+		inputTok, outputTok := tokenUsage.get()
 		// Build the stop chunk with usage embedded in the choices array level
 		fr := `"stop"`
 		openaiJSON := fmt.Sprintf(`{"id":"%s","object":"chat.completion.chunk","created":%d,"model":"%s","choices":[{"index":0,"delta":{},"finish_reason":%s}],"usage":{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d}}`,
@@ -717,7 +737,15 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			emitToOut(cliproxyexecutor.StreamChunk{Payload: []byte(openaiJSON)})
 		}
 		sendDoneSwitchable()
-		_ = stopDelta // unused
+
+		// Publish usage for management stats. Stream responses previously only
+		// embedded usage in the SSE payload and never reached the usage manager.
+		if streamErr != nil && inputTok == 0 && outputTok == 0 {
+			reporter.PublishFailure(ctx, streamErr)
+		} else {
+			reporter.Publish(ctx, tokenUsage.detail())
+			reporter.EnsurePublished(ctx)
+		}
 
 		// Close whatever output channel is still active
 		outMu.Lock()
@@ -735,6 +763,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	// return an error so the conductor retries with a different auth.
 	select {
 	case streamErr := <-streamErrCh:
+		reporter.PublishFailure(ctx, streamErr)
 		return nil, classifyCursorError(fmt.Errorf("cursor: stream failed before response: %w", streamErr))
 	case <-firstChunkSent:
 		// Data started flowing — return stream to client
@@ -841,6 +870,18 @@ func (u *cursorTokenUsage) get() (input, output int64) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	return u.inputTokensEst, u.outputTokens
+}
+
+func (u *cursorTokenUsage) detail() usage.Detail {
+	if u == nil {
+		return usage.Detail{}
+	}
+	input, output := u.get()
+	return usage.Detail{
+		InputTokens:  input,
+		OutputTokens: output,
+		TotalTokens:  input + output,
+	}
 }
 
 func processH2SessionFrames(

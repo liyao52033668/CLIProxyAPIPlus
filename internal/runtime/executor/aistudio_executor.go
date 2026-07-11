@@ -180,6 +180,7 @@ func (e *AIStudioExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 		return resp, statusErr{code: wsResp.Status, msg: string(wsResp.Body)}
 	}
 	reporter.Publish(ctx, helps.ParseGeminiUsage(wsResp.Body))
+	reporter.EnsurePublished(ctx)
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, body.toFormat, opts.SourceFormat, req.Model, opts.OriginalRequest, translatedReq, wsResp.Body, &param)
 	resp = cliproxyexecutor.Response{Payload: ensureColonSpacedJSON(out), Headers: wsResp.Headers.Clone()}
@@ -279,6 +280,7 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func(first wsrelay.StreamEvent) {
 		defer close(out)
+		defer reporter.EnsurePublished(ctx)
 		var param any
 		metadataLogged := false
 		processEvent := func(event wsrelay.StreamEvent) bool {

@@ -9,12 +9,14 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/qoder"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -1101,6 +1103,209 @@ func TestQoderCreds_UsesPATTokenMetadata(t *testing.T) {
 	creds := qoderCreds(auth)
 	if creds.accessToken != "qdr_pat_token" {
 		t.Fatalf("accessToken = %q, want %q", creds.accessToken, "qdr_pat_token")
+	}
+}
+
+func TestQoderParseSSEToCompletion_PreservesUsage(t *testing.T) {
+	e := NewQoderExecutor(&config.Config{})
+	sse := strings.Join([]string{
+		`data: {"body":"{\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}"}`,
+		`data: {"body":"{\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18}}"}`,
+		`data: {"body":"[DONE]"}`,
+	}, "\n")
+	out := e.parseQoderSSEToCompletion([]byte(sse), "qwen3.7-max")
+	if got := gjson.GetBytes(out, "choices.0.message.content").String(); got != "hello" {
+		t.Fatalf("content = %q, want %q", got, "hello")
+	}
+	if got := gjson.GetBytes(out, "usage.prompt_tokens").Int(); got != 11 {
+		t.Fatalf("usage.prompt_tokens = %d, want %d", got, 11)
+	}
+	if got := gjson.GetBytes(out, "usage.completion_tokens").Int(); got != 7 {
+		t.Fatalf("usage.completion_tokens = %d, want %d", got, 7)
+	}
+	if got := gjson.GetBytes(out, "usage.total_tokens").Int(); got != 18 {
+		t.Fatalf("usage.total_tokens = %d, want %d", got, 18)
+	}
+}
+
+func TestQoderParseSSEToCompletion_PreservesUsageOnlyChunk(t *testing.T) {
+	e := NewQoderExecutor(&config.Config{})
+	sse := strings.Join([]string{
+		`data: {"body":"{\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}"}`,
+		`data: {"body":"{\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}"}`,
+		`data: {"body":"[DONE]"}`,
+	}, "\n")
+	out := e.parseQoderSSEToCompletion([]byte(sse), "qwen3.7-max")
+	if got := gjson.GetBytes(out, "usage.total_tokens").Int(); got != 5 {
+		t.Fatalf("usage.total_tokens = %d, want %d, body=%s", got, 5, string(out))
+	}
+}
+
+func TestQoderExtractOpenAIChunkFromSSE_KeepsUsageOnlyChunk(t *testing.T) {
+	e := NewQoderExecutor(&config.Config{})
+	line := []byte(`data: {"body":"{\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":1,\"total_tokens\":5}}"}`)
+	chunk := e.extractOpenAIChunkFromSSE(line, "qwen3.7-max")
+	if chunk == nil {
+		t.Fatal("expected usage-only chunk to be preserved")
+	}
+	if got := gjson.GetBytes(chunk, "usage.prompt_tokens").Int(); got != 4 {
+		t.Fatalf("usage.prompt_tokens = %d, want %d, chunk=%s", got, 4, string(chunk))
+	}
+	if got := gjson.GetBytes(chunk, "model").String(); got != "qwen3.7-max" {
+		t.Fatalf("model = %q, want %q", got, "qwen3.7-max")
+	}
+}
+
+func TestQoderExecutorExecute_PublishesUsageFromSSE(t *testing.T) {
+	plugin := &captureQoderUsagePlugin{records: make(chan usage.Record, 8)}
+	usage.RegisterPlugin(plugin)
+
+	requestCount := 0
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", qoderRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requestCount++
+		switch requestCount {
+		case 1:
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"id":"u1","name":"Qoder User","securityOauthToken":"session-token","refreshToken":"refresh-token","userType":"personal_standard"}`)),
+				Request:    req,
+			}, nil
+		case 2:
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body: io.NopCloser(strings.NewReader(strings.Join([]string{
+					`data: {"body":"{\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}"}`,
+					`data: {"body":"{\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":3,\"total_tokens\":12}}"}`,
+					`data: {"body":"[DONE]"}`,
+				}, "\n"))),
+				Request: req,
+			}, nil
+		default:
+			t.Fatalf("unexpected request %d: %s", requestCount, req.URL.String())
+			return nil, nil
+		}
+	}))
+
+	e := NewQoderExecutor(&config.Config{})
+	_, err := e.Execute(ctx, &cliproxyauth.Auth{
+		ID:       "qoder-usage-auth.json",
+		Provider: "qoder",
+		Metadata: map[string]any{"access_token": "token", "uid": "u1", "machine_id": "m1"},
+	}, cliproxyexecutor.Request{
+		Model:   "qwen3.7-max",
+		Payload: []byte(`{"messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai")})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	record := waitForQoderUsageRecord(t, plugin.records, "qwen3.7-max")
+	if record.Detail.InputTokens != 9 {
+		t.Fatalf("InputTokens = %d, want %d", record.Detail.InputTokens, 9)
+	}
+	if record.Detail.OutputTokens != 3 {
+		t.Fatalf("OutputTokens = %d, want %d", record.Detail.OutputTokens, 3)
+	}
+	if record.Detail.TotalTokens != 12 {
+		t.Fatalf("TotalTokens = %d, want %d", record.Detail.TotalTokens, 12)
+	}
+}
+
+func TestQoderExecutorExecuteStream_PublishesUsageFromSSE(t *testing.T) {
+	plugin := &captureQoderUsagePlugin{records: make(chan usage.Record, 8)}
+	usage.RegisterPlugin(plugin)
+
+	requestCount := 0
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", qoderRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requestCount++
+		switch requestCount {
+		case 1:
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"id":"u1","name":"Qoder User","securityOauthToken":"session-token","refreshToken":"refresh-token","userType":"personal_standard"}`)),
+				Request:    req,
+			}, nil
+		case 2:
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body: io.NopCloser(strings.NewReader(strings.Join([]string{
+					`data: {"body":"{\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}"}`,
+					`data: {"body":"{\"usage\":{\"prompt_tokens\":6,\"completion_tokens\":4,\"total_tokens\":10}}"}`,
+					`data: {"body":"[DONE]"}`,
+				}, "\n"))),
+				Request: req,
+			}, nil
+		default:
+			t.Fatalf("unexpected request %d: %s %s", requestCount, req.Method, req.URL.String())
+			return nil, nil
+		}
+	}))
+
+	e := NewQoderExecutor(&config.Config{})
+	streamResult, err := e.ExecuteStream(ctx, &cliproxyauth.Auth{
+		ID:       "qoder-stream-auth.json",
+		Provider: "qoder",
+		Metadata: map[string]any{
+			"auth_method":           "pat",
+			"personal_access_token": "qdr_pat_token",
+			"uid":                   "u1",
+			"machine_id":            "m1",
+		},
+	}, cliproxyexecutor.Request{
+		Model:   "qmodel_latest",
+		Payload: []byte(`{"messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai")})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	for chunk := range streamResult.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected stream chunk error: %v", chunk.Err)
+		}
+	}
+
+	record := waitForQoderUsageRecord(t, plugin.records, "qmodel_latest")
+	if record.Detail.InputTokens != 6 {
+		t.Fatalf("InputTokens = %d, want %d", record.Detail.InputTokens, 6)
+	}
+	if record.Detail.OutputTokens != 4 {
+		t.Fatalf("OutputTokens = %d, want %d", record.Detail.OutputTokens, 4)
+	}
+	if record.Detail.TotalTokens != 10 {
+		t.Fatalf("TotalTokens = %d, want %d", record.Detail.TotalTokens, 10)
+	}
+}
+
+type captureQoderUsagePlugin struct {
+	records chan usage.Record
+}
+
+func (p *captureQoderUsagePlugin) HandleUsage(_ context.Context, record usage.Record) {
+	if p == nil {
+		return
+	}
+	select {
+	case p.records <- record:
+	default:
+	}
+}
+
+func waitForQoderUsageRecord(t *testing.T, records <-chan usage.Record, model string) usage.Record {
+	t.Helper()
+	timeout := time.After(2 * time.Second)
+	for {
+		select {
+		case record := <-records:
+			if record.Provider == "qoder" && record.Model == model {
+				return record
+			}
+		case <-timeout:
+			t.Fatalf("timed out waiting for qoder usage record for model %q", model)
+		}
 	}
 }
 

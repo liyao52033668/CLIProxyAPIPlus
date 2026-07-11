@@ -293,6 +293,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	} else {
 		reporter.Publish(ctx, helps.ParseClaudeUsage(data))
 	}
+	reporter.EnsurePublished(ctx)
 	data = restoreClaudeOAuthToolNamesFromResponse(data, claudeToolPrefix, auth.ToolPrefixDisabled(), oauthToolNamesReverseMap)
 	var param any
 	out := sdktranslator.TranslateNonStream(
@@ -481,6 +482,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				case <-ctx.Done():
 				}
 			}
+			reporter.EnsurePublished(ctx)
 			return
 		}
 
@@ -521,6 +523,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			case <-ctx.Done():
 			}
 		}
+		reporter.EnsurePublished(ctx)
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 }

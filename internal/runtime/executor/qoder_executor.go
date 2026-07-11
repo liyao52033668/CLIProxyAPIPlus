@@ -375,6 +375,8 @@ func (e *QoderExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	// Parse SSE response to extract the final completion
 	openAIResp := e.parseQoderSSEToCompletion(data, req.Model)
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(openAIResp))
+	// Ensure usage is recorded even if upstream omits usage metadata.
+	reporter.EnsurePublished(ctx)
 
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, body, openAIResp, &param)
@@ -550,6 +552,8 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			reporter.PublishFailure(ctx)
 			out <- cliproxyexecutor.StreamChunk{Err: errScan}
 		}
+		// Guarantee a usage record exists even if the stream never emitted usage data.
+		reporter.EnsurePublished(ctx)
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 }
@@ -1225,6 +1229,7 @@ func (e *QoderExecutor) buildCosyRequest(ctx context.Context, auth *cliproxyauth
 }
 
 // extractOpenAIChunkFromSSE parses a Qoder SSE line and extracts the inner OpenAI chunk.
+// Chunks that only carry usage (no choices) are preserved so stream usage can be published.
 func (e *QoderExecutor) extractOpenAIChunkFromSSE(line []byte, model string) []byte {
 	s := string(line)
 	if !strings.HasPrefix(s, "data:") {
@@ -1250,7 +1255,9 @@ func (e *QoderExecutor) extractOpenAIChunkFromSSE(line []byte, model string) []b
 		return nil
 	}
 	inner := gjson.Parse(innerRaw)
-	if !inner.Get("choices").Exists() {
+	hasChoices := inner.Get("choices").Exists()
+	hasUsage := hasOpenAIStyleUsageTokenFields(inner.Get("usage"))
+	if !hasChoices && !hasUsage {
 		return nil
 	}
 
@@ -1263,10 +1270,12 @@ func (e *QoderExecutor) extractOpenAIChunkFromSSE(line []byte, model string) []b
 }
 
 // parseQoderSSEToCompletion parses the full SSE response and assembles a non-streaming completion.
+// It preserves the last non-empty usage payload from upstream SSE chunks so usage stats work.
 func (e *QoderExecutor) parseQoderSSEToCompletion(data []byte, model string) []byte {
 	var fullContent strings.Builder
 	var contentBuffer translatorcommon.ContentBlockTextBuffer
 	var finishReason string
+	var usageRaw string
 
 	lines := strings.SplitSeq(string(data), "\n")
 	for line := range lines {
@@ -1287,7 +1296,13 @@ func (e *QoderExecutor) parseQoderSSEToCompletion(data []byte, model string) []b
 		if innerRaw == "[DONE]" {
 			continue
 		}
+		if !gjson.Valid(innerRaw) {
+			continue
+		}
 		inner := gjson.Parse(innerRaw)
+		if usageNode := inner.Get("usage"); hasOpenAIStyleUsageTokenFields(usageNode) {
+			usageRaw = usageNode.Raw
+		}
 		if !inner.Get("choices").Exists() {
 			continue
 		}
@@ -1328,7 +1343,30 @@ func (e *QoderExecutor) parseQoderSSEToCompletion(data []byte, model string) []b
 		},
 	}
 	out, _ := json.Marshal(result)
+	if usageRaw != "" {
+		if withUsage, errSet := sjson.SetRawBytes(out, "usage", []byte(usageRaw)); errSet == nil {
+			out = withUsage
+		}
+	}
 	return out
+}
+
+// hasOpenAIStyleUsageTokenFields reports whether a usage object has countable token fields.
+// Kept local so SSE parsers can accept usage-only chunks without importing helps internals.
+func hasOpenAIStyleUsageTokenFields(usageNode gjson.Result) bool {
+	if !usageNode.Exists() || !usageNode.IsObject() {
+		return false
+	}
+	return usageNode.Get("prompt_tokens").Exists() ||
+		usageNode.Get("input_tokens").Exists() ||
+		usageNode.Get("completion_tokens").Exists() ||
+		usageNode.Get("output_tokens").Exists() ||
+		usageNode.Get("total_tokens").Exists() ||
+		usageNode.Get("prompt_tokens_details.cached_tokens").Exists() ||
+		usageNode.Get("input_tokens_details.cached_tokens").Exists() ||
+		usageNode.Get("input_tokens_details.cache_write_tokens").Exists() ||
+		usageNode.Get("completion_tokens_details.reasoning_tokens").Exists() ||
+		usageNode.Get("output_tokens_details.reasoning_tokens").Exists()
 }
 
 func qoderEnsureSession(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config) (qoderCredentials, error) {

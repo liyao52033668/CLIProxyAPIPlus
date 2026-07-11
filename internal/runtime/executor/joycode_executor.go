@@ -117,6 +117,7 @@ func (e *JoyCodeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, 
 		InputTokens:  promptTokens,
 		OutputTokens: completionTokens,
 	})
+	reporter.EnsurePublished(ctx)
 
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:      joycodeChatURL,
@@ -212,6 +213,7 @@ func (e *JoyCodeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.
 			InputTokens:  totalPromptTokens,
 			OutputTokens: totalCompletionTokens,
 		})
+		reporter.EnsurePublished(ctx)
 
 		helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 			URL:      joycodeChatURL,
