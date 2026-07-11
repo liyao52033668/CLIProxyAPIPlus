@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -405,10 +404,8 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	// Keep websocket on the official API base URL (or an explicit non-default
 	// base_url). Do not reuse xaiChatBaseURL: cli-chat-proxy only accepts HTTP
 	// POST and returns 405 for websocket upgrades.
-	token, baseURL := xaiCreds(auth)
-	if baseURL == "" {
-		baseURL = xaiauth.DefaultAPIBaseURL
-	}
+	token, _ := xaiCreds(auth)
+	baseURL := xaiOfficialOrExplicitBaseURL(auth)
 
 	prepared, err := e.prepareResponsesWebsocketRequest(ctx, req, opts)
 	if err != nil {

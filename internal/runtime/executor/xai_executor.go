@@ -484,10 +484,8 @@ func xaiBuildSSEFrame(eventName string, data []byte) []byte {
 }
 
 func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, endpointPath string) (resp cliproxyexecutor.Response, err error) {
-	token, baseURL := xaiCreds(auth)
-	if baseURL == "" {
-		baseURL = xaiauth.DefaultAPIBaseURL
-	}
+	token, _ := xaiCreds(auth)
+	baseURL := xaiOfficialOrExplicitBaseURL(auth)
 	if endpointPath == "" {
 		endpointPath = xaiDefaultImageEndpointPath
 	}
@@ -529,10 +527,8 @@ func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth
 }
 
 func (e *XAIExecutor) executeVideos(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
-	token, baseURL := xaiCreds(auth)
-	if baseURL == "" {
-		baseURL = xaiauth.DefaultAPIBaseURL
-	}
+	token, _ := xaiCreds(auth)
+	baseURL := xaiOfficialOrExplicitBaseURL(auth)
 
 	method := http.MethodPost
 	endpointPath := xaiVideosGenerationsPath
@@ -824,7 +820,7 @@ func (e *XAIExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cl
 		auth.Metadata["token_endpoint"] = tokenEndpoint
 	}
 	if xaiMetadataString(auth.Metadata, "base_url") == "" {
-		auth.Metadata["base_url"] = xaiauth.DefaultAPIBaseURL
+		auth.Metadata["base_url"] = xaiauth.CLIChatProxyBaseURL
 	}
 	auth.Metadata["last_refresh"] = time.Now().UTC().Format(time.RFC3339)
 	if auth.Attributes == nil {
@@ -832,7 +828,7 @@ func (e *XAIExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cl
 	}
 	auth.Attributes["auth_kind"] = "oauth"
 	if strings.TrimSpace(auth.Attributes["base_url"]) == "" {
-		auth.Attributes["base_url"] = xaiauth.DefaultAPIBaseURL
+		auth.Attributes["base_url"] = xaiauth.CLIChatProxyBaseURL
 	}
 	return auth, nil
 }
@@ -1020,6 +1016,17 @@ func xaiIsDefaultAPIBaseURL(baseURL string) bool {
 
 func xaiIsCLIChatProxyBaseURL(baseURL string) bool {
 	return xaiNormalizeBaseURL(baseURL) == xaiNormalizeBaseURL(xaiauth.CLIChatProxyBaseURL)
+}
+
+// xaiOfficialOrExplicitBaseURL returns a base URL suitable for websocket/media.
+// CLI chat-proxy only accepts HTTP chat POST, so empty/default/chat-proxy values
+// fall back to the official API while still honoring custom explicit base URLs.
+func xaiOfficialOrExplicitBaseURL(auth *cliproxyauth.Auth) string {
+	_, baseURL := xaiCreds(auth)
+	if baseURL == "" || xaiIsDefaultAPIBaseURL(baseURL) || xaiIsCLIChatProxyBaseURL(baseURL) {
+		return xaiauth.DefaultAPIBaseURL
+	}
+	return baseURL
 }
 
 func applyXAIHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, sessionID string) {

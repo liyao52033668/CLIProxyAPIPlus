@@ -103,3 +103,19 @@ func TestRefreshTokensPostsClientIDAndRefreshToken(t *testing.T) {
 		t.Fatalf("refresh_token = %q, want old-refresh", gotForm.Get("refresh_token"))
 	}
 }
+
+func TestCreateTokenStorageDefaultsToCLIChatProxy(t *testing.T) {
+	auth := NewXAIAuth(nil)
+	storage := auth.CreateTokenStorage(&AuthBundle{
+		TokenData: TokenData{AccessToken: "access", RefreshToken: "refresh"},
+	})
+	if storage == nil {
+		t.Fatal("CreateTokenStorage returned nil")
+	}
+	if storage.BaseURL != CLIChatProxyBaseURL {
+		t.Fatalf("BaseURL = %q, want %q", storage.BaseURL, CLIChatProxyBaseURL)
+	}
+	if storage.AuthKind != "oauth" {
+		t.Fatalf("AuthKind = %q, want oauth", storage.AuthKind)
+	}
+}

@@ -1998,3 +1998,46 @@ func testValidGrokEncryptedContent() string {
 	}
 	return base64.RawStdEncoding.EncodeToString(buf[:256])
 }
+
+func TestXAIOfficialOrExplicitBaseURL(t *testing.T) {
+	tests := []struct {
+		name string
+		auth *cliproxyauth.Auth
+		want string
+	}{
+		{
+			name: "empty falls back to official",
+			auth: &cliproxyauth.Auth{Attributes: map[string]string{"auth_kind": "oauth"}},
+			want: xaiauth.DefaultAPIBaseURL,
+		},
+		{
+			name: "oauth chat-proxy is rewritten to official for websocket/media",
+			auth: &cliproxyauth.Auth{Attributes: map[string]string{
+				"auth_kind": "oauth",
+				"base_url":  xaiauth.CLIChatProxyBaseURL,
+			}},
+			want: xaiauth.DefaultAPIBaseURL,
+		},
+		{
+			name: "official stays official",
+			auth: &cliproxyauth.Auth{Attributes: map[string]string{
+				"base_url": xaiauth.DefaultAPIBaseURL,
+			}},
+			want: xaiauth.DefaultAPIBaseURL,
+		},
+		{
+			name: "custom explicit base is preserved",
+			auth: &cliproxyauth.Auth{Attributes: map[string]string{
+				"base_url": "https://custom.example.com/v1",
+			}},
+			want: "https://custom.example.com/v1",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := xaiOfficialOrExplicitBaseURL(tt.auth); got != tt.want {
+				t.Fatalf("xaiOfficialOrExplicitBaseURL() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

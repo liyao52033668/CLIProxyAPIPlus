@@ -172,7 +172,7 @@ func (a *XAIAuth) ExchangeCodeForTokens(ctx context.Context, code, redirectURI s
 	return &AuthBundle{
 		TokenData:     *tokenData,
 		LastRefresh:   time.Now().UTC().Format(time.RFC3339),
-		BaseURL:       DefaultAPIBaseURL,
+		BaseURL:       CLIChatProxyBaseURL, // OAuth default: CLI chat-proxy for non-media HTTP chat
 		RedirectURI:   strings.TrimSpace(redirectURI),
 		TokenEndpoint: strings.TrimSpace(tokenEndpoint),
 	}, nil
@@ -286,7 +286,7 @@ func (a *XAIAuth) CreateTokenStorage(bundle *AuthBundle) *TokenStorage {
 		LastRefresh:   bundle.LastRefresh,
 		Email:         strings.TrimSpace(bundle.TokenData.Email),
 		Subject:       bundle.TokenData.Subject,
-		BaseURL:       firstNonEmpty(bundle.BaseURL, DefaultAPIBaseURL),
+		BaseURL:       firstNonEmpty(bundle.BaseURL, CLIChatProxyBaseURL),
 		RedirectURI:   bundle.RedirectURI,
 		TokenEndpoint: bundle.TokenEndpoint,
 		AuthKind:      "oauth",
