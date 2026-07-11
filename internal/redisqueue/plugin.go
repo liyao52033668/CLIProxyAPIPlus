@@ -82,15 +82,30 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		ResponseHeaders: record.ResponseHeaders,
 	}
 
+	requestServiceTier := strings.TrimSpace(record.RequestServiceTier)
+	if requestServiceTier == "" {
+		requestServiceTier = strings.TrimSpace(record.ServiceTier)
+	}
+	if requestServiceTier == "" {
+		requestServiceTier = coreusage.ServiceTierFromContext(ctx)
+	}
+	responseServiceTier := strings.TrimSpace(record.ResponseServiceTier)
+	if responseServiceTier == "" {
+		responseServiceTier = strings.TrimSpace(record.Detail.ResponseServiceTier)
+	}
+
 	payload, err := json.Marshal(queuedUsageDetail{
-		requestDetail: detail,
-		Provider:      provider,
-		Model:         modelName,
-		Alias:         aliasName,
-		Endpoint:      resolveEndpoint(ctx),
-		AuthType:      authType,
-		APIKey:        apiKey,
-		RequestID:     requestID,
+		requestDetail:       detail,
+		Provider:            provider,
+		Model:               modelName,
+		Alias:               aliasName,
+		Endpoint:            resolveEndpoint(ctx),
+		AuthType:            authType,
+		APIKey:              apiKey,
+		RequestID:           requestID,
+		ServiceTier:         requestServiceTier,
+		RequestServiceTier:  requestServiceTier,
+		ResponseServiceTier: responseServiceTier,
 	})
 	if err != nil {
 		return
@@ -100,13 +115,16 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 
 type queuedUsageDetail struct {
 	requestDetail
-	Provider  string `json:"provider"`
-	Model     string `json:"model"`
-	Alias     string `json:"alias"`
-	Endpoint  string `json:"endpoint"`
-	AuthType  string `json:"auth_type"`
-	APIKey    string `json:"api_key"`
-	RequestID string `json:"request_id"`
+	Provider            string `json:"provider"`
+	Model               string `json:"model"`
+	Alias               string `json:"alias"`
+	Endpoint            string `json:"endpoint"`
+	AuthType            string `json:"auth_type"`
+	APIKey              string `json:"api_key"`
+	RequestID           string `json:"request_id"`
+	ServiceTier         string `json:"service_tier,omitempty"`
+	RequestServiceTier  string `json:"request_service_tier,omitempty"`
+	ResponseServiceTier string `json:"response_service_tier,omitempty"`
 }
 
 type requestDetail struct {

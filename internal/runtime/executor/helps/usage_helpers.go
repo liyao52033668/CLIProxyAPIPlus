@@ -20,18 +20,19 @@ import (
 )
 
 type UsageReporter struct {
-	provider    string
-	model       string
-	alias       string
-	authID      string
-	authIndex   string
-	authType    string
-	apiKey      string
-	source      string
-	reasoning   string
-	serviceTier string
-	requestedAt time.Time
-	once        sync.Once
+	provider                   string
+	model                      string
+	alias                      string
+	authID                     string
+	authIndex                  string
+	authType                   string
+	apiKey                     string
+	source                     string
+	reasoning                  string
+	serviceTier                string
+	pendingResponseServiceTier string
+	requestedAt                time.Time
+	once                       sync.Once
 }
 
 type usageExecutor interface {
@@ -130,6 +131,17 @@ func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 		return
 	}
 	detail = normalizeUsageDetailTotal(detail)
+	// Tier-only stream chunks should not finalize the once.Do publish, otherwise
+	// a later usage chunk with tokens would be dropped.
+	if !failed && !hasNonZeroTokenUsage(detail) {
+		if tier := strings.TrimSpace(detail.ResponseServiceTier); tier != "" {
+			r.pendingResponseServiceTier = tier
+		}
+		return
+	}
+	if strings.TrimSpace(detail.ResponseServiceTier) == "" {
+		detail.ResponseServiceTier = r.pendingResponseServiceTier
+	}
 	r.once.Do(func() {
 		r.publishRecord(ctx, r.buildRecord(detail, failed, fail))
 	})
@@ -189,22 +201,24 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		return usage.Record{Model: model, Detail: detail, Failed: failed, Fail: fail}
 	}
 	return usage.Record{
-		Provider:        r.provider,
-		Model:           model,
-		Alias:           r.alias,
-		Source:          r.source,
-		APIKey:          r.apiKey,
-		AuthID:          r.authID,
-		AuthIndex:       r.authIndex,
-		AuthType:        r.authType,
-		ReasoningEffort: r.reasoning,
-		ServiceTier:     r.serviceTier,
-		RequestedAt:     r.requestedAt,
-		Latency:         r.latency(),
-		TTFT:            r.latency(),
-		Failed:          failed,
-		Fail:            fail,
-		Detail:          detail,
+		Provider:            r.provider,
+		Model:               model,
+		Alias:               r.alias,
+		Source:              r.source,
+		APIKey:              r.apiKey,
+		AuthID:              r.authID,
+		AuthIndex:           r.authIndex,
+		AuthType:            r.authType,
+		ReasoningEffort:     r.reasoning,
+		ServiceTier:         r.serviceTier,
+		RequestServiceTier:  r.serviceTier,
+		ResponseServiceTier: strings.TrimSpace(detail.ResponseServiceTier),
+		RequestedAt:         r.requestedAt,
+		Latency:             r.latency(),
+		TTFT:                r.latency(),
+		Failed:              failed,
+		Fail:                fail,
+		Detail:              detail,
 	}
 }
 
@@ -314,11 +328,17 @@ func resolveUsageAuthType(auth *cliproxyauth.Auth) string {
 }
 
 func ParseCodexUsage(data []byte) (usage.Detail, bool) {
+	responseServiceTier := extractResponseServiceTier(data)
 	usageNode := gjson.ParseBytes(data).Get("response.usage")
 	if !hasOpenAIStyleUsageTokenFields(usageNode) {
-		return usage.Detail{}, false
+		if responseServiceTier == "" {
+			return usage.Detail{}, false
+		}
+		return usage.Detail{ResponseServiceTier: responseServiceTier}, true
 	}
-	return parseOpenAIStyleUsageNode(usageNode), true
+	detail := parseOpenAIStyleUsageNode(usageNode)
+	detail.ResponseServiceTier = responseServiceTier
+	return detail, true
 }
 
 func ParseCodexImageToolUsage(data []byte) (usage.Detail, bool) {
@@ -330,11 +350,14 @@ func ParseCodexImageToolUsage(data []byte) (usage.Detail, bool) {
 }
 
 func ParseOpenAIUsage(data []byte) usage.Detail {
+	responseServiceTier := extractResponseServiceTier(data)
 	usageNode := gjson.ParseBytes(data).Get("usage")
 	if !hasOpenAIStyleUsageTokenFields(usageNode) {
-		return usage.Detail{}
+		return usage.Detail{ResponseServiceTier: responseServiceTier}
 	}
-	return parseOpenAIStyleUsageNode(usageNode)
+	detail := parseOpenAIStyleUsageNode(usageNode)
+	detail.ResponseServiceTier = responseServiceTier
+	return detail
 }
 
 func hasOpenAIStyleUsageTokenFields(usageNode gjson.Result) bool {
@@ -387,16 +410,63 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 	return detail
 }
 
+var (
+	openAIStreamUsageMarker       = []byte(`"usage"`)
+	openAIStreamServiceTierMarker = []byte(`"service_tier"`)
+)
+
+// ParseOpenAIStreamUsage extracts usage from an OpenAI-style SSE line.
+// It skips JSON parsing for chunks that cannot contain usage fields.
 func ParseOpenAIStreamUsage(line []byte) (usage.Detail, bool) {
 	payload := jsonPayload(line)
+	if len(payload) == 0 {
+		return usage.Detail{}, false
+	}
+	// Fast path: most stream chunks are deltas without usage/tier metadata.
+	hasUsageCandidate := bytes.Contains(payload, openAIStreamUsageMarker)
+	hasTierCandidate := bytes.Contains(payload, openAIStreamServiceTierMarker)
+	if !hasUsageCandidate && !hasTierCandidate {
+		return usage.Detail{}, false
+	}
+	if !gjson.ValidBytes(payload) {
+		return usage.Detail{}, false
+	}
+
+	responseServiceTier := ""
+	if hasTierCandidate {
+		responseServiceTier = extractResponseServiceTierFromValidJSON(payload)
+	}
+
+	if hasUsageCandidate {
+		usageNode := gjson.GetBytes(payload, "usage")
+		if hasOpenAIStyleUsageTokenFields(usageNode) {
+			detail := parseOpenAIStyleUsageNode(usageNode)
+			detail.ResponseServiceTier = responseServiceTier
+			return detail, true
+		}
+	}
+	// Tier-only chunks: return them so callers that buffer can retain the label.
+	// Callers that publish on first ok chunk should prefer token usage events.
+	if responseServiceTier != "" {
+		return usage.Detail{ResponseServiceTier: responseServiceTier}, true
+	}
+	return usage.Detail{}, false
+}
+
+func extractResponseServiceTier(payload []byte) string {
 	if len(payload) == 0 || !gjson.ValidBytes(payload) {
-		return usage.Detail{}, false
+		return ""
 	}
-	usageNode := gjson.GetBytes(payload, "usage")
-	if !hasOpenAIStyleUsageTokenFields(usageNode) {
-		return usage.Detail{}, false
+	return extractResponseServiceTierFromValidJSON(payload)
+}
+
+func extractResponseServiceTierFromValidJSON(payload []byte) string {
+	for _, path := range []string{"response.service_tier", "service_tier", "interaction.service_tier"} {
+		if tier := strings.TrimSpace(gjson.GetBytes(payload, path).String()); tier != "" {
+			return tier
+		}
 	}
-	return parseOpenAIStyleUsageNode(usageNode), true
+	return ""
 }
 
 func ParseClaudeUsage(data []byte) usage.Detail {

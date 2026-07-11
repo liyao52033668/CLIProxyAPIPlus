@@ -64,7 +64,7 @@ func TestParseOpenAIStreamUsageIgnoresNullUsage(t *testing.T) {
 }
 
 func TestParseOpenAIStreamUsageResponsesFields(t *testing.T) {
-	line := []byte(`data: {"id":"chunk_1","object":"chat.completion.chunk","choices":[],"usage":{"input_tokens":8,"output_tokens":5,"total_tokens":13,"input_tokens_details":{"cached_tokens":3},"output_tokens_details":{"reasoning_tokens":2}}}`)
+	line := []byte(`data: {"id":"chunk_1","object":"chat.completion.chunk","choices":[],"usage":{"input_tokens":8,"output_tokens":5,"total_tokens":13,"input_tokens_details":{"cached_tokens":3},"output_tokens_details":{"reasoning_tokens":2}},"service_tier":"priority"}`)
 	detail, ok := ParseOpenAIStreamUsage(line)
 	if !ok {
 		t.Fatal("ParseOpenAIStreamUsage() ok = false, want true")
@@ -83,6 +83,57 @@ func TestParseOpenAIStreamUsageResponsesFields(t *testing.T) {
 	}
 	if detail.ReasoningTokens != 2 {
 		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 2)
+	}
+	if detail.ResponseServiceTier != "priority" {
+		t.Fatalf("response service tier = %q, want priority", detail.ResponseServiceTier)
+	}
+}
+
+func TestParseOpenAIStreamUsageSkipsIrrelevantChunks(t *testing.T) {
+	line := []byte(`data: {"id":"chunk_1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}`)
+	if detail, ok := ParseOpenAIStreamUsage(line); ok {
+		t.Fatalf("ParseOpenAIStreamUsage() = (%+v, true), want false for delta-only chunk", detail)
+	}
+}
+
+func TestParseOpenAIStreamUsageTierOnly(t *testing.T) {
+	line := []byte(`data: {"id":"chunk_1","object":"chat.completion.chunk","choices":[],"service_tier":"default"}`)
+	detail, ok := ParseOpenAIStreamUsage(line)
+	if !ok {
+		t.Fatal("ParseOpenAIStreamUsage() ok = false, want true for tier-only chunk")
+	}
+	if detail.ResponseServiceTier != "default" {
+		t.Fatalf("response service tier = %q, want default", detail.ResponseServiceTier)
+	}
+	if hasNonZeroTokenUsage(detail) {
+		t.Fatalf("tier-only detail should have zero tokens, got %+v", detail)
+	}
+}
+
+func TestUsageReporterDefersTierOnlyUntilTokens(t *testing.T) {
+	reporter := &UsageReporter{model: "gpt-5.4", serviceTier: "request-default"}
+
+	// Tier-only should not finalize the once.Do publish.
+	reporter.publishWithOutcome(context.Background(), usage.Detail{ResponseServiceTier: "priority"}, false, usage.Failure{})
+	if reporter.pendingResponseServiceTier != "priority" {
+		t.Fatalf("pendingResponseServiceTier = %q, want priority", reporter.pendingResponseServiceTier)
+	}
+
+	// Token usage should merge the pending tier into the published record.
+	record := reporter.buildRecord(usage.Detail{
+		InputTokens:         1,
+		OutputTokens:        2,
+		TotalTokens:         3,
+		ResponseServiceTier: reporter.pendingResponseServiceTier,
+	}, false)
+	if record.RequestServiceTier != "request-default" {
+		t.Fatalf("RequestServiceTier = %q, want request-default", record.RequestServiceTier)
+	}
+	if record.ResponseServiceTier != "priority" {
+		t.Fatalf("ResponseServiceTier = %q, want priority", record.ResponseServiceTier)
+	}
+	if record.ServiceTier != "request-default" {
+		t.Fatalf("ServiceTier = %q, want request-default", record.ServiceTier)
 	}
 }
 
