@@ -773,6 +773,23 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 			}
 		}
 	}
+	// using_api is an xAI routing switch: true -> official API, false -> CLI chat-proxy.
+	if rawUsingAPI := strings.TrimSpace(authAttribute(auth, "using_api")); rawUsingAPI != "" {
+		if parsed, err := strconv.ParseBool(rawUsingAPI); err == nil {
+			entry["using_api"] = parsed
+		}
+	} else if auth.Metadata != nil {
+		if raw, ok := auth.Metadata["using_api"]; ok {
+			switch v := raw.(type) {
+			case bool:
+				entry["using_api"] = v
+			case string:
+				if parsed, err := strconv.ParseBool(strings.TrimSpace(v)); err == nil {
+					entry["using_api"] = parsed
+				}
+			}
+		}
+	}
 	return entry
 }
 
@@ -1667,7 +1684,7 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "disabled": *req.Disabled})
 }
 
-// PatchAuthFileFields updates editable fields (prefix, proxy_url, headers, priority, excluded_models, disable_cooling, websockets, note) of an auth file.
+// PatchAuthFileFields updates editable fields (prefix, proxy_url, headers, priority, excluded_models, disable_cooling, websockets, using_api, note) of an auth file.
 func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	if h.authManager == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
@@ -1683,6 +1700,7 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		ExcludedModels []string          `json:"excluded_models"`
 		DisableCooling json.RawMessage   `json:"disable_cooling"`
 		Websockets     json.RawMessage   `json:"websockets"`
+		UsingAPI       json.RawMessage   `json:"using_api"`
 		Note           *string           `json:"note"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -1822,7 +1840,7 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 			changed = true
 		}
 	}
-	if req.Priority != nil || req.ExcludedModels != nil || len(req.DisableCooling) > 0 || len(req.Websockets) > 0 || req.Note != nil {
+	if req.Priority != nil || req.ExcludedModels != nil || len(req.DisableCooling) > 0 || len(req.Websockets) > 0 || len(req.UsingAPI) > 0 || req.Note != nil {
 		if targetAuth.Metadata == nil {
 			targetAuth.Metadata = make(map[string]any)
 		}
@@ -1879,6 +1897,17 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 			} else {
 				delete(targetAuth.Metadata, "websockets")
 				delete(targetAuth.Attributes, "websockets")
+			}
+		}
+		if len(req.UsingAPI) > 0 {
+			// xAI only: true uses official API, false uses CLI chat-proxy.
+			// null/empty clears the override so auth_kind defaults apply.
+			if parsed, ok := parseNullableBoolRaw(req.UsingAPI); ok {
+				targetAuth.Metadata["using_api"] = parsed
+				targetAuth.Attributes["using_api"] = strconv.FormatBool(parsed)
+			} else {
+				delete(targetAuth.Metadata, "using_api")
+				delete(targetAuth.Attributes, "using_api")
 			}
 		}
 		if req.Note != nil {

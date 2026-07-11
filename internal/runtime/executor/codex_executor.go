@@ -330,9 +330,8 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body, _ = sjson.DeleteBytes(body, "stream")
 	body = normalizeCodexInstructions(body)
-	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
-		body = ensureImageGenerationTool(body, baseModel, auth, opts.Headers)
-	}
+	// Compact requests should not inject image_generation tools; keep the body
+	// focused on history + compaction_trigger.
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, e.Identifier(), body)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
