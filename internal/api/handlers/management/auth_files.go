@@ -1902,12 +1902,32 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		if len(req.UsingAPI) > 0 {
 			// xAI only: true uses official API, false uses CLI chat-proxy.
 			// null/empty clears the override so auth_kind defaults apply.
+			// Keep base_url aligned so auth-file preview and runtime credentials match.
 			if parsed, ok := parseNullableBoolRaw(req.UsingAPI); ok {
 				targetAuth.Metadata["using_api"] = parsed
 				targetAuth.Attributes["using_api"] = strconv.FormatBool(parsed)
+				baseURL := xaiauth.CLIChatProxyBaseURL
+				if parsed {
+					baseURL = xaiauth.DefaultAPIBaseURL
+				}
+				targetAuth.Metadata["base_url"] = baseURL
+				targetAuth.Attributes["base_url"] = baseURL
 			} else {
 				delete(targetAuth.Metadata, "using_api")
 				delete(targetAuth.Attributes, "using_api")
+				// Restore the auth_kind default endpoint when the override is cleared.
+				baseURL := xaiauth.DefaultAPIBaseURL
+				authKind := strings.TrimSpace(authAttribute(targetAuth, "auth_kind"))
+				if authKind == "" && targetAuth.Metadata != nil {
+					if raw, ok := targetAuth.Metadata["auth_kind"].(string); ok {
+						authKind = strings.TrimSpace(raw)
+					}
+				}
+				if strings.EqualFold(authKind, "oauth") {
+					baseURL = xaiauth.CLIChatProxyBaseURL
+				}
+				targetAuth.Metadata["base_url"] = baseURL
+				targetAuth.Attributes["base_url"] = baseURL
 			}
 		}
 		if req.Note != nil {

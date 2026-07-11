@@ -118,6 +118,12 @@ func TestPatchAuthFileFields_MergeHeadersAndDeleteEmptyValues(t *testing.T) {
 	if got := updated.Attributes["using_api"]; got != "true" {
 		t.Fatalf("attrs using_api = %q, want %q", got, "true")
 	}
+	if got := updated.Attributes["base_url"]; got != "https://api.x.ai/v1" {
+		t.Fatalf("attrs base_url = %q, want official API", got)
+	}
+	if got, _ := updated.Metadata["base_url"].(string); got != "https://api.x.ai/v1" {
+		t.Fatalf("metadata.base_url = %#v, want official API", updated.Metadata["base_url"])
+	}
 	if got := updated.Attributes["note"]; got != "patched" {
 		t.Fatalf("attrs note = %q, want %q", got, "patched")
 	}
