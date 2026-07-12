@@ -466,21 +466,9 @@ func (e *GitLabExecutor) requestCodeSuggestionsStream(
 }
 
 func (e *GitLabExecutor) doJSONTextRequest(ctx context.Context, auth *cliproxyauth.Auth, endpoint string, payload map[string]any) (string, error) {
-	resp, _, err := e.doJSONRequest(ctx, auth, endpoint, payload, "application/json")
+	_, respBody, err := e.doJSONRequestBody(ctx, auth, endpoint, payload, "application/json")
 	if err != nil {
 		return "", err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return "", err
-	}
-	helps.AppendAPIResponseChunk(ctx, e.cfg, respBody)
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", statusErr{code: resp.StatusCode, msg: strings.TrimSpace(string(respBody))}
 	}
 
 	text, err := parseGitLabTextResponse(endpoint, respBody)
@@ -488,6 +476,40 @@ func (e *GitLabExecutor) doJSONTextRequest(ctx context.Context, auth *cliproxyau
 		return "", err
 	}
 	return strings.TrimSpace(text), nil
+}
+
+func (e *GitLabExecutor) doJSONRequestBody(
+	ctx context.Context,
+	auth *cliproxyauth.Auth,
+	endpoint string,
+	payload map[string]any,
+	accept string,
+) (reqBody []byte, respBody []byte, err error) {
+	token := gitLabPrimaryToken(auth)
+	baseURL := gitLabBaseURL(auth)
+	if token == "" || baseURL == "" {
+		return nil, nil, statusErr{code: http.StatusUnauthorized, msg: "gitlab duo executor: missing credentials"}
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, nil, fmt.Errorf("gitlab duo executor: marshal request failed: %w", err)
+	}
+
+	url := helps.JoinBaseURL(baseURL, endpoint)
+	headers := e.gitlabRequestHeaders(auth, token, accept)
+	_, respBody, _, errDo := helps.DoJSON(ctx, e.cfg, helps.UpstreamRequest{
+		Provider: e.Identifier(),
+		Auth:     auth,
+		Method:   http.MethodPost,
+		URL:      url,
+		Headers:  headers,
+		Body:     body,
+	})
+	if errDo != nil {
+		return body, nil, toStatusErr(errDo)
+	}
+	return body, respBody, nil
 }
 
 func (e *GitLabExecutor) doJSONRequest(
@@ -509,31 +531,35 @@ func (e *GitLabExecutor) doJSONRequest(
 	}
 
 	url := helps.JoinBaseURL(baseURL, endpoint)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return nil, nil, err
+	headers := e.gitlabRequestHeaders(auth, token, accept)
+	resp, errDo := helps.DoStream(ctx, e.cfg, helps.UpstreamRequest{
+		Provider: e.Identifier(),
+		Auth:     auth,
+		Method:   http.MethodPost,
+		URL:      url,
+		Headers:  headers,
+		Body:     body,
+	})
+	if errDo != nil {
+		return nil, body, toStatusErr(errDo)
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", accept)
-	req.Header.Set("User-Agent", "CLIProxyAPI/GitLab-Duo")
-	applyGitLabRequestHeaders(req, auth)
-	if strings.EqualFold(accept, "text/event-stream") {
-		req.Header.Set("Cache-Control", "no-cache")
-		req.Header.Set(gitLabSSEStreamingHeader, "true")
-		req.Header.Set("Accept-Encoding", "identity")
-	}
-
-	helps.RecordUpstreamRequest(ctx, e.cfg, auth, e.Identifier(), http.MethodPost, url, req.Header.Clone(), body)
-
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return nil, body, err
-	}
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, resp.StatusCode, resp.Header.Clone())
 	return resp, body, nil
+}
+
+func (e *GitLabExecutor) gitlabRequestHeaders(auth *cliproxyauth.Auth, token, accept string) http.Header {
+	headers := make(http.Header)
+	tmpReq := &http.Request{Header: headers}
+	tmpReq.Header.Set("Authorization", "Bearer "+token)
+	tmpReq.Header.Set("Content-Type", "application/json")
+	tmpReq.Header.Set("Accept", accept)
+	tmpReq.Header.Set("User-Agent", "CLIProxyAPI/GitLab-Duo")
+	applyGitLabRequestHeaders(tmpReq, auth)
+	if strings.EqualFold(accept, "text/event-stream") {
+		tmpReq.Header.Set("Cache-Control", "no-cache")
+		tmpReq.Header.Set(gitLabSSEStreamingHeader, "true")
+		tmpReq.Header.Set("Accept-Encoding", "identity")
+	}
+	return tmpReq.Header
 }
 
 func (e *GitLabExecutor) refreshOAuthToken(ctx context.Context, client *gitlab.AuthClient, auth *cliproxyauth.Auth, baseURL string) (*gitlab.TokenResponse, error) {

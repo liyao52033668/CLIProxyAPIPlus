@@ -138,48 +138,38 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	}
 
 	url := helps.JoinBaseURL(baseURL, endpoint)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
-	if err != nil {
-		return resp, err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
+	headers := make(http.Header)
+	headers.Set("Content-Type", "application/json")
 	if apiKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+		headers.Set("Authorization", "Bearer "+apiKey)
 	}
-	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+	headers.Set("User-Agent", "cli-proxy-openai-compat")
+	tmpReq := &http.Request{Header: headers}
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
 	}
-	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
-	helps.RecordUpstreamRequest(ctx, e.cfg, auth, e.Identifier(), http.MethodPost, url, httpReq.Header.Clone(), translated)
+	util.ApplyCustomHeadersFromAttrs(tmpReq, attrs)
+	headers = tmpReq.Header
 
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, err := httpClient.Do(httpReq)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return resp, err
+	_, body, respHeaders, errDo := helps.DoJSON(ctx, e.cfg, helps.UpstreamRequest{
+		Provider: e.Identifier(),
+		Auth:     auth,
+		Method:   http.MethodPost,
+		URL:      url,
+		Headers:  headers,
+		Body:     translated,
+	})
+	if errDo != nil {
+		return resp, toStatusErr(errDo)
 	}
-	defer helps.CloseResponseBody(e.Identifier(), httpResp.Body)
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b := helps.ReadHTTPErrorBody(ctx, e.cfg, httpResp)
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
-		return resp, err
-	}
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-	body, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return resp, err
-	}
-	helps.AppendAPIResponseChunk(ctx, e.cfg, body)
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
 	// Ensure we at least record the request even if upstream doesn't return usage
 	reporter.EnsurePublished(ctx)
 	// Translate response back to source format when needed
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, body, &param)
-	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
+	resp = cliproxyexecutor.Response{Payload: out, Headers: respHeaders}
 	return resp, nil
 }
 
@@ -413,36 +403,32 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
 
 	url := helps.JoinBaseURL(baseURL, "/chat/completions")
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
-	if err != nil {
-		return nil, err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
+	headers := make(http.Header)
+	headers.Set("Content-Type", "application/json")
 	if apiKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+		headers.Set("Authorization", "Bearer "+apiKey)
 	}
-	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+	headers.Set("User-Agent", "cli-proxy-openai-compat")
+	tmpReq := &http.Request{Header: headers}
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
 	}
-	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
-	httpReq.Header.Set("Accept", "text/event-stream")
-	httpReq.Header.Set("Cache-Control", "no-cache")
-	helps.RecordUpstreamRequest(ctx, e.cfg, auth, e.Identifier(), http.MethodPost, url, httpReq.Header.Clone(), translated)
+	util.ApplyCustomHeadersFromAttrs(tmpReq, attrs)
+	tmpReq.Header.Set("Accept", "text/event-stream")
+	tmpReq.Header.Set("Cache-Control", "no-cache")
+	headers = tmpReq.Header
 
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, err := httpClient.Do(httpReq)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return nil, err
-	}
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b := helps.ReadHTTPErrorBody(ctx, e.cfg, httpResp)
-		helps.CloseResponseBody(e.Identifier(), httpResp.Body)
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
-		return nil, err
+	httpResp, errDo := helps.DoStream(ctx, e.cfg, helps.UpstreamRequest{
+		Provider: e.Identifier(),
+		Auth:     auth,
+		Method:   http.MethodPost,
+		URL:      url,
+		Headers:  headers,
+		Body:     translated,
+	})
+	if errDo != nil {
+		return nil, toStatusErr(errDo)
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {

@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"slices"
 	"strings"
@@ -164,41 +163,26 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
 		path = githubCopilotResponsesPath
 	}
 	url := baseURL + path
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return resp, err
-	}
-	e.applyHeaders(httpReq, apiToken, body)
-
+	headers := make(http.Header)
+	tmpReq := &http.Request{Header: headers}
+	e.applyHeaders(tmpReq, apiToken, body)
 	// Add Copilot-Vision-Request header if the request contains vision content
 	if hasVision {
-		httpReq.Header.Set("Copilot-Vision-Request", "true")
+		tmpReq.Header.Set("Copilot-Vision-Request", "true")
 	}
+	headers = tmpReq.Header
 
-	helps.RecordUpstreamRequest(ctx, e.cfg, auth, e.Identifier(), http.MethodPost, url, httpReq.Header.Clone(), body)
-
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, err := httpClient.Do(httpReq)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return resp, err
+	_, data, respHeaders, errDo := helps.DoJSON(ctx, e.cfg, helps.UpstreamRequest{
+		Provider: e.Identifier(),
+		Auth:     auth,
+		Method:   http.MethodPost,
+		URL:      url,
+		Headers:  headers,
+		Body:     body,
+	})
+	if errDo != nil {
+		return resp, toStatusErr(errDo)
 	}
-	defer helps.CloseResponseBody(e.Identifier(), httpResp.Body)
-
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-
-	if !isHTTPSuccess(httpResp.StatusCode) {
-		b := helps.ReadHTTPErrorBody(ctx, e.cfg, httpResp)
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
-		return resp, err
-	}
-
-	data, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return resp, err
-	}
-	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 
 	detail := helps.ParseOpenAIUsage(data)
 	if useResponses && detail.TotalTokens == 0 {
@@ -216,7 +200,7 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
 		data = normalizeGitHubCopilotReasoningField(data)
 		converted = sdktranslator.TranslateNonStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), body, data, &param)
 	}
-	resp = cliproxyexecutor.Response{Payload: converted, Headers: httpResp.Header.Clone()}
+	resp = cliproxyexecutor.Response{Payload: converted, Headers: respHeaders}
 	reporter.EnsurePublished(ctx)
 	return resp, nil
 }
@@ -285,33 +269,25 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 		path = githubCopilotResponsesPath
 	}
 	url := baseURL + path
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	e.applyHeaders(httpReq, apiToken, body)
-
+	headers := make(http.Header)
+	tmpReq := &http.Request{Header: headers}
+	e.applyHeaders(tmpReq, apiToken, body)
 	// Add Copilot-Vision-Request header if the request contains vision content
 	if hasVision {
-		httpReq.Header.Set("Copilot-Vision-Request", "true")
+		tmpReq.Header.Set("Copilot-Vision-Request", "true")
 	}
+	headers = tmpReq.Header
 
-	helps.RecordUpstreamRequest(ctx, e.cfg, auth, e.Identifier(), http.MethodPost, url, httpReq.Header.Clone(), body)
-
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, err := httpClient.Do(httpReq)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return nil, err
-	}
-
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-
-	if !isHTTPSuccess(httpResp.StatusCode) {
-		b := helps.ReadHTTPErrorBody(ctx, e.cfg, httpResp)
-		helps.CloseResponseBody(e.Identifier(), httpResp.Body)
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
-		return nil, err
+	httpResp, errDo := helps.DoStream(ctx, e.cfg, helps.UpstreamRequest{
+		Provider: e.Identifier(),
+		Auth:     auth,
+		Method:   http.MethodPost,
+		URL:      url,
+		Headers:  headers,
+		Body:     body,
+	})
+	if errDo != nil {
+		return nil, toStatusErr(errDo)
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk)

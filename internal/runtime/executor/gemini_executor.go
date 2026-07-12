@@ -151,43 +151,33 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	body, _ = sjson.DeleteBytes(body, "session_id")
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return resp, err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
+	headers := make(http.Header)
+	headers.Set("Content-Type", "application/json")
 	if apiKey != "" {
-		httpReq.Header.Set("x-goog-api-key", apiKey)
+		headers.Set("x-goog-api-key", apiKey)
 	} else if bearer != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+bearer)
+		headers.Set("Authorization", "Bearer "+bearer)
 	}
-	applyGeminiHeaders(httpReq, auth)
-	helps.RecordUpstreamRequest(ctx, e.cfg, auth, e.Identifier(), http.MethodPost, url, httpReq.Header.Clone(), body)
+	tmpReq := &http.Request{Header: headers}
+	applyGeminiHeaders(tmpReq, auth)
+	headers = tmpReq.Header
 
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, err := httpClient.Do(httpReq)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return resp, err
+	_, data, respHeaders, errDo := helps.DoJSON(ctx, e.cfg, helps.UpstreamRequest{
+		Provider: e.Identifier(),
+		Auth:     auth,
+		Method:   http.MethodPost,
+		URL:      url,
+		Headers:  headers,
+		Body:     body,
+	})
+	if errDo != nil {
+		return resp, toStatusErr(errDo)
 	}
-	defer helps.CloseResponseBody(e.Identifier(), httpResp.Body)
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b := helps.ReadHTTPErrorBody(ctx, e.cfg, httpResp)
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
-		return resp, err
-	}
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-	data, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return resp, err
-	}
-	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	reporter.Publish(ctx, helps.ParseGeminiUsage(data))
 	reporter.EnsurePublished(ctx)
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, body, data, &param)
-	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
+	resp = cliproxyexecutor.Response{Payload: out, Headers: respHeaders}
 	return resp, nil
 }
 
@@ -235,31 +225,27 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	body, _ = sjson.DeleteBytes(body, "session_id")
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
+	headers := make(http.Header)
+	headers.Set("Content-Type", "application/json")
 	if apiKey != "" {
-		httpReq.Header.Set("x-goog-api-key", apiKey)
+		headers.Set("x-goog-api-key", apiKey)
 	} else {
-		httpReq.Header.Set("Authorization", "Bearer "+bearer)
+		headers.Set("Authorization", "Bearer "+bearer)
 	}
-	applyGeminiHeaders(httpReq, auth)
-	helps.RecordUpstreamRequest(ctx, e.cfg, auth, e.Identifier(), http.MethodPost, url, httpReq.Header.Clone(), body)
+	tmpReq := &http.Request{Header: headers}
+	applyGeminiHeaders(tmpReq, auth)
+	headers = tmpReq.Header
 
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, err := httpClient.Do(httpReq)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return nil, err
-	}
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b := helps.ReadHTTPErrorBody(ctx, e.cfg, httpResp)
-		helps.CloseResponseBody(e.Identifier(), httpResp.Body)
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
-		return nil, err
+	httpResp, errDo := helps.DoStream(ctx, e.cfg, helps.UpstreamRequest{
+		Provider: e.Identifier(),
+		Auth:     auth,
+		Method:   http.MethodPost,
+		URL:      url,
+		Headers:  headers,
+		Body:     body,
+	})
+	if errDo != nil {
+		return nil, toStatusErr(errDo)
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
