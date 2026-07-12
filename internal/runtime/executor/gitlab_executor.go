@@ -508,7 +508,7 @@ func (e *GitLabExecutor) doJSONRequest(
 		return nil, nil, fmt.Errorf("gitlab duo executor: marshal request failed: %w", err)
 	}
 
-	url := strings.TrimRight(baseURL, "/") + endpoint
+	url := helps.JoinBaseURL(baseURL, endpoint)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, nil, err
@@ -524,23 +524,7 @@ func (e *GitLabExecutor) doJSONRequest(
 		req.Header.Set("Accept-Encoding", "identity")
 	}
 
-	var authID, authLabel, authType, authValue string
-	if auth != nil {
-		authID = auth.ID
-		authLabel = auth.Label
-		authType, authValue = auth.AccountInfo()
-	}
-	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
-		URL:       url,
-		Method:    http.MethodPost,
-		Headers:   req.Header.Clone(),
-		Body:      body,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
-	})
+	helps.RecordUpstreamRequest(ctx, e.cfg, auth, e.Identifier(), http.MethodPost, url, req.Header.Clone(), body)
 
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	resp, err := httpClient.Do(req)

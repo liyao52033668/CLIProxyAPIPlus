@@ -46,10 +46,10 @@ func getKiroPooledHTTPClient() *http.Client {
 			// TLS handshake timeout
 			TLSHandshakeTimeout: 10 * time.Second,
 
-			// Response header timeout
-			ResponseHeaderTimeout: 30 * time.Second,
-
-			// Expect 100-continue timeout
+			// Do not set ResponseHeaderTimeout: after the upstream connection is
+			// established, request lifetime is governed by context cancellation only
+			// (see AGENTS.md timeout policy). Dial/TLS timeouts below still apply to
+			// connection establishment only.
 			ExpectContinueTimeout: 1 * time.Second,
 
 			// Enable HTTP/2 when available
