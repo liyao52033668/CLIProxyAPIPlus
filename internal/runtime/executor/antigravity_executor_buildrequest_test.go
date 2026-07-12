@@ -237,7 +237,7 @@ func TestAntigravityBuildRequest_RejectsMissingProjectID(t *testing.T) {
 	executor := &AntigravityExecutor{}
 	auth := &cliproxyauth.Auth{Metadata: map[string]any{}}
 
-	_, err := executor.buildRequest(context.Background(), auth, "token", "gemini-3.1-pro", []byte(`{"request":{}}`), false, "", "https://example.com")
+	_, _, err := executor.buildRequest(context.Background(), auth, "token", "gemini-3.1-pro", []byte(`{"request":{}}`), false, "", "https://example.com")
 	if err == nil {
 		t.Fatalf("buildRequest should fail when auth has no project_id")
 	}
@@ -337,7 +337,7 @@ func buildRequestBodyFromRawPayload(t *testing.T, modelName string, payload []by
 	executor := &AntigravityExecutor{}
 	auth := &cliproxyauth.Auth{Metadata: map[string]any{"project_id": "project-1"}}
 
-	req, err := executor.buildRequest(context.Background(), auth, "token", modelName, payload, false, "", "https://example.com")
+	req, _, err := executor.buildRequest(context.Background(), auth, "token", modelName, payload, false, "", "https://example.com")
 	if err != nil {
 		t.Fatalf("buildRequest error: %v", err)
 	}

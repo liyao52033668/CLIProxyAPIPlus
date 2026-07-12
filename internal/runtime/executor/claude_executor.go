@@ -204,41 +204,25 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 
 	url := helps.JoinBaseURL(baseURL, "/v1/messages?beta=true")
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
-	if err != nil {
-		return resp, err
-	}
-	applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg)
-	helps.RecordUpstreamRequest(ctx, e.cfg, auth, e.Identifier(), http.MethodPost, url, httpReq.Header.Clone(), bodyForUpstream)
+	headers := make(http.Header)
+	tmpReq := &http.Request{Header: headers}
+	applyClaudeHeaders(tmpReq, auth, apiKey, false, extraBetas, e.cfg)
+	headers = tmpReq.Header
 
-	httpClient := helps.NewUtlsHTTPClient(e.cfg, auth, 0)
-	httpResp, err := httpClient.Do(httpReq)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return resp, err
+	_, data, respHeaders, errDo := helps.DoJSON(ctx, e.cfg, helps.UpstreamRequest{
+		Provider: e.Identifier(),
+		Auth:     auth,
+		Method:   http.MethodPost,
+		URL:      url,
+		Headers:  headers,
+		Body:     bodyForUpstream,
+		Client:   helps.NewUtlsHTTPClient(e.cfg, auth, 0),
+		Decode:   decodeResponseBody,
+	})
+	if errDo != nil {
+		return resp, toStatusErr(errDo)
 	}
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		// Decompress error responses with decodeResponseBody so header-declared and
-		// magic-byte-detected compression match the success path.
-		b := helps.ReadHTTPErrorBodyWithDecode(ctx, e.cfg, httpResp, decodeResponseBody)
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
-		helps.CloseResponseBody(e.Identifier(), httpResp.Body)
-		return resp, err
-	}
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-	decodedBody, err := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		helps.CloseResponseBody(e.Identifier(), httpResp.Body)
-		return resp, err
-	}
-	defer helps.CloseResponseBody(e.Identifier(), decodedBody)
-	data, err := io.ReadAll(decodedBody)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return resp, err
-	}
-	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+	_ = respHeaders
 	if stream {
 		if errValidate := validateClaudeStreamingResponse(data); errValidate != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errValidate)
@@ -266,7 +250,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		data,
 		&param,
 	)
-	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
+	resp = cliproxyexecutor.Response{Payload: out, Headers: respHeaders}
 	return resp, nil
 }
 
@@ -340,31 +324,25 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 
 	url := helps.JoinBaseURL(baseURL, "/v1/messages?beta=true")
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
-	if err != nil {
-		return nil, err
-	}
-	applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, e.cfg)
-	helps.RecordUpstreamRequest(ctx, e.cfg, auth, e.Identifier(), http.MethodPost, url, httpReq.Header.Clone(), bodyForUpstream)
+	headers := make(http.Header)
+	tmpReq := &http.Request{Header: headers}
+	applyClaudeHeaders(tmpReq, auth, apiKey, true, extraBetas, e.cfg)
+	headers = tmpReq.Header
 
-	httpClient := helps.NewUtlsHTTPClient(e.cfg, auth, 0)
-	httpResp, err := httpClient.Do(httpReq)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return nil, err
+	httpResp, errDo := helps.DoStream(ctx, e.cfg, helps.UpstreamRequest{
+		Provider: e.Identifier(),
+		Auth:     auth,
+		Method:   http.MethodPost,
+		URL:      url,
+		Headers:  headers,
+		Body:     bodyForUpstream,
+		Client:   helps.NewUtlsHTTPClient(e.cfg, auth, 0),
+		Decode:   decodeResponseBody,
+	})
+	if errDo != nil {
+		return nil, toStatusErr(errDo)
 	}
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b := helps.ReadHTTPErrorBodyWithDecode(ctx, e.cfg, httpResp, decodeResponseBody)
-		helps.CloseResponseBody(e.Identifier(), httpResp.Body)
-		return nil, statusErr{code: httpResp.StatusCode, msg: string(b)}
-	}
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-	decodedBody, err := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		helps.CloseResponseBody(e.Identifier(), httpResp.Body)
-		return nil, err
-	}
+	decodedBody := httpResp.Body
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
@@ -534,41 +512,27 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	}
 
 	url := helps.JoinBaseURL(baseURL, "/v1/messages/count_tokens?beta=true")
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return cliproxyexecutor.Response{}, err
-	}
-	applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg)
-	helps.RecordUpstreamRequest(ctx, e.cfg, auth, e.Identifier(), http.MethodPost, url, httpReq.Header.Clone(), body)
+	headers := make(http.Header)
+	tmpReq := &http.Request{Header: headers}
+	applyClaudeHeaders(tmpReq, auth, apiKey, false, extraBetas, e.cfg)
+	headers = tmpReq.Header
 
-	httpClient := helps.NewUtlsHTTPClient(e.cfg, auth, 0)
-	resp, err := httpClient.Do(httpReq)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return cliproxyexecutor.Response{}, err
+	_, data, respHeaders, errDo := helps.DoJSON(ctx, e.cfg, helps.UpstreamRequest{
+		Provider: e.Identifier(),
+		Auth:     auth,
+		Method:   http.MethodPost,
+		URL:      url,
+		Headers:  headers,
+		Body:     body,
+		Client:   helps.NewUtlsHTTPClient(e.cfg, auth, 0),
+		Decode:   decodeResponseBody,
+	})
+	if errDo != nil {
+		return cliproxyexecutor.Response{}, toStatusErr(errDo)
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		b := helps.ReadHTTPErrorBodyWithDecode(ctx, e.cfg, resp, decodeResponseBody)
-		helps.CloseResponseBody(e.Identifier(), resp.Body)
-		return cliproxyexecutor.Response{}, statusErr{code: resp.StatusCode, msg: string(b)}
-	}
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, resp.StatusCode, resp.Header.Clone())
-	decodedBody, err := decodeResponseBody(resp.Body, resp.Header.Get("Content-Encoding"))
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		helps.CloseResponseBody(e.Identifier(), resp.Body)
-		return cliproxyexecutor.Response{}, err
-	}
-	defer helps.CloseResponseBody(e.Identifier(), decodedBody)
-	data, err := io.ReadAll(decodedBody)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return cliproxyexecutor.Response{}, err
-	}
-	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	count := gjson.GetBytes(data, "input_tokens").Int()
 	out := sdktranslator.TranslateTokenCount(ctx, to, from, count, data)
-	return cliproxyexecutor.Response{Payload: out, Headers: resp.Header.Clone()}, nil
+	return cliproxyexecutor.Response{Payload: out, Headers: respHeaders}, nil
 }
 
 func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {

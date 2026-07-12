@@ -8,7 +8,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 
@@ -320,48 +319,36 @@ func (e *GeminiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	baseURL := resolveGeminiBaseURL(auth)
 	url := fmt.Sprintf("%s/%s/models/%s:%s", baseURL, glAPIVersion, baseModel, "countTokens")
 
-	requestBody := bytes.NewReader(translatedReq)
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, requestBody)
-	if err != nil {
-		return cliproxyexecutor.Response{}, err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
+	headers := make(http.Header)
+	headers.Set("Content-Type", "application/json")
 	if apiKey != "" {
-		httpReq.Header.Set("x-goog-api-key", apiKey)
+		headers.Set("x-goog-api-key", apiKey)
 	} else {
-		httpReq.Header.Set("Authorization", "Bearer "+bearer)
+		headers.Set("Authorization", "Bearer "+bearer)
 	}
-	applyGeminiHeaders(httpReq, auth)
-	helps.RecordUpstreamRequest(ctx, e.cfg, auth, e.Identifier(), http.MethodPost, url, httpReq.Header.Clone(), translatedReq)
+	tmpReq := &http.Request{Header: headers}
+	applyGeminiHeaders(tmpReq, auth)
+	headers = tmpReq.Header
 
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	resp, err := httpClient.Do(httpReq)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return cliproxyexecutor.Response{}, err
-	}
-	defer func() {
-		if errClose := resp.Body.Close(); errClose != nil {
-			helps.LogWithRequestID(ctx).Errorf("response body close error: %v", errClose)
+	_, data, respHeaders, errDo := helps.DoJSON(ctx, e.cfg, helps.UpstreamRequest{
+		Provider: e.Identifier(),
+		Auth:     auth,
+		Method:   http.MethodPost,
+		URL:      url,
+		Headers:  headers,
+		Body:     translatedReq,
+	})
+	if errDo != nil {
+		if ue, ok := errDo.(helps.UpstreamStatusError); ok {
+			helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", ue.Code, helps.SummarizeErrorBody("application/json", []byte(ue.Msg)))
+			return cliproxyexecutor.Response{}, statusErr{code: ue.Code, msg: ue.Msg}
 		}
-	}()
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, resp.StatusCode, resp.Header.Clone())
-
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return cliproxyexecutor.Response{}, err
-	}
-	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", resp.StatusCode, helps.SummarizeErrorBody(resp.Header.Get("Content-Type"), data))
-		return cliproxyexecutor.Response{}, statusErr{code: resp.StatusCode, msg: string(data)}
+		return cliproxyexecutor.Response{}, errDo
 	}
 
 	count := gjson.GetBytes(data, "totalTokens").Int()
 	translated := sdktranslator.TranslateTokenCount(respCtx, to, from, count, data)
-	return cliproxyexecutor.Response{Payload: translated, Headers: resp.Header.Clone()}, nil
+	return cliproxyexecutor.Response{Payload: translated, Headers: respHeaders}, nil
 }
 
 // Refresh refreshes the authentication credentials (no-op for Gemini API key).

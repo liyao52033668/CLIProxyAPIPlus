@@ -697,40 +697,44 @@ attemptLoop:
 				}
 			}
 
-			httpReq, errReq := e.buildRequest(ctx, auth, token, baseModel, requestPayload, false, opts.Alt, baseURL)
+			httpReq, reqBody, errReq := e.buildRequest(ctx, auth, token, baseModel, requestPayload, false, opts.Alt, baseURL)
 			if errReq != nil {
 				err = errReq
 				return resp, err
 			}
 
-			httpResp, errDo := httpClient.Do(httpReq)
+			_, bodyBytes, respHeaders, errDo := helps.DoJSON(ctx, e.cfg, helps.UpstreamRequest{
+				Provider:       e.Identifier(),
+				Auth:           auth,
+				Method:         http.MethodPost,
+				URL:            httpReq.URL.String(),
+				Headers:        httpReq.Header,
+				Body:           reqBody,
+				Client:         httpClient,
+				SkipRequestLog: true,
+			})
+			var statusCode int = http.StatusOK
 			if errDo != nil {
-				helps.RecordAPIResponseError(ctx, e.cfg, errDo)
-				if errors.Is(errDo, context.Canceled) || errors.Is(errDo, context.DeadlineExceeded) {
-					return resp, errDo
+				if ue, ok := errDo.(helps.UpstreamStatusError); ok {
+					statusCode = ue.Code
+					bodyBytes = []byte(ue.Msg)
+				} else {
+					if errors.Is(errDo, context.Canceled) || errors.Is(errDo, context.DeadlineExceeded) {
+						return resp, errDo
+					}
+					lastStatus = 0
+					lastBody = nil
+					lastErr = errDo
+					if idx+1 < len(baseURLs) {
+						log.Debugf("antigravity executor: request error on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+						continue
+					}
+					err = errDo
+					return resp, err
 				}
-				lastStatus = 0
-				lastBody = nil
-				lastErr = errDo
-				if idx+1 < len(baseURLs) {
-					log.Debugf("antigravity executor: request error on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
-					continue
-				}
-				err = errDo
-				return resp, err
 			}
 
-			helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-			bodyBytes, errRead := io.ReadAll(httpResp.Body)
-			helps.CloseResponseBody(e.Identifier(), httpResp.Body)
-			if errRead != nil {
-				helps.RecordAPIResponseError(ctx, e.cfg, errRead)
-				err = errRead
-				return resp, err
-			}
-			helps.AppendAPIResponseChunk(ctx, e.cfg, bodyBytes)
-
-			if httpResp.StatusCode == http.StatusTooManyRequests {
+			if statusCode == http.StatusTooManyRequests {
 				decision := decideAntigravity429(bodyBytes)
 				switch decision.kind {
 				case antigravity429DecisionInstantRetrySameAuth:
@@ -760,16 +764,16 @@ attemptLoop:
 				}
 			}
 
-			if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
-				log.Debugf("antigravity executor: upstream error status: %d, body: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), bodyBytes))
-				lastStatus = httpResp.StatusCode
+			if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
+				log.Debugf("antigravity executor: upstream error status: %d, body: %s", statusCode, helps.SummarizeErrorBody("application/json", bodyBytes))
+				lastStatus = statusCode
 				lastBody = append([]byte(nil), bodyBytes...)
 				lastErr = nil
-				if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
+				if statusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
 					log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 					continue
 				}
-				if antigravityShouldRetryTransientResourceExhausted429(httpResp.StatusCode, bodyBytes) && attempt+1 < attempts {
+				if antigravityShouldRetryTransientResourceExhausted429(statusCode, bodyBytes) && attempt+1 < attempts {
 					delay := antigravityTransient429RetryDelay(attempt)
 					log.Debugf("antigravity executor: transient 429 resource exhausted for model %s, retrying in %s (attempt %d/%d)", baseModel, delay, attempt+1, attempts)
 					if errWait := antigravityWait(ctx, delay); errWait != nil {
@@ -777,7 +781,7 @@ attemptLoop:
 					}
 					continue attemptLoop
 				}
-				if antigravityShouldRetryNoCapacity(httpResp.StatusCode, bodyBytes) {
+				if antigravityShouldRetryNoCapacity(statusCode, bodyBytes) {
 					if idx+1 < len(baseURLs) {
 						log.Debugf("antigravity executor: no capacity on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 						continue
@@ -791,7 +795,7 @@ attemptLoop:
 						continue attemptLoop
 					}
 				}
-				if antigravityShouldRetrySoftRateLimit(httpResp.StatusCode, bodyBytes) {
+				if antigravityShouldRetrySoftRateLimit(statusCode, bodyBytes) {
 					if attempt+1 < attempts {
 						delay := antigravitySoftRateLimitDelay(attempt)
 						log.Debugf("antigravity executor: soft rate limit for model %s, retrying in %s (attempt %d/%d)", baseModel, delay, attempt+1, attempts)
@@ -801,11 +805,11 @@ attemptLoop:
 						continue attemptLoop
 					}
 				}
-				if errClear := clearAntigravityReasoningReplayOnInvalidSignature(ctx, replayScope, httpResp.StatusCode, bodyBytes); errClear != nil {
+				if errClear := clearAntigravityReasoningReplayOnInvalidSignature(ctx, replayScope, statusCode, bodyBytes); errClear != nil {
 					err = errClear
 					return resp, err
 				}
-				err = newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
+				err = newAntigravityStatusErr(statusCode, bodyBytes)
 				return resp, err
 			}
 
@@ -818,7 +822,7 @@ attemptLoop:
 			reporter.Publish(ctx, helps.ParseAntigravityUsage(bodyBytes))
 			var param any
 			converted := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, bodyBytes, &param)
-			resp = cliproxyexecutor.Response{Payload: converted, Headers: httpResp.Header.Clone()}
+			resp = cliproxyexecutor.Response{Payload: converted, Headers: respHeaders}
 			reporter.EnsurePublished(ctx)
 			return resp, nil
 		}
@@ -907,29 +911,44 @@ attemptLoop:
 					helps.MarkCreditsUsed(ctx)
 				}
 			}
-			httpReq, errReq := e.buildRequest(ctx, auth, token, baseModel, requestPayload, true, opts.Alt, baseURL)
+			httpReq, reqBody, errReq := e.buildRequest(ctx, auth, token, baseModel, requestPayload, true, opts.Alt, baseURL)
 			if errReq != nil {
 				err = errReq
 				return resp, err
 			}
 
-			httpResp, errDo := httpClient.Do(httpReq)
+			httpResp, errDo := helps.DoStream(ctx, e.cfg, helps.UpstreamRequest{
+				Provider:       e.Identifier(),
+				Auth:           auth,
+				Method:         http.MethodPost,
+				URL:            httpReq.URL.String(),
+				Headers:        httpReq.Header,
+				Body:           reqBody,
+				Client:         httpClient,
+				SkipRequestLog: true,
+			})
 			if errDo != nil {
-				helps.RecordAPIResponseError(ctx, e.cfg, errDo)
-				if errors.Is(errDo, context.Canceled) || errors.Is(errDo, context.DeadlineExceeded) {
-					return resp, errDo
+				if ue, ok := errDo.(helps.UpstreamStatusError); ok {
+					httpResp = &http.Response{
+						StatusCode: ue.Code,
+						Header:     make(http.Header),
+						Body:       io.NopCloser(bytes.NewReader([]byte(ue.Msg))),
+					}
+				} else {
+					if errors.Is(errDo, context.Canceled) || errors.Is(errDo, context.DeadlineExceeded) {
+						return resp, errDo
+					}
+					lastStatus = 0
+					lastBody = nil
+					lastErr = errDo
+					if idx+1 < len(baseURLs) {
+						log.Debugf("antigravity executor: request error on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+						continue
+					}
+					err = errDo
+					return resp, err
 				}
-				lastStatus = 0
-				lastBody = nil
-				lastErr = errDo
-				if idx+1 < len(baseURLs) {
-					log.Debugf("antigravity executor: request error on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
-					continue
-				}
-				err = errDo
-				return resp, err
 			}
-			helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 			if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
 				bodyBytes, errRead := io.ReadAll(httpResp.Body)
 				helps.CloseResponseBody(e.Identifier(), httpResp.Body)
@@ -1383,28 +1402,43 @@ attemptLoop:
 					return nil, err
 				}
 			}
-			httpReq, errReq := e.buildRequest(ctx, auth, token, baseModel, requestPayload, true, opts.Alt, baseURL)
+			httpReq, reqBody, errReq := e.buildRequest(ctx, auth, token, baseModel, requestPayload, true, opts.Alt, baseURL)
 			if errReq != nil {
 				err = errReq
 				return nil, err
 			}
-			httpResp, errDo := httpClient.Do(httpReq)
+			httpResp, errDo := helps.DoStream(ctx, e.cfg, helps.UpstreamRequest{
+				Provider:       e.Identifier(),
+				Auth:           auth,
+				Method:         http.MethodPost,
+				URL:            httpReq.URL.String(),
+				Headers:        httpReq.Header,
+				Body:           reqBody,
+				Client:         httpClient,
+				SkipRequestLog: true,
+			})
 			if errDo != nil {
-				helps.RecordAPIResponseError(ctx, e.cfg, errDo)
-				if errors.Is(errDo, context.Canceled) || errors.Is(errDo, context.DeadlineExceeded) {
-					return nil, errDo
+				if ue, ok := errDo.(helps.UpstreamStatusError); ok {
+					httpResp = &http.Response{
+						StatusCode: ue.Code,
+						Header:     make(http.Header),
+						Body:       io.NopCloser(bytes.NewReader([]byte(ue.Msg))),
+					}
+				} else {
+					if errors.Is(errDo, context.Canceled) || errors.Is(errDo, context.DeadlineExceeded) {
+						return nil, errDo
+					}
+					lastStatus = 0
+					lastBody = nil
+					lastErr = errDo
+					if idx+1 < len(baseURLs) {
+						log.Debugf("antigravity executor: request error on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+						continue
+					}
+					err = errDo
+					return nil, err
 				}
-				lastStatus = 0
-				lastBody = nil
-				lastErr = errDo
-				if idx+1 < len(baseURLs) {
-					log.Debugf("antigravity executor: request error on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
-					continue
-				}
-				err = errDo
-				return nil, err
 			}
-			helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 			if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
 				bodyBytes, errRead := io.ReadAll(httpResp.Body)
 				helps.CloseResponseBody(e.Identifier(), httpResp.Body)
@@ -2161,9 +2195,9 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalance(ctx context.Contex
 	}
 }
 
-func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyauth.Auth, token, modelName string, payload []byte, stream bool, alt, baseURL string) (*http.Request, error) {
+func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyauth.Auth, token, modelName string, payload []byte, stream bool, alt, baseURL string) (*http.Request, []byte, error) {
 	if token == "" {
-		return nil, statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
+		return nil, nil, statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
 	}
 
 	base := strings.TrimSuffix(baseURL, "/")
@@ -2191,7 +2225,7 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 
 	projectID, errProject := e.projectIDForRequest(ctx, auth, token)
 	if errProject != nil {
-		return nil, errProject
+		return nil, nil, errProject
 	}
 	payload = geminiToAntigravity(modelName, payload, projectID)
 	payload, _ = sjson.SetBytes(payload, "model", modelName)
@@ -2233,9 +2267,7 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 
 		payloadStrBytes := applyAntigravityNativeSignatureReplayIfNeeded(modelName, []byte(payloadStr))
 		bodyReader = bytes.NewReader(payloadStrBytes)
-		if e.cfg != nil && e.cfg.RequestLog {
-			payloadLog = append([]byte(nil), payloadStrBytes...)
-		}
+		payloadLog = append([]byte(nil), payloadStrBytes...)
 	} else {
 		if strings.Contains(modelName, "claude") {
 			payload, _ = sjson.SetBytes(payload, "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
@@ -2245,9 +2277,7 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 
 		payload = applyAntigravityNativeSignatureReplayIfNeeded(modelName, payload)
 		bodyReader = bytes.NewReader(payload)
-		if e.cfg != nil && e.cfg.RequestLog {
-			payloadLog = append([]byte(nil), payload...)
-		}
+		payloadLog = append([]byte(nil), payload...)
 	}
 
 	// if useAntigravitySchema {
@@ -2265,7 +2295,7 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 
 	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, requestURL.String(), bodyReader)
 	if errReq != nil {
-		return nil, errReq
+		return nil, nil, errReq
 	}
 	httpReq.Close = true
 	httpReq.Header.Set("Content-Type", "application/json")
@@ -2282,7 +2312,7 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 
 	helps.RecordUpstreamRequest(ctx, e.cfg, auth, e.Identifier(), http.MethodPost, requestURL.String(), httpReq.Header.Clone(), payloadLog)
 
-	return httpReq, nil
+	return httpReq, payloadLog, nil
 }
 
 func antigravityRequestNeedsSchemaSanitization(payload []byte) bool {

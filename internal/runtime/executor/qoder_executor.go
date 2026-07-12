@@ -290,8 +290,9 @@ func (e *QoderExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	helps.RecordUpstreamRequest(ctx, e.cfg, auth, e.Identifier(), http.MethodPost, url, httpReq.Header.Clone(), qoderBodyJSON)
 
 	retryCfg := qoderDefaultRetryConfig()
-	var httpResp *http.Response
 	var lastErr error
+	var data []byte
+	var respHeaders http.Header
 
 	for attempt := 0; attempt < retryCfg.MaxRetries; attempt++ {
 		if attempt > 0 {
@@ -305,50 +306,39 @@ func (e *QoderExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 			util.ApplyCustomHeadersFromAttrs(httpReq, auth.Attributes)
 		}
 
-		httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-		httpResp, lastErr = httpClient.Do(httpReq)
-		if lastErr != nil {
-			helps.RecordAPIResponseError(ctx, e.cfg, lastErr)
-			if qoderIsRetryableError(lastErr) {
+		reqBodyBytes, errBody := readHTTPRequestBody(httpReq)
+		if errBody != nil {
+			return resp, errBody
+		}
+		_, data, respHeaders, lastErr = helps.DoJSON(ctx, e.cfg, helps.UpstreamRequest{
+			Provider:       e.Identifier(),
+			Auth:           auth,
+			Method:         http.MethodPost,
+			URL:            url,
+			Headers:        httpReq.Header,
+			Body:           reqBodyBytes,
+			SkipRequestLog: true,
+		})
+		if lastErr == nil {
+			break
+		}
+		if ue, ok := lastErr.(helps.UpstreamStatusError); ok {
+			logQoderUpstreamErrorDiagnostics(helps.PayloadRequestedModel(opts, req.Model), req.Model, qoderBodyJSON, ue.Code, "application/json", []byte(ue.Msg))
+			if ue.Code >= 500 && qoderIsRetryableHTTPStatus(ue.Code) {
+				lastErr = statusErr{code: ue.Code, msg: ue.Msg}
 				continue
 			}
-			return resp, lastErr
+			return resp, statusErr{code: ue.Code, msg: ue.Msg}
 		}
-
-		helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-		if httpResp.StatusCode >= 500 && qoderIsRetryableHTTPStatus(httpResp.StatusCode) {
-			b, _ := io.ReadAll(httpResp.Body)
-			_ = httpResp.Body.Close()
-			helps.AppendAPIResponseChunk(ctx, e.cfg, b)
-			logQoderUpstreamErrorDiagnostics(helps.PayloadRequestedModel(opts, req.Model), req.Model, qoderBodyJSON, httpResp.StatusCode, httpResp.Header.Get("Content-Type"), b)
-			lastErr = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		if qoderIsRetryableError(lastErr) {
 			continue
 		}
-		break
+		return resp, lastErr
 	}
 
 	if lastErr != nil {
 		return resp, lastErr
 	}
-	if httpResp == nil {
-		return resp, fmt.Errorf("qoder executor: unexpected nil response after retries")
-	}
-
-	defer helps.CloseResponseBody(e.Identifier(), httpResp.Body)
-
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b := helps.ReadHTTPErrorBody(ctx, e.cfg, httpResp)
-		logQoderUpstreamErrorDiagnostics(helps.PayloadRequestedModel(opts, req.Model), req.Model, qoderBodyJSON, httpResp.StatusCode, httpResp.Header.Get("Content-Type"), b)
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
-		return resp, err
-	}
-
-	data, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return resp, err
-	}
-	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 
 	// Parse SSE response to extract the final completion
 	openAIResp := e.parseQoderSSEToCompletion(data, req.Model)
@@ -358,7 +348,7 @@ func (e *QoderExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, body, openAIResp, &param)
-	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
+	resp = cliproxyexecutor.Response{Payload: out, Headers: respHeaders}
 	return resp, nil
 }
 
@@ -421,26 +411,34 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		}
 
 		streamAttemptStartedAt = time.Now()
-		httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-		httpResp, lastErr = httpClient.Do(httpReq)
-		if lastErr != nil {
-			helps.RecordAPIResponseError(ctx, e.cfg, lastErr)
-			if qoderIsRetryableError(lastErr) {
+		reqBodyBytes, errBody := readHTTPRequestBody(httpReq)
+		if errBody != nil {
+			return nil, errBody
+		}
+		httpResp, lastErr = helps.DoStream(ctx, e.cfg, helps.UpstreamRequest{
+			Provider:       e.Identifier(),
+			Auth:           auth,
+			Method:         http.MethodPost,
+			URL:            url,
+			Headers:        httpReq.Header,
+			Body:           reqBodyBytes,
+			SkipRequestLog: true,
+		})
+		if lastErr == nil {
+			break
+		}
+		if ue, ok := lastErr.(helps.UpstreamStatusError); ok {
+			logQoderUpstreamErrorDiagnostics(helps.PayloadRequestedModel(opts, req.Model), req.Model, qoderBodyJSON, ue.Code, "application/json", []byte(ue.Msg))
+			if ue.Code >= 500 && qoderIsRetryableHTTPStatus(ue.Code) {
+				lastErr = statusErr{code: ue.Code, msg: ue.Msg}
 				continue
 			}
-			return nil, lastErr
+			return nil, statusErr{code: ue.Code, msg: ue.Msg}
 		}
-
-		helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-		if httpResp.StatusCode >= 500 && qoderIsRetryableHTTPStatus(httpResp.StatusCode) {
-			b, _ := io.ReadAll(httpResp.Body)
-			_ = httpResp.Body.Close()
-			helps.AppendAPIResponseChunk(ctx, e.cfg, b)
-			logQoderUpstreamErrorDiagnostics(helps.PayloadRequestedModel(opts, req.Model), req.Model, qoderBodyJSON, httpResp.StatusCode, httpResp.Header.Get("Content-Type"), b)
-			lastErr = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		if qoderIsRetryableError(lastErr) {
 			continue
 		}
-		break
+		return nil, lastErr
 	}
 
 	if lastErr != nil {
@@ -448,14 +446,6 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 	if httpResp == nil {
 		return nil, fmt.Errorf("qoder executor: unexpected nil response after retries")
-	}
-
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b := helps.ReadHTTPErrorBody(ctx, e.cfg, httpResp)
-		helps.CloseResponseBody(e.Identifier(), httpResp.Body)
-		logQoderUpstreamErrorDiagnostics(helps.PayloadRequestedModel(opts, req.Model), req.Model, qoderBodyJSON, httpResp.StatusCode, httpResp.Header.Get("Content-Type"), b)
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
-		return nil, err
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk)
@@ -1612,4 +1602,23 @@ func rsaEncrypt(data []byte) []byte {
 		return nil
 	}
 	return encrypted
+}
+
+func readHTTPRequestBody(req *http.Request) ([]byte, error) {
+	if req == nil || req.Body == nil {
+		return nil, nil
+	}
+	data, err := io.ReadAll(req.Body)
+	if err != nil {
+		return nil, err
+	}
+	_ = req.Body.Close()
+	req.Body = io.NopCloser(bytes.NewReader(data))
+	if req.GetBody == nil {
+		bodyCopy := append([]byte(nil), data...)
+		req.GetBody = func() (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader(bodyCopy)), nil
+		}
+	}
+	return data, nil
 }

@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"sort"
@@ -150,34 +149,28 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 	defer reporter.TrackFailure(ctx, &err)
 
 	url := helps.JoinBaseURL(baseURL, "/responses")
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(prepared.body))
-	if err != nil {
-		return resp, err
-	}
-	applyXAIChatHeaders(httpReq, auth, token, true, prepared.sessionID)
-	e.recordXAIRequest(ctx, auth, url, httpReq.Header.Clone(), prepared.body)
+	headers := make(http.Header)
+	tmpReq := &http.Request{Header: headers}
+	applyXAIChatHeaders(tmpReq, auth, token, true, prepared.sessionID)
+	headers = tmpReq.Header
+	e.recordXAIRequest(ctx, auth, url, headers.Clone(), prepared.body)
 
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, err := httpClient.Do(httpReq)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return resp, err
+	_, data, respHeaders, errDo := helps.DoJSON(ctx, e.cfg, helps.UpstreamRequest{
+		Provider:       e.Identifier(),
+		Auth:           auth,
+		Method:         http.MethodPost,
+		URL:            url,
+		Headers:        headers,
+		Body:           prepared.body,
+		SkipRequestLog: true,
+	})
+	if errDo != nil {
+		if ue, ok := errDo.(helps.UpstreamStatusError); ok {
+			return resp, xaiStatusErr(ue.Code, []byte(ue.Msg))
+		}
+		return resp, errDo
 	}
-	defer func() {
-		helps.CloseResponseBody(e.Identifier(), httpResp.Body)
-	}()
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		data := helps.ReadHTTPErrorBody(ctx, e.cfg, httpResp)
-		return resp, xaiStatusErr(httpResp.StatusCode, data)
-	}
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-
-	data, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return resp, err
-	}
-	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+	_ = respHeaders
 
 	outputItemsByIndex := make(map[int64][]byte)
 	var outputItemsFallback [][]byte
@@ -199,7 +192,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 			cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, completedData)
 			var param any
 			out := sdktranslator.TranslateNonStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, completedData, &param)
-			return cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}, nil
+			return cliproxyexecutor.Response{Payload: out, Headers: respHeaders}, nil
 		}
 	}
 
@@ -233,40 +226,32 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 	defer reporter.TrackFailure(ctx, &err)
 
 	requestURL := helps.JoinBaseURL(baseURL, "/responses/compact")
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(prepared.body))
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	applyXAIChatHeaders(httpReq, auth, token, false, prepared.sessionID)
-	e.recordXAIRequest(ctx, auth, requestURL, httpReq.Header.Clone(), prepared.body)
+	headers := make(http.Header)
+	tmpReq := &http.Request{Header: headers}
+	applyXAIChatHeaders(tmpReq, auth, token, false, prepared.sessionID)
+	headers = tmpReq.Header
+	e.recordXAIRequest(ctx, auth, requestURL, headers.Clone(), prepared.body)
 
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, err := httpClient.Do(httpReq)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return nil, nil, nil, err
-	}
-	defer func() {
-		helps.CloseResponseBody(e.Identifier(), httpResp.Body)
-	}()
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-
-	data, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return nil, nil, nil, err
-	}
-	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
-
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		err = statusErr{code: httpResp.StatusCode, msg: string(data)}
-		return nil, nil, nil, err
+	_, data, respHeaders, errDo := helps.DoJSON(ctx, e.cfg, helps.UpstreamRequest{
+		Provider:       e.Identifier(),
+		Auth:           auth,
+		Method:         http.MethodPost,
+		URL:            requestURL,
+		Headers:        headers,
+		Body:           prepared.body,
+		SkipRequestLog: true,
+	})
+	if errDo != nil {
+		if ue, ok := errDo.(helps.UpstreamStatusError); ok {
+			helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", ue.Code, helps.SummarizeErrorBody("application/json", []byte(ue.Msg)))
+			return nil, nil, nil, statusErr{code: ue.Code, msg: ue.Msg}
+		}
+		return nil, nil, nil, errDo
 	}
 
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
 	reporter.EnsurePublished(ctx)
-	return prepared, data, httpResp.Header.Clone(), nil
+	return prepared, data, respHeaders, nil
 }
 
 func (e *XAIExecutor) executeCompactionTriggerStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
@@ -493,37 +478,30 @@ func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth
 	}
 
 	url := helps.JoinBaseURL(baseURL, endpointPath)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(req.Payload))
-	if err != nil {
-		return resp, err
-	}
-	applyXAIHeaders(httpReq, auth, token, false, "")
-	e.recordXAIRequest(ctx, auth, url, httpReq.Header.Clone(), req.Payload)
+	headers := make(http.Header)
+	tmpReq := &http.Request{Header: headers}
+	applyXAIHeaders(tmpReq, auth, token, false, "")
+	headers = tmpReq.Header
+	e.recordXAIRequest(ctx, auth, url, headers.Clone(), req.Payload)
 
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, err := httpClient.Do(httpReq)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return resp, err
-	}
-	defer func() {
-		helps.CloseResponseBody(e.Identifier(), httpResp.Body)
-	}()
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-
-	data, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return resp, err
-	}
-	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
-
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		return resp, xaiStatusErr(httpResp.StatusCode, data)
+	_, data, respHeaders, errDo := helps.DoJSON(ctx, e.cfg, helps.UpstreamRequest{
+		Provider:       e.Identifier(),
+		Auth:           auth,
+		Method:         http.MethodPost,
+		URL:            url,
+		Headers:        headers,
+		Body:           req.Payload,
+		SkipRequestLog: true,
+	})
+	if errDo != nil {
+		if ue, ok := errDo.(helps.UpstreamStatusError); ok {
+			helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", ue.Code, helps.SummarizeErrorBody("application/json", []byte(ue.Msg)))
+			return resp, xaiStatusErr(ue.Code, []byte(ue.Msg))
+		}
+		return resp, errDo
 	}
 
-	return cliproxyexecutor.Response{Payload: data, Headers: httpResp.Header.Clone()}, nil
+	return cliproxyexecutor.Response{Payload: data, Headers: respHeaders}, nil
 }
 
 func (e *XAIExecutor) executeVideos(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
@@ -532,7 +510,6 @@ func (e *XAIExecutor) executeVideos(ctx context.Context, auth *cliproxyauth.Auth
 
 	method := http.MethodPost
 	endpointPath := xaiVideosGenerationsPath
-	var body io.Reader = bytes.NewReader(req.Payload)
 
 	switch path := xaiVideoEndpointPath(opts); path {
 	case xaiVideosGenerationsPath, xaiVideosEditsPath, xaiVideosExtensionsPath:
@@ -541,50 +518,46 @@ func (e *XAIExecutor) executeVideos(ctx context.Context, auth *cliproxyauth.Auth
 		if requestID := strings.TrimSpace(gjson.GetBytes(req.Payload, "request_id").String()); requestID != "" {
 			method = http.MethodGet
 			endpointPath = xaiVideosPath + "/" + url.PathEscape(requestID)
-			body = nil
 		}
 	}
 	requestURL := helps.JoinBaseURL(baseURL, endpointPath)
-	httpReq, err := http.NewRequestWithContext(ctx, method, requestURL, body)
-	if err != nil {
-		return resp, err
-	}
-	applyXAIHeaders(httpReq, auth, token, false, "")
+	headers := make(http.Header)
+	tmpReq := &http.Request{Header: headers}
+	applyXAIHeaders(tmpReq, auth, token, false, "")
 	if method == http.MethodPost {
 		key := xaiMetadataString(opts.Metadata, xaiIdempotencyKeyMetaKey)
 		if key == "" && opts.Headers != nil {
 			key = strings.TrimSpace(opts.Headers.Get("x-idempotency-key"))
 		}
 		if key != "" {
-			httpReq.Header.Set("x-idempotency-key", key)
+			tmpReq.Header.Set("x-idempotency-key", key)
 		}
 	}
-	e.recordXAIRequest(ctx, auth, requestURL, httpReq.Header.Clone(), req.Payload)
+	headers = tmpReq.Header
+	e.recordXAIRequest(ctx, auth, requestURL, headers.Clone(), req.Payload)
 
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, err := httpClient.Do(httpReq)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return resp, err
+	var reqBody []byte
+	if method == http.MethodPost {
+		reqBody = req.Payload
 	}
-	defer func() {
-		helps.CloseResponseBody(e.Identifier(), httpResp.Body)
-	}()
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-
-	data, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return resp, err
+	_, data, respHeaders, errDo := helps.DoJSON(ctx, e.cfg, helps.UpstreamRequest{
+		Provider:       e.Identifier(),
+		Auth:           auth,
+		Method:         method,
+		URL:            requestURL,
+		Headers:        headers,
+		Body:           reqBody,
+		SkipRequestLog: true,
+	})
+	if errDo != nil {
+		if ue, ok := errDo.(helps.UpstreamStatusError); ok {
+			helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", ue.Code, helps.SummarizeErrorBody("application/json", []byte(ue.Msg)))
+			return resp, xaiStatusErr(ue.Code, []byte(ue.Msg))
+		}
+		return resp, errDo
 	}
-	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		return resp, xaiStatusErr(httpResp.StatusCode, data)
-	}
-
-	return cliproxyexecutor.Response{Payload: data, Headers: httpResp.Header.Clone()}, nil
+	return cliproxyexecutor.Response{Payload: data, Headers: respHeaders}, nil
 }
 
 func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
@@ -607,25 +580,27 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 	defer reporter.TrackFailure(ctx, &err)
 
 	url := helps.JoinBaseURL(baseURL, "/responses")
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(prepared.body))
-	if err != nil {
-		return nil, err
-	}
-	applyXAIChatHeaders(httpReq, auth, token, true, prepared.sessionID)
-	e.recordXAIRequest(ctx, auth, url, httpReq.Header.Clone(), prepared.body)
+	headers := make(http.Header)
+	tmpReq := &http.Request{Header: headers}
+	applyXAIChatHeaders(tmpReq, auth, token, true, prepared.sessionID)
+	headers = tmpReq.Header
+	e.recordXAIRequest(ctx, auth, url, headers.Clone(), prepared.body)
 
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, err := httpClient.Do(httpReq)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return nil, err
+	httpResp, errDo := helps.DoStream(ctx, e.cfg, helps.UpstreamRequest{
+		Provider:       e.Identifier(),
+		Auth:           auth,
+		Method:         http.MethodPost,
+		URL:            url,
+		Headers:        headers,
+		Body:           prepared.body,
+		SkipRequestLog: true,
+	})
+	if errDo != nil {
+		if ue, ok := errDo.(helps.UpstreamStatusError); ok {
+			return nil, xaiStatusErr(ue.Code, []byte(ue.Msg))
+		}
+		return nil, errDo
 	}
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		data := helps.ReadHTTPErrorBody(ctx, e.cfg, httpResp)
-		helps.CloseResponseBody(e.Identifier(), httpResp.Body)
-		return nil, xaiStatusErr(httpResp.StatusCode, data)
-	}
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {

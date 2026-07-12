@@ -9,7 +9,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -375,29 +374,22 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 
-	helps.RecordUpstreamRequest(ctx, e.cfg, auth, e.Identifier(), http.MethodPost, url, httpReq.Header.Clone(), body)
-
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, errDo := httpClient.Do(httpReq)
+	_, data, respHeaders, errDo := helps.DoJSON(ctx, e.cfg, helps.UpstreamRequest{
+		Provider: e.Identifier(),
+		Auth:     auth,
+		Method:   http.MethodPost,
+		URL:      url,
+		Headers:  httpReq.Header,
+		Body:     body,
+	})
 	if errDo != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
+		if ue, ok := errDo.(helps.UpstreamStatusError); ok {
+			helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", ue.Code, helps.SummarizeErrorBody("application/json", []byte(ue.Msg)))
+			err = statusErr{code: ue.Code, msg: ue.Msg}
+			return resp, err
+		}
 		return resp, errDo
 	}
-	defer helps.CloseResponseBody(e.Identifier(), httpResp.Body)
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
-		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
-		return resp, err
-	}
-	data, errRead := io.ReadAll(httpResp.Body)
-	if errRead != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, errRead)
-		return resp, errRead
-	}
-	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	reporter.Publish(ctx, helps.ParseGeminiUsage(data))
 	reporter.EnsurePublished(ctx)
 
@@ -412,7 +404,7 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 	to := sdktranslator.FromString("gemini")
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, body, data, &param)
-	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
+	resp = cliproxyexecutor.Response{Payload: out, Headers: respHeaders}
 	return resp, nil
 }
 
@@ -478,34 +470,27 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(ctx context.Context, auth *clip
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 
-	helps.RecordUpstreamRequest(ctx, e.cfg, auth, e.Identifier(), http.MethodPost, url, httpReq.Header.Clone(), body)
-
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, errDo := httpClient.Do(httpReq)
+	_, data, respHeaders, errDo := helps.DoJSON(ctx, e.cfg, helps.UpstreamRequest{
+		Provider: e.Identifier(),
+		Auth:     auth,
+		Method:   http.MethodPost,
+		URL:      url,
+		Headers:  httpReq.Header,
+		Body:     body,
+	})
 	if errDo != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
+		if ue, ok := errDo.(helps.UpstreamStatusError); ok {
+			helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", ue.Code, helps.SummarizeErrorBody("application/json", []byte(ue.Msg)))
+			err = statusErr{code: ue.Code, msg: ue.Msg}
+			return resp, err
+		}
 		return resp, errDo
 	}
-	defer helps.CloseResponseBody(e.Identifier(), httpResp.Body)
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
-		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
-		return resp, err
-	}
-	data, errRead := io.ReadAll(httpResp.Body)
-	if errRead != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, errRead)
-		return resp, errRead
-	}
-	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	reporter.Publish(ctx, helps.ParseGeminiUsage(data))
 	reporter.EnsurePublished(ctx)
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, body, data, &param)
-	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
+	resp = cliproxyexecutor.Response{Payload: out, Headers: respHeaders}
 	return resp, nil
 }
 
@@ -570,21 +555,20 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 
-	helps.RecordUpstreamRequest(ctx, e.cfg, auth, e.Identifier(), http.MethodPost, url, httpReq.Header.Clone(), body)
-
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, errDo := httpClient.Do(httpReq)
+	httpResp, errDo := helps.DoStream(ctx, e.cfg, helps.UpstreamRequest{
+		Provider: e.Identifier(),
+		Auth:     auth,
+		Method:   http.MethodPost,
+		URL:      url,
+		Headers:  httpReq.Header,
+		Body:     body,
+	})
 	if errDo != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
+		if ue, ok := errDo.(helps.UpstreamStatusError); ok {
+			helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", ue.Code, helps.SummarizeErrorBody("application/json", []byte(ue.Msg)))
+			return nil, statusErr{code: ue.Code, msg: ue.Msg}
+		}
 		return nil, errDo
-	}
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
-		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		helps.CloseResponseBody(e.Identifier(), httpResp.Body)
-		return nil, statusErr{code: httpResp.StatusCode, msg: string(b)}
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk)
@@ -691,21 +675,20 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 
-	helps.RecordUpstreamRequest(ctx, e.cfg, auth, e.Identifier(), http.MethodPost, url, httpReq.Header.Clone(), body)
-
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, errDo := httpClient.Do(httpReq)
+	httpResp, errDo := helps.DoStream(ctx, e.cfg, helps.UpstreamRequest{
+		Provider: e.Identifier(),
+		Auth:     auth,
+		Method:   http.MethodPost,
+		URL:      url,
+		Headers:  httpReq.Header,
+		Body:     body,
+	})
 	if errDo != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
+		if ue, ok := errDo.(helps.UpstreamStatusError); ok {
+			helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", ue.Code, helps.SummarizeErrorBody("application/json", []byte(ue.Msg)))
+			return nil, statusErr{code: ue.Code, msg: ue.Msg}
+		}
 		return nil, errDo
-	}
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
-		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		helps.CloseResponseBody(e.Identifier(), httpResp.Body)
-		return nil, statusErr{code: httpResp.StatusCode, msg: string(b)}
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk)
@@ -794,31 +777,24 @@ func (e *GeminiVertexExecutor) countTokensWithServiceAccount(ctx context.Context
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 
-	helps.RecordUpstreamRequest(ctx, e.cfg, auth, e.Identifier(), http.MethodPost, url, httpReq.Header.Clone(), translatedReq)
-
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, errDo := httpClient.Do(httpReq)
+	_, data, respHeaders, errDo := helps.DoJSON(ctx, e.cfg, helps.UpstreamRequest{
+		Provider: e.Identifier(),
+		Auth:     auth,
+		Method:   http.MethodPost,
+		URL:      url,
+		Headers:  httpReq.Header,
+		Body:     translatedReq,
+	})
 	if errDo != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
+		if ue, ok := errDo.(helps.UpstreamStatusError); ok {
+			helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", ue.Code, helps.SummarizeErrorBody("application/json", []byte(ue.Msg)))
+			return cliproxyexecutor.Response{}, statusErr{code: ue.Code, msg: ue.Msg}
+		}
 		return cliproxyexecutor.Response{}, errDo
 	}
-	defer helps.CloseResponseBody(e.Identifier(), httpResp.Body)
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
-		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		return cliproxyexecutor.Response{}, statusErr{code: httpResp.StatusCode, msg: string(b)}
-	}
-	data, errRead := io.ReadAll(httpResp.Body)
-	if errRead != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, errRead)
-		return cliproxyexecutor.Response{}, errRead
-	}
-	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	count := gjson.GetBytes(data, "totalTokens").Int()
 	out := sdktranslator.TranslateTokenCount(ctx, to, from, count, data)
-	return cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}, nil
+	return cliproxyexecutor.Response{Payload: out, Headers: respHeaders}, nil
 }
 
 // countTokensWithAPIKey handles token counting using API key credentials.
@@ -864,31 +840,24 @@ func (e *GeminiVertexExecutor) countTokensWithAPIKey(ctx context.Context, auth *
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 
-	helps.RecordUpstreamRequest(ctx, e.cfg, auth, e.Identifier(), http.MethodPost, url, httpReq.Header.Clone(), translatedReq)
-
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, errDo := httpClient.Do(httpReq)
+	_, data, respHeaders, errDo := helps.DoJSON(ctx, e.cfg, helps.UpstreamRequest{
+		Provider: e.Identifier(),
+		Auth:     auth,
+		Method:   http.MethodPost,
+		URL:      url,
+		Headers:  httpReq.Header,
+		Body:     translatedReq,
+	})
 	if errDo != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
+		if ue, ok := errDo.(helps.UpstreamStatusError); ok {
+			helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", ue.Code, helps.SummarizeErrorBody("application/json", []byte(ue.Msg)))
+			return cliproxyexecutor.Response{}, statusErr{code: ue.Code, msg: ue.Msg}
+		}
 		return cliproxyexecutor.Response{}, errDo
 	}
-	defer helps.CloseResponseBody(e.Identifier(), httpResp.Body)
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
-		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		return cliproxyexecutor.Response{}, statusErr{code: httpResp.StatusCode, msg: string(b)}
-	}
-	data, errRead := io.ReadAll(httpResp.Body)
-	if errRead != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, errRead)
-		return cliproxyexecutor.Response{}, errRead
-	}
-	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	count := gjson.GetBytes(data, "totalTokens").Int()
 	out := sdktranslator.TranslateTokenCount(ctx, to, from, count, data)
-	return cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}, nil
+	return cliproxyexecutor.Response{Payload: out, Headers: respHeaders}, nil
 }
 
 // vertexCreds extracts project, location and raw service account JSON from auth metadata.

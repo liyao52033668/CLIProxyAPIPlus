@@ -124,26 +124,32 @@ func (e *CodeArtsExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 
 	payload := buildCodeArtsPayload(req.Payload, baseModel, agentID, userID, opts)
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", codeartsChatURL, bytes.NewReader(payload))
-	if err != nil {
-		return resp, err
+	headers := make(http.Header)
+	tmpReq := &http.Request{Header: headers}
+	if errPrep := e.PrepareRequest(tmpReq, auth); errPrep != nil {
+		return resp, errPrep
 	}
+	headers = tmpReq.Header
 
-	httpResp, err := e.HttpRequest(ctx, auth, httpReq)
-	if err != nil {
-		return resp, err
+	helps.RecordUpstreamRequest(ctx, e.cfg, auth, "codearts", http.MethodPost, codeartsChatURL, headers.Clone(), payload)
+	httpResp, errDo := helps.DoStream(ctx, e.cfg, helps.UpstreamRequest{
+		Provider:       e.Identifier(),
+		Auth:           auth,
+		Method:         http.MethodPost,
+		URL:            codeartsChatURL,
+		Headers:        headers,
+		Body:           payload,
+		Client:         helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0),
+		SkipRequestLog: true,
+	})
+	if errDo != nil {
+		if ue, ok := errDo.(helps.UpstreamStatusError); ok {
+			return resp, statusErr{code: ue.Code, msg: fmt.Sprintf("codearts: API returned %d: %s", ue.Code, ue.Msg)}
+		}
+		return resp, errDo
 	}
 	defer httpResp.Body.Close()
-
 	log.Debugf("codearts: Execute response status=%d, content_type=%s", httpResp.StatusCode, httpResp.Header.Get("Content-Type"))
-
-	if httpResp.StatusCode != 200 {
-		body, _ := io.ReadAll(httpResp.Body)
-		return resp, statusErr{
-			code: httpResp.StatusCode,
-			msg:  fmt.Sprintf("codearts: API returned %d: %s", httpResp.StatusCode, string(body)),
-		}
-	}
 
 	var contentBuilder strings.Builder
 	var contentBuffer translatorcommon.ContentBlockTextBuffer
@@ -271,8 +277,6 @@ func (e *CodeArtsExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 	})
 	reporter.EnsurePublished(ctx)
 
-	helps.RecordUpstreamRequest(ctx, e.cfg, auth, "codearts", http.MethodPost, codeartsChatURL, nil, nil)
-
 	return cliproxyexecutor.Response{Payload: translated}, nil
 }
 
@@ -295,24 +299,29 @@ func (e *CodeArtsExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 
 	payload := buildCodeArtsPayload(req.Payload, baseModel, agentID, userID, opts)
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", codeartsChatURL, bytes.NewReader(payload))
-	if err != nil {
-		return nil, err
+	headers := make(http.Header)
+	tmpReq := &http.Request{Header: headers}
+	if errPrep := e.PrepareRequest(tmpReq, auth); errPrep != nil {
+		return nil, errPrep
 	}
+	headers = tmpReq.Header
 
-	httpResp, err := e.HttpRequest(ctx, auth, httpReq)
-	if err != nil {
-		return nil, err
-	}
-
-	if httpResp.StatusCode != 200 {
-		body, _ := io.ReadAll(httpResp.Body)
-		httpResp.Body.Close()
-		log.Debugf("codearts: non-200 response status=%d, body=%s", httpResp.StatusCode, string(body))
-		return nil, statusErr{
-			code: httpResp.StatusCode,
-			msg:  fmt.Sprintf("codearts: API returned %d: %s", httpResp.StatusCode, string(body)),
+	helps.RecordUpstreamRequest(ctx, e.cfg, auth, "codearts", http.MethodPost, codeartsChatURL, headers.Clone(), payload)
+	httpResp, errDo := helps.DoStream(ctx, e.cfg, helps.UpstreamRequest{
+		Provider:       e.Identifier(),
+		Auth:           auth,
+		Method:         http.MethodPost,
+		URL:            codeartsChatURL,
+		Headers:        headers,
+		Body:           payload,
+		Client:         helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0),
+		SkipRequestLog: true,
+	})
+	if errDo != nil {
+		if ue, ok := errDo.(helps.UpstreamStatusError); ok {
+			return nil, statusErr{code: ue.Code, msg: fmt.Sprintf("codearts: API returned %d: %s", ue.Code, ue.Msg)}
 		}
+		return nil, errDo
 	}
 
 	log.Debugf("codearts: stream response status=%d, content_type=%s, content_length=%d",
@@ -438,7 +447,6 @@ func (e *CodeArtsExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 		})
 		reporter.EnsurePublished(ctx)
 
-		helps.RecordUpstreamRequest(ctx, e.cfg, auth, "codearts", http.MethodPost, codeartsChatURL, nil, nil)
 	}()
 
 	return &cliproxyexecutor.StreamResult{

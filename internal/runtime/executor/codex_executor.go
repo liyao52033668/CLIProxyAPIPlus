@@ -7,7 +7,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -204,26 +203,21 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	}
 	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
 	applyModelHeaderOverrides(httpReq.Header, baseModel)
-	helps.RecordUpstreamRequest(ctx, e.cfg, auth, e.Identifier(), http.MethodPost, url, httpReq.Header.Clone(), body)
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, err := httpClient.Do(httpReq)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return resp, err
+	_, data, respHeaders, errDo := helps.DoJSON(ctx, e.cfg, helps.UpstreamRequest{
+		Provider: e.Identifier(),
+		Auth:     auth,
+		Method:   http.MethodPost,
+		URL:      url,
+		Headers:  httpReq.Header,
+		Body:     body,
+	})
+	if errDo != nil {
+		if ue, ok := errDo.(helps.UpstreamStatusError); ok {
+			return resp, newCodexStatusErr(ue.Code, []byte(ue.Msg))
+		}
+		return resp, errDo
 	}
-	defer helps.CloseResponseBody(e.Identifier(), httpResp.Body)
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b := helps.ReadHTTPErrorBody(ctx, e.cfg, httpResp)
-		err = newCodexStatusErr(httpResp.StatusCode, b)
-		return resp, err
-	}
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-	data, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return resp, err
-	}
-	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+	_ = respHeaders
 
 	lines := bytes.Split(data, []byte("\n"))
 	outputItemsByIndex := make(map[int64][]byte)
@@ -270,7 +264,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 
 		var param any
 		out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, completedData, &param)
-		resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
+		resp = cliproxyexecutor.Response{Payload: out, Headers: respHeaders}
 		return resp, nil
 	}
 	err = statusErr{code: 408, msg: "stream error: stream disconnected before completion: stream closed before response.completed"}
@@ -320,31 +314,25 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	}
 	applyCodexHeaders(httpReq, auth, apiKey, false, e.cfg)
 	applyModelHeaderOverrides(httpReq.Header, baseModel)
-	helps.RecordUpstreamRequest(ctx, e.cfg, auth, e.Identifier(), http.MethodPost, url, httpReq.Header.Clone(), body)
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, err := httpClient.Do(httpReq)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return resp, err
+	_, data, respHeaders, errDo := helps.DoJSON(ctx, e.cfg, helps.UpstreamRequest{
+		Provider: e.Identifier(),
+		Auth:     auth,
+		Method:   http.MethodPost,
+		URL:      url,
+		Headers:  httpReq.Header,
+		Body:     body,
+	})
+	if errDo != nil {
+		if ue, ok := errDo.(helps.UpstreamStatusError); ok {
+			return resp, newCodexStatusErr(ue.Code, []byte(ue.Msg))
+		}
+		return resp, errDo
 	}
-	defer helps.CloseResponseBody(e.Identifier(), httpResp.Body)
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b := helps.ReadHTTPErrorBody(ctx, e.cfg, httpResp)
-		err = newCodexStatusErr(httpResp.StatusCode, b)
-		return resp, err
-	}
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-	data, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return resp, err
-	}
-	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
 	reporter.EnsurePublished(ctx)
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, data, &param)
-	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
+	resp = cliproxyexecutor.Response{Payload: out, Headers: respHeaders}
 	return resp, nil
 }
 
@@ -402,21 +390,20 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
 	applyModelHeaderOverrides(httpReq.Header, baseModel)
-	helps.RecordUpstreamRequest(ctx, e.cfg, auth, e.Identifier(), http.MethodPost, url, httpReq.Header.Clone(), body)
-
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, err := httpClient.Do(httpReq)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return nil, err
+	httpResp, errDo := helps.DoStream(ctx, e.cfg, helps.UpstreamRequest{
+		Provider: e.Identifier(),
+		Auth:     auth,
+		Method:   http.MethodPost,
+		URL:      url,
+		Headers:  httpReq.Header,
+		Body:     body,
+	})
+	if errDo != nil {
+		if ue, ok := errDo.(helps.UpstreamStatusError); ok {
+			return nil, newCodexStatusErr(ue.Code, []byte(ue.Msg))
+		}
+		return nil, errDo
 	}
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		data := helps.ReadHTTPErrorBody(ctx, e.cfg, httpResp)
-		helps.CloseResponseBody(e.Identifier(), httpResp.Body)
-		err = newCodexStatusErr(httpResp.StatusCode, data)
-		return nil, err
-	}
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)

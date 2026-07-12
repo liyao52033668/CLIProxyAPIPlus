@@ -2,13 +2,11 @@ package executor
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -83,26 +81,30 @@ func (e *JoyCodeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, 
 
 	payload := buildJoyCodePayload(req.Payload, baseModel, auth)
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", joycodeChatURL, bytes.NewReader(payload))
-	if err != nil {
-		return resp, err
+	headers := make(http.Header)
+	tmpReq := &http.Request{Header: headers}
+	if errPrep := e.PrepareRequest(tmpReq, auth); errPrep != nil {
+		return resp, errPrep
 	}
+	headers = tmpReq.Header
 
-	httpResp, err := e.HttpRequest(ctx, auth, httpReq)
-	if err != nil {
-		return resp, err
-	}
-	defer httpResp.Body.Close()
-
-	if httpResp.StatusCode != 200 {
-		body, _ := io.ReadAll(httpResp.Body)
-		return resp, statusErr{
-			code: httpResp.StatusCode,
-			msg:  fmt.Sprintf("joycode: API returned %d: %s", httpResp.StatusCode, string(body)),
+	helps.RecordUpstreamRequest(ctx, e.cfg, auth, "joycode", http.MethodPost, joycodeChatURL, headers.Clone(), payload)
+	_, body, _, errDo := helps.DoJSON(ctx, e.cfg, helps.UpstreamRequest{
+		Provider:       e.Identifier(),
+		Auth:           auth,
+		Method:         http.MethodPost,
+		URL:            joycodeChatURL,
+		Headers:        headers,
+		Body:           payload,
+		Client:         helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 5*time.Minute),
+		SkipRequestLog: true,
+	})
+	if errDo != nil {
+		if ue, ok := errDo.(helps.UpstreamStatusError); ok {
+			return resp, statusErr{code: ue.Code, msg: fmt.Sprintf("joycode: API returned %d: %s", ue.Code, ue.Msg)}
 		}
+		return resp, errDo
 	}
-
-	body, _ := io.ReadAll(httpResp.Body)
 
 	from := sdktranslator.FromString("openai")
 	to := sdktranslator.FromString("joycode")
@@ -119,8 +121,6 @@ func (e *JoyCodeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, 
 	})
 	reporter.EnsurePublished(ctx)
 
-	helps.RecordUpstreamRequest(ctx, e.cfg, auth, "joycode", http.MethodPost, joycodeChatURL, nil, nil)
-
 	return cliproxyexecutor.Response{Payload: translated}, nil
 }
 
@@ -133,23 +133,29 @@ func (e *JoyCodeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.
 
 	payload := buildJoyCodePayload(req.Payload, baseModel, auth)
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", joycodeChatURL, bytes.NewReader(payload))
-	if err != nil {
-		return nil, err
+	headers := make(http.Header)
+	tmpReq := &http.Request{Header: headers}
+	if errPrep := e.PrepareRequest(tmpReq, auth); errPrep != nil {
+		return nil, errPrep
 	}
+	headers = tmpReq.Header
 
-	httpResp, err := e.HttpRequest(ctx, auth, httpReq)
-	if err != nil {
-		return nil, err
-	}
-
-	if httpResp.StatusCode != 200 {
-		body, _ := io.ReadAll(httpResp.Body)
-		httpResp.Body.Close()
-		return nil, statusErr{
-			code: httpResp.StatusCode,
-			msg:  fmt.Sprintf("joycode: API returned %d: %s", httpResp.StatusCode, string(body)),
+	helps.RecordUpstreamRequest(ctx, e.cfg, auth, "joycode", http.MethodPost, joycodeChatURL, headers.Clone(), payload)
+	httpResp, errDo := helps.DoStream(ctx, e.cfg, helps.UpstreamRequest{
+		Provider:       e.Identifier(),
+		Auth:           auth,
+		Method:         http.MethodPost,
+		URL:            joycodeChatURL,
+		Headers:        headers,
+		Body:           payload,
+		Client:         helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 5*time.Minute),
+		SkipRequestLog: true,
+	})
+	if errDo != nil {
+		if ue, ok := errDo.(helps.UpstreamStatusError); ok {
+			return nil, statusErr{code: ue.Code, msg: fmt.Sprintf("joycode: API returned %d: %s", ue.Code, ue.Msg)}
 		}
+		return nil, errDo
 	}
 
 	chunks := make(chan cliproxyexecutor.StreamChunk, 64)

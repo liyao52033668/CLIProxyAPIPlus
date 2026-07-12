@@ -390,36 +390,50 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 			// Timeout 0: after the upstream connection is established, request
 			// lifetime is governed by context cancellation only (AGENTS.md).
 			httpClient := newKiroHTTPClientWithPooling(ctx, e.cfg, auth, 0)
-			httpResp, err := httpClient.Do(httpReq)
+			httpResp, err := helps.DoStream(ctx, e.cfg, helps.UpstreamRequest{
+				Provider:       e.Identifier(),
+				Auth:           auth,
+				Method:         http.MethodPost,
+				URL:            url,
+				Headers:        httpReq.Header,
+				Body:           kiroPayload,
+				Client:         httpClient,
+				SkipRequestLog: true,
+			})
 			if err != nil {
-				// Check for context cancellation first - client disconnected, not a server error
-				// Use 499 (Client Closed Request - nginx convention) instead of 500
-				if errors.Is(err, context.Canceled) {
-					log.Debugf("kiro: request canceled by client (context.Canceled)")
-					return resp, statusErr{code: 499, msg: "client canceled request"}
+				if ue, ok := err.(helps.UpstreamStatusError); ok {
+					httpResp = &http.Response{
+						StatusCode: ue.Code,
+						Header:     make(http.Header),
+						Body:       io.NopCloser(bytes.NewReader([]byte(ue.Msg))),
+					}
+				} else {
+					// Check for context cancellation first - client disconnected, not a server error
+					// Use 499 (Client Closed Request - nginx convention) instead of 500
+					if errors.Is(err, context.Canceled) {
+						log.Debugf("kiro: request canceled by client (context.Canceled)")
+						return resp, statusErr{code: 499, msg: "client canceled request"}
+					}
+
+					// Check for context deadline exceeded - request timed out
+					// Return 504 Gateway Timeout instead of 500
+					if errors.Is(err, context.DeadlineExceeded) {
+						log.Debugf("kiro: request timed out (context.DeadlineExceeded)")
+						return resp, statusErr{code: http.StatusGatewayTimeout, msg: "upstream request timed out"}
+					}
+
+					// Enhanced socket retry: Check if error is retryable (network timeout, connection reset, etc.)
+					retryCfg := defaultRetryConfig()
+					if isRetryableError(err) && attempt < retryCfg.MaxRetries {
+						delay := calculateRetryDelay(attempt, retryCfg)
+						logRetryAttempt(attempt, retryCfg.MaxRetries, fmt.Sprintf("socket error: %v", err), delay, endpointConfig.Name)
+						time.Sleep(delay)
+						continue
+					}
+
+					return resp, err
 				}
-
-				// Check for context deadline exceeded - request timed out
-				// Return 504 Gateway Timeout instead of 500
-				if errors.Is(err, context.DeadlineExceeded) {
-					log.Debugf("kiro: request timed out (context.DeadlineExceeded)")
-					return resp, statusErr{code: http.StatusGatewayTimeout, msg: "upstream request timed out"}
-				}
-
-				helps.RecordAPIResponseError(ctx, e.cfg, err)
-
-				// Enhanced socket retry: Check if error is retryable (network timeout, connection reset, etc.)
-				retryCfg := defaultRetryConfig()
-				if isRetryableError(err) && attempt < retryCfg.MaxRetries {
-					delay := calculateRetryDelay(attempt, retryCfg)
-					logRetryAttempt(attempt, retryCfg.MaxRetries, fmt.Sprintf("socket error: %v", err), delay, endpointConfig.Name)
-					time.Sleep(delay)
-					continue
-				}
-
-				return resp, err
 			}
-			helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 
 			// Handle 429 errors (quota exhausted) - try next endpoint
 			// Each endpoint has its own quota pool, so we can try different endpoints
@@ -815,22 +829,36 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 			helps.RecordUpstreamRequest(ctx, e.cfg, auth, e.Identifier(), http.MethodPost, url, httpReq.Header.Clone(), kiroPayload)
 
 			httpClient := newKiroHTTPClientWithPooling(ctx, e.cfg, auth, 0)
-			httpResp, err := httpClient.Do(httpReq)
+			httpResp, err := helps.DoStream(ctx, e.cfg, helps.UpstreamRequest{
+				Provider:       e.Identifier(),
+				Auth:           auth,
+				Method:         http.MethodPost,
+				URL:            url,
+				Headers:        httpReq.Header,
+				Body:           kiroPayload,
+				Client:         httpClient,
+				SkipRequestLog: true,
+			})
 			if err != nil {
-				helps.RecordAPIResponseError(ctx, e.cfg, err)
+				if ue, ok := err.(helps.UpstreamStatusError); ok {
+					httpResp = &http.Response{
+						StatusCode: ue.Code,
+						Header:     make(http.Header),
+						Body:       io.NopCloser(bytes.NewReader([]byte(ue.Msg))),
+					}
+				} else {
+					// Enhanced socket retry for streaming: Check if error is retryable (network timeout, connection reset, etc.)
+					retryCfg := defaultRetryConfig()
+					if isRetryableError(err) && attempt < retryCfg.MaxRetries {
+						delay := calculateRetryDelay(attempt, retryCfg)
+						logRetryAttempt(attempt, retryCfg.MaxRetries, fmt.Sprintf("stream socket error: %v", err), delay, endpointConfig.Name)
+						time.Sleep(delay)
+						continue
+					}
 
-				// Enhanced socket retry for streaming: Check if error is retryable (network timeout, connection reset, etc.)
-				retryCfg := defaultRetryConfig()
-				if isRetryableError(err) && attempt < retryCfg.MaxRetries {
-					delay := calculateRetryDelay(attempt, retryCfg)
-					logRetryAttempt(attempt, retryCfg.MaxRetries, fmt.Sprintf("stream socket error: %v", err), delay, endpointConfig.Name)
-					time.Sleep(delay)
-					continue
+					return nil, err
 				}
-
-				return nil, err
 			}
-			helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 
 			// Handle 429 errors (quota exhausted) - try next endpoint
 			// Each endpoint has its own quota pool, so we can try different endpoints

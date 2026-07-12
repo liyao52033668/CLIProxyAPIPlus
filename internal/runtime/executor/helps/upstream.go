@@ -51,29 +51,45 @@ type UpstreamRequest struct {
 	Body     []byte
 	// Client optional; when nil a proxy-aware client with no request Timeout is used.
 	Client *http.Client
-	// Decode optional body decoder for error responses (gzip/br/zstd).
+	// Decode optional body decoder for error/success bodies (gzip/br/zstd).
 	Decode ResponseBodyDecoder
+	// SkipRequestLog skips RecordUpstreamRequest when the caller already logged.
+	SkipRequestLog bool
 }
 
 // DoJSON executes an upstream request, fully reads a successful response body,
 // and records the standard request/response log hooks. On non-2xx it returns
 // UpstreamStatusError after consuming the error body.
+// When req.Decode is set, both error and success bodies are passed through it
+// (used for Content-Encoding decompression such as Claude responses).
 func DoJSON(ctx context.Context, cfg *config.Config, req UpstreamRequest) (status int, body []byte, headers http.Header, err error) {
 	httpResp, errDo := doUpstream(ctx, cfg, req, true)
 	if errDo != nil {
 		return 0, nil, nil, errDo
 	}
-	defer CloseResponseBody(req.Provider, httpResp.Body)
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		errBody := ReadHTTPErrorBodyWithDecode(ctx, cfg, httpResp, req.Decode)
+		CloseResponseBody(req.Provider, httpResp.Body)
 		return httpResp.StatusCode, nil, httpResp.Header.Clone(), UpstreamStatusError{
 			Code: httpResp.StatusCode,
 			Msg:  string(errBody),
 		}
 	}
 
-	data, errRead := io.ReadAll(httpResp.Body)
+	reader := io.ReadCloser(httpResp.Body)
+	if req.Decode != nil {
+		decoded, errDecode := req.Decode(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
+		if errDecode != nil {
+			RecordAPIResponseError(ctx, cfg, errDecode)
+			CloseResponseBody(req.Provider, httpResp.Body)
+			return httpResp.StatusCode, nil, httpResp.Header.Clone(), errDecode
+		}
+		reader = decoded
+	}
+	defer CloseResponseBody(req.Provider, reader)
+
+	data, errRead := io.ReadAll(reader)
 	if errRead != nil {
 		RecordAPIResponseError(ctx, cfg, errRead)
 		return httpResp.StatusCode, nil, httpResp.Header.Clone(), errRead
@@ -85,6 +101,8 @@ func DoJSON(ctx context.Context, cfg *config.Config, req UpstreamRequest) (statu
 // DoStream executes an upstream request intended for streaming. On success the
 // caller owns httpResp.Body and must close it. On non-2xx the error body is
 // consumed, the response body is closed, and UpstreamStatusError is returned.
+// When req.Decode is set on success, httpResp.Body is replaced with the decoded
+// reader (caller still closes it).
 func DoStream(ctx context.Context, cfg *config.Config, req UpstreamRequest) (*http.Response, error) {
 	httpResp, errDo := doUpstream(ctx, cfg, req, true)
 	if errDo != nil {
@@ -94,6 +112,15 @@ func DoStream(ctx context.Context, cfg *config.Config, req UpstreamRequest) (*ht
 		errBody := ReadHTTPErrorBodyWithDecode(ctx, cfg, httpResp, req.Decode)
 		CloseResponseBody(req.Provider, httpResp.Body)
 		return nil, UpstreamStatusError{Code: httpResp.StatusCode, Msg: string(errBody)}
+	}
+	if req.Decode != nil {
+		decoded, errDecode := req.Decode(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
+		if errDecode != nil {
+			RecordAPIResponseError(ctx, cfg, errDecode)
+			CloseResponseBody(req.Provider, httpResp.Body)
+			return nil, errDecode
+		}
+		httpResp.Body = decoded
 	}
 	return httpResp, nil
 }
@@ -115,7 +142,7 @@ func doUpstream(ctx context.Context, cfg *config.Config, req UpstreamRequest, lo
 		httpReq.Header = req.Headers.Clone()
 	}
 
-	if logRequest {
+	if logRequest && !req.SkipRequestLog {
 		RecordUpstreamRequest(ctx, cfg, req.Auth, req.Provider, method, req.URL, httpReq.Header.Clone(), req.Body)
 	}
 
