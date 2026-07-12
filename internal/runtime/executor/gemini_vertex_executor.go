@@ -1055,21 +1055,9 @@ func vertexCreds(a *cliproxyauth.Auth) (projectID, location string, serviceAccou
 	return projectID, location, saJSON, nil
 }
 
-// vertexAPICreds extracts API key and base URL from auth attributes following the claudeCreds pattern.
+// vertexAPICreds extracts API key and base URL from auth attributes/metadata.
 func vertexAPICreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
-	if a == nil {
-		return "", ""
-	}
-	if a.Attributes != nil {
-		apiKey = a.Attributes["api_key"]
-		baseURL = a.Attributes["base_url"]
-	}
-	if apiKey == "" && a.Metadata != nil {
-		if v, ok := a.Metadata["access_token"].(string); ok {
-			apiKey = v
-		}
-	}
-	return
+	return helps.ResolveAPIKeyAndBaseURL(a)
 }
 
 func vertexBaseURL(location string) string {

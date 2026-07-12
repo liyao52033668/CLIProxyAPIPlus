@@ -15,6 +15,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/gitlab"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -1209,17 +1210,7 @@ func gitLabResolvedModel(auth *cliproxyauth.Auth, requested string) string {
 }
 
 func gitLabMetadataString(metadata map[string]any, keys ...string) string {
-	for _, key := range keys {
-		if metadata == nil {
-			return ""
-		}
-		if value, ok := metadata[key].(string); ok {
-			if trimmed := strings.TrimSpace(value); trimmed != "" {
-				return trimmed
-			}
-		}
-	}
-	return ""
+	return helps.MetadataString(metadata, keys...)
 }
 
 func gitLabOAuthTokenNeedsRefresh(metadata map[string]any) bool {

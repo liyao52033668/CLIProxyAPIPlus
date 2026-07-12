@@ -294,3 +294,90 @@ func requireRecordID(t *testing.T, raw json.RawMessage, want int) {
 		t.Fatalf("record id = %d, want %d", payload.ID, want)
 	}
 }
+
+func TestBuildUsageFilterFromRequest(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Run("defaults and valid pagination", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(rec)
+		ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage/events?page=2&page_size=50&result=success", nil)
+
+		filter, err := buildUsageFilterFromRequest(ctx)
+		if err != nil {
+			t.Fatalf("buildUsageFilterFromRequest returned error: %v", err)
+		}
+		if filter.Page != 2 {
+			t.Fatalf("page = %d, want 2", filter.Page)
+		}
+		if filter.PageSize != 50 || filter.Limit != 50 {
+			t.Fatalf("page_size/limit = %d/%d, want 50/50", filter.PageSize, filter.Limit)
+		}
+		if filter.Offset != 50 {
+			t.Fatalf("offset = %d, want 50", filter.Offset)
+		}
+		if filter.Result != "success" {
+			t.Fatalf("result = %q, want success", filter.Result)
+		}
+	})
+
+	t.Run("invalid page_size is rejected", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(rec)
+		ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage/events?page_size=9999", nil)
+
+		_, err := buildUsageFilterFromRequest(ctx)
+		if err == nil {
+			t.Fatal("expected invalid page_size error")
+		}
+	})
+
+	t.Run("invalid start_time is rejected", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(rec)
+		ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage/events?start_time=not-a-time", nil)
+
+		_, err := buildUsageFilterFromRequest(ctx)
+		if err == nil {
+			t.Fatal("expected invalid start_time error")
+		}
+	})
+
+	t.Run("start after end is rejected", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(rec)
+		ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage/events?start_time=2026-05-02T00:00:00Z&end_time=2026-05-01T00:00:00Z", nil)
+
+		_, err := buildUsageFilterFromRequest(ctx)
+		if err == nil {
+			t.Fatal("expected start_time/end_time order error")
+		}
+	})
+
+	t.Run("invalid result is rejected", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(rec)
+		ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage/events?result=maybe", nil)
+
+		_, err := buildUsageFilterFromRequest(ctx)
+		if err == nil {
+			t.Fatal("expected invalid result error")
+		}
+	})
+}
+
+func TestGetDBUsageEventsRejectsInvalidFilter(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openManagementUsageTestDatabase(t)
+	h := newManagementUsageHandler(t, db)
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage/events?page_size=9999", nil)
+
+	h.GetDBUsageEvents(ctx)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}

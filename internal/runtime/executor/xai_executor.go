@@ -58,11 +58,17 @@ const (
 	xaiAutomationUpdateToolName   = "automation_update"
 	xaiSafeFunctionParameters     = `{"type":"object","properties":{},"additionalProperties":true}`
 	xaiFreeUsageExhaustedCooldown = 24 * time.Hour
-	xaiTokenAuthHeader            = "X-XAI-Token-Auth"
-	xaiTokenAuthValue             = "xai-grok-cli"
-	xaiClientVersionHeader        = "x-grok-client-version"
 	// Keep in sync with the current Grok CLI client version that chat-proxy expects.
-	xaiClientVersionValue = "0.2.93"
+	xaiClientVersionValue     = "0.2.93"
+	xaiUserAgentHeader        = "User-Agent"
+	xaiUserAgentValue         = "grok-shell/" + xaiClientVersionValue + " (linux; x86_64)"
+	xaiAuthResponseHeader     = "x-authenticateresponse"
+	xaiAuthResponseValue      = "authenticate-response"
+	xaiClientIdentifierHeader = "x-grok-client-identifier"
+	xaiClientIdentifierValue  = "grok-shell"
+	xaiTokenAuthHeader        = "x-xai-token-auth"
+	xaiTokenAuthValue         = "xai-grok-cli"
+	xaiClientVersionHeader    = "x-grok-client-version"
 	// xaiUsingAPIAttr enables the official API path for non-media HTTP chat.
 	xaiUsingAPIAttr = "using_api"
 )
@@ -83,6 +89,9 @@ func (e *XAIExecutor) Identifier() string {
 }
 
 // PrepareRequest injects xAI credentials into the outgoing HTTP request.
+// When the auth resolves to the official CLI chat-proxy, the same Grok CLI
+// identity headers used by chat execution paths are attached so SDK callers
+// of Manager.NewHTTPRequest/PrepareHTTPRequest/HTTPRequest match Execute.
 func (e *XAIExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
 	if req == nil {
 		return nil
@@ -90,6 +99,9 @@ func (e *XAIExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth)
 	token, _ := xaiCreds(auth)
 	if strings.TrimSpace(token) != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	if !xaiUsingAPI(auth) && xaiIsCLIChatProxyBaseURL(xaiChatBaseURL(auth)) {
+		applyXAIChatProxyIdentityHeaders(req)
 	}
 	var attrs map[string]string
 	if auth != nil {
@@ -137,7 +149,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), prepared.baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
-	url := strings.TrimSuffix(baseURL, "/") + "/responses"
+	url := helps.JoinBaseURL(baseURL, "/responses")
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(prepared.body))
 	if err != nil {
 		return resp, err
@@ -152,21 +164,13 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 		return resp, err
 	}
 	defer func() {
-		if errClose := httpResp.Body.Close(); errClose != nil {
-			log.Errorf("xai executor: close response body error: %v", errClose)
-		}
+		helps.CloseResponseBody(e.Identifier(), httpResp.Body)
 	}()
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		data, errRead := io.ReadAll(httpResp.Body)
-		if errRead != nil {
-			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
-			return resp, errRead
-		}
-		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+		data := helps.ReadHTTPErrorBody(ctx, e.cfg, httpResp)
 		return resp, xaiStatusErr(httpResp.StatusCode, data)
 	}
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 
 	data, err := io.ReadAll(httpResp.Body)
 	if err != nil {
@@ -228,7 +232,7 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), prepared.baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
-	requestURL := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
+	requestURL := helps.JoinBaseURL(baseURL, "/responses/compact")
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(prepared.body))
 	if err != nil {
 		return nil, nil, nil, err
@@ -243,9 +247,7 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 		return nil, nil, nil, err
 	}
 	defer func() {
-		if errClose := httpResp.Body.Close(); errClose != nil {
-			log.Errorf("xai executor: close response body error: %v", errClose)
-		}
+		helps.CloseResponseBody(e.Identifier(), httpResp.Body)
 	}()
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 
@@ -490,7 +492,7 @@ func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth
 		endpointPath = xaiDefaultImageEndpointPath
 	}
 
-	url := strings.TrimSuffix(baseURL, "/") + endpointPath
+	url := helps.JoinBaseURL(baseURL, endpointPath)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(req.Payload))
 	if err != nil {
 		return resp, err
@@ -505,9 +507,7 @@ func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth
 		return resp, err
 	}
 	defer func() {
-		if errClose := httpResp.Body.Close(); errClose != nil {
-			log.Errorf("xai executor: close response body error: %v", errClose)
-		}
+		helps.CloseResponseBody(e.Identifier(), httpResp.Body)
 	}()
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 
@@ -544,7 +544,7 @@ func (e *XAIExecutor) executeVideos(ctx context.Context, auth *cliproxyauth.Auth
 			body = nil
 		}
 	}
-	requestURL := strings.TrimSuffix(baseURL, "/") + endpointPath
+	requestURL := helps.JoinBaseURL(baseURL, endpointPath)
 	httpReq, err := http.NewRequestWithContext(ctx, method, requestURL, body)
 	if err != nil {
 		return resp, err
@@ -568,9 +568,7 @@ func (e *XAIExecutor) executeVideos(ctx context.Context, auth *cliproxyauth.Auth
 		return resp, err
 	}
 	defer func() {
-		if errClose := httpResp.Body.Close(); errClose != nil {
-			log.Errorf("xai executor: close response body error: %v", errClose)
-		}
+		helps.CloseResponseBody(e.Identifier(), httpResp.Body)
 	}()
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 
@@ -608,7 +606,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), prepared.baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
-	url := strings.TrimSuffix(baseURL, "/") + "/responses"
+	url := helps.JoinBaseURL(baseURL, "/responses")
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(prepared.body))
 	if err != nil {
 		return nil, err
@@ -622,29 +620,17 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
 	}
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		data, errRead := io.ReadAll(httpResp.Body)
-		if errClose := httpResp.Body.Close(); errClose != nil {
-			log.Errorf("xai executor: close response body error: %v", errClose)
-		}
-		if errRead != nil {
-			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
-			return nil, errRead
-		}
-		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+		data := helps.ReadHTTPErrorBody(ctx, e.cfg, httpResp)
+		helps.CloseResponseBody(e.Identifier(), httpResp.Body)
 		return nil, xaiStatusErr(httpResp.StatusCode, data)
 	}
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
-		defer func() {
-			if errClose := httpResp.Body.Close(); errClose != nil {
-				log.Errorf("xai executor: close response body error: %v", errClose)
-			}
-		}()
+		defer helps.CloseResponseBody(e.Identifier(), httpResp.Body)
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, 52_428_800)
 		var param any
@@ -912,42 +898,11 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 }
 
 func (e *XAIExecutor) recordXAIRequest(ctx context.Context, auth *cliproxyauth.Auth, url string, headers http.Header, body []byte) {
-	var authID, authLabel, authType, authValue string
-	if auth != nil {
-		authID = auth.ID
-		authLabel = auth.Label
-		authType, authValue = auth.AccountInfo()
-	}
-	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-		URL:       url,
-		Method:    http.MethodPost,
-		Headers:   headers,
-		Body:      body,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
-	})
+	helps.RecordUpstreamRequest(ctx, e.cfg, auth, e.Identifier(), http.MethodPost, url, headers, body)
 }
 
 func xaiCreds(auth *cliproxyauth.Auth) (token, baseURL string) {
-	if auth == nil {
-		return "", ""
-	}
-	if auth.Attributes != nil {
-		token = strings.TrimSpace(auth.Attributes["api_key"])
-		baseURL = strings.TrimSpace(auth.Attributes["base_url"])
-	}
-	if auth.Metadata != nil {
-		if token == "" {
-			token = xaiMetadataString(auth.Metadata, "access_token")
-		}
-		if baseURL == "" {
-			baseURL = xaiMetadataString(auth.Metadata, "base_url")
-		}
-	}
-	return token, baseURL
+	return helps.ResolveAPIKeyAndBaseURL(auth)
 }
 
 // xaiUsingAPI reports whether this xAI auth should use the official API path
@@ -1058,6 +1013,19 @@ func applyXAICustomHeaders(r *http.Request, auth *cliproxyauth.Auth) {
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
 }
 
+// applyXAIChatProxyIdentityHeaders attaches the fixed Grok CLI fingerprint
+// expected by the official CLI chat-proxy endpoint.
+func applyXAIChatProxyIdentityHeaders(r *http.Request) {
+	if r == nil {
+		return
+	}
+	r.Header.Set(xaiUserAgentHeader, xaiUserAgentValue)
+	r.Header.Set(xaiAuthResponseHeader, xaiAuthResponseValue)
+	r.Header.Set(xaiClientIdentifierHeader, xaiClientIdentifierValue)
+	r.Header.Set(xaiTokenAuthHeader, xaiTokenAuthValue)
+	r.Header.Set(xaiClientVersionHeader, xaiClientVersionValue)
+}
+
 // applyXAIChatHeaders applies standard xAI headers for non-image/video chat
 // requests. When using_api is true, this matches the standard
 // applyXAIHeaders behavior. CLI chat-proxy identity headers are only attached
@@ -1070,8 +1038,7 @@ func applyXAIChatHeaders(r *http.Request, auth *cliproxyauth.Auth, token string,
 	}
 	applyXAIDefaultHeaders(r, token, stream, sessionID)
 	if xaiIsCLIChatProxyBaseURL(xaiChatBaseURL(auth)) {
-		r.Header.Set(xaiTokenAuthHeader, xaiTokenAuthValue)
-		r.Header.Set(xaiClientVersionHeader, xaiClientVersionValue)
+		applyXAIChatProxyIdentityHeaders(r)
 	}
 	applyXAICustomHeaders(r, auth)
 }
@@ -1162,21 +1129,7 @@ func xaiVideoEndpointPath(opts cliproxyexecutor.Options) string {
 }
 
 func xaiMetadataString(meta map[string]any, key string) string {
-	if len(meta) == 0 || key == "" {
-		return ""
-	}
-	value, ok := meta[key]
-	if !ok || value == nil {
-		return ""
-	}
-	switch typed := value.(type) {
-	case string:
-		return strings.TrimSpace(typed)
-	case fmt.Stringer:
-		return strings.TrimSpace(typed.String())
-	default:
-		return strings.TrimSpace(fmt.Sprint(typed))
-	}
+	return helps.MetadataString(meta, key)
 }
 
 func sanitizeXAIResponsesBody(body []byte, model string) []byte {

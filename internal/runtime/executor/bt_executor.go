@@ -117,7 +117,7 @@ func (e *BTExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req c
 	}
 
 	baseURL := btauth.CloudURL + "/plugin_api/chat/openai/v1"
-	upstreamURL := strings.TrimSuffix(baseURL, "/") + endpoint
+	upstreamURL := helps.JoinBaseURL(baseURL, endpoint)
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(translated))
 	if err != nil {
@@ -134,23 +134,7 @@ func (e *BTExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req c
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 	httpReq.Header.Set("User-Agent", "cli-proxy-bt")
-	var authID, authLabel, authType, authValue string
-	if auth != nil {
-		authID = auth.ID
-		authLabel = auth.Label
-		authType, authValue = auth.AccountInfo()
-	}
-	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-		URL:       upstreamURL,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
-		Body:      translated,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
-	})
+	helps.RecordUpstreamRequest(ctx, e.cfg, auth, e.Identifier(), http.MethodPost, upstreamURL, httpReq.Header.Clone(), translated)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, err := httpClient.Do(httpReq)
@@ -158,16 +142,10 @@ func (e *BTExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req c
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
-	defer func() {
-		if errClose := httpResp.Body.Close(); errClose != nil {
-			log.Errorf("bt executor: close response body error: %v", errClose)
-		}
-	}()
+	defer helps.CloseResponseBody(e.Identifier(), httpResp.Body)
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
-		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
-		helps.LogWithRequestID(ctx).Debugf("bt executor: request error, status: %d, message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		b := helps.ReadHTTPErrorBody(ctx, e.cfg, httpResp)
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return resp, err
 	}
@@ -216,7 +194,7 @@ func (e *BTExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth,
 	}
 
 	baseURL := btauth.CloudURL + "/plugin_api/chat/openai/v1"
-	upstreamURL := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
+	upstreamURL := helps.JoinBaseURL(baseURL, "/chat/completions")
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(translated))
 	if err != nil {
@@ -235,23 +213,7 @@ func (e *BTExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth,
 	httpReq.Header.Set("User-Agent", "cli-proxy-bt")
 	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("Cache-Control", "no-cache")
-	var authID, authLabel, authType, authValue string
-	if auth != nil {
-		authID = auth.ID
-		authLabel = auth.Label
-		authType, authValue = auth.AccountInfo()
-	}
-	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-		URL:       upstreamURL,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
-		Body:      translated,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
-	})
+	helps.RecordUpstreamRequest(ctx, e.cfg, auth, e.Identifier(), http.MethodPost, upstreamURL, httpReq.Header.Clone(), translated)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, err := httpClient.Do(httpReq)
@@ -261,22 +223,15 @@ func (e *BTExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth,
 	}
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
-		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
-		if errClose := httpResp.Body.Close(); errClose != nil {
-			log.Errorf("bt executor: close response body error: %v", errClose)
-		}
+		b := helps.ReadHTTPErrorBody(ctx, e.cfg, httpResp)
+		helps.CloseResponseBody(e.Identifier(), httpResp.Body)
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return nil, err
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
-		defer func() {
-			if errClose := httpResp.Body.Close(); errClose != nil {
-				log.Errorf("bt executor: close response body error: %v", errClose)
-			}
-		}()
+		defer helps.CloseResponseBody(e.Identifier(), httpResp.Body)
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, 52_428_800)
 		var param any

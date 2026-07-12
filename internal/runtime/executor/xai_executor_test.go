@@ -1840,6 +1840,43 @@ func TestXAIChatBaseURL(t *testing.T) {
 	}
 }
 
+func assertNoXAIChatProxyIdentityHeaders(t *testing.T, req *http.Request, reason string) {
+	t.Helper()
+	for _, header := range []string{
+		xaiUserAgentHeader,
+		xaiAuthResponseHeader,
+		xaiClientIdentifierHeader,
+		xaiTokenAuthHeader,
+		xaiClientVersionHeader,
+	} {
+		if got := req.Header.Get(header); got != "" {
+			t.Fatalf("%s = %q, want empty for %s", header, got, reason)
+		}
+	}
+}
+
+func assertXAIChatProxyIdentityHeaders(t *testing.T, req *http.Request) {
+	t.Helper()
+	if got := req.Header.Get(xaiUserAgentHeader); got != xaiUserAgentValue {
+		t.Fatalf("%s = %q, want %q", xaiUserAgentHeader, got, xaiUserAgentValue)
+	}
+	if !strings.Contains(xaiUserAgentValue, xaiClientVersionValue) {
+		t.Fatalf("xaiUserAgentValue %q must embed xaiClientVersionValue %q", xaiUserAgentValue, xaiClientVersionValue)
+	}
+	if got := req.Header.Get(xaiAuthResponseHeader); got != xaiAuthResponseValue {
+		t.Fatalf("%s = %q, want %q", xaiAuthResponseHeader, got, xaiAuthResponseValue)
+	}
+	if got := req.Header.Get(xaiClientIdentifierHeader); got != xaiClientIdentifierValue {
+		t.Fatalf("%s = %q, want %q", xaiClientIdentifierHeader, got, xaiClientIdentifierValue)
+	}
+	if got := req.Header.Get(xaiTokenAuthHeader); got != xaiTokenAuthValue {
+		t.Fatalf("%s = %q, want %q", xaiTokenAuthHeader, got, xaiTokenAuthValue)
+	}
+	if got := req.Header.Get(xaiClientVersionHeader); got != xaiClientVersionValue {
+		t.Fatalf("%s = %q, want %q", xaiClientVersionHeader, got, xaiClientVersionValue)
+	}
+}
+
 func TestApplyXAIChatHeaders(t *testing.T) {
 	t.Run("non OAuth defaults to official API headers", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "https://example.invalid/responses", nil)
@@ -1854,12 +1891,7 @@ func TestApplyXAIChatHeaders(t *testing.T) {
 		if got := req.Header.Get("x-grok-conv-id"); got != "conv-1" {
 			t.Fatalf("x-grok-conv-id = %q, want conv-1", got)
 		}
-		if got := req.Header.Get(xaiTokenAuthHeader); got != "" {
-			t.Fatalf("%s = %q, want empty for official API", xaiTokenAuthHeader, got)
-		}
-		if got := req.Header.Get(xaiClientVersionHeader); got != "" {
-			t.Fatalf("%s = %q, want empty for official API", xaiClientVersionHeader, got)
-		}
+		assertNoXAIChatProxyIdentityHeaders(t, req, "official API")
 	})
 
 	t.Run("OAuth defaults to cli chat proxy headers", func(t *testing.T) {
@@ -1878,12 +1910,7 @@ func TestApplyXAIChatHeaders(t *testing.T) {
 		if got := req.Header.Get("x-grok-conv-id"); got != "conv-1" {
 			t.Fatalf("x-grok-conv-id = %q, want conv-1", got)
 		}
-		if got := req.Header.Get(xaiTokenAuthHeader); got != xaiTokenAuthValue {
-			t.Fatalf("%s = %q, want %q", xaiTokenAuthHeader, got, xaiTokenAuthValue)
-		}
-		if got := req.Header.Get(xaiClientVersionHeader); got != xaiClientVersionValue {
-			t.Fatalf("%s = %q, want %q", xaiClientVersionHeader, got, xaiClientVersionValue)
-		}
+		assertXAIChatProxyIdentityHeaders(t, req)
 	})
 
 	t.Run("no cli headers on custom gateway with using_api false", func(t *testing.T) {
@@ -1896,12 +1923,7 @@ func TestApplyXAIChatHeaders(t *testing.T) {
 		}
 		applyXAIChatHeaders(req, auth, "xai-token", false, "")
 
-		if got := req.Header.Get(xaiTokenAuthHeader); got != "" {
-			t.Fatalf("%s = %q, want empty for custom gateway", xaiTokenAuthHeader, got)
-		}
-		if got := req.Header.Get(xaiClientVersionHeader); got != "" {
-			t.Fatalf("%s = %q, want empty for custom gateway", xaiClientVersionHeader, got)
-		}
+		assertNoXAIChatProxyIdentityHeaders(t, req, "custom gateway")
 	})
 
 	t.Run("custom headers override cli chat proxy defaults", func(t *testing.T) {
@@ -1912,6 +1934,7 @@ func TestApplyXAIChatHeaders(t *testing.T) {
 				xaiUsingAPIAttr:                    "false",
 				"header:" + xaiTokenAuthHeader:     "custom-token-auth",
 				"header:" + xaiClientVersionHeader: "custom-client-version",
+				"header:" + xaiUserAgentHeader:     "custom-user-agent",
 			},
 		}
 		applyXAIChatHeaders(req, auth, "xai-token", true, "")
@@ -1921,6 +1944,9 @@ func TestApplyXAIChatHeaders(t *testing.T) {
 		}
 		if got := req.Header.Get(xaiClientVersionHeader); got != "custom-client-version" {
 			t.Fatalf("%s = %q, want custom-client-version", xaiClientVersionHeader, got)
+		}
+		if got := req.Header.Get(xaiUserAgentHeader); got != "custom-user-agent" {
+			t.Fatalf("%s = %q, want custom-user-agent", xaiUserAgentHeader, got)
 		}
 	})
 
@@ -1934,11 +1960,67 @@ func TestApplyXAIChatHeaders(t *testing.T) {
 		}
 		applyXAIChatHeaders(req, auth, "xai-token", true, "")
 
+		assertXAIChatProxyIdentityHeaders(t, req)
+	})
+}
+
+func TestXAIExecutorPrepareRequestChatProxyHeaders(t *testing.T) {
+	exec := NewXAIExecutor(&config.Config{})
+
+	t.Run("attaches cli identity headers for oauth chat proxy", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, xaiauth.CLIChatProxyBaseURL+"/responses", nil)
+		auth := &cliproxyauth.Auth{
+			Attributes: map[string]string{
+				"auth_kind": "oauth",
+				"base_url":  xaiauth.CLIChatProxyBaseURL,
+			},
+			Metadata: map[string]any{"access_token": "xai-token"},
+		}
+		if err := exec.PrepareRequest(req, auth); err != nil {
+			t.Fatalf("PrepareRequest() error = %v", err)
+		}
+		if got := req.Header.Get("Authorization"); got != "Bearer xai-token" {
+			t.Fatalf("Authorization = %q, want Bearer xai-token", got)
+		}
+		assertXAIChatProxyIdentityHeaders(t, req)
+	})
+
+	t.Run("skips cli identity headers for official api", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, xaiauth.DefaultAPIBaseURL+"/responses", nil)
+		auth := &cliproxyauth.Auth{
+			Attributes: map[string]string{
+				"base_url":      xaiauth.DefaultAPIBaseURL,
+				xaiUsingAPIAttr: "true",
+			},
+			Metadata: map[string]any{"access_token": "xai-token"},
+		}
+		if err := exec.PrepareRequest(req, auth); err != nil {
+			t.Fatalf("PrepareRequest() error = %v", err)
+		}
+		if got := req.Header.Get("Authorization"); got != "Bearer xai-token" {
+			t.Fatalf("Authorization = %q, want Bearer xai-token", got)
+		}
+		assertNoXAIChatProxyIdentityHeaders(t, req, "official API PrepareRequest")
+	})
+
+	t.Run("custom headers override prepare-request cli defaults", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, xaiauth.CLIChatProxyBaseURL+"/responses", nil)
+		auth := &cliproxyauth.Auth{
+			Attributes: map[string]string{
+				"base_url":                         xaiauth.CLIChatProxyBaseURL,
+				xaiUsingAPIAttr:                    "false",
+				"header:" + xaiClientVersionHeader: "custom-client-version",
+			},
+			Metadata: map[string]any{"access_token": "xai-token"},
+		}
+		if err := exec.PrepareRequest(req, auth); err != nil {
+			t.Fatalf("PrepareRequest() error = %v", err)
+		}
+		if got := req.Header.Get(xaiClientVersionHeader); got != "custom-client-version" {
+			t.Fatalf("%s = %q, want custom-client-version", xaiClientVersionHeader, got)
+		}
 		if got := req.Header.Get(xaiTokenAuthHeader); got != xaiTokenAuthValue {
 			t.Fatalf("%s = %q, want %q", xaiTokenAuthHeader, got, xaiTokenAuthValue)
-		}
-		if got := req.Header.Get(xaiClientVersionHeader); got != xaiClientVersionValue {
-			t.Fatalf("%s = %q, want %q", xaiClientVersionHeader, got, xaiClientVersionValue)
 		}
 	})
 }

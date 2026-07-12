@@ -119,12 +119,7 @@ func (e *JoyCodeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, 
 	})
 	reporter.EnsurePublished(ctx)
 
-	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-		URL:      joycodeChatURL,
-		Method:   "POST",
-		Provider: "joycode",
-		AuthID:   auth.ID,
-	})
+	helps.RecordUpstreamRequest(ctx, e.cfg, auth, "joycode", http.MethodPost, joycodeChatURL, nil, nil)
 
 	return cliproxyexecutor.Response{Payload: translated}, nil
 }
@@ -215,12 +210,7 @@ func (e *JoyCodeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.
 		})
 		reporter.EnsurePublished(ctx)
 
-		helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-			URL:      joycodeChatURL,
-			Method:   "POST",
-			Provider: "joycode",
-			AuthID:   auth.ID,
-		})
+		helps.RecordUpstreamRequest(ctx, e.cfg, auth, "joycode", http.MethodPost, joycodeChatURL, nil, nil)
 	}()
 
 	return &cliproxyexecutor.StreamResult{

@@ -3,8 +3,10 @@ package management
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -14,6 +16,15 @@ import (
 	keeperservice "github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/service"
 	dto "github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/service/dto"
 )
+
+// Keep in sync with internal/usage/keeper/api/usage_filter.go.
+var allowedManagementUsagePageSizes = map[int]struct{}{
+	20:   {},
+	50:   {},
+	100:  {},
+	500:  {},
+	1000: {},
+}
 
 type usageExportPayload struct {
 	Version    int                        `json:"version"`
@@ -134,7 +145,11 @@ func (h *Handler) GetDBUsageStatistics(c *gin.Context) {
 		return
 	}
 
-	filter := buildUsageFilterFromRequest(c)
+	filter, errFilter := buildUsageFilterFromRequest(c)
+	if errFilter != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errFilter.Error()})
+		return
+	}
 	snapshot, err := h.usageService.GetUsageWithFilter(c.Request.Context(), filter)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -153,7 +168,11 @@ func (h *Handler) GetDBUsageOverview(c *gin.Context) {
 		return
 	}
 
-	filter := buildUsageFilterFromRequest(c)
+	filter, errFilter := buildUsageFilterFromRequest(c)
+	if errFilter != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errFilter.Error()})
+		return
+	}
 	overview, err := h.usageService.GetUsageOverview(c.Request.Context(), filter)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -170,7 +189,11 @@ func (h *Handler) GetDBUsageEvents(c *gin.Context) {
 		return
 	}
 
-	filter := buildUsageFilterFromRequest(c)
+	filter, errFilter := buildUsageFilterFromRequest(c)
+	if errFilter != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errFilter.Error()})
+		return
+	}
 	page, err := h.usageService.ListUsageEvents(c.Request.Context(), filter)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -187,7 +210,11 @@ func (h *Handler) GetDBUsageAnalysis(c *gin.Context) {
 		return
 	}
 
-	filter := buildUsageFilterFromRequest(c)
+	filter, errFilter := buildUsageFilterFromRequest(c)
+	if errFilter != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errFilter.Error()})
+		return
+	}
 	analysis, err := h.usageService.GetUsageAnalysis(c.Request.Context(), filter)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -204,7 +231,11 @@ func (h *Handler) GetDBUsageEventFilterOptions(c *gin.Context) {
 		return
 	}
 
-	filter := buildUsageFilterFromRequest(c)
+	filter, errFilter := buildUsageFilterFromRequest(c)
+	if errFilter != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errFilter.Error()})
+		return
+	}
 	options, err := h.usageService.ListUsageEventFilterOptions(c.Request.Context(), filter)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -222,64 +253,84 @@ func parseUsageQueueCount(raw string) (int, error) {
 	return count, nil
 }
 
-func buildUsageFilterFromRequest(c *gin.Context) dto.UsageFilter {
-	filter := dto.UsageFilter{}
+// buildUsageFilterFromRequest parses management usage query parameters with
+// strict validation so invalid filters fail closed instead of being ignored.
+func buildUsageFilterFromRequest(c *gin.Context) (dto.UsageFilter, error) {
+	if c == nil {
+		return dto.UsageFilter{}, nil
+	}
 
-	if rangeVal := c.Query("range"); rangeVal != "" {
+	filter := dto.UsageFilter{
+		Page:     1,
+		PageSize: dto.DefaultUsageEventsLimit,
+		Limit:    dto.DefaultUsageEventsLimit,
+	}
+
+	if rangeVal := strings.TrimSpace(c.Query("range")); rangeVal != "" {
 		filter.Range = rangeVal
 	}
 
-	if startTimeStr := c.Query("start_time"); startTimeStr != "" {
-		if t, err := time.Parse(time.RFC3339, startTimeStr); err == nil {
-			filter.StartTime = &t
+	if startTimeStr := strings.TrimSpace(c.Query("start_time")); startTimeStr != "" {
+		t, err := time.Parse(time.RFC3339, startTimeStr)
+		if err != nil {
+			return dto.UsageFilter{}, fmt.Errorf("invalid start_time %q", startTimeStr)
 		}
+		filter.StartTime = &t
 	}
 
-	if endTimeStr := c.Query("end_time"); endTimeStr != "" {
-		if t, err := time.Parse(time.RFC3339, endTimeStr); err == nil {
-			filter.EndTime = &t
+	if endTimeStr := strings.TrimSpace(c.Query("end_time")); endTimeStr != "" {
+		t, err := time.Parse(time.RFC3339, endTimeStr)
+		if err != nil {
+			return dto.UsageFilter{}, fmt.Errorf("invalid end_time %q", endTimeStr)
 		}
+		filter.EndTime = &t
 	}
 
-	if limitStr := c.Query("limit"); limitStr != "" {
-		if limit, err := strconv.Atoi(limitStr); err == nil {
-			filter.Limit = limit
+	if filter.StartTime != nil && filter.EndTime != nil && filter.StartTime.After(*filter.EndTime) {
+		return dto.UsageFilter{}, fmt.Errorf("start_time must be before end_time")
+	}
+
+	if pageStr := strings.TrimSpace(c.Query("page")); pageStr != "" {
+		page, err := strconv.Atoi(pageStr)
+		if err != nil || page < 1 {
+			return dto.UsageFilter{}, fmt.Errorf("invalid page %q", pageStr)
 		}
+		filter.Page = page
 	}
 
-	if pageStr := c.Query("page"); pageStr != "" {
-		if page, err := strconv.Atoi(pageStr); err == nil {
-			filter.Page = page
+	pageSizeValue := strings.TrimSpace(c.Query("page_size"))
+	if pageSizeValue == "" {
+		pageSizeValue = strings.TrimSpace(c.Query("limit"))
+	}
+	if pageSizeValue != "" {
+		pageSize, err := strconv.Atoi(pageSizeValue)
+		if err != nil {
+			return dto.UsageFilter{}, fmt.Errorf("invalid page_size %q", pageSizeValue)
 		}
-	}
-
-	if pageSizeStr := c.Query("page_size"); pageSizeStr != "" {
-		if pageSize, err := strconv.Atoi(pageSizeStr); err == nil {
-			filter.PageSize = pageSize
+		if _, ok := allowedManagementUsagePageSizes[pageSize]; !ok {
+			return dto.UsageFilter{}, fmt.Errorf("invalid page_size %q", pageSizeValue)
 		}
+		filter.PageSize = pageSize
+		filter.Limit = pageSize
 	}
 
-	if offsetStr := c.Query("offset"); offsetStr != "" {
-		if offset, err := strconv.Atoi(offsetStr); err == nil {
-			filter.Offset = offset
+	if offsetStr := strings.TrimSpace(c.Query("offset")); offsetStr != "" {
+		offset, err := strconv.Atoi(offsetStr)
+		if err != nil || offset < 0 {
+			return dto.UsageFilter{}, fmt.Errorf("invalid offset %q", offsetStr)
 		}
+		filter.Offset = offset
+	} else {
+		filter.Offset = (filter.Page - 1) * filter.PageSize
 	}
 
-	if model := c.Query("model"); model != "" {
-		filter.Model = model
+	filter.Model = strings.TrimSpace(c.Query("model"))
+	filter.Source = strings.TrimSpace(c.Query("source"))
+	filter.AuthIndex = strings.TrimSpace(c.Query("auth_index"))
+	filter.Result = strings.TrimSpace(c.Query("result"))
+	if filter.Result != "" && filter.Result != "success" && filter.Result != "failed" {
+		return dto.UsageFilter{}, fmt.Errorf("invalid result %q", filter.Result)
 	}
 
-	if source := c.Query("source"); source != "" {
-		filter.Source = source
-	}
-
-	if authIndex := c.Query("auth_index"); authIndex != "" {
-		filter.AuthIndex = authIndex
-	}
-
-	if result := c.Query("result"); result != "" {
-		filter.Result = result
-	}
-
-	return filter
+	return filter, nil
 }
