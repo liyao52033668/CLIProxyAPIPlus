@@ -15,9 +15,32 @@ import (
 
 // httpClientCache caches HTTP clients by proxy URL to enable connection reuse
 var (
-	httpClientCache      = make(map[string]*http.Client)
-	httpClientCacheMutex sync.RWMutex
+	httpClientCache         = make(map[string]*http.Client)
+	httpClientCacheMutex    sync.RWMutex
+	buildProxyTransportFunc = buildProxyTransport
 )
+
+func cachedProxyClient(proxyURL string) *http.Client {
+	httpClientCacheMutex.RLock()
+	cached := httpClientCache[proxyURL]
+	httpClientCacheMutex.RUnlock()
+	if cached != nil {
+		return cached
+	}
+
+	httpClientCacheMutex.Lock()
+	defer httpClientCacheMutex.Unlock()
+	if cached = httpClientCache[proxyURL]; cached != nil {
+		return cached
+	}
+	transport := buildProxyTransportFunc(proxyURL)
+	if transport == nil {
+		return nil
+	}
+	cached = &http.Client{Transport: transport}
+	httpClientCache[proxyURL] = cached
+	return cached
+}
 
 // NewProxyAwareHTTPClient creates an HTTP client with proper proxy configuration priority:
 // 1. Use auth.ProxyURL if configured (highest priority)
@@ -46,40 +69,21 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 		proxyURL = strings.TrimSpace(cfg.ProxyURL)
 	}
 
-	// If we have a proxy URL configured, try cache first to reuse TCP/TLS connections.
+	// If we have a proxy URL configured, reuse one transport-backed client.
 	if proxyURL != "" {
-		httpClientCacheMutex.RLock()
-		if cachedClient, ok := httpClientCache[proxyURL]; ok {
-			httpClientCacheMutex.RUnlock()
+		if cachedClient := cachedProxyClient(proxyURL); cachedClient != nil {
 			if timeout > 0 {
 				return &http.Client{Transport: cachedClient.Transport, Timeout: timeout}
 			}
 			return cachedClient
 		}
-		httpClientCacheMutex.RUnlock()
+		log.Debugf("failed to setup proxy from URL: %s, falling back to context transport", proxyutil.Redact(proxyURL))
 	}
 
-	// Create new client
+	// Create a client for the direct or context-provided transport path.
 	httpClient := &http.Client{}
 	if timeout > 0 {
 		httpClient.Timeout = timeout
-	}
-
-	// If we have a proxy URL configured, set up the transport
-	if proxyURL != "" {
-		transport := buildProxyTransport(proxyURL)
-		if transport != nil {
-			baseClient := &http.Client{Transport: transport}
-			httpClientCacheMutex.Lock()
-			httpClientCache[proxyURL] = baseClient
-			httpClientCacheMutex.Unlock()
-			if timeout > 0 {
-				return &http.Client{Transport: transport, Timeout: timeout}
-			}
-			return baseClient
-		}
-		// If proxy setup failed, log and fall through to context RoundTripper
-		log.Debugf("failed to setup proxy from URL: %s, falling back to context transport", proxyutil.Redact(proxyURL))
 	}
 
 	// Priority 3: Use RoundTripper from context (typically from RoundTripperFor)

@@ -20,6 +20,10 @@ func TestFindAllAntigravityCreditsCandidateAuths_PrefersKnownCreditsThenUnknown(
 		},
 	}
 
+	t.Cleanup(func() {
+		DeleteAntigravityCreditsHint("zz-credits")
+		DeleteAntigravityCreditsHint("mm-no")
+	})
 	SetAntigravityCreditsHint("zz-credits", AntigravityCreditsHint{
 		Known:     true,
 		Available: true,

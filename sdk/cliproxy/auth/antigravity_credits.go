@@ -79,6 +79,15 @@ func GetAntigravityCreditsHint(authID string) (AntigravityCreditsHint, bool) {
 	return local, true
 }
 
+// DeleteAntigravityCreditsHint removes the process-local credits hint for one auth.
+func DeleteAntigravityCreditsHint(authID string) {
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return
+	}
+	antigravityCreditsHintByAuth.Delete(authID)
+}
+
 // GetAntigravityCreditsHintRequired returns the latest known AI credits state for request-time paths.
 func GetAntigravityCreditsHintRequired(ctx context.Context, authID string) (AntigravityCreditsHint, bool, error) {
 	authID = strings.TrimSpace(authID)

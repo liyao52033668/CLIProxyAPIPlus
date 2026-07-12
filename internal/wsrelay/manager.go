@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -20,6 +21,7 @@ type Manager struct {
 	upgrader  websocket.Upgrader
 	sessions  map[string]*session
 	sessMutex sync.RWMutex
+	stopped   atomic.Bool
 
 	providerFactory func(*http.Request) (string, error)
 	onConnected     func(string)
@@ -116,6 +118,7 @@ func (m *Manager) Handler() http.Handler {
 
 // Stop gracefully closes all active websocket sessions.
 func (m *Manager) Stop(_ context.Context) error {
+	m.stopped.Store(true)
 	m.sessMutex.Lock()
 	sessions := make([]*session, 0, len(m.sessions))
 	for _, sess := range m.sessions {
@@ -134,6 +137,10 @@ func (m *Manager) Stop(_ context.Context) error {
 
 // handleWebsocket upgrades the connection and wires the session into the pool.
 func (m *Manager) handleWebsocket(w http.ResponseWriter, r *http.Request) {
+	if m.stopped.Load() {
+		http.Error(w, "websocket relay stopped", http.StatusServiceUnavailable)
+		return
+	}
 	expectedPath := m.Path()
 	if expectedPath != "" && r.URL != nil && r.URL.Path != expectedPath {
 		http.NotFound(w, r)
@@ -164,6 +171,11 @@ func (m *Manager) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 		s.provider = strings.ToLower(s.id)
 	}
 	m.sessMutex.Lock()
+	if m.stopped.Load() {
+		m.sessMutex.Unlock()
+		s.cleanup(errors.New("wsrelay: manager stopped"))
+		return
+	}
 	var replaced *session
 	if existing, ok := m.sessions[s.provider]; ok {
 		replaced = existing

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -58,6 +59,24 @@ func getOrBuildManagementTransport(proxyStr string) http.RoundTripper {
 	managementTransportCache[proxyStr] = transport
 	managementTransportCacheMutex.Unlock()
 	return transport
+}
+
+const (
+	maxAPICallRequestBodyBytes  int64 = 8 << 20
+	maxAPICallResponseBodyBytes int64 = 32 << 20
+)
+
+var errAPICallBodyTooLarge = errors.New("api call body too large")
+
+func readAPICallBody(reader io.Reader, limit int64) ([]byte, error) {
+	data, errRead := io.ReadAll(io.LimitReader(reader, limit+1))
+	if errRead != nil {
+		return nil, errRead
+	}
+	if int64(len(data)) > limit {
+		return nil, errAPICallBodyTooLarge
+	}
+	return data, nil
 }
 
 const (
@@ -155,10 +174,16 @@ func (h *Handler) APICall(c *gin.Context) {
 	isCBOR := strings.Contains(contentType, "application/cbor")
 
 	var body apiCallRequest
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxAPICallRequestBodyBytes)
 
 	// Parse request body based on content type
 	if isCBOR {
-		rawBody, errRead := io.ReadAll(c.Request.Body)
+		rawBody, errRead := readAPICallBody(c.Request.Body, maxAPICallRequestBodyBytes)
+		var maxBytesErr *http.MaxBytesError
+		if errors.Is(errRead, errAPICallBodyTooLarge) || errors.As(errRead, &maxBytesErr) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "request body too large"})
+			return
+		}
 		if errRead != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "failed to read request body"})
 			return
@@ -168,7 +193,13 @@ func (h *Handler) APICall(c *gin.Context) {
 			return
 		}
 	} else {
-		if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil {
+		rawBody, errRead := readAPICallBody(c.Request.Body, maxAPICallRequestBodyBytes)
+		var maxBytesErr *http.MaxBytesError
+		if errors.Is(errRead, errAPICallBodyTooLarge) || errors.As(errRead, &maxBytesErr) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "request body too large"})
+			return
+		}
+		if errRead != nil || json.Unmarshal(rawBody, &body) != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 			return
 		}
@@ -276,7 +307,11 @@ func (h *Handler) APICall(c *gin.Context) {
 		}
 	}()
 
-	respBody, errReadAll := io.ReadAll(resp.Body)
+	respBody, errReadAll := readAPICallBody(resp.Body, maxAPICallResponseBodyBytes)
+	if errors.Is(errReadAll, errAPICallBodyTooLarge) {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "response too large"})
+		return
+	}
 	if errReadAll != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read response"})
 		return

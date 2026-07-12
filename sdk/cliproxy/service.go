@@ -978,16 +978,19 @@ func (s *Service) Run(ctx context.Context) error {
 	})
 
 	s.serverErr = make(chan error, 1)
+	serverReady := make(chan struct{})
 	go func() {
-		if errStart := s.server.Start(); errStart != nil {
-			s.serverErr <- errStart
-		} else {
-			s.serverErr <- nil
-		}
+		s.serverErr <- s.server.StartWithReady(serverReady)
 	}()
 
-	time.Sleep(100 * time.Millisecond)
-	fmt.Printf("API server started successfully on: %s:%d\n", s.cfg.Host, s.cfg.Port)
+	select {
+	case <-serverReady:
+		fmt.Printf("API server started successfully on: %s:%d\n", s.cfg.Host, s.cfg.Port)
+	case errServer := <-s.serverErr:
+		return errServer
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 
 	s.applyPprofConfig(s.cfg)
 
@@ -1075,6 +1078,13 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			s.homeClient = nil
 		}
 		home.ClearCurrent()
+
+		if s.server != nil {
+			if errStopAccepting := s.server.StopAccepting(); errStopAccepting != nil {
+				log.Errorf("failed to stop accepting API connections: %v", errStopAccepting)
+				shutdownErr = errStopAccepting
+			}
+		}
 
 		// legacy refresh loop removed; only stopping core auth manager below
 

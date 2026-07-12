@@ -15,6 +15,22 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+func TestDeleteAntigravityCreditsHint(t *testing.T) {
+	const authID = "delete-antigravity-hint"
+	t.Cleanup(func() { DeleteAntigravityCreditsHint(authID) })
+	SetAntigravityCreditsHint(authID, AntigravityCreditsHint{
+		Known:     true,
+		Available: true,
+	})
+
+	DeleteAntigravityCreditsHint(authID)
+
+	_, ok := GetAntigravityCreditsHint(authID)
+	if ok {
+		t.Fatal("GetAntigravityCreditsHint() found deleted hint")
+	}
+}
+
 type antigravityCreditsFallbackExecutor struct {
 	streamCreditsRequested []bool
 }
@@ -227,6 +243,7 @@ func TestIsAuthBlockedForModel_ClaudeWithCreditsStillBlockedDuringCooldown(t *te
 		},
 	}
 
+	t.Cleanup(func() { DeleteAntigravityCreditsHint(auth.ID) })
 	SetAntigravityCreditsHint(auth.ID, AntigravityCreditsHint{
 		Known:     true,
 		Available: true,
@@ -255,6 +272,7 @@ func TestIsAuthBlockedForModel_KeepsGeminiBlockedWithoutCreditsBypass(t *testing
 		},
 	}
 
+	t.Cleanup(func() { DeleteAntigravityCreditsHint(auth.ID) })
 	SetAntigravityCreditsHint(auth.ID, AntigravityCreditsHint{
 		Known:     true,
 		Available: true,

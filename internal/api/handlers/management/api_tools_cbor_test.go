@@ -11,6 +11,30 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+func TestAPICallRejectsOversizedCBORRequest(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := &Handler{}
+	payload, errMarshal := cbor.Marshal(apiCallRequest{
+		Method: http.MethodPost,
+		URL:    "https://example.test",
+		Data:   string(bytes.Repeat([]byte("x"), (8<<20)+1)),
+	})
+	if errMarshal != nil {
+		t.Fatalf("marshal CBOR request: %v", errMarshal)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v0/management/api-call", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/cbor")
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = req
+
+	h.APICall(ctx)
+
+	if recorder.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusRequestEntityTooLarge, recorder.Body.String())
+	}
+}
+
 func TestAPICall_CBOR_Support(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

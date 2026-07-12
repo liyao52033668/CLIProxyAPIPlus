@@ -15,8 +15,37 @@ const maxInboundMessageLen = 64 << 20 // 64 MiB
 var errClosed = errors.New("websocket session closed")
 
 type pendingRequest struct {
+	ctx       context.Context
 	ch        chan Message
+	mu        sync.Mutex
+	closed    bool
 	closeOnce sync.Once
+}
+
+func newPendingRequest(ctx context.Context) *pendingRequest {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return &pendingRequest{ctx: ctx, ch: make(chan Message, 8)}
+}
+
+func (pr *pendingRequest) deliver(sessionClosed <-chan struct{}, msg Message) bool {
+	if pr == nil {
+		return false
+	}
+	pr.mu.Lock()
+	defer pr.mu.Unlock()
+	if pr.closed {
+		return false
+	}
+	select {
+	case pr.ch <- msg:
+		return true
+	case <-pr.ctx.Done():
+		return false
+	case <-sessionClosed:
+		return false
+	}
 }
 
 func (pr *pendingRequest) close() {
@@ -24,7 +53,10 @@ func (pr *pendingRequest) close() {
 		return
 	}
 	pr.closeOnce.Do(func() {
+		pr.mu.Lock()
+		pr.closed = true
 		close(pr.ch)
+		pr.mu.Unlock()
 	})
 }
 
@@ -120,14 +152,15 @@ func (s *session) dispatch(msg Message) {
 	}
 	if value, ok := s.pending.Load(msg.ID); ok {
 		req := value.(*pendingRequest)
-		select {
-		case req.ch <- msg:
-		default:
-		}
-		if msg.Type == MessageTypeHTTPResp || msg.Type == MessageTypeError || msg.Type == MessageTypeStreamEnd {
+		delivered := req.deliver(s.closed, msg)
+		terminal := msg.Type == MessageTypeHTTPResp || msg.Type == MessageTypeError || msg.Type == MessageTypeStreamEnd
+		if terminal {
 			if actual, loaded := s.pending.LoadAndDelete(msg.ID); loaded {
 				actual.(*pendingRequest).close()
 			}
+		}
+		if !delivered && terminal {
+			s.manager.logDebugf("wsrelay: terminal delivery cancelled for id %s (provider=%s)", msg.ID, s.provider)
 		}
 		return
 	}
@@ -157,7 +190,7 @@ func (s *session) request(ctx context.Context, msg Message) (<-chan Message, err
 	if msg.ID == "" {
 		return nil, fmt.Errorf("wsrelay: message id is required")
 	}
-	if _, loaded := s.pending.LoadOrStore(msg.ID, &pendingRequest{ch: make(chan Message, 8)}); loaded {
+	if _, loaded := s.pending.LoadOrStore(msg.ID, newPendingRequest(ctx)); loaded {
 		return nil, fmt.Errorf("wsrelay: duplicate message id %s", msg.ID)
 	}
 	value, _ := s.pending.Load(msg.ID)
@@ -185,16 +218,10 @@ func (s *session) cleanup(cause error) {
 	s.closeOnce.Do(func() {
 		close(s.closed)
 		s.pending.Range(func(key, value any) bool {
-			req := value.(*pendingRequest)
-			msg := Message{ID: key.(string), Type: MessageTypeError, Payload: map[string]any{"error": cause.Error()}}
-			select {
-			case req.ch <- msg:
-			default:
-			}
-			req.close()
+			s.pending.Delete(key)
+			value.(*pendingRequest).close()
 			return true
 		})
-		s.pending = sync.Map{}
 		_ = s.conn.Close()
 		if s.manager != nil {
 			s.manager.handleSessionClosed(s, cause)

@@ -21,10 +21,58 @@ import (
 )
 
 func resetAntigravityCreditsRetryState() {
-	antigravityCreditsFailureByAuth = sync.Map{}
-	antigravityShortCooldownByAuth = sync.Map{}
-	antigravityCreditsBalanceByAuth = sync.Map{}
-	antigravityCreditsHintRefreshByID = sync.Map{}
+	waitForAntigravityCreditsHintRefreshes()
+
+	seenAuthIDs := make(map[string]struct{})
+	collect := func(key string) {
+		if key != "" {
+			seenAuthIDs[key] = struct{}{}
+		}
+	}
+	clearSyncMap(&antigravityCreditsFailureByAuth, collect)
+	clearSyncMap(&antigravityShortCooldownByAuth, collect)
+	clearSyncMap(&antigravityCreditsBalanceByAuth, collect)
+	clearSyncMap(&antigravityCreditsHintRefreshByID, collect)
+	for authID := range seenAuthIDs {
+		cliproxyauth.DeleteAntigravityCreditsHint(authID)
+	}
+}
+
+func clearSyncMap(m *sync.Map, onKey func(string)) {
+	m.Range(func(key, _ any) bool {
+		m.Delete(key)
+		if onKey != nil {
+			if authID, ok := key.(string); ok {
+				onKey(authID)
+			}
+		}
+		return true
+	})
+}
+
+func TestResetAntigravityCreditsRetryStateWaitsForRefresh(t *testing.T) {
+	state := &antigravityCreditsHintRefreshState{}
+	state.mu.Lock()
+	antigravityCreditsHintRefreshByID.Store("wait-auth", state)
+
+	done := make(chan struct{})
+	go func() {
+		resetAntigravityCreditsRetryState()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("reset returned while refresh state was locked")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	state.mu.Unlock()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("reset did not finish after refresh completed")
+	}
 }
 
 type fakeAntigravityKVClient struct {
@@ -547,7 +595,7 @@ func TestAntigravityShortCooldownRequiredHomeKV(t *testing.T) {
 	if client.setCount != 1 || client.lastSetTTL != duration+5*time.Second {
 		t.Fatalf("KVSet count/ttl = %d/%v, want 1/%v", client.setCount, client.lastSetTTL, duration+5*time.Second)
 	}
-	antigravityShortCooldownByAuth = sync.Map{}
+	clearSyncMap(&antigravityShortCooldownByAuth, nil)
 	inCooldown, remaining, errRead := antigravityIsInShortCooldownRequired(context.Background(), auth, "claude-sonnet-4-5", now.Add(5*time.Second))
 	if errRead != nil {
 		t.Fatalf("antigravityIsInShortCooldownRequired() error = %v", errRead)

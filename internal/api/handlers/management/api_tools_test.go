@@ -1,11 +1,14 @@
 package management
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -13,6 +16,78 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
+
+type repeatingByteReader struct{}
+
+func (repeatingByteReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 'x'
+	}
+	return len(p), nil
+}
+
+func TestAPICallRejectsOversizedJSONRequest(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := &Handler{}
+	payload := `{"method":"POST","url":"https://example.test","data":"` + strings.Repeat("x", (8<<20)+1) + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/v0/management/api-call", strings.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = req
+
+	h.APICall(ctx)
+
+	if recorder.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusRequestEntityTooLarge, recorder.Body.String())
+	}
+}
+
+func TestAPICallRejectsOversizedJSONRequestWithTrailingWhitespace(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := &Handler{}
+	payload := `{"method":"GET","url":"https://example.test"}` + strings.Repeat(" ", 8<<20)
+	req := httptest.NewRequest(http.MethodPost, "/v0/management/api-call", strings.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = req
+
+	h.APICall(ctx)
+
+	if recorder.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusRequestEntityTooLarge, recorder.Body.String())
+	}
+}
+
+func TestAPICallRejectsOversizedUpstreamResponse(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.CopyN(w, repeatingByteReader{}, (32<<20)+1)
+	}))
+	defer upstream.Close()
+
+	h := &Handler{}
+	payload, errMarshal := json.Marshal(apiCallRequest{Method: http.MethodGet, URL: upstream.URL})
+	if errMarshal != nil {
+		t.Fatalf("marshal request: %v", errMarshal)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v0/management/api-call", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = req
+
+	h.APICall(ctx)
+
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadGateway)
+	}
+	if !strings.Contains(recorder.Body.String(), "response too large") {
+		t.Fatalf("body = %s, want response too large", recorder.Body.String())
+	}
+}
 
 func resetManagementTransportCacheForTest() {
 	managementTransportCacheMutex.Lock()

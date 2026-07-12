@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -53,6 +54,53 @@ func newTestServer(t *testing.T) *Server {
 		t.Cleanup(server.codexWorkerCancel)
 	}
 	return server
+}
+
+func TestServerStartWithReadySignalsAfterListen(t *testing.T) {
+	server := newTestServer(t)
+	ready := make(chan struct{})
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- server.StartWithReady(ready)
+	}()
+
+	select {
+	case <-ready:
+	case errStart := <-errCh:
+		t.Fatalf("StartWithReady() returned before ready: %v", errStart)
+	case <-time.After(time.Second):
+		t.Fatal("StartWithReady() did not signal readiness")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if errStop := server.Stop(ctx); errStop != nil {
+		t.Fatalf("Stop() error = %v", errStop)
+	}
+	if errStart := <-errCh; errStart != nil {
+		t.Fatalf("StartWithReady() after Stop() error = %v", errStart)
+	}
+}
+
+func TestServerStartWithReadyDoesNotSignalWhenListenFails(t *testing.T) {
+	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
+	if errListen != nil {
+		t.Fatalf("listen: %v", errListen)
+	}
+	defer listener.Close()
+
+	server := newTestServer(t)
+	server.server.Addr = listener.Addr().String()
+	ready := make(chan struct{})
+	errStart := server.StartWithReady(ready)
+	if errStart == nil {
+		t.Fatal("StartWithReady() error = nil, want bind failure")
+	}
+	select {
+	case <-ready:
+		t.Fatal("StartWithReady() signaled ready after bind failure")
+	default:
+	}
 }
 
 func TestCodexInspectionUpdateSettingsReloadsWorker(t *testing.T) {

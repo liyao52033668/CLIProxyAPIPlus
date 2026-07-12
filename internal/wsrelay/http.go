@@ -45,6 +45,13 @@ func (m *Manager) NonStream(ctx context.Context, provider string, req *HTTPReque
 	if err != nil {
 		return nil, err
 	}
+	return consumeNonStreamResponse(ctx, respCh)
+}
+
+func consumeNonStreamResponse(ctx context.Context, respCh <-chan Message) (*HTTPResponse, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var (
 		streamMode bool
 		streamResp *HTTPResponse
@@ -56,16 +63,7 @@ func (m *Manager) NonStream(ctx context.Context, provider string, req *HTTPReque
 			return nil, ctx.Err()
 		case msg, ok := <-respCh:
 			if !ok {
-				if streamMode {
-					if streamResp == nil {
-						streamResp = &HTTPResponse{Status: http.StatusOK, Headers: make(http.Header)}
-					} else if streamResp.Headers == nil {
-						streamResp.Headers = make(http.Header)
-					}
-					streamResp.Body = append(streamResp.Body[:0], streamBody.Bytes()...)
-					return streamResp, nil
-				}
-				return nil, errors.New("wsrelay: connection closed during response")
+				return nil, errors.New("wsrelay: connection closed before terminal response")
 			}
 			switch msg.Type {
 			case MessageTypeHTTPResp:
@@ -105,7 +103,6 @@ func (m *Manager) NonStream(ctx context.Context, provider string, req *HTTPReque
 				}
 				streamResp.Body = append(streamResp.Body[:0], streamBody.Bytes()...)
 				return streamResp, nil
-			default:
 			}
 		}
 	}

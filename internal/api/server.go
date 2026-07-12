@@ -1386,6 +1386,11 @@ func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
 // Returns:
 //   - error: An error if the server fails to start
 func (s *Server) Start() error {
+	return s.StartWithReady(nil)
+}
+
+// StartWithReady begins serving requests and closes ready after the listener is prepared.
+func (s *Server) StartWithReady(ready chan<- struct{}) error {
 	if s == nil || s.server == nil {
 		return fmt.Errorf("failed to start HTTP server: server not initialized")
 	}
@@ -1441,6 +1446,9 @@ func (s *Server) Start() error {
 	go func() {
 		acceptErrCh <- s.acceptMuxConnections(listener, httpListener)
 	}()
+	if ready != nil {
+		close(ready)
+	}
 
 	select {
 	case errServe := <-httpErrCh:
@@ -1484,6 +1492,25 @@ func (s *Server) Start() error {
 	}
 }
 
+// StopAccepting closes the listeners so no new connections can enter the server.
+func (s *Server) StopAccepting() error {
+	if s == nil {
+		return nil
+	}
+	var stopErr error
+	if s.muxHTTPListener != nil {
+		if errClose := s.muxHTTPListener.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
+			stopErr = errClose
+		}
+	}
+	if s.muxBaseListener != nil {
+		if errClose := s.muxBaseListener.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) && stopErr == nil {
+			stopErr = errClose
+		}
+	}
+	return stopErr
+}
+
 // Stop gracefully shuts down the API server without interrupting any
 // active connections.
 //
@@ -1505,13 +1532,8 @@ func (s *Server) Stop(ctx context.Context) error {
 		s.codexWorkerCancel()
 	}
 
-	if s.muxHTTPListener != nil {
-		_ = s.muxHTTPListener.Close()
-	}
-	if s.muxBaseListener != nil {
-		if errClose := s.muxBaseListener.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
-			log.Debugf("failed to close shared listener: %v", errClose)
-		}
+	if errStopAccepting := s.StopAccepting(); errStopAccepting != nil {
+		log.Debugf("failed to stop accepting API connections: %v", errStopAccepting)
 	}
 
 	// Shutdown the HTTP server.

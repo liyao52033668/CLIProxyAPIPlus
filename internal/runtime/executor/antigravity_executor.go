@@ -123,6 +123,18 @@ type antigravityCreditsHintRefreshState struct {
 	lastAttempt time.Time
 }
 
+func waitForAntigravityCreditsHintRefreshes() {
+	antigravityCreditsHintRefreshByID.Range(func(_, value any) bool {
+		state, ok := value.(*antigravityCreditsHintRefreshState)
+		if !ok || state == nil {
+			return true
+		}
+		state.mu.Lock()
+		state.mu.Unlock()
+		return true
+	})
+}
+
 type antigravityTokenRefreshData struct {
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
