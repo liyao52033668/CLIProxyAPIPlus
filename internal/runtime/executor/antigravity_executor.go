@@ -722,9 +722,7 @@ attemptLoop:
 
 			helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 			bodyBytes, errRead := io.ReadAll(httpResp.Body)
-			if errClose := httpResp.Body.Close(); errClose != nil {
-				log.Errorf("antigravity executor: close response body error: %v", errClose)
-			}
+			helps.CloseResponseBody(e.Identifier(), httpResp.Body)
 			if errRead != nil {
 				helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 				err = errRead
@@ -934,9 +932,7 @@ attemptLoop:
 			helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 			if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
 				bodyBytes, errRead := io.ReadAll(httpResp.Body)
-				if errClose := httpResp.Body.Close(); errClose != nil {
-					log.Errorf("antigravity executor: close response body error: %v", errClose)
-				}
+				helps.CloseResponseBody(e.Identifier(), httpResp.Body)
 				if errRead != nil {
 					helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 					if errors.Is(errRead, context.Canceled) || errors.Is(errRead, context.DeadlineExceeded) {
@@ -1040,9 +1036,7 @@ attemptLoop:
 			go func(resp *http.Response) {
 				defer close(out)
 				defer func() {
-					if errClose := resp.Body.Close(); errClose != nil {
-						log.Errorf("antigravity executor: close response body error: %v", errClose)
-					}
+					helps.CloseResponseBody(e.Identifier(), resp.Body)
 				}()
 				scanner := bufio.NewScanner(resp.Body)
 				scanner.Buffer(nil, streamScannerBuffer)
@@ -1413,9 +1407,7 @@ attemptLoop:
 			helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 			if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
 				bodyBytes, errRead := io.ReadAll(httpResp.Body)
-				if errClose := httpResp.Body.Close(); errClose != nil {
-					log.Errorf("antigravity executor: close response body error: %v", errClose)
-				}
+				helps.CloseResponseBody(e.Identifier(), httpResp.Body)
 				if errRead != nil {
 					helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 					if errors.Is(errRead, context.Canceled) || errors.Is(errRead, context.DeadlineExceeded) {
@@ -1693,13 +1685,6 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
 
-	var authID, authLabel, authType, authValue string
-	if auth != nil {
-		authID = auth.ID
-		authLabel = auth.Label
-		authType, authValue = auth.AccountInfo()
-	}
-
 	var lastStatus int
 	var lastBody []byte
 	var lastErr error
@@ -1735,17 +1720,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		}
 		util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 
-		helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-			URL:       requestURL.String(),
-			Method:    http.MethodPost,
-			Headers:   httpReq.Header.Clone(),
-			Body:      payload,
-			Provider:  e.Identifier(),
-			AuthID:    authID,
-			AuthLabel: authLabel,
-			AuthType:  authType,
-			AuthValue: authValue,
-		})
+		helps.RecordUpstreamRequest(ctx, e.cfg, auth, e.Identifier(), http.MethodPost, requestURL.String(), httpReq.Header.Clone(), payload)
 
 		httpResp, errDo := httpClient.Do(httpReq)
 		if errDo != nil {
@@ -1765,9 +1740,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 
 		helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 		bodyBytes, errRead := io.ReadAll(httpResp.Body)
-		if errClose := httpResp.Body.Close(); errClose != nil {
-			log.Errorf("antigravity executor: close response body error: %v", errClose)
-		}
+		helps.CloseResponseBody(e.Identifier(), httpResp.Body)
 		if errRead != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 			return cliproxyexecutor.Response{}, errRead
@@ -1997,9 +1970,7 @@ func (e *AntigravityExecutor) refreshTokenSingleFlight(ctx context.Context, auth
 		return nil, errDo
 	}
 	defer func() {
-		if errClose := httpResp.Body.Close(); errClose != nil {
-			log.Errorf("antigravity executor: close response body error: %v", errClose)
-		}
+		helps.CloseResponseBody(e.Identifier(), httpResp.Body)
 	}()
 
 	bodyBytes, errRead := io.ReadAll(httpResp.Body)
@@ -2309,23 +2280,7 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 
-	var authID, authLabel, authType, authValue string
-	if auth != nil {
-		authID = auth.ID
-		authLabel = auth.Label
-		authType, authValue = auth.AccountInfo()
-	}
-	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-		URL:       requestURL.String(),
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
-		Body:      payloadLog,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
-	})
+	helps.RecordUpstreamRequest(ctx, e.cfg, auth, e.Identifier(), http.MethodPost, requestURL.String(), httpReq.Header.Clone(), payloadLog)
 
 	return httpReq, nil
 }

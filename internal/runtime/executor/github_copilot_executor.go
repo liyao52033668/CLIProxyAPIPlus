@@ -175,23 +175,7 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
 		httpReq.Header.Set("Copilot-Vision-Request", "true")
 	}
 
-	var authID, authLabel, authType, authValue string
-	if auth != nil {
-		authID = auth.ID
-		authLabel = auth.Label
-		authType, authValue = auth.AccountInfo()
-	}
-	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
-		URL:       url,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
-		Body:      body,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
-	})
+	helps.RecordUpstreamRequest(ctx, e.cfg, auth, e.Identifier(), http.MethodPost, url, httpReq.Header.Clone(), body)
 
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, err := httpClient.Do(httpReq)
@@ -199,19 +183,13 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
 		recordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
-	defer func() {
-		if errClose := httpResp.Body.Close(); errClose != nil {
-			log.Errorf("github-copilot executor: close response body error: %v", errClose)
-		}
-	}()
+	defer helps.CloseResponseBody(e.Identifier(), httpResp.Body)
 
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 
 	if !isHTTPSuccess(httpResp.StatusCode) {
-		data, _ := io.ReadAll(httpResp.Body)
-		appendAPIResponseChunk(ctx, e.cfg, data)
-		log.Debugf("github-copilot executor: upstream error status: %d, body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		err = statusErr{code: httpResp.StatusCode, msg: string(data)}
+		b := helps.ReadHTTPErrorBody(ctx, e.cfg, httpResp)
+		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return resp, err
 	}
 
@@ -318,23 +296,7 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 		httpReq.Header.Set("Copilot-Vision-Request", "true")
 	}
 
-	var authID, authLabel, authType, authValue string
-	if auth != nil {
-		authID = auth.ID
-		authLabel = auth.Label
-		authType, authValue = auth.AccountInfo()
-	}
-	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
-		URL:       url,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
-		Body:      body,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
-	})
+	helps.RecordUpstreamRequest(ctx, e.cfg, auth, e.Identifier(), http.MethodPost, url, httpReq.Header.Clone(), body)
 
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, err := httpClient.Do(httpReq)
@@ -346,17 +308,9 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 
 	if !isHTTPSuccess(httpResp.StatusCode) {
-		data, readErr := io.ReadAll(httpResp.Body)
-		if errClose := httpResp.Body.Close(); errClose != nil {
-			log.Errorf("github-copilot executor: close response body error: %v", errClose)
-		}
-		if readErr != nil {
-			recordAPIResponseError(ctx, e.cfg, readErr)
-			return nil, readErr
-		}
-		appendAPIResponseChunk(ctx, e.cfg, data)
-		log.Debugf("github-copilot executor: upstream error status: %d, body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		err = statusErr{code: httpResp.StatusCode, msg: string(data)}
+		b := helps.ReadHTTPErrorBody(ctx, e.cfg, httpResp)
+		helps.CloseResponseBody(e.Identifier(), httpResp.Body)
+		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return nil, err
 	}
 
@@ -364,11 +318,7 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 
 	go func() {
 		defer close(out)
-		defer func() {
-			if errClose := httpResp.Body.Close(); errClose != nil {
-				log.Errorf("github-copilot executor: close response body error: %v", errClose)
-			}
-		}()
+		defer helps.CloseResponseBody(e.Identifier(), httpResp.Body)
 
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, maxScannerBufferSize)

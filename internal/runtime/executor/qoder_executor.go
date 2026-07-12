@@ -287,23 +287,7 @@ func (e *QoderExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, auth.Attributes)
 
-	var authID, authLabel, authType, authValue string
-	if auth != nil {
-		authID = auth.ID
-		authLabel = auth.Label
-		authType, authValue = auth.AccountInfo()
-	}
-	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-		URL:       url,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
-		Body:      qoderBodyJSON,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
-	})
+	helps.RecordUpstreamRequest(ctx, e.cfg, auth, e.Identifier(), http.MethodPost, url, httpReq.Header.Clone(), qoderBodyJSON)
 
 	retryCfg := qoderDefaultRetryConfig()
 	var httpResp *http.Response
@@ -350,17 +334,11 @@ func (e *QoderExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		return resp, fmt.Errorf("qoder executor: unexpected nil response after retries")
 	}
 
-	defer func() {
-		if errClose := httpResp.Body.Close(); errClose != nil {
-			log.Errorf("qoder executor: close response body error: %v", errClose)
-		}
-	}()
+	defer helps.CloseResponseBody(e.Identifier(), httpResp.Body)
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
-		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+		b := helps.ReadHTTPErrorBody(ctx, e.cfg, httpResp)
 		logQoderUpstreamErrorDiagnostics(helps.PayloadRequestedModel(opts, req.Model), req.Model, qoderBodyJSON, httpResp.StatusCode, httpResp.Header.Get("Content-Type"), b)
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return resp, err
 	}
@@ -422,23 +400,7 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, auth.Attributes)
 
-	var authID, authLabel, authType, authValue string
-	if auth != nil {
-		authID = auth.ID
-		authLabel = auth.Label
-		authType, authValue = auth.AccountInfo()
-	}
-	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-		URL:       url,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
-		Body:      qoderBodyJSON,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
-	})
+	helps.RecordUpstreamRequest(ctx, e.cfg, auth, e.Identifier(), http.MethodPost, url, httpReq.Header.Clone(), qoderBodyJSON)
 
 	retryCfg := qoderDefaultRetryConfig()
 	var httpResp *http.Response
@@ -489,13 +451,9 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
-		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+		b := helps.ReadHTTPErrorBody(ctx, e.cfg, httpResp)
+		helps.CloseResponseBody(e.Identifier(), httpResp.Body)
 		logQoderUpstreamErrorDiagnostics(helps.PayloadRequestedModel(opts, req.Model), req.Model, qoderBodyJSON, httpResp.StatusCode, httpResp.Header.Get("Content-Type"), b)
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		if errClose := httpResp.Body.Close(); errClose != nil {
-			log.Errorf("qoder executor: close response body error: %v", errClose)
-		}
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return nil, err
 	}
@@ -503,11 +461,7 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
-		defer func() {
-			if errClose := httpResp.Body.Close(); errClose != nil {
-				log.Errorf("qoder executor: close response body error: %v", errClose)
-			}
-		}()
+		defer helps.CloseResponseBody(e.Identifier(), httpResp.Body)
 
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, 1_048_576) // 1MB

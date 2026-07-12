@@ -418,7 +418,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), prepared.baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
-	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
+	httpURL := helps.JoinBaseURL(baseURL, "/responses")
 	wsURL, err := buildXAIResponsesWebsocketURL(httpURL)
 	if err != nil {
 		return nil, err
@@ -427,12 +427,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	wsReqBody := buildXAIWebsocketRequestBody(prepared.body)
 	warmupRequest := xaiWebsocketGenerateFalse(wsReqBody)
 
-	var authID, authLabel, authType, authValue string
-	if auth != nil {
-		authID = auth.ID
-		authLabel = auth.Label
-		authType, authValue = auth.AccountInfo()
-	}
+	authID, authLabel, authType, authValue := helps.AuthLogFields(auth)
 
 	var sess *codexWebsocketSession
 	if executionSessionID != "" {

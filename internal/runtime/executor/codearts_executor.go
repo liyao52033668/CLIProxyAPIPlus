@@ -271,12 +271,7 @@ func (e *CodeArtsExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 	})
 	reporter.EnsurePublished(ctx)
 
-	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-		URL:      codeartsChatURL,
-		Method:   "POST",
-		Provider: "codearts",
-		AuthID:   auth.ID,
-	})
+	helps.RecordUpstreamRequest(ctx, e.cfg, auth, "codearts", http.MethodPost, codeartsChatURL, nil, nil)
 
 	return cliproxyexecutor.Response{Payload: translated}, nil
 }
@@ -443,12 +438,7 @@ func (e *CodeArtsExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 		})
 		reporter.EnsurePublished(ctx)
 
-		helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-			URL:      codeartsChatURL,
-			Method:   "POST",
-			Provider: "codearts",
-			AuthID:   auth.ID,
-		})
+		helps.RecordUpstreamRequest(ctx, e.cfg, auth, "codearts", http.MethodPost, codeartsChatURL, nil, nil)
 	}()
 
 	return &cliproxyexecutor.StreamResult{

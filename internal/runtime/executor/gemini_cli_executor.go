@@ -159,11 +159,6 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	httpClient := newHTTPClient(ctx, e.cfg, auth, 0)
 	respCtx := context.WithValue(ctx, "alt", opts.Alt)
 
-	var authID, authLabel, authType, authValue string
-	authID = auth.ID
-	authLabel = auth.Label
-	authType, authValue = auth.AccountInfo()
-
 	var lastStatus int
 	var lastBody []byte
 
@@ -199,17 +194,7 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 		applyGeminiCLIHeaders(reqHTTP, attemptModel)
 		reqHTTP.Header.Set("Accept", "application/json")
 		util.ApplyCustomHeadersFromAttrs(reqHTTP, auth.Attributes)
-		helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-			URL:       url,
-			Method:    http.MethodPost,
-			Headers:   reqHTTP.Header.Clone(),
-			Body:      payload,
-			Provider:  e.Identifier(),
-			AuthID:    authID,
-			AuthLabel: authLabel,
-			AuthType:  authType,
-			AuthValue: authValue,
-		})
+		helps.RecordUpstreamRequest(ctx, e.cfg, auth, e.Identifier(), http.MethodPost, url, reqHTTP.Header.Clone(), payload)
 
 		httpResp, errDo := httpClient.Do(reqHTTP)
 		if errDo != nil {
@@ -219,9 +204,7 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 		}
 
 		data, errRead := io.ReadAll(httpResp.Body)
-		if errClose := httpResp.Body.Close(); errClose != nil {
-			log.Errorf("gemini cli executor: close response body error: %v", errClose)
-		}
+		helps.CloseResponseBody(e.Identifier(), httpResp.Body)
 		helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 		if errRead != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
@@ -310,11 +293,6 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	httpClient := newHTTPClient(ctx, e.cfg, auth, 0)
 	respCtx := context.WithValue(ctx, "alt", opts.Alt)
 
-	var authID, authLabel, authType, authValue string
-	authID = auth.ID
-	authLabel = auth.Label
-	authType, authValue = auth.AccountInfo()
-
 	var lastStatus int
 	var lastBody []byte
 
@@ -347,17 +325,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 		applyGeminiCLIHeaders(reqHTTP, attemptModel)
 		reqHTTP.Header.Set("Accept", "text/event-stream")
 		util.ApplyCustomHeadersFromAttrs(reqHTTP, auth.Attributes)
-		helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-			URL:       url,
-			Method:    http.MethodPost,
-			Headers:   reqHTTP.Header.Clone(),
-			Body:      payload,
-			Provider:  e.Identifier(),
-			AuthID:    authID,
-			AuthLabel: authLabel,
-			AuthType:  authType,
-			AuthValue: authValue,
-		})
+		helps.RecordUpstreamRequest(ctx, e.cfg, auth, e.Identifier(), http.MethodPost, url, reqHTTP.Header.Clone(), payload)
 
 		httpResp, errDo := httpClient.Do(reqHTTP)
 		if errDo != nil {
@@ -368,9 +336,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 		helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 		if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 			data, errRead := io.ReadAll(httpResp.Body)
-			if errClose := httpResp.Body.Close(); errClose != nil {
-				log.Errorf("gemini cli executor: close response body error: %v", errClose)
-			}
+			helps.CloseResponseBody(e.Identifier(), httpResp.Body)
 			if errRead != nil {
 				helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 				err = errRead
@@ -395,11 +361,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 		out := make(chan cliproxyexecutor.StreamChunk)
 		go func(resp *http.Response, reqBody []byte, attemptModel string) {
 			defer close(out)
-			defer func() {
-				if errClose := resp.Body.Close(); errClose != nil {
-					log.Errorf("gemini cli executor: close response body error: %v", errClose)
-				}
-			}()
+			defer helps.CloseResponseBody(e.Identifier(), resp.Body)
 			if opts.Alt == "" {
 				scanner := bufio.NewScanner(resp.Body)
 				scanner.Buffer(nil, streamScannerBuffer)
@@ -509,13 +471,6 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 	httpClient := newHTTPClient(ctx, e.cfg, auth, 0)
 	respCtx := context.WithValue(ctx, "alt", opts.Alt)
 
-	var authID, authLabel, authType, authValue string
-	if auth != nil {
-		authID = auth.ID
-		authLabel = auth.Label
-		authType, authValue = auth.AccountInfo()
-	}
-
 	var lastStatus int
 	var lastBody []byte
 
@@ -554,17 +509,7 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 		applyGeminiCLIHeaders(reqHTTP, baseModel)
 		reqHTTP.Header.Set("Accept", "application/json")
 		util.ApplyCustomHeadersFromAttrs(reqHTTP, auth.Attributes)
-		helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-			URL:       url,
-			Method:    http.MethodPost,
-			Headers:   reqHTTP.Header.Clone(),
-			Body:      payload,
-			Provider:  e.Identifier(),
-			AuthID:    authID,
-			AuthLabel: authLabel,
-			AuthType:  authType,
-			AuthValue: authValue,
-		})
+		helps.RecordUpstreamRequest(ctx, e.cfg, auth, e.Identifier(), http.MethodPost, url, reqHTTP.Header.Clone(), payload)
 
 		resp, errDo := httpClient.Do(reqHTTP)
 		if errDo != nil {

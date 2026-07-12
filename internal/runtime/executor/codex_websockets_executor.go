@@ -239,7 +239,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		body = ensureImageGenerationTool(body, baseModel, auth, opts.Headers)
 	}
 
-	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
+	httpURL := helps.JoinBaseURL(baseURL, "/responses")
 	wsURL, err := buildCodexResponsesWebsocketURL(httpURL)
 	if err != nil {
 		return resp, err
@@ -249,12 +249,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg)
 	applyModelHeaderOverrides(wsHeaders, baseModel)
 
-	var authID, authLabel, authType, authValue string
-	if auth != nil {
-		authID = auth.ID
-		authLabel = auth.Label
-		authType, authValue = auth.AccountInfo()
-	}
+	authID, authLabel, authType, authValue := helps.AuthLogFields(auth)
 
 	executionSessionID := executionSessionIDFromOptions(opts)
 	var sess *codexWebsocketSession
@@ -441,7 +436,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		body = ensureImageGenerationTool(body, baseModel, auth, opts.Headers)
 	}
 
-	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
+	httpURL := helps.JoinBaseURL(baseURL, "/responses")
 	wsURL, err := buildCodexResponsesWebsocketURL(httpURL)
 	if err != nil {
 		return nil, err
@@ -451,10 +446,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg)
 	applyModelHeaderOverrides(wsHeaders, baseModel)
 
-	var authID, authLabel, authType, authValue string
-	authID = auth.ID
-	authLabel = auth.Label
-	authType, authValue = auth.AccountInfo()
+	authID, authLabel, authType, authValue := helps.AuthLogFields(auth)
 
 	executionSessionID := executionSessionIDFromOptions(opts)
 	var sess *codexWebsocketSession
