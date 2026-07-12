@@ -232,21 +232,21 @@ func (e *CursorExecutor) CountTokens(_ context.Context, _ *cliproxyauth.Auth, re
 		model = req.Model
 	}
 
-	enc, err := getTokenizer(model)
+	enc, err := helps.TokenizerForModel(model)
 	if err != nil {
 		// Fallback: return zero tokens rather than error (avoids 502)
-		return cliproxyexecutor.Response{Payload: buildOpenAIUsageJSON(0)}, nil
+		return cliproxyexecutor.Response{Payload: helps.BuildOpenAIUsageJSON(0)}, nil
 	}
 
 	// Detect format: Claude (/v1/messages) vs OpenAI (/v1/chat/completions)
 	var count int64
 	if gjson.GetBytes(req.Payload, "system").Exists() || opts.SourceFormat.String() == "claude" {
-		count, _ = countClaudeChatTokens(enc, req.Payload)
+		count, _ = helps.CountClaudeChatTokens(enc, req.Payload)
 	} else {
-		count, _ = countOpenAIChatTokens(enc, req.Payload)
+		count, _ = helps.CountOpenAIChatTokens(enc, req.Payload)
 	}
 
-	return cliproxyexecutor.Response{Payload: buildOpenAIUsageJSON(count)}, nil
+	return cliproxyexecutor.Response{Payload: helps.BuildOpenAIUsageJSON(count)}, nil
 }
 
 // Refresh attempts to refresh the Cursor access token.
@@ -304,7 +304,7 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	defer reporter.TrackFailure(ctx, &err)
 
 	ccSessId := extractClaudeCodeSessionId(req.Payload)
-	conversationId := deriveConversationId(apiKeyFromContext(ctx), ccSessId, parsed.SystemPrompt)
+	conversationId := deriveConversationId(helps.APIKeyFromContext(ctx), ccSessId, parsed.SystemPrompt)
 	params := buildRunRequestParams(req.Model, parsed, conversationId)
 
 	requestBytes := cursorproto.EncodeRunRequest(params)
@@ -406,7 +406,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	log.Debugf("cursor: parsed request: model=%s userText=%d chars, turns=%d, tools=%d, toolResults=%d",
 		parsed.Model, len(parsed.UserText), len(parsed.Turns), len(parsed.Tools), len(parsed.ToolResults))
 
-	conversationId := deriveConversationId(apiKeyFromContext(ctx), ccSessionId, parsed.SystemPrompt)
+	conversationId := deriveConversationId(helps.APIKeyFromContext(ctx), ccSessionId, parsed.SystemPrompt)
 	authID := auth.ID // e.g. "cursor.json" or "cursor-account2.json"
 	log.Debugf("cursor: conversationId=%s authID=%s", conversationId, authID)
 

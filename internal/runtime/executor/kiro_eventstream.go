@@ -9,7 +9,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+
 	"encoding/json"
+
 	kiroclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/claude"
 	kirocommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/common"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -717,7 +720,7 @@ func (e *KiroExecutor) extractEventTypeFromBytes(headers []byte) string {
 // Implements duplicate content filtering using lastContentEvent detection (based on AIClient-2-API).
 // Extracts stop_reason from upstream events when available.
 // thinkingEnabled controls whether <thinking> tags are parsed - only parse when request enabled thinking.
-func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out chan<- cliproxyexecutor.StreamChunk, targetFormat sdktranslator.Format, model string, originalReq, claudeBody []byte, reporter *usageReporter, thinkingEnabled bool) {
+func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out chan<- cliproxyexecutor.StreamChunk, targetFormat sdktranslator.Format, model string, originalReq, claudeBody []byte, reporter *helps.UsageReporter, thinkingEnabled bool) {
 	reader := bufio.NewReaderSize(body, 20*1024*1024) // 20MB buffer to match other providers
 	var totalUsage usage.Detail
 	var hasToolUses bool          // Track if any tool uses were emitted
@@ -764,15 +767,15 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 
 	// Pre-calculate input tokens from request if possible
 	// Kiro uses Claude format, so try Claude format first, then OpenAI format, then fallback
-	if enc, err := getTokenizer(model); err == nil {
+	if enc, err := helps.TokenizerForModel(model); err == nil {
 		var inputTokens int64
 		var countMethod string
 
 		// Try Claude format first (Kiro uses Claude API format)
-		if inp, err := countClaudeChatTokens(enc, claudeBody); err == nil && inp > 0 {
+		if inp, err := helps.CountClaudeChatTokens(enc, claudeBody); err == nil && inp > 0 {
 			inputTokens = inp
 			countMethod = "claude"
-		} else if inp, err := countOpenAIChatTokens(enc, originalReq); err == nil && inp > 0 {
+		} else if inp, err := helps.CountOpenAIChatTokens(enc, originalReq); err == nil && inp > 0 {
 			// Fallback to OpenAI format (for OpenAI-compatible requests)
 			inputTokens = inp
 			countMethod = "openai"
@@ -797,8 +800,8 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 
 	// Ensure usage is published even on early return
 	defer func() {
-		reporter.publish(ctx, totalUsage)
-		reporter.ensurePublished(ctx)
+		reporter.Publish(ctx, totalUsage)
+		reporter.EnsurePublished(ctx)
 	}()
 
 	for {
@@ -871,7 +874,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 		if len(payload) == 0 {
 			continue
 		}
-		appendAPIResponseChunk(ctx, e.cfg, payload)
+		helps.AppendAPIResponseChunk(ctx, e.cfg, payload)
 
 		var event map[string]any
 		if err := json.Unmarshal(payload, &event); err != nil {
@@ -1152,7 +1155,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 				if shouldSendUsageUpdate {
 					// Calculate current output tokens using tiktoken
 					var currentOutputTokens int64
-					if enc, encErr := getTokenizer(model); encErr == nil {
+					if enc, encErr := helps.TokenizerForModel(model); encErr == nil {
 						if tokenCount, countErr := enc.Count(accumulatedContent.String()); countErr == nil {
 							currentOutputTokens = int64(tokenCount)
 						}
@@ -1736,7 +1739,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 	// Only use local estimation if server didn't provide usage (server-side usage takes priority)
 	if totalUsage.OutputTokens == 0 && accumulatedContent.Len() > 0 {
 		// Try to use tiktoken for accurate counting
-		if enc, err := getTokenizer(model); err == nil {
+		if enc, err := helps.TokenizerForModel(model); err == nil {
 			if tokenCount, countErr := enc.Count(accumulatedContent.String()); countErr == nil {
 				totalUsage.OutputTokens = int64(tokenCount)
 				log.Debugf("kiro: streamToChannel calculated output tokens using tiktoken: %d", totalUsage.OutputTokens)

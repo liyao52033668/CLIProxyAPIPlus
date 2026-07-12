@@ -50,10 +50,10 @@ func antigravityReasoningReplayScopeFromRequest(ctx context.Context, modelName s
 	if scope := antigravityReasoningReplayScopeFromPayload(modelName, req.Payload); scope.valid() {
 		return scope
 	}
-	if value := metadataString(opts.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey); value != "" {
+	if value := helps.MetadataString(opts.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey); value != "" {
 		return antigravityReasoningReplayScope{modelName: modelName, sessionKey: "execution:" + value}
 	}
-	if value := metadataString(req.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey); value != "" {
+	if value := helps.MetadataString(req.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey); value != "" {
 		return antigravityReasoningReplayScope{modelName: modelName, sessionKey: "execution:" + value}
 	}
 	_ = ctx

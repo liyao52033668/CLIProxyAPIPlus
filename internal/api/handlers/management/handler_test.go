@@ -36,3 +36,33 @@ func TestAuthenticateManagementKey_LocalhostIPBan_BlocksCorrectKeyDuringBan(t *t
 		t.Fatalf("unexpected banned message: %q", errMsg)
 	}
 }
+
+func TestManagementRequestClientIP_UsesRemoteAddrNotForwardedHeaders(t *testing.T) {
+	tests := []struct {
+		name       string
+		remoteAddr string
+		wantIP     string
+		wantLocal  bool
+	}{
+		{name: "ipv4 loopback", remoteAddr: "127.0.0.1:54321", wantIP: "127.0.0.1", wantLocal: true},
+		{name: "ipv6 loopback", remoteAddr: "[::1]:54321", wantIP: "::1", wantLocal: true},
+		{name: "remote ipv4", remoteAddr: "203.0.113.10:443", wantIP: "203.0.113.10", wantLocal: false},
+		{name: "raw ipv4 without port", remoteAddr: "127.0.0.1", wantIP: "127.0.0.1", wantLocal: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := &http.Request{
+				RemoteAddr: tc.remoteAddr,
+				Header:     http.Header{"X-Forwarded-For": []string{"127.0.0.1"}},
+			}
+			gotIP, gotLocal := managementRequestClientIP(req)
+			if gotIP != tc.wantIP {
+				t.Fatalf("clientIP = %q, want %q", gotIP, tc.wantIP)
+			}
+			if gotLocal != tc.wantLocal {
+				t.Fatalf("localClient = %v, want %v", gotLocal, tc.wantLocal)
+			}
+		})
+	}
+}

@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -84,7 +86,7 @@ func newKiroHTTPClientWithPooling(ctx context.Context, cfg *config.Config, auth 
 	// If proxy is configured, use the existing proxy-aware client (doesn't pool)
 	if proxyURL != "" {
 		log.Debugf("kiro: using proxy-aware HTTP client (proxy=%s)", proxyURL)
-		return newProxyAwareHTTPClient(ctx, cfg, auth, timeout)
+		return helps.NewProxyAwareHTTPClient(ctx, cfg, auth, timeout)
 	}
 
 	// No proxy - use pooled client for better performance

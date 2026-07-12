@@ -19,11 +19,14 @@ import (
 )
 
 const maxErrorOnlyCapturedRequestBodyBytes int64 = 1 << 20 // 1 MiB
+const maxFullCapturedRequestBodyBytes int64 = 16 << 20     // 16 MiB when request-log is fully enabled
+const maxDecodedCapturedRequestBodyBytes int64 = 32 << 20  // 32 MiB after content-encoding decode
 
 // RequestLoggingMiddleware creates a Gin middleware that logs HTTP requests and responses.
 // It captures detailed information about the request and response, including headers and body,
 // and uses the provided RequestLogger to record this data. When full request logging is disabled,
 // body capture is limited to small known-size payloads to avoid large per-request memory spikes.
+// When full request logging is enabled, body capture is still capped to avoid unbounded ReadAll.
 func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if logger == nil {
@@ -92,9 +95,6 @@ func isResponsesWebsocketUpgrade(req *http.Request) bool {
 }
 
 func shouldCaptureRequestBody(loggerEnabled bool, req *http.Request) bool {
-	if loggerEnabled {
-		return true
-	}
 	if req == nil || req.Body == nil {
 		return false
 	}
@@ -103,9 +103,14 @@ func shouldCaptureRequestBody(loggerEnabled bool, req *http.Request) bool {
 		return false
 	}
 	if req.ContentLength <= 0 {
+		// Unknown or empty body: skip capture to avoid unbounded io.ReadAll.
 		return false
 	}
-	return req.ContentLength <= maxErrorOnlyCapturedRequestBodyBytes
+	maxBytes := maxErrorOnlyCapturedRequestBodyBytes
+	if loggerEnabled {
+		maxBytes = maxFullCapturedRequestBodyBytes
+	}
+	return req.ContentLength <= maxBytes
 }
 
 // captureRequestInfo extracts relevant information from the incoming HTTP request.
@@ -126,18 +131,34 @@ func captureRequestInfo(c *gin.Context, captureBody bool) (*RequestInfo, error) 
 	headers := make(map[string][]string)
 	maps.Copy(headers, c.Request.Header)
 
-	// Capture request body
+	// Capture request body. shouldCaptureRequestBody only enables this when
+	// ContentLength is known and within the configured cap; still hard-limit the
+	// read so a forged ContentLength cannot force unbounded allocation for logs.
 	var body []byte
 	if captureBody && c.Request.Body != nil {
-		// Read the body
-		bodyBytes, err := io.ReadAll(c.Request.Body)
+		maxBytes := maxFullCapturedRequestBodyBytes
+		if c.Request.ContentLength > 0 && c.Request.ContentLength < maxBytes {
+			maxBytes = c.Request.ContentLength
+		}
+		origBody := c.Request.Body
+		bodyBytes, err := io.ReadAll(io.LimitReader(origBody, maxBytes+1))
 		if err != nil {
 			return nil, err
 		}
-
-		// Restore the body for the actual request processing
-		c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-		body = decodeCapturedRequestBodyForLog(bodyBytes, c.Request.Header.Get("Content-Encoding"))
+		if int64(len(bodyBytes)) > maxBytes {
+			// ContentLength lied or body is larger than the log cap: do not keep
+			// the full body for logging, but reassemble so handlers still see all bytes.
+			c.Request.Body = struct {
+				io.Reader
+				io.Closer
+			}{Reader: io.MultiReader(bytes.NewReader(bodyBytes), origBody), Closer: origBody}
+			// Skip logging the oversize body.
+			body = nil
+		} else {
+			_ = origBody.Close()
+			c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+			body = decodeCapturedRequestBodyForLog(bodyBytes, c.Request.Header.Get("Content-Encoding"))
+		}
 	}
 
 	return &RequestInfo{
@@ -195,9 +216,12 @@ func decodeCapturedZstdRequestBody(raw []byte) ([]byte, error) {
 	}
 	defer decoder.Close()
 
-	decoded, errRead := io.ReadAll(decoder)
+	decoded, errRead := io.ReadAll(io.LimitReader(decoder, maxDecodedCapturedRequestBodyBytes+1))
 	if errRead != nil {
 		return nil, fmt.Errorf("failed to decode zstd request body: %w", errRead)
+	}
+	if int64(len(decoded)) > maxDecodedCapturedRequestBodyBytes {
+		decoded = decoded[:maxDecodedCapturedRequestBodyBytes]
 	}
 	return decoded, nil
 }

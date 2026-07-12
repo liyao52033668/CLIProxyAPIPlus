@@ -1390,7 +1390,7 @@ func qoderEnsureSession(ctx context.Context, auth *cliproxyauth.Auth, cfg *confi
 	req.Header.Set("cosy-machineid", creds.machineID)
 	req.Header.Set("user-agent", "Go-http-client/2.0")
 
-	httpClient := newProxyAwareHTTPClient(ctx, cfg, auth, 15*time.Second)
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, 15*time.Second)
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return creds, fmt.Errorf("qoder executor: exchange job token: %w", err)

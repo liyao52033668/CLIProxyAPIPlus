@@ -700,7 +700,9 @@ func (s *Server) registerManagementRoutes() {
 	log.Info("management routes registered after secret key configuration")
 
 	mgmt := s.engine.Group("/v0/management")
-	mgmt.Use(s.managementAvailabilityMiddleware(), s.mgmt.Middleware())
+	// Disable global CORS on management routes to reduce browser-based CSRF/XSS attack surface.
+	// The control panel is same-origin (/management.html); cross-origin browser calls are not supported.
+	mgmt.Use(s.managementAvailabilityMiddleware(), managementNoCORSMiddleware(), s.mgmt.Middleware())
 	{
 		mgmt.GET("/usage", s.mgmt.GetUsageStatistics)
 		mgmt.GET("/usage/export", s.mgmt.ExportUsageStatistics)
@@ -1534,6 +1536,24 @@ func corsMiddleware() gin.HandlerFunc {
 
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(http.StatusNoContent)
+			return
+		}
+
+		c.Next()
+	}
+}
+
+// managementNoCORSMiddleware clears permissive global CORS headers on management
+// routes and rejects browser preflight. Mirrors the Amp management policy.
+func managementNoCORSMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("Access-Control-Allow-Origin", "")
+		c.Header("Access-Control-Allow-Methods", "")
+		c.Header("Access-Control-Allow-Headers", "")
+		c.Header("Access-Control-Allow-Credentials", "")
+
+		if c.Request.Method == http.MethodOptions {
+			c.AbortWithStatus(http.StatusForbidden)
 			return
 		}
 

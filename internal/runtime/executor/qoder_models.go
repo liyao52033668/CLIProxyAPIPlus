@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/qoder"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -77,7 +79,7 @@ func fetchQoderModelArray(ctx context.Context, auth *cliproxyauth.Auth, cfg *con
 			return gjson.Result{}, false
 		}
 
-		httpClient := newProxyAwareHTTPClient(ctx, cfg, auth, 15*time.Second)
+		httpClient := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, 15*time.Second)
 		req, err := buildQoderCosyHTTPRequest(ctx, auth, http.MethodGet, qoder.ChatBase+qoder.ModelListPath+"?Encode=1", nil)
 		if err != nil {
 			log.Warnf("qoder: failed to create model list request: %v", err)

@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/google/uuid"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 
 	kiroclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/claude"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -98,13 +100,12 @@ type webSearchHandler struct {
 }
 
 // newWebSearchHandler creates a new webSearchHandler.
-// If httpClient is nil, a default client with 30s timeout is used.
+// If httpClient is nil, a default client without a request Timeout is used.
 // Pass a shared pooled client (e.g. from getKiroPooledHTTPClient) for connection reuse.
+// After the upstream connection is established, lifetime is governed by ctx only (AGENTS.md).
 func newWebSearchHandler(ctx context.Context, mcpEndpoint, authToken string, httpClient *http.Client, auth *cliproxyauth.Auth, authAttrs map[string]string) *webSearchHandler {
 	if httpClient == nil {
-		httpClient = &http.Client{
-			Timeout: 30 * time.Second,
-		}
+		httpClient = &http.Client{}
 	}
 	return &webSearchHandler{
 		ctx:         ctx,
@@ -257,24 +258,24 @@ func (e *KiroExecutor) handleWebSearchStream(
 	// ── Step 1: tools/list (SYNC) — cache tool description ──
 	{
 		authAttrs := webSearchAuthAttrs(auth)
-		fetchToolDescription(ctx, mcpEndpoint, accessToken, newKiroHTTPClientWithPooling(ctx, e.cfg, auth, 30*time.Second), auth, authAttrs)
+		fetchToolDescription(ctx, mcpEndpoint, accessToken, newKiroHTTPClientWithPooling(ctx, e.cfg, auth, 0), auth, authAttrs)
 	}
 
 	// Create output channel
 	out := make(chan cliproxyexecutor.StreamChunk)
 
 	// Usage reporting: track web search requests like normal streaming requests
-	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
+	reporter := helps.NewUsageReporter(ctx, e.Identifier(), req.Model, auth)
 
 	go func() {
 		var wsErr error
-		defer reporter.trackFailure(ctx, &wsErr)
+		defer reporter.TrackFailure(ctx, &wsErr)
 		defer close(out)
 
 		// Estimate input tokens using tokenizer (matching streamToChannel pattern)
 		var totalUsage usage.Detail
-		if enc, tokErr := getTokenizer(req.Model); tokErr == nil {
-			if inp, e := countClaudeChatTokens(enc, req.Payload); e == nil && inp > 0 {
+		if enc, tokErr := helps.TokenizerForModel(req.Model); tokErr == nil {
+			if inp, e := helps.CountClaudeChatTokens(enc, req.Payload); e == nil && inp > 0 {
 				totalUsage.InputTokens = inp
 			} else {
 				totalUsage.InputTokens = int64(len(req.Payload) / 4)
@@ -294,14 +295,14 @@ func (e *KiroExecutor) handleWebSearchStream(
 			if accumulatedOutputLen > 0 && totalUsage.OutputTokens == 0 {
 				totalUsage.OutputTokens = 1
 			}
-			reporter.publish(ctx, totalUsage)
-			reporter.ensurePublished(ctx)
+			reporter.Publish(ctx, totalUsage)
+			reporter.EnsurePublished(ctx)
 		}()
 
 		// Send message_start event to client (aligned with streamToChannel pattern)
 		// Use payloadRequestedModel to return user's original model alias
 		msgStart := kiroclaude.BuildClaudeMessageStartEvent(
-			payloadRequestedModel(opts, req.Model),
+			helps.PayloadRequestedModel(opts, req.Model),
 			totalUsage.InputTokens,
 		)
 		select {
@@ -338,7 +339,7 @@ func (e *KiroExecutor) handleWebSearchStream(
 			_, mcpRequest := kiroclaude.CreateMcpRequest(currentQuery)
 
 			authAttrs := webSearchAuthAttrs(auth)
-			handler := newWebSearchHandler(ctx, mcpEndpoint, accessToken, newKiroHTTPClientWithPooling(ctx, e.cfg, auth, 30*time.Second), auth, authAttrs)
+			handler := newWebSearchHandler(ctx, mcpEndpoint, accessToken, newKiroHTTPClientWithPooling(ctx, e.cfg, auth, 0), auth, authAttrs)
 			mcpResponse, mcpErr := handler.callMcpAPI(mcpRequest)
 
 			var searchResults *kiroclaude.WebSearchResults
@@ -466,14 +467,14 @@ func (e *KiroExecutor) handleWebSearch(
 	// Step 1: Fetch/cache tool description (sync)
 	{
 		authAttrs := webSearchAuthAttrs(auth)
-		fetchToolDescription(ctx, mcpEndpoint, accessToken, newKiroHTTPClientWithPooling(ctx, e.cfg, auth, 30*time.Second), auth, authAttrs)
+		fetchToolDescription(ctx, mcpEndpoint, accessToken, newKiroHTTPClientWithPooling(ctx, e.cfg, auth, 0), auth, authAttrs)
 	}
 
 	// Step 2: Perform MCP search
 	_, mcpRequest := kiroclaude.CreateMcpRequest(query)
 
 	authAttrs := webSearchAuthAttrs(auth)
-	handler := newWebSearchHandler(ctx, mcpEndpoint, accessToken, newKiroHTTPClientWithPooling(ctx, e.cfg, auth, 30*time.Second), auth, authAttrs)
+	handler := newWebSearchHandler(ctx, mcpEndpoint, accessToken, newKiroHTTPClientWithPooling(ctx, e.cfg, auth, 0), auth, authAttrs)
 	mcpResponse, mcpErr := handler.callMcpAPI(mcpRequest)
 
 	var searchResults *kiroclaude.WebSearchResults
@@ -597,9 +598,9 @@ func (e *KiroExecutor) callKiroDirectStream(
 
 	tokenKey := getAccountKey(auth)
 
-	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
+	reporter := helps.NewUsageReporter(ctx, e.Identifier(), req.Model, auth)
 	var streamErr error
-	defer reporter.trackFailure(ctx, &streamErr)
+	defer reporter.TrackFailure(ctx, &streamErr)
 
 	stream, streamErr := e.executeStreamWithRetry(
 		ctx, auth, req, opts, accessToken, effectiveProfileArn,
@@ -646,9 +647,9 @@ func (e *KiroExecutor) executeNonStreamFallback(
 	effectiveProfileArn := getEffectiveProfileArnWithWarning(auth, profileArn)
 	tokenKey := getAccountKey(auth)
 
-	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
+	reporter := helps.NewUsageReporter(ctx, e.Identifier(), req.Model, auth)
 	var err error
-	defer reporter.trackFailure(ctx, &err)
+	defer reporter.TrackFailure(ctx, &err)
 
 	resp, err := e.executeWithRetry(ctx, auth, req, opts, accessToken, effectiveProfileArn, nil, body, from, to, reporter, "", kiroModelID, isAgentic, isChatOnly, tokenKey)
 	return resp, err

@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -211,8 +212,10 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 		c.Header("X-CPA-COMMIT", buildinfo.Commit)
 		c.Header("X-CPA-BUILD-DATE", buildinfo.BuildDate)
 
-		clientIP := c.ClientIP()
-		localClient := clientIP == "127.0.0.1" || clientIP == "::1"
+		// Use the real TCP peer address rather than gin.ClientIP(), which can be
+		// influenced by X-Forwarded-For / trusted-proxy settings and would let a
+		// remote client spoof localhost to bypass allow-remote-management.
+		clientIP, localClient := managementRequestClientIP(c.Request)
 
 		// Accept either Authorization: Bearer <key> or X-Management-Key
 		var provided string
@@ -235,6 +238,28 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 		}
 		c.Next()
 	}
+}
+
+// managementRequestClientIP extracts the peer IP from Request.RemoteAddr.
+// RemoteAddr cannot be forged by client-controlled headers such as X-Forwarded-For.
+func managementRequestClientIP(r *http.Request) (clientIP string, localClient bool) {
+	if r == nil {
+		return "", false
+	}
+	remoteAddr := strings.TrimSpace(r.RemoteAddr)
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return "", false
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return host, false
+	}
+	return ip.String(), ip.IsLoopback()
 }
 
 // AuthenticateManagementKey verifies the provided management key for the given client.
