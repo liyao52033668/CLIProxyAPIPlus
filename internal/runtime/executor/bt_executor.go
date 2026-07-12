@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -298,37 +297,26 @@ func FetchBTModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Con
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, 15*time.Second)
 	modelsURL := btauth.CloudURL + "/plugin_api/chat/openai/v1/models"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, modelsURL, nil)
-	if err != nil {
-		log.Warnf("bt: failed to create model fetch request: %v", err)
-		return nil
-	}
-	req.Header.Set("uid", uid)
-	req.Header.Set("access-key", accessKey)
-	req.Header.Set("serverid", serverID)
-	req.Header.Set("appid", btauth.AppID)
-	req.Header.Set("User-Agent", "cli-proxy-bt")
-	util.ApplyCustomHeadersFromAttrs(req, auth.Attributes)
+	headers := make(http.Header)
+	headers.Set("uid", uid)
+	headers.Set("access-key", accessKey)
+	headers.Set("serverid", serverID)
+	headers.Set("appid", btauth.AppID)
+	headers.Set("User-Agent", "cli-proxy-bt")
+	tmpReq := &http.Request{Header: headers}
+	util.ApplyCustomHeadersFromAttrs(tmpReq, auth.Attributes)
+	headers = tmpReq.Header
 
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		log.Warnf("bt: fetch models failed: %v", err)
-		return nil
-	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			log.Debugf("bt: close model fetch response error: %v", err)
-		}
-	}()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		log.Warnf("bt: failed to read models response: %v", err)
-		return nil
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		log.Warnf("bt: fetch models failed: status %d, body: %s", resp.StatusCode, string(body))
+	_, body, _, errDo := helps.DoJSON(ctx, cfg, helps.UpstreamRequest{
+		Provider: "bt",
+		Auth:     auth,
+		Method:   http.MethodGet,
+		URL:      modelsURL,
+		Headers:  headers,
+		Client:   httpClient,
+	})
+	if errDo != nil {
+		log.Warnf("bt: fetch models failed: %v", errDo)
 		return nil
 	}
 

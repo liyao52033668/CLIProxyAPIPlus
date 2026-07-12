@@ -1737,70 +1737,62 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 			requestURL.WriteString(url.QueryEscape(opts.Alt))
 		}
 
-		httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, requestURL.String(), bytes.NewReader(payload))
-		if errReq != nil {
-			return cliproxyexecutor.Response{}, errReq
-		}
-		httpReq.Close = true
-		httpReq.Header.Set("Content-Type", "application/json")
-		httpReq.Header.Set("Authorization", "Bearer "+token)
-		httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
+		headers := make(http.Header)
+		tmpReq := &http.Request{Header: headers, Close: true}
+		tmpReq.Header.Set("Content-Type", "application/json")
+		tmpReq.Header.Set("Authorization", "Bearer "+token)
+		tmpReq.Header.Set("User-Agent", resolveUserAgent(auth))
 		if host := resolveHost(base); host != "" {
-			httpReq.Host = host
+			tmpReq.Host = host
 		}
 		var attrs map[string]string
 		if auth != nil {
 			attrs = auth.Attributes
 		}
-		util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+		util.ApplyCustomHeadersFromAttrs(tmpReq, attrs)
+		headers = tmpReq.Header
 
-		helps.RecordUpstreamRequest(ctx, e.cfg, auth, e.Identifier(), http.MethodPost, requestURL.String(), httpReq.Header.Clone(), payload)
-
-		httpResp, errDo := httpClient.Do(httpReq)
-		if errDo != nil {
-			helps.RecordAPIResponseError(ctx, e.cfg, errDo)
-			if errors.Is(errDo, context.Canceled) || errors.Is(errDo, context.DeadlineExceeded) {
-				return cliproxyexecutor.Response{}, errDo
-			}
-			lastStatus = 0
-			lastBody = nil
-			lastErr = errDo
-			if idx+1 < len(baseURLs) {
-				log.Debugf("antigravity executor: request error on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
-				continue
-			}
-			return cliproxyexecutor.Response{}, errDo
-		}
-
-		helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-		bodyBytes, errRead := io.ReadAll(httpResp.Body)
-		helps.CloseResponseBody(e.Identifier(), httpResp.Body)
-		if errRead != nil {
-			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
-			return cliproxyexecutor.Response{}, errRead
-		}
-		helps.AppendAPIResponseChunk(ctx, e.cfg, bodyBytes)
-
-		if httpResp.StatusCode >= http.StatusOK && httpResp.StatusCode < http.StatusMultipleChoices {
+		_, bodyBytes, respHeaders, errDo := helps.DoJSON(ctx, e.cfg, helps.UpstreamRequest{
+			Provider: e.Identifier(),
+			Auth:     auth,
+			Method:   http.MethodPost,
+			URL:      requestURL.String(),
+			Headers:  headers,
+			Body:     payload,
+			Client:   httpClient,
+		})
+		if errDo == nil {
 			count := gjson.GetBytes(bodyBytes, "totalTokens").Int()
 			translated := sdktranslator.TranslateTokenCount(respCtx, to, responseFormat, count, bodyBytes)
-			return cliproxyexecutor.Response{Payload: translated, Headers: httpResp.Header.Clone()}, nil
+			return cliproxyexecutor.Response{Payload: translated, Headers: respHeaders}, nil
 		}
-
-		lastStatus = httpResp.StatusCode
-		lastBody = append([]byte(nil), bodyBytes...)
-		lastErr = nil
-		if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
-			log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+		if ue, ok := errDo.(helps.UpstreamStatusError); ok {
+			lastStatus = ue.Code
+			lastBody = []byte(ue.Msg)
+			lastErr = nil
+			if ue.Code == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
+				log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+				continue
+			}
+			sErr := statusErr{code: ue.Code, msg: ue.Msg}
+			if ue.Code == http.StatusTooManyRequests {
+				if retryAfter, parseErr := helps.ParseRetryDelay(lastBody); parseErr == nil && retryAfter != nil {
+					sErr.retryAfter = retryAfter
+				}
+			}
+			return cliproxyexecutor.Response{}, sErr
+		}
+		if errors.Is(errDo, context.Canceled) || errors.Is(errDo, context.DeadlineExceeded) {
+			return cliproxyexecutor.Response{}, errDo
+		}
+		lastStatus = 0
+		lastBody = nil
+		lastErr = errDo
+		if idx+1 < len(baseURLs) {
+			log.Debugf("antigravity executor: request error on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 			continue
 		}
-		sErr := statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
-		if httpResp.StatusCode == http.StatusTooManyRequests {
-			if retryAfter, parseErr := helps.ParseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
-				sErr.retryAfter = retryAfter
-			}
-		}
-		return cliproxyexecutor.Response{}, sErr
+		return cliproxyexecutor.Response{}, errDo
 	}
 
 	switch {
@@ -1989,37 +1981,33 @@ func (e *AntigravityExecutor) refreshTokenSingleFlight(ctx context.Context, auth
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", refreshToken)
 
-	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, "https://oauth2.googleapis.com/token", strings.NewReader(form.Encode()))
-	if errReq != nil {
-		return nil, errReq
-	}
-	httpReq.Header.Set("Host", "oauth2.googleapis.com")
-	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	headers := make(http.Header)
+	headers.Set("Host", "oauth2.googleapis.com")
+	headers.Set("Content-Type", "application/x-www-form-urlencoded")
 	// Real Antigravity uses Go's default User-Agent for OAuth token refresh
-	httpReq.Header.Set("User-Agent", "Go-http-client/2.0")
+	headers.Set("User-Agent", "Go-http-client/2.0")
 
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, errDo := httpClient.Do(httpReq)
+	_, bodyBytes, _, errDo := helps.DoJSON(ctx, e.cfg, helps.UpstreamRequest{
+		Provider: e.Identifier(),
+		Auth:     auth,
+		Method:   http.MethodPost,
+		URL:      "https://oauth2.googleapis.com/token",
+		Headers:  headers,
+		Body:     []byte(form.Encode()),
+		Client:   httpClient,
+	})
 	if errDo != nil {
-		return nil, errDo
-	}
-	defer func() {
-		helps.CloseResponseBody(e.Identifier(), httpResp.Body)
-	}()
-
-	bodyBytes, errRead := io.ReadAll(httpResp.Body)
-	if errRead != nil {
-		return nil, errRead
-	}
-
-	if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
-		sErr := statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
-		if httpResp.StatusCode == http.StatusTooManyRequests {
-			if retryAfter, parseErr := helps.ParseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
-				sErr.retryAfter = retryAfter
+		if ue, ok := errDo.(helps.UpstreamStatusError); ok {
+			sErr := statusErr{code: ue.Code, msg: ue.Msg}
+			if ue.Code == http.StatusTooManyRequests {
+				if retryAfter, parseErr := helps.ParseRetryDelay([]byte(ue.Msg)); parseErr == nil && retryAfter != nil {
+					sErr.retryAfter = retryAfter
+				}
 			}
+			return nil, sErr
 		}
-		return nil, sErr
+		return nil, errDo
 	}
 
 	var tokenResp antigravityTokenRefreshData
@@ -2120,31 +2108,28 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalance(ctx context.Contex
 	}
 	baseURL := antigravityLoadCodeAssistBaseURL(auth)
 	endpointURL := helps.JoinBaseURL(baseURL, "/v1internal:loadCodeAssist")
-	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, bytes.NewReader(loadReqBody))
-	if errReq != nil {
-		log.Debugf("antigravity executor: create loadCodeAssist request error: %v", errReq)
-		return
-	}
-	httpReq.Header.Set("Authorization", "Bearer "+token)
-	httpReq.Header.Set("Accept", "*/*")
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("User-Agent", userAgent)
+	headers := make(http.Header)
+	headers.Set("Authorization", "Bearer "+token)
+	headers.Set("Accept", "*/*")
+	headers.Set("Content-Type", "application/json")
+	headers.Set("User-Agent", userAgent)
 
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, errDo := httpClient.Do(httpReq)
+	_, bodyBytes, _, errDo := helps.DoJSON(ctx, e.cfg, helps.UpstreamRequest{
+		Provider: e.Identifier(),
+		Auth:     auth,
+		Method:   http.MethodPost,
+		URL:      endpointURL,
+		Headers:  headers,
+		Body:     loadReqBody,
+		Client:   httpClient,
+	})
 	if errDo != nil {
-		log.Debugf("antigravity executor: loadCodeAssist request error: %v", errDo)
-		return
-	}
-	defer func() {
-		if errClose := httpResp.Body.Close(); errClose != nil {
-			log.Errorf("antigravity executor: close loadCodeAssist response body error: %v", errClose)
+		if ue, ok := errDo.(helps.UpstreamStatusError); ok {
+			log.Debugf("antigravity executor: loadCodeAssist returned status %d", ue.Code)
+		} else {
+			log.Debugf("antigravity executor: loadCodeAssist request error: %v", errDo)
 		}
-	}()
-
-	bodyBytes, errRead := io.ReadAll(httpResp.Body)
-	if errRead != nil || httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
-		log.Debugf("antigravity executor: loadCodeAssist returned status %d, err=%v", httpResp.StatusCode, errRead)
 		return
 	}
 

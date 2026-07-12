@@ -1360,42 +1360,38 @@ func qoderEnsureSession(ctx context.Context, auth *cliproxyauth.Auth, cfg *confi
 		return creds, fmt.Errorf("qoder executor: encode job token request body")
 	}
 	jobTokenURL := qoder.CenterBase + "/algo/api/v3/user/jobToken?Encode=1"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, jobTokenURL, strings.NewReader(encodedBody))
-	if err != nil {
-		return creds, fmt.Errorf("qoder executor: create job token request: %w", err)
-	}
 	date := time.Now().UTC().Format("Mon, 02 Jan 2006 15:04:05 GMT")
 	signature := fmt.Sprintf("%x", md5.Sum([]byte(qoderAppCode+"&"+qoderSecret+"&"+date)))
-	req.Header.Set("cosy-machinetoken", creds.machineToken)
-	req.Header.Set("cosy-machinetype", creds.machineType)
-	req.Header.Set("login-version", "v2")
-	req.Header.Set("appcode", qoderAppCode)
-	req.Header.Set("accept", "application/json")
-	req.Header.Set("accept-encoding", "identity")
-	req.Header.Set("cosy-version", qoder.CosyVersion)
-	req.Header.Set("cosy-clienttype", "5")
-	req.Header.Set("date", date)
-	req.Header.Set("signature", signature)
-	req.Header.Set("content-type", "application/json")
-	req.Header.Set("cosy-machineid", creds.machineID)
-	req.Header.Set("user-agent", "Go-http-client/2.0")
+	headers := make(http.Header)
+	headers.Set("cosy-machinetoken", creds.machineToken)
+	headers.Set("cosy-machinetype", creds.machineType)
+	headers.Set("login-version", "v2")
+	headers.Set("appcode", qoderAppCode)
+	headers.Set("accept", "application/json")
+	headers.Set("accept-encoding", "identity")
+	headers.Set("cosy-version", qoder.CosyVersion)
+	headers.Set("cosy-clienttype", "5")
+	headers.Set("date", date)
+	headers.Set("signature", signature)
+	headers.Set("content-type", "application/json")
+	headers.Set("cosy-machineid", creds.machineID)
+	headers.Set("user-agent", "Go-http-client/2.0")
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, 15*time.Second)
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return creds, fmt.Errorf("qoder executor: exchange job token: %w", err)
-	}
-	defer func() {
-		if errClose := resp.Body.Close(); errClose != nil {
-			log.Errorf("qoder executor: close job token response body error: %v", errClose)
+	_, respBody, _, errDo := helps.DoJSON(ctx, cfg, helps.UpstreamRequest{
+		Provider: "qoder",
+		Auth:     auth,
+		Method:   http.MethodPost,
+		URL:      jobTokenURL,
+		Headers:  headers,
+		Body:     []byte(encodedBody),
+		Client:   httpClient,
+	})
+	if errDo != nil {
+		if ue, ok := errDo.(helps.UpstreamStatusError); ok {
+			return creds, fmt.Errorf("qoder executor: exchange job token failed: status %d: %s", ue.Code, strings.TrimSpace(ue.Msg))
 		}
-	}()
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return creds, fmt.Errorf("qoder executor: read job token response: %w", err)
-	}
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return creds, fmt.Errorf("qoder executor: exchange job token failed: status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+		return creds, fmt.Errorf("qoder executor: exchange job token: %w", errDo)
 	}
 	root := gjson.ParseBytes(respBody)
 	creds.sessionAccessToken = strings.TrimSpace(firstNonEmptyResult(root, "securityOauthToken", "security_oauth_token"))

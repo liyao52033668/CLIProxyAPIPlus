@@ -4,9 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -303,38 +301,24 @@ func FetchKiloModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.C
 
 	log.Debugf("kilo: fetching dynamic models (orgID: %s)", orgID)
 
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, 0)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.kilo.ai/api/openrouter/models", nil)
-	if err != nil {
-		log.Warnf("kilo: failed to create model fetch request: %v", err)
-		return registry.GetKiloModels()
-	}
-
-	req.Header.Set("Authorization", "Bearer "+accessToken)
+	headers := make(http.Header)
+	headers.Set("Authorization", "Bearer "+accessToken)
 	if orgID != "" {
-		req.Header.Set("X-Kilocode-OrganizationID", orgID)
+		headers.Set("X-Kilocode-OrganizationID", orgID)
 	}
-	req.Header.Set("User-Agent", "cli-proxy-kilo")
+	headers.Set("User-Agent", "cli-proxy-kilo")
 
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			log.Warnf("kilo: fetch models canceled: %v", err)
-		} else {
-			log.Warnf("kilo: using static models (API fetch failed: %v)", err)
-		}
-		return registry.GetKiloModels()
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		log.Warnf("kilo: failed to read models response: %v", err)
-		return registry.GetKiloModels()
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		log.Warnf("kilo: fetch models failed: status %d, body: %s", resp.StatusCode, string(body))
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, 0)
+	_, body, _, errDo := helps.DoJSON(ctx, cfg, helps.UpstreamRequest{
+		Provider: "kilo",
+		Auth:     auth,
+		Method:   http.MethodGet,
+		URL:      "https://api.kilo.ai/api/openrouter/models",
+		Headers:  headers,
+		Client:   httpClient,
+	})
+	if errDo != nil {
+		log.Warnf("kilo: failed to fetch models: %v", errDo)
 		return registry.GetKiloModels()
 	}
 

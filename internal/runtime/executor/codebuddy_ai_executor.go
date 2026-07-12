@@ -4,9 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -317,49 +315,31 @@ func FetchCodeBuddyAIModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 
 	log.Debugf("codebuddy-ai: fetching dynamic models from config API")
 
+	headers := make(http.Header)
+	headers.Set("User-Agent", codebuddy_ai.UserAgent)
+	headers.Set("Accept", "application/json, text/plain, */*")
+	headers.Set("X-Requested-With", "XMLHttpRequest")
+	headers.Set("Authorization", "Bearer "+accessToken)
+	headers.Set("X-User-Id", userID)
+	headers.Set("X-Domain", domain)
+	headers.Set("X-IDE-Type", "CodeBuddyIDE")
+	headers.Set("X-IDE-Name", "CodeBuddyIDE")
+	headers.Set("X-IDE-Version", "4.9.5")
+	headers.Set("X-Product-Version", "4.9.5")
+	headers.Set("X-Env-ID", "production")
+	headers.Set("X-Product", "SaaS")
+
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, 15*time.Second)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, codebuddy_ai.BaseURL+"/v3/config", nil)
-	if err != nil {
-		log.Warnf("codebuddy-ai: failed to create config request: %v", err)
-		return registry.GetCodeBuddyAIModels()
-	}
-
-	req.Header.Set("User-Agent", codebuddy_ai.UserAgent)
-	req.Header.Set("Accept", "application/json, text/plain, */*")
-	req.Header.Set("X-Requested-With", "XMLHttpRequest")
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("X-User-Id", userID)
-	req.Header.Set("X-Domain", domain)
-	req.Header.Set("X-IDE-Type", "CodeBuddyIDE")
-	req.Header.Set("X-IDE-Name", "CodeBuddyIDE")
-	req.Header.Set("X-IDE-Version", "4.9.5")
-	req.Header.Set("X-Product-Version", "4.9.5")
-	req.Header.Set("X-Env-ID", "production")
-	req.Header.Set("X-Product", "SaaS")
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			log.Warnf("codebuddy-ai: fetch models canceled: %v", err)
-		} else {
-			log.Warnf("codebuddy-ai: using static models (config API fetch failed: %v)", err)
-		}
-		return registry.GetCodeBuddyAIModels()
-	}
-	defer func() {
-		if errClose := resp.Body.Close(); errClose != nil {
-			log.Errorf("codebuddy-ai: close config response body error: %v", errClose)
-		}
-	}()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		log.Warnf("codebuddy-ai: failed to read config response: %v", err)
-		return registry.GetCodeBuddyAIModels()
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		log.Warnf("codebuddy-ai: config API returned status %d", resp.StatusCode)
+	_, body, _, errDo := helps.DoJSON(ctx, cfg, helps.UpstreamRequest{
+		Provider: "codebuddy-ai",
+		Auth:     auth,
+		Method:   http.MethodGet,
+		URL:      codebuddy_ai.BaseURL + "/v3/config",
+		Headers:  headers,
+		Client:   httpClient,
+	})
+	if errDo != nil {
+		log.Warnf("codebuddy-ai: using static models (config API fetch failed: %v)", errDo)
 		return registry.GetCodeBuddyAIModels()
 	}
 

@@ -1397,6 +1397,38 @@ func newH2Client() *http.Client {
 	}
 }
 
+// doCursorUnary performs a unary Connect/HTTP2 request and returns the response body.
+// Cursor's protocol is not JSON/SSE, so this stays separate from helps.DoJSON.
+func doCursorUnary(ctx context.Context, client *http.Client, requestURL, accessToken string, body []byte, contentType string) (int, []byte, error) {
+	if client == nil {
+		client = newH2Client()
+	}
+	if contentType == "" {
+		contentType = "application/proto"
+	}
+	h2Req, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(body))
+	if err != nil {
+		return 0, nil, err
+	}
+	h2Req.Header.Set("Content-Type", contentType)
+	h2Req.Header.Set("Te", "trailers")
+	h2Req.Header.Set("Authorization", "Bearer "+accessToken)
+	h2Req.Header.Set("X-Ghost-Mode", "true")
+	h2Req.Header.Set("X-Cursor-Client-Version", cursorClientVersion)
+	h2Req.Header.Set("X-Cursor-Client-Type", "cli")
+
+	resp, err := client.Do(h2Req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return resp.StatusCode, nil, err
+	}
+	return resp.StatusCode, data, nil
+}
+
 // extractCCH extracts the cch value from the system prompt's billing header.
 func extractCCH(systemPrompt string) string {
 	_, after, ok := strings.Cut(systemPrompt, "cch=")
@@ -1531,39 +1563,14 @@ func FetchCursorModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	// GetUsableModels is a unary RPC call (not streaming)
-	// Send an empty protobuf request
-	emptyReq := make([]byte, 0)
-
-	h2Req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		cursorAPIURL+cursorModelsPath, bytes.NewReader(emptyReq))
-	if err != nil {
-		log.Debugf("cursor: failed to create models request: %v", err)
-		return GetCursorFallbackModels()
-	}
-
-	h2Req.Header.Set("Content-Type", "application/proto")
-	h2Req.Header.Set("Te", "trailers")
-	h2Req.Header.Set("Authorization", "Bearer "+accessToken)
-	h2Req.Header.Set("X-Ghost-Mode", "true")
-	h2Req.Header.Set("X-Cursor-Client-Version", cursorClientVersion)
-	h2Req.Header.Set("X-Cursor-Client-Type", "cli")
-
-	client := newH2Client()
-	resp, err := client.Do(h2Req)
+	// GetUsableModels is a unary RPC call (not streaming).
+	status, body, err := doCursorUnary(ctx, newH2Client(), cursorAPIURL+cursorModelsPath, accessToken, nil, "application/proto")
 	if err != nil {
 		log.Debugf("cursor: models request failed: %v", err)
 		return GetCursorFallbackModels()
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		log.Debugf("cursor: models request returned status %d", resp.StatusCode)
-		return GetCursorFallbackModels()
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
+	if status < 200 || status >= 300 {
+		log.Debugf("cursor: models request returned status %d", status)
 		return GetCursorFallbackModels()
 	}
 
