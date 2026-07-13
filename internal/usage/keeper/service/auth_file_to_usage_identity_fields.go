@@ -28,6 +28,16 @@ func resolveCodexAccountID(file authfiles.AuthFile) *string {
 	return firstNonEmptyStringPtr(
 		idTokenAccountID,
 		idTokenAccountIDCamel,
+		// Top-level metadata/attributes (used when id_token is empty or incomplete).
+		mapString(file.Metadata, "chatgpt_account_id"),
+		mapString(file.Metadata, "chatgptAccountId"),
+		mapString(file.Metadata, "account_id"),
+		mapString(file.Metadata, "accountId"),
+		mapString(file.Attributes, "chatgpt_account_id"),
+		mapString(file.Attributes, "chatgptAccountId"),
+		mapString(file.Attributes, "account_id"),
+		mapString(file.Attributes, "accountId"),
+		// Nested id_token claims object when already decoded by the list API.
 		mapString(file.Metadata, "id_token", "chatgpt_account_id"),
 		mapString(file.Metadata, "id_token", "chatgptAccountId"),
 		mapString(file.Metadata, "idToken", "chatgpt_account_id"),
@@ -49,18 +59,30 @@ func resolveCodexPlanType(file authfiles.AuthFile) *string {
 	return firstNonEmptyStringPtr(
 		idTokenPlanType,
 		idTokenPlanTypeCamel,
+		mapString(file.Metadata, "chatgpt_plan_type"),
+		mapString(file.Metadata, "chatgptPlanType"),
 		mapString(file.Metadata, "plan_type"),
 		mapString(file.Metadata, "planType"),
 		mapString(file.Metadata, "id_token", "plan_type"),
 		mapString(file.Metadata, "id_token", "planType"),
+		mapString(file.Metadata, "id_token", "chatgpt_plan_type"),
+		mapString(file.Metadata, "id_token", "chatgptPlanType"),
 		mapString(file.Metadata, "idToken", "plan_type"),
 		mapString(file.Metadata, "idToken", "planType"),
+		mapString(file.Metadata, "idToken", "chatgpt_plan_type"),
+		mapString(file.Metadata, "idToken", "chatgptPlanType"),
+		mapString(file.Attributes, "chatgpt_plan_type"),
+		mapString(file.Attributes, "chatgptPlanType"),
 		mapString(file.Attributes, "plan_type"),
 		mapString(file.Attributes, "planType"),
 		mapString(file.Attributes, "id_token", "plan_type"),
 		mapString(file.Attributes, "id_token", "planType"),
+		mapString(file.Attributes, "id_token", "chatgpt_plan_type"),
+		mapString(file.Attributes, "id_token", "chatgptPlanType"),
 		mapString(file.Attributes, "idToken", "plan_type"),
 		mapString(file.Attributes, "idToken", "planType"),
+		mapString(file.Attributes, "idToken", "chatgpt_plan_type"),
+		mapString(file.Attributes, "idToken", "chatgptPlanType"),
 	)
 }
 

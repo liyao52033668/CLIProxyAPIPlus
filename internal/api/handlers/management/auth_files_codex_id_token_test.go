@@ -149,3 +149,118 @@ func TestListAuthFilesFallsBackToCodexMetadataAccountID(t *testing.T) {
 		t.Fatalf("chatgpt_account_id = %#v, want %q", got, "255de4a6-96a4-430a-b660-358954424e79")
 	}
 }
+
+func TestListAuthFilesFallsBackToTopLevelAccountIDWhenIDTokenEmpty(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "codex-empty-id-token.json",
+		FileName: "codex-empty-id-token.json",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"path": "/tmp/codex-empty-id-token.json",
+		},
+		Metadata: map[string]any{
+			"type":               "codex",
+			"email":              "VivienneRiesenberg81216@outlook.com",
+			"account_id":         "62578ab4-e8af-433c-a6e2-f0a3b4f542f0",
+			"chatgpt_account_id": "62578ab4-e8af-433c-a6e2-f0a3b4f542f0",
+			"chatgpt_plan_type":  "k12",
+			"id_token":           "",
+			"id_token_synthetic": false,
+		},
+	}); err != nil {
+		t.Fatalf("failed to register codex auth: %v", err)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files", nil)
+	h.ListAuthFiles(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		Files []map[string]any `json:"files"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(payload.Files) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(payload.Files))
+	}
+
+	idToken, ok := payload.Files[0]["id_token"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected id_token object, got %#v", payload.Files[0]["id_token"])
+	}
+	if got := idToken["chatgpt_account_id"]; got != "62578ab4-e8af-433c-a6e2-f0a3b4f542f0" {
+		t.Fatalf("chatgpt_account_id = %#v, want %q", got, "62578ab4-e8af-433c-a6e2-f0a3b4f542f0")
+	}
+	if got := idToken["plan_type"]; got != "k12" {
+		t.Fatalf("plan_type = %#v, want %q", got, "k12")
+	}
+}
+
+func TestListAuthFilesFallsBackToAccountIDWhenIDTokenMissing(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "codex-missing-id-token.json",
+		FileName: "codex-missing-id-token.json",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"path": "/tmp/codex-missing-id-token.json",
+		},
+		Metadata: map[string]any{
+			"type":       "codex",
+			"email":      "user-without-id-token@example.com",
+			"account_id": "11111111-2222-3333-4444-555555555555",
+			"plan_type":  "plus",
+		},
+	}); err != nil {
+		t.Fatalf("failed to register codex auth: %v", err)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files", nil)
+	h.ListAuthFiles(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		Files []map[string]any `json:"files"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(payload.Files) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(payload.Files))
+	}
+
+	idToken, ok := payload.Files[0]["id_token"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected id_token object, got %#v", payload.Files[0]["id_token"])
+	}
+	if got := idToken["chatgpt_account_id"]; got != "11111111-2222-3333-4444-555555555555" {
+		t.Fatalf("chatgpt_account_id = %#v, want %q", got, "11111111-2222-3333-4444-555555555555")
+	}
+	if got := idToken["plan_type"]; got != "plus" {
+		t.Fatalf("plan_type = %#v, want %q", got, "plus")
+	}
+}

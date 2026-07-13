@@ -461,41 +461,66 @@ func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
 	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 		return nil
 	}
-	idTokenRaw, ok := auth.Metadata["id_token"].(string)
-	if !ok {
-		return nil
-	}
-	idToken := strings.TrimSpace(idTokenRaw)
-	if idToken == "" {
-		return nil
-	}
-	claims, err := codex.ParseJWTToken(idToken)
-	if err != nil || claims == nil {
-		return nil
-	}
 
 	result := gin.H{}
-	if v := strings.TrimSpace(claims.CodexAuthInfo.ChatgptAccountID); v != "" {
-		result["chatgpt_account_id"] = v
-	} else if v, ok := auth.Metadata["account_id"].(string); ok {
-		if trimmed := strings.TrimSpace(v); trimmed != "" {
-			result["chatgpt_account_id"] = trimmed
+
+	// Prefer claims from id_token when present and parseable.
+	// Some credentials keep account/plan metadata at the top level while id_token is empty
+	// (for example synthetic or partially imported Codex auth files).
+	if idTokenRaw, ok := auth.Metadata["id_token"].(string); ok {
+		if idToken := strings.TrimSpace(idTokenRaw); idToken != "" {
+			if claims, err := codex.ParseJWTToken(idToken); err == nil && claims != nil {
+				if v := strings.TrimSpace(claims.CodexAuthInfo.ChatgptAccountID); v != "" {
+					result["chatgpt_account_id"] = v
+				}
+				if v := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType); v != "" {
+					result["plan_type"] = v
+				}
+				if v := claims.CodexAuthInfo.ChatgptSubscriptionActiveStart; v != nil {
+					result["chatgpt_subscription_active_start"] = v
+				}
+				if v := claims.CodexAuthInfo.ChatgptSubscriptionActiveUntil; v != nil {
+					result["chatgpt_subscription_active_until"] = v
+				}
+			}
 		}
 	}
-	if v := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType); v != "" {
-		result["plan_type"] = v
+
+	// Fall back to top-level metadata when id_token is missing, empty, invalid, or incomplete.
+	if _, ok := result["chatgpt_account_id"]; !ok {
+		if v := firstMetadataString(auth.Metadata, "chatgpt_account_id", "account_id"); v != "" {
+			result["chatgpt_account_id"] = v
+		}
 	}
-	if v := claims.CodexAuthInfo.ChatgptSubscriptionActiveStart; v != nil {
-		result["chatgpt_subscription_active_start"] = v
-	}
-	if v := claims.CodexAuthInfo.ChatgptSubscriptionActiveUntil; v != nil {
-		result["chatgpt_subscription_active_until"] = v
+	if _, ok := result["plan_type"]; !ok {
+		if v := firstMetadataString(auth.Metadata, "chatgpt_plan_type", "plan_type"); v != "" {
+			result["plan_type"] = v
+		}
 	}
 
 	if len(result) == 0 {
 		return nil
 	}
 	return result
+}
+
+func firstMetadataString(metadata map[string]any, keys ...string) string {
+	if metadata == nil {
+		return ""
+	}
+	for _, key := range keys {
+		raw, ok := metadata[key]
+		if !ok {
+			continue
+		}
+		switch value := raw.(type) {
+		case string:
+			if trimmed := strings.TrimSpace(value); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return ""
 }
 
 func authEmail(auth *coreauth.Auth) string {
