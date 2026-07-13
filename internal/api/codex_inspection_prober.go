@@ -112,10 +112,14 @@ func (p *codexInspectionProber) inspectFile(ctx context.Context, file codexinspe
 		return result
 	}
 
-	if response.StatusCode == http.StatusUnauthorized {
+	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusPaymentRequired {
 		result.Action = codexinspection.ActionDelete
 		result.Error = codexInspectionErrorText(response)
-		result.ActionReason = "401 response"
+		if response.StatusCode == http.StatusUnauthorized {
+			result.ActionReason = "401 response"
+		} else {
+			result.ActionReason = "402 response"
+		}
 		return result
 	}
 	if response.StatusCode >= http.StatusBadRequest {
@@ -343,21 +347,27 @@ func codexInspectionTokenFromMetadata(metadata map[string]any) string {
 }
 
 func codexInspectionActionForUsage(disabled bool, fiveHourUsedPercent *int, weeklyUsedPercent *int, settings codexinspection.InspectionSettings) (codexinspection.Action, string) {
+	// Weekly remaining below threshold → suggest delete (highest priority).
+	if weeklyUsedPercent != nil && *weeklyUsedPercent >= settings.WeeklyUsedPercentThreshold {
+		return codexinspection.ActionDelete, fmt.Sprintf("weeklyUsedPercent >= %d", settings.WeeklyUsedPercentThreshold)
+	}
+
+	// Enable only when disabled and BOTH 5h/weekly remaining are above thresholds.
 	if disabled {
-		if weeklyUsedPercent != nil && *weeklyUsedPercent < settings.WeeklyUsedPercentThreshold {
-			return codexinspection.ActionEnable, fmt.Sprintf("weeklyUsedPercent < %d", settings.WeeklyUsedPercentThreshold)
-		}
-		if weeklyUsedPercent == nil && fiveHourUsedPercent != nil && *fiveHourUsedPercent < settings.FiveHourUsedPercentThreshold {
-			return codexinspection.ActionEnable, fmt.Sprintf("fiveHourUsedPercent < %d", settings.FiveHourUsedPercentThreshold)
-		}
-		return codexinspection.ActionKeep, "no issue detected"
-	}
-	if weeklyUsedPercent != nil {
-		if *weeklyUsedPercent >= settings.WeeklyUsedPercentThreshold {
-			return codexinspection.ActionDisable, fmt.Sprintf("weeklyUsedPercent >= %d", settings.WeeklyUsedPercentThreshold)
+		if fiveHourUsedPercent != nil &&
+			weeklyUsedPercent != nil &&
+			*fiveHourUsedPercent < settings.FiveHourUsedPercentThreshold &&
+			*weeklyUsedPercent < settings.WeeklyUsedPercentThreshold {
+			return codexinspection.ActionEnable, fmt.Sprintf(
+				"fiveHourUsedPercent < %d && weeklyUsedPercent < %d",
+				settings.FiveHourUsedPercentThreshold,
+				settings.WeeklyUsedPercentThreshold,
+			)
 		}
 		return codexinspection.ActionKeep, "no issue detected"
 	}
+
+	// 5h remaining below threshold → suggest disable.
 	if fiveHourUsedPercent != nil && *fiveHourUsedPercent >= settings.FiveHourUsedPercentThreshold {
 		return codexinspection.ActionDisable, fmt.Sprintf("fiveHourUsedPercent >= %d", settings.FiveHourUsedPercentThreshold)
 	}

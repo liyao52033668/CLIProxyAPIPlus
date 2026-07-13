@@ -135,10 +135,10 @@ func (s *Service) Run(ctx context.Context, req RunRequest) (snapshot LatestSnaps
 		return snapshot, probeErr
 	}
 
-	autoDeleteLogs := []InspectionActionLog{}
+	autoActionLogs := []InspectionActionLog{}
 	autoDeletedCount := 0
 	if req.TriggerType == TriggerTypeScheduled {
-		results, autoDeleteLogs, autoDeletedCount = s.autoDeleteUnauthorizedResults(ctx, results)
+		results, autoActionLogs, autoDeletedCount = s.autoApplyScheduledActions(ctx, results)
 	}
 
 	if len(req.FileNames) == 0 {
@@ -146,7 +146,7 @@ func (s *Service) Run(ctx context.Context, req RunRequest) (snapshot LatestSnaps
 	} else {
 		snapshot.Results = mergeRunResults(snapshot.Results, results)
 	}
-	snapshot.ActionLogs = autoDeleteLogs
+	snapshot.ActionLogs = autoActionLogs
 	snapshot.Run.Status = RunStatusCompleted
 	snapshot.Run.FinishedAtMS = nowMillis()
 	snapshot.Run.Error = ""
@@ -285,32 +285,66 @@ func (s *Service) reconcileSnapshot(ctx context.Context, snapshot LatestSnapshot
 	return snapshot, nil
 }
 
-func (s *Service) autoDeleteUnauthorizedResults(ctx context.Context, results []InspectionResultItem) ([]InspectionResultItem, []InspectionActionLog, int) {
+func (s *Service) autoApplyScheduledActions(ctx context.Context, results []InspectionResultItem) ([]InspectionResultItem, []InspectionActionLog, int) {
 	nextResults := make([]InspectionResultItem, 0, len(results))
 	logs := make([]InspectionActionLog, 0)
 	autoDeletedCount := 0
 
 	for _, result := range results {
-		if result.Action != ActionDelete || result.ActionReason != "401 response" {
+		switch result.Action {
+		case ActionDelete:
+			log := InspectionActionLog{
+				Action:       ActionDelete,
+				FileName:     result.FileName,
+				DisplayName:  result.DisplayName,
+				Success:      true,
+				ExecutedAtMS: nowMillis(),
+			}
+			if err := s.gateway.DeleteFiles(ctx, []string{result.FileName}); err != nil {
+				log.Success = false
+				log.Error = err.Error()
+				nextResults = append(nextResults, result)
+			} else {
+				autoDeletedCount++
+			}
+			logs = append(logs, log)
+		case ActionDisable:
+			log := InspectionActionLog{
+				Action:       ActionDisable,
+				FileName:     result.FileName,
+				DisplayName:  result.DisplayName,
+				Success:      true,
+				ExecutedAtMS: nowMillis(),
+			}
+			if err := s.gateway.SetDisabled(ctx, result.FileName, true); err != nil {
+				log.Success = false
+				log.Error = err.Error()
+				nextResults = append(nextResults, result)
+			} else {
+				result.Disabled = true
+				nextResults = append(nextResults, resolveActionState(result))
+			}
+			logs = append(logs, log)
+		case ActionEnable:
+			log := InspectionActionLog{
+				Action:       ActionEnable,
+				FileName:     result.FileName,
+				DisplayName:  result.DisplayName,
+				Success:      true,
+				ExecutedAtMS: nowMillis(),
+			}
+			if err := s.gateway.SetDisabled(ctx, result.FileName, false); err != nil {
+				log.Success = false
+				log.Error = err.Error()
+				nextResults = append(nextResults, result)
+			} else {
+				result.Disabled = false
+				nextResults = append(nextResults, resolveActionState(result))
+			}
+			logs = append(logs, log)
+		default:
 			nextResults = append(nextResults, result)
-			continue
 		}
-
-		log := InspectionActionLog{
-			Action:       ActionDelete,
-			FileName:     result.FileName,
-			DisplayName:  result.DisplayName,
-			Success:      true,
-			ExecutedAtMS: nowMillis(),
-		}
-		if err := s.gateway.DeleteFiles(ctx, []string{result.FileName}); err != nil {
-			log.Success = false
-			log.Error = err.Error()
-			nextResults = append(nextResults, result)
-		} else {
-			autoDeletedCount++
-		}
-		logs = append(logs, log)
 	}
 
 	return nextResults, logs, autoDeletedCount

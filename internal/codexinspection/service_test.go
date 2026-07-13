@@ -432,7 +432,7 @@ func TestService_GetSnapshotClearsResolvedDisableRecommendation(t *testing.T) {
 	}
 }
 
-func TestService_RunScheduledAutoDeletesUnauthorizedResults(t *testing.T) {
+func TestService_RunScheduledAutoAppliesSuggestedActions(t *testing.T) {
 	repo := &fakeRepository{snapshot: DefaultSnapshot()}
 	gateway := &fakeGateway{}
 	prober := &fakeProber{
@@ -442,6 +442,26 @@ func TestService_RunScheduledAutoDeletesUnauthorizedResults(t *testing.T) {
 				DisplayName:  "Expired",
 				Action:       ActionDelete,
 				ActionReason: "401 response",
+			},
+			{
+				FileName:     "weekly-low.json",
+				DisplayName:  "Weekly Low",
+				Action:       ActionDelete,
+				ActionReason: "weeklyUsedPercent >= 85",
+			},
+			{
+				FileName:     "five-hour-low.json",
+				DisplayName:  "Five Hour Low",
+				Action:       ActionDisable,
+				ActionReason: "fiveHourUsedPercent >= 85",
+				Disabled:     false,
+			},
+			{
+				FileName:     "recovered.json",
+				DisplayName:  "Recovered",
+				Action:       ActionEnable,
+				ActionReason: "fiveHourUsedPercent < 85 && weeklyUsedPercent < 85",
+				Disabled:     true,
 			},
 			{
 				FileName:     "healthy.json",
@@ -457,33 +477,44 @@ func TestService_RunScheduledAutoDeletesUnauthorizedResults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run(scheduled) error = %v", err)
 	}
-	if len(gateway.deleteCalls) != 1 {
-		t.Fatalf("len(deleteCalls) = %d, want 1", len(gateway.deleteCalls))
+	if len(gateway.deleteCalls) != 2 {
+		t.Fatalf("len(deleteCalls) = %d, want 2", len(gateway.deleteCalls))
 	}
-	if len(gateway.deleteCalls[0]) != 1 || gateway.deleteCalls[0][0] != "expired.json" {
-		t.Fatalf("delete call = %#v, want expired.json", gateway.deleteCalls[0])
+	if len(gateway.setDisabledCalls) != 2 {
+		t.Fatalf("len(setDisabledCalls) = %d, want 2", len(gateway.setDisabledCalls))
 	}
-	if len(snapshot.Results) != 1 {
-		t.Fatalf("len(snapshot.Results) = %d, want 1", len(snapshot.Results))
+	if gateway.setDisabledCalls[0] != (setDisabledCall{name: "five-hour-low.json", disabled: true}) {
+		t.Fatalf("setDisabledCalls[0] = %+v, want five-hour-low disable", gateway.setDisabledCalls[0])
 	}
-	if snapshot.Results[0].FileName != "healthy.json" {
-		t.Fatalf("snapshot.Results[0].FileName = %q, want healthy.json", snapshot.Results[0].FileName)
+	if gateway.setDisabledCalls[1] != (setDisabledCall{name: "recovered.json", disabled: false}) {
+		t.Fatalf("setDisabledCalls[1] = %+v, want recovered enable", gateway.setDisabledCalls[1])
 	}
-	if snapshot.Run.Summary.AutoDeletedCount != 1 {
-		t.Fatalf("AutoDeletedCount = %d, want 1", snapshot.Run.Summary.AutoDeletedCount)
+	if len(snapshot.Results) != 3 {
+		t.Fatalf("len(snapshot.Results) = %d, want 3", len(snapshot.Results))
 	}
-	if snapshot.Run.Summary.ReauthCount != 0 {
-		t.Fatalf("ReauthCount = %d, want 0", snapshot.Run.Summary.ReauthCount)
+	if snapshot.Results[0].FileName != "five-hour-low.json" || !snapshot.Results[0].Disabled || snapshot.Results[0].Action != ActionKeep {
+		t.Fatalf("snapshot.Results[0] = %+v, want disabled keep", snapshot.Results[0])
 	}
-	if len(snapshot.ActionLogs) != 1 {
-		t.Fatalf("len(ActionLogs) = %d, want 1", len(snapshot.ActionLogs))
+	if snapshot.Results[1].FileName != "recovered.json" || snapshot.Results[1].Disabled || snapshot.Results[1].Action != ActionKeep {
+		t.Fatalf("snapshot.Results[1] = %+v, want enabled keep", snapshot.Results[1])
 	}
-	if snapshot.ActionLogs[0].Action != ActionDelete || !snapshot.ActionLogs[0].Success {
-		t.Fatalf("ActionLogs[0] = %+v, want successful delete", snapshot.ActionLogs[0])
+	if snapshot.Results[2].FileName != "healthy.json" {
+		t.Fatalf("snapshot.Results[2].FileName = %q, want healthy.json", snapshot.Results[2].FileName)
+	}
+	if snapshot.Run.Summary.AutoDeletedCount != 2 {
+		t.Fatalf("AutoDeletedCount = %d, want 2", snapshot.Run.Summary.AutoDeletedCount)
+	}
+	if len(snapshot.ActionLogs) != 4 {
+		t.Fatalf("len(ActionLogs) = %d, want 4", len(snapshot.ActionLogs))
+	}
+	for _, log := range snapshot.ActionLogs {
+		if !log.Success {
+			t.Fatalf("ActionLog = %+v, want success", log)
+		}
 	}
 }
 
-func TestService_RunManualDoesNotAutoDeleteUnauthorizedResults(t *testing.T) {
+func TestService_RunManualDoesNotAutoApplySuggestedActions(t *testing.T) {
 	repo := &fakeRepository{snapshot: DefaultSnapshot()}
 	gateway := &fakeGateway{}
 	prober := &fakeProber{
@@ -493,6 +524,12 @@ func TestService_RunManualDoesNotAutoDeleteUnauthorizedResults(t *testing.T) {
 				DisplayName:  "Expired",
 				Action:       ActionDelete,
 				ActionReason: "401 response",
+			},
+			{
+				FileName:     "five-hour-low.json",
+				DisplayName:  "Five Hour Low",
+				Action:       ActionDisable,
+				ActionReason: "fiveHourUsedPercent >= 85",
 			},
 		},
 	}
@@ -505,14 +542,20 @@ func TestService_RunManualDoesNotAutoDeleteUnauthorizedResults(t *testing.T) {
 	if len(gateway.deleteCalls) != 0 {
 		t.Fatalf("len(deleteCalls) = %d, want 0", len(gateway.deleteCalls))
 	}
-	if len(snapshot.Results) != 1 {
-		t.Fatalf("len(snapshot.Results) = %d, want 1", len(snapshot.Results))
+	if len(gateway.setDisabledCalls) != 0 {
+		t.Fatalf("len(setDisabledCalls) = %d, want 0", len(gateway.setDisabledCalls))
+	}
+	if len(snapshot.Results) != 2 {
+		t.Fatalf("len(snapshot.Results) = %d, want 2", len(snapshot.Results))
 	}
 	if snapshot.Run.Summary.AutoDeletedCount != 0 {
 		t.Fatalf("AutoDeletedCount = %d, want 0", snapshot.Run.Summary.AutoDeletedCount)
 	}
 	if snapshot.Run.Summary.DeleteCount != 1 {
 		t.Fatalf("DeleteCount = %d, want 1", snapshot.Run.Summary.DeleteCount)
+	}
+	if snapshot.Run.Summary.DisableCount != 1 {
+		t.Fatalf("DisableCount = %d, want 1", snapshot.Run.Summary.DisableCount)
 	}
 	if snapshot.Run.Summary.ReauthCount != 0 {
 		t.Fatalf("ReauthCount = %d, want 0", snapshot.Run.Summary.ReauthCount)
