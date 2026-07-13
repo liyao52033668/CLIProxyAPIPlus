@@ -261,7 +261,6 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		}
 	}
 
-	engine.Use(corsMiddleware())
 	wd, err := os.Getwd()
 	if err != nil {
 		wd = configFilePath
@@ -285,6 +284,10 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		wsRoutes:            make(map[string]struct{}),
 	}
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
+	// CORS must be registered after Server exists so management allowlist can read s.cfg.
+	// Engine-level handling is required for OPTIONS preflight: Gin group middleware does
+	// not run when no OPTIONS route is registered (would otherwise 404 without CORS headers).
+	engine.Use(s.corsMiddleware())
 	// Save initial YAML snapshot
 	s.oldConfigYaml, _ = yaml.Marshal(cfg)
 	s.applyAccessConfig(nil, cfg)
@@ -700,9 +703,8 @@ func (s *Server) registerManagementRoutes() {
 	log.Info("management routes registered after secret key configuration")
 
 	mgmt := s.engine.Group("/v0/management")
-	// Management routes default to no CORS (same-origin control panel).
-	// Origins listed in remote-management.cors-allowed-origins may call cross-origin.
-	mgmt.Use(s.managementAvailabilityMiddleware(), s.managementCORSMiddleware(), s.mgmt.Middleware())
+	// CORS for management is handled by engine-level s.corsMiddleware() (incl. OPTIONS preflight).
+	mgmt.Use(s.managementAvailabilityMiddleware(), s.mgmt.Middleware())
 	{
 		mgmt.GET("/usage", s.mgmt.GetUsageStatistics)
 		mgmt.GET("/usage/export", s.mgmt.ExportUsageStatistics)
@@ -1545,17 +1547,15 @@ func (s *Server) Stop(ctx context.Context) error {
 	return nil
 }
 
-// corsMiddleware returns a Gin middleware handler that adds CORS headers
-// to every response, allowing cross-origin requests.
-// Management routes are skipped here so managementCORSMiddleware owns their policy.
-//
-// Returns:
-//   - gin.HandlerFunc: The CORS middleware handler
-func corsMiddleware() gin.HandlerFunc {
+// corsMiddleware applies CORS policy for all routes.
+// Non-management APIs keep Allow-Origin: *.
+// Management APIs default to no CORS; origins in remote-management.cors-allowed-origins
+// are reflected so private admin UIs can use custom connection addresses.
+// OPTIONS preflight is answered here at engine level so it never falls through as 404.
+func (s *Server) corsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// Let /v0/management use the dedicated allowlist CORS middleware.
 		if strings.HasPrefix(c.Request.URL.Path, "/v0/management") {
-			c.Next()
+			s.applyManagementCORS(c)
 			return
 		}
 
@@ -1563,7 +1563,7 @@ func corsMiddleware() gin.HandlerFunc {
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		c.Header("Access-Control-Allow-Headers", "*")
 
-		if c.Request.Method == "OPTIONS" {
+		if c.Request.Method == http.MethodOptions {
 			c.AbortWithStatus(http.StatusNoContent)
 			return
 		}
@@ -1572,46 +1572,42 @@ func corsMiddleware() gin.HandlerFunc {
 	}
 }
 
-// managementCORSMiddleware replaces the global permissive CORS policy on management
-// routes. By default it clears CORS headers and rejects browser preflight.
-// When remote-management.cors-allowed-origins contains the request Origin, it
-// reflects that origin so a private admin UI (or local Vite dev server) can use
-// custom connection addresses without exposing management to arbitrary sites.
-func (s *Server) managementCORSMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		// Always strip the global Allow-Origin: * first.
-		c.Header("Access-Control-Allow-Origin", "")
-		c.Header("Access-Control-Allow-Methods", "")
-		c.Header("Access-Control-Allow-Headers", "")
-		c.Header("Access-Control-Allow-Credentials", "")
+// applyManagementCORS writes management CORS headers and short-circuits OPTIONS.
+func (s *Server) applyManagementCORS(c *gin.Context) {
+	// Never inherit permissive * from other layers.
+	c.Header("Access-Control-Allow-Origin", "")
+	c.Header("Access-Control-Allow-Methods", "")
+	c.Header("Access-Control-Allow-Headers", "")
+	c.Header("Access-Control-Allow-Credentials", "")
 
-		origin := strings.TrimSpace(c.GetHeader("Origin"))
-		if origin != "" && s.isManagementCORSOriginAllowed(origin) {
-			c.Header("Access-Control-Allow-Origin", origin)
-			c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-			allowHeaders := strings.TrimSpace(c.GetHeader("Access-Control-Request-Headers"))
-			if allowHeaders == "" {
-				allowHeaders = "Authorization, Content-Type"
-			}
-			c.Header("Access-Control-Allow-Headers", allowHeaders)
-			c.Header("Access-Control-Max-Age", "600")
-			c.Writer.Header().Add("Vary", "Origin")
-
-			if c.Request.Method == http.MethodOptions {
-				c.AbortWithStatus(http.StatusNoContent)
-				return
-			}
-			c.Next()
-			return
+	origin := strings.TrimSpace(c.GetHeader("Origin"))
+	if origin != "" && s.isManagementCORSOriginAllowed(origin) {
+		c.Header("Access-Control-Allow-Origin", origin)
+		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+		allowHeaders := strings.TrimSpace(c.GetHeader("Access-Control-Request-Headers"))
+		if allowHeaders == "" {
+			allowHeaders = "Authorization, Content-Type"
 		}
+		c.Header("Access-Control-Allow-Headers", allowHeaders)
+		c.Header("Access-Control-Max-Age", "600")
+		c.Writer.Header().Add("Vary", "Origin")
 
 		if c.Request.Method == http.MethodOptions {
-			c.AbortWithStatus(http.StatusForbidden)
+			c.AbortWithStatus(http.StatusNoContent)
 			return
 		}
-
 		c.Next()
+		return
 	}
+
+	if c.Request.Method == http.MethodOptions {
+		// Not on allowlist (or no Origin): reject preflight without CORS headers.
+		c.AbortWithStatus(http.StatusForbidden)
+		return
+	}
+
+	// Non-OPTIONS without allowlist: continue without CORS headers (same-origin panel still works).
+	c.Next()
 }
 
 func (s *Server) isManagementCORSOriginAllowed(origin string) bool {
