@@ -700,9 +700,9 @@ func (s *Server) registerManagementRoutes() {
 	log.Info("management routes registered after secret key configuration")
 
 	mgmt := s.engine.Group("/v0/management")
-	// Disable global CORS on management routes to reduce browser-based CSRF/XSS attack surface.
-	// The control panel is same-origin (/management.html); cross-origin browser calls are not supported.
-	mgmt.Use(s.managementAvailabilityMiddleware(), managementNoCORSMiddleware(), s.mgmt.Middleware())
+	// Management routes default to no CORS (same-origin control panel).
+	// Origins listed in remote-management.cors-allowed-origins may call cross-origin.
+	mgmt.Use(s.managementAvailabilityMiddleware(), s.managementCORSMiddleware(), s.mgmt.Middleware())
 	{
 		mgmt.GET("/usage", s.mgmt.GetUsageStatistics)
 		mgmt.GET("/usage/export", s.mgmt.ExportUsageStatistics)
@@ -1547,11 +1547,18 @@ func (s *Server) Stop(ctx context.Context) error {
 
 // corsMiddleware returns a Gin middleware handler that adds CORS headers
 // to every response, allowing cross-origin requests.
+// Management routes are skipped here so managementCORSMiddleware owns their policy.
 //
 // Returns:
 //   - gin.HandlerFunc: The CORS middleware handler
 func corsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// Let /v0/management use the dedicated allowlist CORS middleware.
+		if strings.HasPrefix(c.Request.URL.Path, "/v0/management") {
+			c.Next()
+			return
+		}
+
 		c.Header("Access-Control-Allow-Origin", "*")
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		c.Header("Access-Control-Allow-Headers", "*")
@@ -1565,14 +1572,38 @@ func corsMiddleware() gin.HandlerFunc {
 	}
 }
 
-// managementNoCORSMiddleware clears permissive global CORS headers on management
-// routes and rejects browser preflight. Mirrors the Amp management policy.
-func managementNoCORSMiddleware() gin.HandlerFunc {
+// managementCORSMiddleware replaces the global permissive CORS policy on management
+// routes. By default it clears CORS headers and rejects browser preflight.
+// When remote-management.cors-allowed-origins contains the request Origin, it
+// reflects that origin so a private admin UI (or local Vite dev server) can use
+// custom connection addresses without exposing management to arbitrary sites.
+func (s *Server) managementCORSMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// Always strip the global Allow-Origin: * first.
 		c.Header("Access-Control-Allow-Origin", "")
 		c.Header("Access-Control-Allow-Methods", "")
 		c.Header("Access-Control-Allow-Headers", "")
 		c.Header("Access-Control-Allow-Credentials", "")
+
+		origin := strings.TrimSpace(c.GetHeader("Origin"))
+		if origin != "" && s.isManagementCORSOriginAllowed(origin) {
+			c.Header("Access-Control-Allow-Origin", origin)
+			c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+			allowHeaders := strings.TrimSpace(c.GetHeader("Access-Control-Request-Headers"))
+			if allowHeaders == "" {
+				allowHeaders = "Authorization, Content-Type"
+			}
+			c.Header("Access-Control-Allow-Headers", allowHeaders)
+			c.Header("Access-Control-Max-Age", "600")
+			c.Writer.Header().Add("Vary", "Origin")
+
+			if c.Request.Method == http.MethodOptions {
+				c.AbortWithStatus(http.StatusNoContent)
+				return
+			}
+			c.Next()
+			return
+		}
 
 		if c.Request.Method == http.MethodOptions {
 			c.AbortWithStatus(http.StatusForbidden)
@@ -1581,6 +1612,46 @@ func managementNoCORSMiddleware() gin.HandlerFunc {
 
 		c.Next()
 	}
+}
+
+func (s *Server) isManagementCORSOriginAllowed(origin string) bool {
+	if s == nil || s.cfg == nil {
+		return false
+	}
+	return originAllowedByList(origin, s.cfg.RemoteManagement.CorsAllowedOrigins)
+}
+
+// normalizeCORSOrigin converts a configured or request origin into scheme://host[:port].
+func normalizeCORSOrigin(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "http://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return ""
+	}
+	return scheme + "://" + strings.ToLower(u.Host)
+}
+
+func originAllowedByList(origin string, allowed []string) bool {
+	normalizedOrigin := normalizeCORSOrigin(origin)
+	if normalizedOrigin == "" {
+		return false
+	}
+	for _, entry := range allowed {
+		if normalizeCORSOrigin(entry) == normalizedOrigin {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) applyAccessConfig(oldCfg, newCfg *config.Config) {

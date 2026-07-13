@@ -239,6 +239,11 @@ type RemoteManagement struct {
 	// PanelGitHubRepository overrides the GitHub repository used to fetch the management panel asset.
 	// Accepts either a repository URL (https://github.com/org/repo) or an API releases endpoint.
 	PanelGitHubRepository string `yaml:"panel-github-repository"`
+	// CorsAllowedOrigins lists browser origins allowed to call Management API cross-origin
+	// (e.g. local Vite UI at http://localhost:5173, or a private admin domain).
+	// Empty (default) keeps the previous no-CORS policy for management routes.
+	// Entries accept full origins (http://localhost:5173) or host[:port] (normalized as http://...).
+	CorsAllowedOrigins []string `yaml:"cors-allowed-origins"`
 }
 
 // QuotaExceeded defines the behavior when API quota limits are exceeded.

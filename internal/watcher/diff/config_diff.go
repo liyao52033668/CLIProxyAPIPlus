@@ -276,6 +276,13 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldPanelRepo != newPanelRepo {
 		changes = append(changes, fmt.Sprintf("remote-management.panel-github-repository: %s -> %s", oldPanelRepo, newPanelRepo))
 	}
+	if !equalStringSet(oldCfg.RemoteManagement.CorsAllowedOrigins, newCfg.RemoteManagement.CorsAllowedOrigins) {
+		changes = append(changes, fmt.Sprintf(
+			"remote-management.cors-allowed-origins: updated (%d -> %d entries)",
+			len(oldCfg.RemoteManagement.CorsAllowedOrigins),
+			len(newCfg.RemoteManagement.CorsAllowedOrigins),
+		))
+	}
 	if oldCfg.RemoteManagement.SecretKey != newCfg.RemoteManagement.SecretKey {
 		switch {
 		case oldCfg.RemoteManagement.SecretKey == "" && newCfg.RemoteManagement.SecretKey != "":
