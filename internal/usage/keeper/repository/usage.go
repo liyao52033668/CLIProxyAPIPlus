@@ -387,6 +387,14 @@ func newUsageOverviewRecord(filter dto.UsageQueryFilter) *dto.UsageOverviewRecor
 		HourlySeries: newUsageOverviewSeriesRecord(),
 		DailySeries:  newUsageOverviewSeriesRecord(),
 		Health:       buildUsageOverviewHealth(filter),
+		KeyStats:     newUsageKeyStatsRecord(),
+	}
+}
+
+func newUsageKeyStatsRecord() dto.UsageKeyStatsRecord {
+	return dto.UsageKeyStatsRecord{
+		BySource:    map[string]dto.UsageKeyCountRecord{},
+		ByAuthIndex: map[string]dto.UsageKeyCountRecord{},
 	}
 }
 
@@ -395,6 +403,8 @@ var usageOverviewSelectColumns = []string{
 	"api_group_key",
 	"model",
 	"timestamp",
+	"source",
+	"auth_index",
 	"failed",
 	"input_tokens",
 	"output_tokens",
@@ -609,6 +619,7 @@ func applyUsageEventToOverview(overview *dto.UsageOverviewRecord, event entities
 	}
 	cost := calculateUsageEventCost(event, pricing)
 	overview.Summary.TotalCost += cost
+	applyUsageEventToKeyStats(&overview.KeyStats, event, cost)
 
 	bucketKey, bucketMinutes := usageOverviewBucket(event.Timestamp.UTC(), bucketByDay)
 	applyUsageEventToOverviewSeries(&overview.Series, event, cost, bucketKey, bucketMinutes)
@@ -621,6 +632,41 @@ func applyUsageEventToOverview(overview *dto.UsageOverviewRecord, event entities
 	dayKey, dayMinutes := usageOverviewBucket(event.Timestamp.UTC(), true)
 	applyUsageEventToOverviewSeries(&overview.DailySeries, event, cost, dayKey, dayMinutes)
 	updateUsageOverviewHealthBlock(overview.Health.BlockDetails, event)
+}
+
+func applyUsageEventToKeyStats(stats *dto.UsageKeyStatsRecord, event entities.UsageEvent, cost float64) {
+	if stats == nil {
+		return
+	}
+	if stats.BySource == nil {
+		stats.BySource = map[string]dto.UsageKeyCountRecord{}
+	}
+	if stats.ByAuthIndex == nil {
+		stats.ByAuthIndex = map[string]dto.UsageKeyCountRecord{}
+	}
+
+	if source := strings.TrimSpace(event.Source); source != "" {
+		count := stats.BySource[source]
+		if event.Failed {
+			count.Failure++
+		} else {
+			count.Success++
+		}
+		count.Tokens += event.TotalTokens
+		count.Cost += cost
+		stats.BySource[source] = count
+	}
+	if authIndex := strings.TrimSpace(event.AuthIndex); authIndex != "" {
+		count := stats.ByAuthIndex[authIndex]
+		if event.Failed {
+			count.Failure++
+		} else {
+			count.Success++
+		}
+		count.Tokens += event.TotalTokens
+		count.Cost += cost
+		stats.ByAuthIndex[authIndex] = count
+	}
 }
 
 func finalizeUsageOverview(overview *dto.UsageOverviewRecord, includeDetails bool, startTime, endTime *time.Time, bucketByDay bool) {

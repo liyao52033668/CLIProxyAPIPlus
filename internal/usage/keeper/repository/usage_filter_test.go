@@ -84,16 +84,19 @@ func TestBuildUsageOverviewWithFilterComputesSummaryAndSeries(t *testing.T) {
 		{
 			EventKey: "event-1", APIGroupKey: "provider-a", Model: "claude-sonnet",
 			Timestamp: time.Date(2026, 4, 16, 9, 15, 0, 0, time.UTC), Failed: false,
+			Source: "auth-a.json", AuthIndex: "idx-a",
 			InputTokens: 1000, OutputTokens: 500, ReasoningTokens: 100, CachedTokens: 200, TotalTokens: 1800,
 		},
 		{
 			EventKey: "event-2", APIGroupKey: "provider-a", Model: "claude-sonnet",
 			Timestamp: time.Date(2026, 4, 16, 10, 45, 0, 0, time.UTC), Failed: true,
+			Source: "auth-a.json", AuthIndex: "idx-a",
 			InputTokens: 2000, OutputTokens: 1000, ReasoningTokens: 50, CachedTokens: 100, TotalTokens: 3150,
 		},
 		{
 			EventKey: "event-3", APIGroupKey: "provider-a", Model: "claude-sonnet",
 			Timestamp: time.Date(2026, 4, 17, 11, 5, 0, 0, time.UTC), Failed: false,
+			Source: "auth-b.json", AuthIndex: "idx-b",
 			InputTokens: 500, OutputTokens: 250, ReasoningTokens: 25, CachedTokens: 50, TotalTokens: 825,
 		},
 	}
@@ -156,6 +159,24 @@ func TestBuildUsageOverviewWithFilterComputesSummaryAndSeries(t *testing.T) {
 	}
 	if overview.Health.TotalSuccess != 2 || overview.Health.TotalFailure != 1 {
 		t.Fatalf("unexpected overview health totals: %+v", overview.Health)
+	}
+	if overview.KeyStats.ByAuthIndex["idx-a"].Success != 1 || overview.KeyStats.ByAuthIndex["idx-a"].Failure != 1 {
+		t.Fatalf("unexpected key stats for idx-a: %+v", overview.KeyStats)
+	}
+	if overview.KeyStats.ByAuthIndex["idx-a"].Tokens != 4950 {
+		t.Fatalf("unexpected token stats for idx-a: %+v", overview.KeyStats.ByAuthIndex["idx-a"])
+	}
+	if overview.KeyStats.ByAuthIndex["idx-b"].Success != 1 || overview.KeyStats.ByAuthIndex["idx-b"].Failure != 0 {
+		t.Fatalf("unexpected key stats for idx-b: %+v", overview.KeyStats)
+	}
+	if overview.KeyStats.BySource["auth-a.json"].Success != 1 || overview.KeyStats.BySource["auth-a.json"].Failure != 1 {
+		t.Fatalf("unexpected key stats for source auth-a.json: %+v", overview.KeyStats)
+	}
+	if overview.KeyStats.BySource["auth-b.json"].Success != 1 || overview.KeyStats.BySource["auth-b.json"].Failure != 0 {
+		t.Fatalf("unexpected key stats for source auth-b.json: %+v", overview.KeyStats)
+	}
+	if math.Abs(overview.KeyStats.ByAuthIndex["idx-a"].Cost-0.03069) > 0.000000001 {
+		t.Fatalf("unexpected cost stats for idx-a: %+v", overview.KeyStats.ByAuthIndex["idx-a"])
 	}
 	expectedSuccessRate := (2.0 / 3.0) * 100.0
 	if diff := overview.Health.SuccessRate - expectedSuccessRate; diff < -1e-9 || diff > 1e-9 {

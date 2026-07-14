@@ -33,36 +33,36 @@ type UsageImportResult struct {
 
 // UsageEventsPage 是 usage events 列表的服务层结果。
 type UsageEventsPage struct {
-	Events     []UsageEventRecord
-	Models     []string
-	TotalCount int64
-	Page       int
-	PageSize   int
-	TotalPages int
+	Events     []UsageEventRecord `json:"events"`
+	Models     []string           `json:"models"`
+	TotalCount int64              `json:"total_count"`
+	Page       int                `json:"page"`
+	PageSize   int                `json:"page_size"`
+	TotalPages int                `json:"total_pages"`
 }
 
 // UsageEventFilterOptions 是 usage events 筛选项的服务层结果。
 type UsageEventFilterOptions struct {
-	Models []string
+	Models []string `json:"models"`
 }
 
 // UsageEventRecord 是单条 usage event 的服务层结果。
 type UsageEventRecord struct {
-	ID              uint
-	Timestamp       time.Time
-	APIGroupKey     string
-	Model           string
-	AuthType        string
-	Provider        string
-	Source          string
-	AuthIndex       string
-	Failed          bool
-	LatencyMS       int64
-	InputTokens     int64
-	OutputTokens    int64
-	ReasoningTokens int64
-	CachedTokens    int64
-	TotalTokens     int64
+	ID              uint      `json:"id"`
+	Timestamp       time.Time `json:"timestamp"`
+	APIGroupKey     string    `json:"api_group_key"`
+	Model           string    `json:"model"`
+	AuthType        string    `json:"auth_type"`
+	Provider        string    `json:"provider"`
+	Source          string    `json:"source"`
+	AuthIndex       string    `json:"auth_index"`
+	Failed          bool      `json:"failed"`
+	LatencyMS       int64     `json:"latency_ms"`
+	InputTokens     int64     `json:"input_tokens"`
+	OutputTokens    int64     `json:"output_tokens"`
+	ReasoningTokens int64     `json:"reasoning_tokens"`
+	CachedTokens    int64     `json:"cached_tokens"`
+	TotalTokens     int64     `json:"total_tokens"`
 }
 
 // UsageAnalysisModelStat 是按模型聚合的分析结果。
@@ -150,6 +150,21 @@ type UsageOverviewHealth struct {
 	BlockDetails  []UsageOverviewHealthBlock
 }
 
+// UsageKeyCount is a compact request-outcome counter for one key.
+type UsageKeyCount struct {
+	Success int64   `json:"success"`
+	Failure int64   `json:"failure"`
+	Tokens  int64   `json:"tokens"`
+	Cost    float64 `json:"cost"`
+}
+
+// UsageKeyStats aggregates request outcomes by auth_index and source for the
+// management UI, without shipping per-request details.
+type UsageKeyStats struct {
+	BySource    map[string]UsageKeyCount `json:"by_source"`
+	ByAuthIndex map[string]UsageKeyCount `json:"by_auth_index"`
+}
+
 // UsageOverviewSnapshot 是 overview 的服务层结果。
 type UsageOverviewSnapshot struct {
 	Usage        *repodto.StatisticsSnapshot
@@ -158,6 +173,7 @@ type UsageOverviewSnapshot struct {
 	HourlySeries UsageOverviewSeries
 	DailySeries  UsageOverviewSeries
 	Health       UsageOverviewHealth
+	KeyStats     UsageKeyStats `json:"key_stats"`
 	StartTime    *time.Time
 	EndTime      *time.Time
 	BucketByDay  bool

@@ -57,10 +57,33 @@ func (s *usageService) GetUsageOverview(_ context.Context, filter servicedto.Usa
 		HourlySeries: mapUsageOverviewSeries(overview.HourlySeries),
 		DailySeries:  mapUsageOverviewSeries(overview.DailySeries),
 		Health:       buildUsageOverviewHealth(overview),
+		KeyStats:     mapUsageKeyStats(overview.KeyStats),
 		StartTime:    filter.StartTime,
 		EndTime:      filter.EndTime,
 		BucketByDay:  bucketByDay,
 	}, nil
+}
+
+func mapUsageKeyStats(stats repodto.UsageKeyStatsRecord) servicedto.UsageKeyStats {
+	bySource := make(map[string]servicedto.UsageKeyCount, len(stats.BySource))
+	for key, count := range stats.BySource {
+		bySource[key] = servicedto.UsageKeyCount{
+			Success: count.Success,
+			Failure: count.Failure,
+			Tokens:  count.Tokens,
+			Cost:    count.Cost,
+		}
+	}
+	byAuthIndex := make(map[string]servicedto.UsageKeyCount, len(stats.ByAuthIndex))
+	for key, count := range stats.ByAuthIndex {
+		byAuthIndex[key] = servicedto.UsageKeyCount{
+			Success: count.Success,
+			Failure: count.Failure,
+			Tokens:  count.Tokens,
+			Cost:    count.Cost,
+		}
+	}
+	return servicedto.UsageKeyStats{BySource: bySource, ByAuthIndex: byAuthIndex}
 }
 
 func mapUsageOverviewSeries(series repodto.UsageOverviewSeriesRecord) servicedto.UsageOverviewSeries {

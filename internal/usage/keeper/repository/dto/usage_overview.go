@@ -51,6 +51,21 @@ type UsageOverviewHealthRecord struct {
 	BlockDetails  []UsageOverviewHealthBlockRecord
 }
 
+// UsageKeyCountRecord is a compact request-outcome counter for one key.
+type UsageKeyCountRecord struct {
+	Success int64
+	Failure int64
+	Tokens  int64
+	Cost    float64
+}
+
+// UsageKeyStatsRecord aggregates request outcomes by auth_index and source.
+// The management UI uses this instead of replaying per-request details.
+type UsageKeyStatsRecord struct {
+	BySource    map[string]UsageKeyCountRecord
+	ByAuthIndex map[string]UsageKeyCountRecord
+}
+
 // UsageOverviewRecord 是仓储层的完整 usage overview 结果。
 type UsageOverviewRecord struct {
 	Usage        *StatisticsSnapshot
@@ -59,4 +74,5 @@ type UsageOverviewRecord struct {
 	HourlySeries UsageOverviewSeriesRecord
 	DailySeries  UsageOverviewSeriesRecord
 	Health       UsageOverviewHealthRecord
+	KeyStats     UsageKeyStatsRecord
 }
