@@ -241,18 +241,11 @@ func TestBuildUsageOverviewFromEventsBuildsSnapshotAndOverviewInOnePass(t *testi
 	if overview.Usage.APIs["unknown"].Models["unknown"].TotalRequests != 1 {
 		t.Fatalf("expected unknown provider/model snapshot to be populated, got %+v", overview.Usage.APIs)
 	}
-	if details := overview.Usage.APIs["provider-a"].Models["claude-sonnet"].Details; len(details) != 1 {
-		t.Fatalf("expected overview snapshot to include details, got %+v", details)
-	} else {
-		detail := details[0]
-		if detail.Timestamp != time.Date(2026, 4, 16, 9, 15, 0, 0, time.UTC) ||
-			detail.LatencyMS != 120 || detail.Source != "source-a" ||
-			detail.AuthIndex != "1" || detail.Failed != false {
-			t.Fatalf("unexpected detail content: %+v", detail)
-		}
+	if details := overview.Usage.APIs["provider-a"].Models["claude-sonnet"].Details; len(details) != 0 {
+		t.Fatalf("expected overview snapshot to omit request details, got %+v", details)
 	}
-	if details := overview.Usage.APIs["unknown"].Models["unknown"].Details; len(details) != 1 {
-		t.Fatalf("expected overview snapshot to include unknown-model details, got %+v", details)
+	if details := overview.Usage.APIs["unknown"].Models["unknown"].Details; len(details) != 0 {
+		t.Fatalf("expected overview snapshot to omit unknown-model details, got %+v", details)
 	}
 	if overview.Summary.RequestCount != 2 || overview.Summary.TokenCount != 4950 {
 		t.Fatalf("unexpected summary totals: %+v", overview.Summary)

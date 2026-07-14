@@ -299,50 +299,86 @@ func ListUsageAnalysisWithFilter(db *gorm.DB, filter dto.UsageQueryFilter) ([]dt
 	return resultAPIs, modelRows, nil
 }
 
-// Snapshot 先读事件，再按时间窗口在内存里汇总。
+// usageEventStreamBatchSize bounds each page when streaming usage_events so
+// overview/snapshot never materialize the full table with SELECT *.
+const usageEventStreamBatchSize = 1000
+
+// Snapshot streams matching events in pages and aggregates them in memory.
+// Export still needs request details, so details are included.
 func BuildUsageSnapshotWithFilter(db *gorm.DB, filter dto.UsageQueryFilter) (*dto.StatisticsSnapshot, error) {
 	if db == nil {
 		return nil, fmt.Errorf("database is nil")
 	}
 
-	events, err := loadUsageOverviewEventsWithFilter(db, filter)
-	if err != nil {
+	snapshot := newEmptyUsageSnapshot()
+	if err := streamUsageEventsWithFilter(db, filter, usageSnapshotSelectColumns, func(event entities.UsageEvent) error {
+		applyUsageEventToSnapshot(snapshot, event, true)
+		return nil
+	}); err != nil {
 		return nil, err
 	}
-
-	return buildUsageSnapshotFromEvents(events), nil
+	finalizeUsageSnapshot(snapshot, true)
+	return snapshot, nil
 }
 
-// Overview 先读事件，再组合窗口、系列和价格信息。
+// Overview streams matching events in pages and builds summary/series/health
+// without loading the full result set or per-request details.
 func BuildUsageOverviewWithFilter(db *gorm.DB, filter dto.UsageQueryFilter) (*dto.UsageOverviewRecord, error) {
 	if db == nil {
 		return nil, fmt.Errorf("database is nil")
 	}
 
-	events, err := loadUsageOverviewEventsWithFilter(db, filter)
-	if err != nil {
-		return nil, err
-	}
 	pricingByModel, err := loadPriceSettingsByModel(db)
 	if err != nil {
 		return nil, err
 	}
 
-	return buildUsageOverviewFromEvents(events, filter, pricingByModel), nil
+	overview := newUsageOverviewRecord(filter)
+	bucketByDay := shouldBucketUsageOverviewByDay(filter, overview.Summary.WindowMinutes)
+	latestHourlyStart := latestHourlySeriesStart(filter)
+	if err := streamUsageEventsWithFilter(db, filter, usageOverviewSelectColumns, func(event entities.UsageEvent) error {
+		applyUsageEventToSnapshot(overview.Usage, event, false)
+		applyUsageEventToOverview(overview, event, bucketByDay, latestHourlyStart, pricingByModel)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	finalizeUsageOverview(overview, false, filter.StartTime, filter.EndTime, bucketByDay)
+	return overview, nil
 }
 
 func buildUsageOverviewFromEvents(events []entities.UsageEvent, filter dto.UsageQueryFilter, pricingByModel map[string]entities.ModelPriceSetting) *dto.UsageOverviewRecord {
 	windowMinutes := computeWindowMinutes(filter)
 	bucketByDay := shouldBucketUsageOverviewByDay(filter, windowMinutes)
 	latestHourlyStart := latestHourlySeriesStart(filter)
-	overview := &dto.UsageOverviewRecord{
-		Usage: &dto.StatisticsSnapshot{
-			APIs:           map[string]dto.APISnapshot{},
-			RequestsByDay:  map[string]int64{},
-			RequestsByHour: map[string]int64{},
-			TokensByDay:    map[string]int64{},
-			TokensByHour:   map[string]int64{},
-		},
+	overview := newUsageOverviewRecord(filter)
+	if len(events) == 0 {
+		return overview
+	}
+
+	// In-memory helper used by unit tests; keep details off the overview path.
+	for _, event := range events {
+		applyUsageEventToSnapshot(overview.Usage, event, false)
+		applyUsageEventToOverview(overview, event, bucketByDay, latestHourlyStart, pricingByModel)
+	}
+	finalizeUsageOverview(overview, false, filter.StartTime, filter.EndTime, bucketByDay)
+	return overview
+}
+
+func newEmptyUsageSnapshot() *dto.StatisticsSnapshot {
+	return &dto.StatisticsSnapshot{
+		APIs:           map[string]dto.APISnapshot{},
+		RequestsByDay:  map[string]int64{},
+		RequestsByHour: map[string]int64{},
+		TokensByDay:    map[string]int64{},
+		TokensByHour:   map[string]int64{},
+	}
+}
+
+func newUsageOverviewRecord(filter dto.UsageQueryFilter) *dto.UsageOverviewRecord {
+	windowMinutes := computeWindowMinutes(filter)
+	return &dto.UsageOverviewRecord{
+		Usage: newEmptyUsageSnapshot(),
 		Summary: dto.UsageOverviewSummaryRecord{
 			WindowMinutes: windowMinutes,
 			CostAvailable: true,
@@ -352,37 +388,86 @@ func buildUsageOverviewFromEvents(events []entities.UsageEvent, filter dto.Usage
 		DailySeries:  newUsageOverviewSeriesRecord(),
 		Health:       buildUsageOverviewHealth(filter),
 	}
-	if len(events) == 0 {
-		return overview
-	}
-
-	for _, event := range events {
-		applyUsageEventToSnapshot(overview.Usage, event, true)
-		applyUsageEventToOverview(overview, event, bucketByDay, latestHourlyStart, pricingByModel)
-	}
-	finalizeUsageOverview(overview, true, filter.StartTime, filter.EndTime, bucketByDay)
-	return overview
 }
 
-// Overview 第二步：按时间窗口读事件，再交给内存汇总。
-func loadUsageOverviewEventsWithFilter(db *gorm.DB, filter dto.UsageQueryFilter) ([]entities.UsageEvent, error) {
-	query := applyUsageOverviewQuery(db.Model(&entities.UsageEvent{}), filter).Order("timestamp asc")
+var usageOverviewSelectColumns = []string{
+	"id",
+	"api_group_key",
+	"model",
+	"timestamp",
+	"failed",
+	"input_tokens",
+	"output_tokens",
+	"reasoning_tokens",
+	"cached_tokens",
+	"total_tokens",
+}
 
-	var events []entities.UsageEvent
-	if err := query.Find(&events).Error; err != nil {
-		return nil, fmt.Errorf("load usage events: %w", err)
+var usageSnapshotSelectColumns = []string{
+	"id",
+	"api_group_key",
+	"model",
+	"timestamp",
+	"source",
+	"auth_index",
+	"failed",
+	"latency_ms",
+	"input_tokens",
+	"output_tokens",
+	"reasoning_tokens",
+	"cached_tokens",
+	"total_tokens",
+}
+
+// streamUsageEventsWithFilter pages through usage_events with keyset pagination
+// so callers never issue an unbounded SELECT * ... ORDER BY timestamp.
+func streamUsageEventsWithFilter(db *gorm.DB, filter dto.UsageQueryFilter, columns []string, handle func(entities.UsageEvent) error) error {
+	if handle == nil {
+		return fmt.Errorf("usage event handler is nil")
 	}
-	return events, nil
+
+	var (
+		lastTimestamp time.Time
+		lastID        uint
+		hasCursor     bool
+	)
+
+	for {
+		query := applyUsageOverviewQuery(db.Model(&entities.UsageEvent{}), filter)
+		if len(columns) > 0 {
+			query = query.Select(columns)
+		}
+		if hasCursor {
+			query = query.Where("(timestamp > ?) OR (timestamp = ? AND id > ?)", lastTimestamp, lastTimestamp, lastID)
+		}
+		query = query.Order("timestamp asc, id asc").Limit(usageEventStreamBatchSize)
+
+		var events []entities.UsageEvent
+		if err := query.Find(&events).Error; err != nil {
+			return fmt.Errorf("load usage events: %w", err)
+		}
+		if len(events) == 0 {
+			return nil
+		}
+
+		for _, event := range events {
+			if err := handle(event); err != nil {
+				return err
+			}
+		}
+
+		last := events[len(events)-1]
+		lastTimestamp = last.Timestamp
+		lastID = last.ID
+		hasCursor = true
+		if len(events) < usageEventStreamBatchSize {
+			return nil
+		}
+	}
 }
 
 func buildUsageSnapshotFromEvents(events []entities.UsageEvent) *dto.StatisticsSnapshot {
-	snapshot := &dto.StatisticsSnapshot{
-		APIs:           map[string]dto.APISnapshot{},
-		RequestsByDay:  map[string]int64{},
-		RequestsByHour: map[string]int64{},
-		TokensByDay:    map[string]int64{},
-		TokensByHour:   map[string]int64{},
-	}
+	snapshot := newEmptyUsageSnapshot()
 	if len(events) == 0 {
 		return snapshot
 	}

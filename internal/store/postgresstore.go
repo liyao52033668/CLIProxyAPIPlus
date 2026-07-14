@@ -99,6 +99,12 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 	if err != nil {
 		return nil, fmt.Errorf("postgres store: open database connection: %w", err)
 	}
+	// Cap the config/auth store pool; default database/sql has MaxOpenConns=0
+	// (unlimited), which inflates Shared Pooler connection count.
+	db.SetMaxOpenConns(5)
+	db.SetMaxIdleConns(2)
+	db.SetConnMaxLifetime(30 * time.Minute)
+	db.SetConnMaxIdleTime(5 * time.Minute)
 	if err = db.PingContext(ctx); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("postgres store: ping database: %w", err)

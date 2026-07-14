@@ -189,7 +189,7 @@ func NewManagerWithDB(db *gorm.DB) *Manager {
 	m := &Manager{db: db}
 	m.cond = sync.NewCond(&m.mu)
 	if db != nil {
-		m.Register(&databasePlugin{db: db})
+		m.Register(newDatabasePlugin(db))
 	}
 	return m
 }
@@ -229,7 +229,7 @@ func (m *Manager) Start(ctx context.Context) {
 	})
 }
 
-// Stop stops the dispatcher and drains the queue.
+// Stop stops the dispatcher and flushes buffered database usage events.
 func (m *Manager) Stop() {
 	if m == nil {
 		return
@@ -242,6 +242,16 @@ func (m *Manager) Stop() {
 		m.closed = true
 		m.mu.Unlock()
 		m.cond.Broadcast()
+
+		m.pluginsMu.RLock()
+		plugins := make([]Plugin, len(m.plugins))
+		copy(plugins, m.plugins)
+		m.pluginsMu.RUnlock()
+		for _, plugin := range plugins {
+			if closer, ok := plugin.(*databasePlugin); ok {
+				closer.Close()
+			}
+		}
 	})
 }
 
@@ -314,15 +324,37 @@ func safeInvoke(plugin Plugin, ctx context.Context, record Record) {
 	plugin.HandleUsage(ctx, record)
 }
 
-// databasePlugin persists usage records to the database.
+const (
+	usageDBFlushMaxBatch = 100
+	usageDBFlushInterval = 500 * time.Millisecond
+)
+
+// databasePlugin buffers usage records and flushes them in batches so each
+// request does not open its own single-row INSERT against PostgreSQL.
 type databasePlugin struct {
 	db *gorm.DB
+
+	mu     sync.Mutex
+	buffer []entities.UsageEvent
+	once   sync.Once
+	stop   chan struct{}
+	done   chan struct{}
+}
+
+func newDatabasePlugin(db *gorm.DB) *databasePlugin {
+	return &databasePlugin{
+		db:   db,
+		stop: make(chan struct{}),
+		done: make(chan struct{}),
+	}
 }
 
 func (p *databasePlugin) HandleUsage(ctx context.Context, record Record) {
-	if p.db == nil {
+	if p == nil || p.db == nil {
 		return
 	}
+	p.once.Do(p.startFlusher)
+
 	timestamp := record.RequestedAt
 	if timestamp.IsZero() {
 		timestamp = time.Now()
@@ -347,7 +379,64 @@ func (p *databasePlugin) HandleUsage(ctx context.Context, record Record) {
 	if event.TotalTokens == 0 {
 		event.TotalTokens = event.InputTokens + event.OutputTokens + event.ReasoningTokens + event.CachedTokens
 	}
-	_, _, _ = repository.InsertUsageEvents(p.db, []entities.UsageEvent{event})
+
+	p.mu.Lock()
+	p.buffer = append(p.buffer, event)
+	shouldFlush := len(p.buffer) >= usageDBFlushMaxBatch
+	p.mu.Unlock()
+	if shouldFlush {
+		p.flush()
+	}
+}
+
+func (p *databasePlugin) startFlusher() {
+	go func() {
+		defer close(p.done)
+		ticker := time.NewTicker(usageDBFlushInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				p.flush()
+			case <-p.stop:
+				p.flush()
+				return
+			}
+		}
+	}()
+}
+
+func (p *databasePlugin) flush() {
+	if p == nil || p.db == nil {
+		return
+	}
+	p.mu.Lock()
+	if len(p.buffer) == 0 {
+		p.mu.Unlock()
+		return
+	}
+	batch := p.buffer
+	p.buffer = nil
+	p.mu.Unlock()
+
+	if _, _, err := repository.InsertUsageEvents(p.db, batch); err != nil {
+		log.Errorf("usage: batch insert failed (%d events): %v", len(batch), err)
+	}
+}
+
+// Close flushes remaining buffered events. Safe to call multiple times.
+func (p *databasePlugin) Close() {
+	if p == nil {
+		return
+	}
+	// Ensure the flusher exists so Close always has a terminal signal path.
+	p.once.Do(p.startFlusher)
+	select {
+	case <-p.stop:
+	default:
+		close(p.stop)
+	}
+	<-p.done
 }
 
 func buildEventKey(record Record, timestamp time.Time) string {
@@ -384,5 +473,5 @@ func StopDefault() { DefaultManager().Stop() }
 // SetDefaultManagerDB sets the database for the default manager.
 func SetDefaultManagerDB(db *gorm.DB) {
 	defaultManager.SetDB(db)
-	defaultManager.Register(&databasePlugin{db: db})
+	defaultManager.Register(newDatabasePlugin(db))
 }

@@ -3,6 +3,7 @@ package repository
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/entities"
@@ -21,6 +22,18 @@ func OpenPostgresDatabase(cfg config.Config) (*gorm.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open postgres database: %w", err)
 	}
+
+	sqlDB, err := db.DB()
+	if err != nil {
+		return nil, fmt.Errorf("configure postgres usage database: %w", err)
+	}
+	// Keep usage writes/reads on a small dedicated pool so Shared Pooler
+	// connection count and egress stay bounded under request load.
+	sqlDB.SetMaxOpenConns(5)
+	sqlDB.SetMaxIdleConns(2)
+	sqlDB.SetConnMaxLifetime(30 * time.Minute)
+	sqlDB.SetConnMaxIdleTime(5 * time.Minute)
+
 	if err := db.AutoMigrate(entities.All()...); err != nil {
 		return nil, fmt.Errorf("auto migrate postgres database: %w", err)
 	}
