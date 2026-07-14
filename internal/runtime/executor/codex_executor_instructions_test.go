@@ -147,6 +147,23 @@ func TestCodexExecutorMovesMessagesSystemMessagesToInstructions(t *testing.T) {
 	}
 }
 
+func TestCodexExecutorPreservesAdditionalToolsDeveloperItem(t *testing.T) {
+	body := normalizeCodexInstructions([]byte(`{"input":[{"type":"additional_tools","role":"developer","tools":[{"type":"function","name":"search"}]},{"role":"developer","content":"instructions"},{"role":"user","content":"hello"}]}`))
+	if got := gjson.GetBytes(body, "instructions").String(); got != "instructions" {
+		t.Fatalf("instructions = %q, want instructions; body=%s", got, string(body))
+	}
+	input := gjson.GetBytes(body, "input").Array()
+	if len(input) != 2 {
+		t.Fatalf("input length = %d, want 2; body=%s", len(input), string(body))
+	}
+	if got := input[0].Get("type").String(); got != "additional_tools" {
+		t.Fatalf("input.0.type = %q, want additional_tools; body=%s", got, string(body))
+	}
+	if got := input[0].Get("tools.0.name").String(); got != "search" {
+		t.Fatalf("input.0.tools.0.name = %q, want search; body=%s", got, string(body))
+	}
+}
+
 func TestCodexExecutorCountTokensTreatsNullInstructionsAsEmpty(t *testing.T) {
 	executor := NewCodexExecutor(&config.Config{})
 

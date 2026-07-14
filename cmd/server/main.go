@@ -897,17 +897,7 @@ func main() {
 					misc.SetAntigravityFetchTimeout(time.Duration(cfg.Timeouts.AntigravityVersionFetchSeconds) * time.Second)
 				}
 				misc.StartAntigravityVersionUpdater(context.Background())
-				if !localModel && !cfg.Home.Enabled {
-					if cfg.Timeouts.ModelRegistryFetchSeconds > 0 {
-						registry.SetModelsFetchTimeout(time.Duration(cfg.Timeouts.ModelRegistryFetchSeconds) * time.Second)
-					}
-					if cfg.Timeouts.ModelRegistryRefreshIntervalHours > 0 {
-						registry.SetModelsRefreshInterval(time.Duration(cfg.Timeouts.ModelRegistryRefreshIntervalHours) * time.Hour)
-					}
-					registry.StartModelsUpdater(context.Background())
-				} else if cfg.Home.Enabled {
-					log.Info("Home mode: remote model updates disabled")
-				}
+				startModelCatalogUpdaters(localModel, cfg)
 				hook := tui.NewLogHook(2000)
 				hook.SetFormatter(&logging.LogFormatter{})
 				log.AddHook(hook)
@@ -984,17 +974,7 @@ func main() {
 				misc.SetAntigravityFetchTimeout(time.Duration(cfg.Timeouts.AntigravityVersionFetchSeconds) * time.Second)
 			}
 			misc.StartAntigravityVersionUpdater(context.Background())
-			if !localModel && !cfg.Home.Enabled {
-				if cfg.Timeouts.ModelRegistryFetchSeconds > 0 {
-					registry.SetModelsFetchTimeout(time.Duration(cfg.Timeouts.ModelRegistryFetchSeconds) * time.Second)
-				}
-				if cfg.Timeouts.ModelRegistryRefreshIntervalHours > 0 {
-					registry.SetModelsRefreshInterval(time.Duration(cfg.Timeouts.ModelRegistryRefreshIntervalHours) * time.Hour)
-				}
-				registry.StartModelsUpdater(context.Background())
-			} else if cfg.Home.Enabled {
-				log.Info("Home mode: remote model updates disabled")
-			}
+			startModelCatalogUpdaters(localModel, cfg)
 
 			if cfg.AuthDir != "" {
 				kiro.InitializeAndStart(cfg.AuthDir, cfg)
@@ -1021,5 +1001,31 @@ func main() {
 
 			cmd.StartService(cfg, configFilePath, password)
 		}
+	}
+}
+
+// modelCatalogUpdaterPlan decides which remote model catalogs should refresh.
+func modelCatalogUpdaterPlan(localModel, homeEnabled bool) (startModels, startCodexClient bool) {
+	if localModel {
+		return false, false
+	}
+	return !homeEnabled, true
+}
+
+func startModelCatalogUpdaters(localModel bool, cfg *config.Config) {
+	startModels, startCodexClient := modelCatalogUpdaterPlan(localModel, cfg.Home.Enabled)
+	if startCodexClient {
+		registry.StartCodexClientModelsUpdater(context.Background())
+	}
+	if startModels {
+		if cfg.Timeouts.ModelRegistryFetchSeconds > 0 {
+			registry.SetModelsFetchTimeout(time.Duration(cfg.Timeouts.ModelRegistryFetchSeconds) * time.Second)
+		}
+		if cfg.Timeouts.ModelRegistryRefreshIntervalHours > 0 {
+			registry.SetModelsRefreshInterval(time.Duration(cfg.Timeouts.ModelRegistryRefreshIntervalHours) * time.Hour)
+		}
+		registry.StartModelsUpdater(context.Background())
+	} else if cfg.Home.Enabled && !localModel {
+		log.Info("Home mode: remote models.json updates disabled; Codex client model list follows Home model IDs")
 	}
 }

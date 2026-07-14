@@ -23,6 +23,9 @@ func TestParseOpenAIUsageChatCompletions(t *testing.T) {
 	if detail.CachedTokens != 4 {
 		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 4)
 	}
+	if detail.CacheReadTokens != 4 {
+		t.Fatalf("cache read tokens = %d, want %d", detail.CacheReadTokens, 4)
+	}
 	if detail.ReasoningTokens != 5 {
 		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 5)
 	}
@@ -43,8 +46,19 @@ func TestParseOpenAIUsageResponses(t *testing.T) {
 	if detail.CachedTokens != 7 {
 		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 7)
 	}
+	if detail.CacheReadTokens != 7 {
+		t.Fatalf("cache read tokens = %d, want %d", detail.CacheReadTokens, 7)
+	}
 	if detail.ReasoningTokens != 9 {
 		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 9)
+	}
+}
+
+func TestParseOpenAIUsageNormalizesCacheCreationAlias(t *testing.T) {
+	data := []byte(`{"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12,"input_tokens_details":{"cache_creation_tokens":4}}}`)
+	detail := ParseOpenAIUsage(data)
+	if detail.CacheCreationTokens != 4 {
+		t.Fatalf("cache creation tokens = %d, want 4", detail.CacheCreationTokens)
 	}
 }
 
@@ -80,6 +94,9 @@ func TestParseOpenAIStreamUsageResponsesFields(t *testing.T) {
 	}
 	if detail.CachedTokens != 3 {
 		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 3)
+	}
+	if detail.CacheReadTokens != 3 {
+		t.Fatalf("cache read tokens = %d, want %d", detail.CacheReadTokens, 3)
 	}
 	if detail.ReasoningTokens != 2 {
 		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 2)
@@ -126,8 +143,8 @@ func TestUsageReporterDefersTierOnlyUntilTokens(t *testing.T) {
 		TotalTokens:         3,
 		ResponseServiceTier: reporter.pendingResponseServiceTier,
 	}, false)
-	if record.RequestServiceTier != "request-default" {
-		t.Fatalf("RequestServiceTier = %q, want request-default", record.RequestServiceTier)
+	if record.RequestServiceTier != "" {
+		t.Fatalf("RequestServiceTier = %q, want empty deprecated alias", record.RequestServiceTier)
 	}
 	if record.ResponseServiceTier != "priority" {
 		t.Fatalf("ResponseServiceTier = %q, want priority", record.ResponseServiceTier)
@@ -194,6 +211,22 @@ func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 	}
 	if record.Latency > 3*time.Second {
 		t.Fatalf("latency = %v, want <= 3s", record.Latency)
+	}
+}
+
+func TestUsageReporterBuildRecordIncludesServiceTier(t *testing.T) {
+	ctx := usage.WithServiceTier(context.Background(), usage.AutoServiceTier)
+	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
+
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3, ResponseServiceTier: "default"}, false)
+	if record.ServiceTier != usage.AutoServiceTier {
+		t.Fatalf("service tier = %q, want %q", record.ServiceTier, usage.AutoServiceTier)
+	}
+	if record.RequestServiceTier != "" {
+		t.Fatalf("request service tier = %q, want empty deprecated alias", record.RequestServiceTier)
+	}
+	if record.ResponseServiceTier != "default" {
+		t.Fatalf("response service tier = %q, want default", record.ResponseServiceTier)
 	}
 }
 

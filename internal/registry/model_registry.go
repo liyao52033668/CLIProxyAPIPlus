@@ -81,7 +81,6 @@ type ModelConfig struct {
 	OverrideHeader map[string]string `json:"override_header,omitempty"`
 }
 
-
 type availableModelsCacheEntry struct {
 	models    []map[string]any
 	expiresAt time.Time
@@ -243,7 +242,6 @@ func ModelOverrideHeaders(modelID string, provider ...string) map[string]string 
 	}
 	return out
 }
-
 
 // SetHook sets an optional hook for observing model registration changes.
 func (r *ModelRegistry) SetHook(hook ModelRegistryHook) {

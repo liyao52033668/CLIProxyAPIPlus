@@ -99,6 +99,21 @@ func TestSummarizeVertexModels(t *testing.T) {
 	}
 }
 
+func TestModelSummariesIncludeDisplayName(t *testing.T) {
+	if one, two := SummarizeGeminiModels([]config.GeminiModel{{Name: "m", DisplayName: "One"}}), SummarizeGeminiModels([]config.GeminiModel{{Name: "m", DisplayName: "Two"}}); one.hash == two.hash {
+		t.Fatal("Gemini summary hash did not change with display name")
+	}
+	if one, two := SummarizeClaudeModels([]config.ClaudeModel{{Name: "m", DisplayName: "One"}}), SummarizeClaudeModels([]config.ClaudeModel{{Name: "m", DisplayName: "Two"}}); one.hash == two.hash {
+		t.Fatal("Claude summary hash did not change with display name")
+	}
+	if one, two := SummarizeCodexModels([]config.CodexModel{{Name: "m", DisplayName: "One"}}), SummarizeCodexModels([]config.CodexModel{{Name: "m", DisplayName: "Two"}}); one.hash == two.hash {
+		t.Fatal("Codex summary hash did not change with display name")
+	}
+	if one, two := SummarizeVertexModels([]config.VertexCompatModel{{Name: "m", DisplayName: "One"}}), SummarizeVertexModels([]config.VertexCompatModel{{Name: "m", DisplayName: "Two"}}); one.hash == two.hash {
+		t.Fatal("Vertex summary hash did not change with display name")
+	}
+}
+
 func expectContains(t *testing.T, list []string, target string) {
 	t.Helper()
 	if slices.Contains(list, target) {

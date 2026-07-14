@@ -7,12 +7,12 @@ package claude
 
 import (
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"strconv"
 	"strings"
 
+	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
@@ -130,9 +130,16 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 					return
 				}
 
-				signature := part.Get("signature").String()
-				if !isFernetLikeReasoningSignature(signature) {
-					return
+				rawSignature := part.Get("signature").String()
+				signature, ok := sigcompat.CompatibleSignatureForProvider(sigcompat.SignatureProviderGPT, rawSignature)
+				if !ok {
+					if !codexClaudeTargetAcceptsGrokSignature(modelName) {
+						return
+					}
+					if _, errInspect := sigcompat.InspectGrokEncryptedContent(rawSignature); errInspect != nil {
+						return
+					}
+					signature = rawSignature
 				}
 
 				flushMessage()
@@ -340,37 +347,9 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	return template
 }
 
-// isFernetLikeReasoningSignature checks only the encrypted_content envelope shape
-// observed in OpenAI reasoning signatures. It does not authenticate source or payload type.
-func isFernetLikeReasoningSignature(signature string) bool {
-	const (
-		fernetVersionLen = 1
-		fernetTimestamp  = 8
-		fernetIV         = 16
-		fernetHMAC       = 32
-		aesBlockSize     = 16
-	)
-
-	signature = strings.TrimSpace(signature)
-	if !strings.HasPrefix(signature, "gAAAA") {
-		return false
-	}
-
-	decoded, err := base64.URLEncoding.DecodeString(signature)
-	if err != nil {
-		decoded, err = base64.RawURLEncoding.DecodeString(signature)
-		if err != nil {
-			return false
-		}
-	}
-
-	minLen := fernetVersionLen + fernetTimestamp + fernetIV + aesBlockSize + fernetHMAC
-	if len(decoded) < minLen || decoded[0] != 0x80 {
-		return false
-	}
-
-	ciphertextLen := len(decoded) - fernetVersionLen - fernetTimestamp - fernetIV - fernetHMAC
-	return ciphertextLen > 0 && ciphertextLen%aesBlockSize == 0
+func codexClaudeTargetAcceptsGrokSignature(modelName string) bool {
+	baseModel := strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(modelName).ModelName))
+	return strings.Contains(baseModel, "grok")
 }
 
 // shortenCodexCallIDIfNeeded keeps Claude tool IDs within the OpenAI Responses

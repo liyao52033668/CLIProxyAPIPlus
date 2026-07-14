@@ -15,6 +15,13 @@ import (
 	"gorm.io/gorm"
 )
 
+const (
+	// DefaultServiceTier is retained for direct SDK and non-OpenAI usage callers.
+	DefaultServiceTier = "default"
+	// AutoServiceTier is the OpenAI request semantics when service_tier is omitted.
+	AutoServiceTier = "auto"
+)
+
 // Record contains the usage statistics captured for a single provider request.
 type Record struct {
 	Provider  string
@@ -27,9 +34,10 @@ type Record struct {
 	Source    string
 	// ReasoningEffort stores the translated upstream thinking level for request event logs.
 	ReasoningEffort string
-	// ServiceTier stores the client-requested service tier for request event logs.
+	// ServiceTier stores the client-requested service tier.
 	ServiceTier string
-	// RequestServiceTier explicitly aliases the client-requested service tier.
+	// RequestServiceTier is a deprecated input-only alias retained for existing
+	// plugin callers. It is normalized into ServiceTier and never emitted.
 	RequestServiceTier string
 	// ResponseServiceTier stores the final tier reported by the upstream response.
 	ResponseServiceTier string
@@ -122,31 +130,39 @@ func ReasoningEffortFromContext(ctx context.Context) string {
 	}
 }
 
-// WithServiceTier stores the resolved service tier label for usage sinks.
+// WithServiceTier stores the client-requested service tier for usage sinks.
 func WithServiceTier(ctx context.Context, tier string) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	tier = strings.TrimSpace(tier)
 	if tier == "" {
-		return ctx
+		tier = DefaultServiceTier
 	}
 	return context.WithValue(ctx, serviceTierContextKey{}, tier)
 }
 
-// ServiceTierFromContext returns the service tier stored in ctx.
+// ServiceTierFromContext returns the client-requested service tier stored in ctx.
 func ServiceTierFromContext(ctx context.Context) string {
 	if ctx == nil {
-		return ""
+		return DefaultServiceTier
 	}
 	raw := ctx.Value(serviceTierContextKey{})
 	switch value := raw.(type) {
 	case string:
-		return strings.TrimSpace(value)
+		tier := strings.TrimSpace(value)
+		if tier == "" {
+			return DefaultServiceTier
+		}
+		return tier
 	case []byte:
-		return strings.TrimSpace(string(value))
+		tier := strings.TrimSpace(string(value))
+		if tier == "" {
+			return DefaultServiceTier
+		}
+		return tier
 	default:
-		return ""
+		return DefaultServiceTier
 	}
 }
 

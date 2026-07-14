@@ -203,3 +203,45 @@ func TestComputeCodexModelsHash_Deterministic(t *testing.T) {
 		t.Fatalf("expected different hash when models change, got %s", h3)
 	}
 }
+
+func TestComputeModelHashesIncludeDisplayName(t *testing.T) {
+	tests := []struct {
+		name    string
+		base    string
+		changed string
+	}{
+		{
+			name:    "openai compatibility",
+			base:    ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "m", Alias: "a", DisplayName: "One"}}),
+			changed: ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "m", Alias: "a", DisplayName: "Two"}}),
+		},
+		{
+			name:    "vertex",
+			base:    ComputeVertexCompatModelsHash([]config.VertexCompatModel{{Name: "m", Alias: "a", DisplayName: "One"}}),
+			changed: ComputeVertexCompatModelsHash([]config.VertexCompatModel{{Name: "m", Alias: "a", DisplayName: "Two"}}),
+		},
+		{
+			name:    "claude",
+			base:    ComputeClaudeModelsHash([]config.ClaudeModel{{Name: "m", Alias: "a", DisplayName: "One"}}),
+			changed: ComputeClaudeModelsHash([]config.ClaudeModel{{Name: "m", Alias: "a", DisplayName: "Two"}}),
+		},
+		{
+			name:    "codex",
+			base:    ComputeCodexModelsHash([]config.CodexModel{{Name: "m", Alias: "a", DisplayName: "One"}}),
+			changed: ComputeCodexModelsHash([]config.CodexModel{{Name: "m", Alias: "a", DisplayName: "Two"}}),
+		},
+		{
+			name:    "gemini",
+			base:    ComputeGeminiModelsHash([]config.GeminiModel{{Name: "m", Alias: "a", DisplayName: "One"}}),
+			changed: ComputeGeminiModelsHash([]config.GeminiModel{{Name: "m", Alias: "a", DisplayName: "Two"}}),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if test.base == "" || test.base == test.changed {
+				t.Fatalf("display name must change model hash: %q / %q", test.base, test.changed)
+			}
+		})
+	}
+}

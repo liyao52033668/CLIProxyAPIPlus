@@ -509,6 +509,13 @@ func (a *Auth) AccountInfo() (string, string) {
 	if a == nil {
 		return "", ""
 	}
+	explicitKind := normalizeAuthKind(authAttribute(a, AttributeAuthKind))
+	if explicitKind == "" {
+		explicitKind = normalizeAuthKind(authMetadataString(a, AttributeAuthKind))
+	}
+	if explicitKind == AuthKindAPIKey {
+		return "api_key", authAttribute(a, AttributeAPIKey)
+	}
 	// For Gemini CLI, include project ID in the OAuth account info if present.
 	if strings.ToLower(a.Provider) == "gemini-cli" {
 		if a.Metadata != nil {
@@ -563,6 +570,9 @@ func (a *Auth) AccountInfo() (string, string) {
 				return "oauth", email
 			}
 		}
+	}
+	if explicitKind == AuthKindOAuth {
+		return "oauth", ""
 	}
 	// Fall back to API key (API-key auth)
 	if a.Attributes != nil {

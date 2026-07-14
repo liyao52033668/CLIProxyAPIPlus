@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"bytes"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -121,6 +122,67 @@ func TestExtractWebsocketTimelineUsesOverride(t *testing.T) {
 	}
 }
 
+func TestFinalizeBuildsDeferredAPIRequestOnlyForForcedErrorLog(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	built := 0
+	c.Set(logging.DeferredAPIRequestContextKey, []logging.DeferredAPIRequest{func() []byte {
+		built++
+		return []byte("deferred-api-request")
+	}})
+	requestLogger := &testRequestLogger{enabled: false}
+	wrapper := NewResponseWriterWrapper(c.Writer, requestLogger, &RequestInfo{
+		URL:       "/v1/responses",
+		Method:    "POST",
+		Headers:   map[string][]string{"Content-Type": {"application/json"}},
+		RequestID: "req-1",
+		Timestamp: time.Now(),
+	})
+	wrapper.logOnErrorOnly = true
+	wrapper.statusCode = http.StatusBadRequest
+
+	if err := wrapper.Finalize(c); err != nil {
+		t.Fatalf("Finalize error: %v", err)
+	}
+	if built != 1 {
+		t.Fatalf("deferred API request build count = %d, want 1", built)
+	}
+	if string(requestLogger.apiRequest) != "deferred-api-request" {
+		t.Fatalf("logged API request = %q", requestLogger.apiRequest)
+	}
+}
+
+func TestFinalizeDoesNotBuildDeferredAPIRequestForSuccess(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	built := 0
+	c.Set(logging.DeferredAPIRequestContextKey, []logging.DeferredAPIRequest{func() []byte {
+		built++
+		return []byte("deferred-api-request")
+	}})
+	requestLogger := &testRequestLogger{enabled: false}
+	wrapper := NewResponseWriterWrapper(c.Writer, requestLogger, &RequestInfo{
+		URL:       "/v1/responses",
+		Method:    "POST",
+		RequestID: "req-1",
+		Timestamp: time.Now(),
+	})
+	wrapper.logOnErrorOnly = true
+	wrapper.statusCode = http.StatusOK
+
+	if err := wrapper.Finalize(c); err != nil {
+		t.Fatalf("Finalize error: %v", err)
+	}
+	if built != 0 {
+		t.Fatalf("deferred API request build count = %d, want 0", built)
+	}
+	if requestLogger.logCalls != 0 {
+		t.Fatalf("log calls = %d, want 0", requestLogger.logCalls)
+	}
+}
+
 func TestFinalizeStreamingWritesAPIWebsocketTimeline(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
@@ -155,10 +217,19 @@ func TestFinalizeStreamingWritesAPIWebsocketTimeline(t *testing.T) {
 }
 
 type testRequestLogger struct {
-	enabled bool
+	enabled    bool
+	logCalls   int
+	apiRequest []byte
 }
 
 func (l *testRequestLogger) LogRequest(string, string, map[string][]string, []byte, int, map[string][]string, []byte, []byte, []byte, []byte, []byte, []*interfaces.ErrorMessage, string, time.Time, time.Time) error {
+	l.logCalls++
+	return nil
+}
+
+func (l *testRequestLogger) LogRequestWithOptions(_ string, _ string, _ map[string][]string, _ []byte, _ int, _ map[string][]string, _ []byte, _ []byte, apiRequest []byte, _ []byte, _ []byte, _ []*interfaces.ErrorMessage, _ bool, _ string, _ time.Time, _ time.Time) error {
+	l.logCalls++
+	l.apiRequest = bytes.Clone(apiRequest)
 	return nil
 }
 

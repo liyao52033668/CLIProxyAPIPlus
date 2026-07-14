@@ -161,6 +161,12 @@ func TestOpenAICompatSignature_StableAndNormalized(t *testing.T) {
 	if sigC := openAICompatSignature(c); sigC == sigB {
 		t.Fatalf("expected signature to change when models change, got %s", sigC)
 	}
+
+	d := b
+	d.Models[0].DisplayName = "Configured Name"
+	if sigD := openAICompatSignature(d); sigD == sigB {
+		t.Fatalf("expected signature to change when display name changes, got %s", sigD)
+	}
 }
 
 func TestCountOpenAIModelsSkipsBlanks(t *testing.T) {

@@ -98,8 +98,6 @@ func TestRedisOptionsHomeTLSEnabledUsesExplicitServerName(t *testing.T) {
 		},
 	}, 0, 0)
 
-
-
 	client.mu.Lock()
 	options, err := client.redisOptionsLocked("127.0.0.1:444")
 	client.mu.Unlock()

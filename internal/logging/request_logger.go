@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -31,6 +32,134 @@ import (
 )
 
 var requestLogID atomic.Uint64
+
+const DeferredAPIRequestContextKey = "DEFERRED_API_REQUEST"
+
+type DeferredAPIRequest func() []byte
+
+type FileBodySource struct {
+	mu      sync.Mutex
+	dir     string
+	paths   []string
+	cleaned bool
+}
+
+func NewFileBodySourceInDir(baseDir, prefix string) (*FileBodySource, error) {
+	baseDir = strings.TrimSpace(baseDir)
+	if baseDir == "" {
+		return nil, fmt.Errorf("base directory is required")
+	}
+	if errMkdir := os.MkdirAll(baseDir, 0755); errMkdir != nil {
+		return nil, errMkdir
+	}
+	dir, errCreate := os.MkdirTemp(baseDir, "request-log-parts-"+sanitizeTempPrefix(prefix)+"-*")
+	if errCreate != nil {
+		return nil, errCreate
+	}
+	return &FileBodySource{dir: dir}, nil
+}
+
+func sanitizeTempPrefix(prefix string) string {
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" {
+		return "log"
+	}
+	var builder strings.Builder
+	for _, r := range prefix {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			builder.WriteRune(r)
+		default:
+			builder.WriteByte('-')
+		}
+	}
+	out := strings.Trim(builder.String(), "-_")
+	if out == "" {
+		return "log"
+	}
+	return out
+}
+
+func (s *FileBodySource) CreatePart(prefix string) (*os.File, error) {
+	if s == nil {
+		return nil, fmt.Errorf("file body source is nil")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cleaned {
+		return nil, fmt.Errorf("file body source has been cleaned")
+	}
+	if errMkdir := os.MkdirAll(s.dir, 0755); errMkdir != nil {
+		return nil, errMkdir
+	}
+	file, errCreate := os.CreateTemp(s.dir, sanitizeTempPrefix(prefix)+"-*.tmp")
+	if errCreate != nil {
+		return nil, errCreate
+	}
+	s.paths = append(s.paths, file.Name())
+	return file, nil
+}
+
+func (s *FileBodySource) Paths() []string {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	paths := make([]string, len(s.paths))
+	copy(paths, s.paths)
+	return paths
+}
+
+func (s *FileBodySource) WriteTo(w io.Writer) error {
+	if s == nil || w == nil {
+		return nil
+	}
+	for _, path := range s.Paths() {
+		file, errOpen := os.Open(path)
+		if errOpen != nil {
+			if os.IsNotExist(errOpen) {
+				continue
+			}
+			return errOpen
+		}
+		_, errCopy := io.Copy(w, file)
+		if errClose := file.Close(); errClose != nil && errCopy == nil {
+			errCopy = errClose
+		}
+		if errCopy != nil {
+			return errCopy
+		}
+	}
+	return nil
+}
+
+func (s *FileBodySource) Bytes() ([]byte, error) {
+	var body bytes.Buffer
+	if errWrite := s.WriteTo(&body); errWrite != nil {
+		return nil, errWrite
+	}
+	return body.Bytes(), nil
+}
+
+func (s *FileBodySource) Cleanup() error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	if s.cleaned {
+		s.mu.Unlock()
+		return nil
+	}
+	dir := s.dir
+	s.paths = nil
+	s.cleaned = true
+	s.mu.Unlock()
+	if dir == "" {
+		return nil
+	}
+	return os.RemoveAll(dir)
+}
 
 type homeRequestLogClient interface {
 	HeartbeatOK() bool
@@ -243,6 +372,13 @@ func NewFileRequestLogger(enabled bool, logsDir string, configDir string, errorL
 
 // SetHomeEnabled toggles home request-log forwarding.
 // When enabled, request logs are not written to disk and are instead forwarded to home via Redis RESP.
+func (l *FileRequestLogger) NewFileBodySource(prefix string) (*FileBodySource, error) {
+	if l == nil {
+		return nil, fmt.Errorf("file request logger is nil")
+	}
+	return NewFileBodySourceInDir(l.logsDir, prefix)
+}
+
 func (l *FileRequestLogger) SetHomeEnabled(enabled bool) {
 	if l == nil {
 		return

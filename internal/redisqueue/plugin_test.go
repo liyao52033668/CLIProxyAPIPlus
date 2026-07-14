@@ -25,15 +25,18 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 
 		plugin := &usageQueuePlugin{}
 		plugin.HandleUsage(ctx, coreusage.Record{
-			Provider:    "openai",
-			Model:       "gpt-5.4",
-			Alias:       "client-gpt",
-			APIKey:      "test-key",
-			AuthIndex:   "0",
-			AuthType:    "apikey",
-			Source:      "user@example.com",
-			RequestedAt: time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
-			Latency:     1500 * time.Millisecond,
+			Provider:            "openai",
+			Model:               "gpt-5.4",
+			Alias:               "client-gpt",
+			APIKey:              "test-key",
+			AuthIndex:           "0",
+			AuthType:            "apikey",
+			Source:              "user@example.com",
+			ReasoningEffort:     "medium",
+			ServiceTier:         "auto",
+			ResponseServiceTier: "default",
+			RequestedAt:         time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
+			Latency:             1500 * time.Millisecond,
 			Detail: coreusage.Detail{
 				InputTokens:  10,
 				OutputTokens: 20,
@@ -51,10 +54,51 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 		requireStringField(t, payload, "auth_type", "apikey")
 		requireMissingField(t, payload, "user_api_key")
 		requireStringField(t, payload, "request_id", "ctx-request-id")
+		requireStringField(t, payload, "service_tier", "auto")
+		requireMissingField(t, payload, "request_service_tier")
+		requireStringField(t, payload, "response_service_tier", "default")
+		requireTokensBoolField(t, payload, "cache_read_tokens_present", true)
 		requireHeaderField(t, payload, "response_headers", "X-Upstream-Request-Id", []string{"upstream-req-1"})
 		requireHeaderField(t, payload, "response_headers", "Retry-After", []string{"30"})
 		requireBoolField(t, payload, "failed", false)
 		requireFailField(t, payload, http.StatusOK, "")
+	})
+}
+
+func TestUsageQueuePluginAcceptsDeprecatedRequestTierRecordField(t *testing.T) {
+	withEnabledQueue(t, func() {
+		ctx := internallogging.WithResponseStatusHolder(context.Background())
+		internallogging.SetResponseStatus(ctx, http.StatusOK)
+
+		(&usageQueuePlugin{}).HandleUsage(ctx, coreusage.Record{
+			Provider:           "openai",
+			Model:              "gpt-5.4",
+			RequestServiceTier: "priority",
+			Detail:             coreusage.Detail{InputTokens: 1, TotalTokens: 1},
+		})
+
+		payload := popSinglePayload(t)
+		requireStringField(t, payload, "service_tier", "priority")
+		requireMissingField(t, payload, "request_service_tier")
+	})
+}
+
+func TestUsageQueuePluginMarksCanonicalZeroCacheRead(t *testing.T) {
+	withEnabledQueue(t, func() {
+		ctx := internallogging.WithResponseStatusHolder(context.Background())
+		internallogging.SetResponseStatus(ctx, http.StatusOK)
+
+		(&usageQueuePlugin{}).HandleUsage(ctx, coreusage.Record{
+			Provider: "openai",
+			Model:    "gpt-5.4",
+			Detail: coreusage.Detail{
+				CachedTokens:    13,
+				CacheReadTokens: 0,
+			},
+		})
+
+		payload := popSinglePayload(t)
+		requireTokensBoolField(t, payload, "cache_read_tokens_present", true)
 	})
 }
 
@@ -291,6 +335,20 @@ type pluginFunc func(context.Context, coreusage.Record)
 
 func (fn pluginFunc) HandleUsage(ctx context.Context, record coreusage.Record) {
 	fn(ctx, record)
+}
+
+func requireTokensBoolField(t *testing.T, payload map[string]json.RawMessage, key string, want bool) {
+	t.Helper()
+
+	raw, ok := payload["tokens"]
+	if !ok {
+		t.Fatal("payload missing tokens")
+	}
+	var tokens map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &tokens); err != nil {
+		t.Fatalf("unmarshal tokens: %v", err)
+	}
+	requireBoolField(t, tokens, key, want)
 }
 
 func requireBoolField(t *testing.T, payload map[string]json.RawMessage, key string, want bool) {

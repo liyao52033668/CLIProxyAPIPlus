@@ -50,13 +50,14 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	requestID := strings.TrimSpace(internallogging.GetRequestID(ctx))
 
 	tokens := tokenStats{
-		InputTokens:         record.Detail.InputTokens,
-		OutputTokens:        record.Detail.OutputTokens,
-		ReasoningTokens:     record.Detail.ReasoningTokens,
-		CachedTokens:        record.Detail.CachedTokens,
-		CacheReadTokens:     record.Detail.CacheReadTokens,
-		CacheCreationTokens: record.Detail.CacheCreationTokens,
-		TotalTokens:         record.Detail.TotalTokens,
+		InputTokens:            record.Detail.InputTokens,
+		OutputTokens:           record.Detail.OutputTokens,
+		ReasoningTokens:        record.Detail.ReasoningTokens,
+		CachedTokens:           record.Detail.CachedTokens,
+		CacheReadTokens:        record.Detail.CacheReadTokens,
+		CacheReadTokensPresent: true,
+		CacheCreationTokens:    record.Detail.CacheCreationTokens,
+		TotalTokens:            record.Detail.TotalTokens,
 	}
 	if tokens.TotalTokens == 0 {
 		tokens.TotalTokens = tokens.InputTokens + tokens.OutputTokens + tokens.ReasoningTokens
@@ -82,12 +83,12 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		ResponseHeaders: record.ResponseHeaders,
 	}
 
-	requestServiceTier := strings.TrimSpace(record.RequestServiceTier)
-	if requestServiceTier == "" {
-		requestServiceTier = strings.TrimSpace(record.ServiceTier)
+	serviceTier := strings.TrimSpace(record.ServiceTier)
+	if serviceTier == "" {
+		serviceTier = strings.TrimSpace(record.RequestServiceTier)
 	}
-	if requestServiceTier == "" {
-		requestServiceTier = coreusage.ServiceTierFromContext(ctx)
+	if serviceTier == "" {
+		serviceTier = coreusage.ServiceTierFromContext(ctx)
 	}
 	responseServiceTier := strings.TrimSpace(record.ResponseServiceTier)
 	if responseServiceTier == "" {
@@ -103,8 +104,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		AuthType:            authType,
 		APIKey:              apiKey,
 		RequestID:           requestID,
-		ServiceTier:         requestServiceTier,
-		RequestServiceTier:  requestServiceTier,
+		ServiceTier:         serviceTier,
 		ResponseServiceTier: responseServiceTier,
 	})
 	if err != nil {
@@ -122,8 +122,7 @@ type queuedUsageDetail struct {
 	AuthType            string `json:"auth_type"`
 	APIKey              string `json:"api_key"`
 	RequestID           string `json:"request_id"`
-	ServiceTier         string `json:"service_tier,omitempty"`
-	RequestServiceTier  string `json:"request_service_tier,omitempty"`
+	ServiceTier         string `json:"service_tier"`
 	ResponseServiceTier string `json:"response_service_tier,omitempty"`
 }
 
@@ -139,13 +138,14 @@ type requestDetail struct {
 }
 
 type tokenStats struct {
-	InputTokens         int64 `json:"input_tokens"`
-	OutputTokens        int64 `json:"output_tokens"`
-	ReasoningTokens     int64 `json:"reasoning_tokens"`
-	CachedTokens        int64 `json:"cached_tokens"`
-	CacheReadTokens     int64 `json:"cache_read_tokens"`
-	CacheCreationTokens int64 `json:"cache_creation_tokens"`
-	TotalTokens         int64 `json:"total_tokens"`
+	InputTokens            int64 `json:"input_tokens"`
+	OutputTokens           int64 `json:"output_tokens"`
+	ReasoningTokens        int64 `json:"reasoning_tokens"`
+	CachedTokens           int64 `json:"cached_tokens"`
+	CacheReadTokens        int64 `json:"cache_read_tokens"`
+	CacheReadTokensPresent bool  `json:"cache_read_tokens_present"`
+	CacheCreationTokens    int64 `json:"cache_creation_tokens"`
+	TotalTokens            int64 `json:"total_tokens"`
 }
 
 type failDetail struct {

@@ -901,8 +901,9 @@ func moveCodexSystemMessagesToInstructions(body []byte, path string) ([]byte, []
 	moved := make([]string, 0)
 	changed := false
 	for _, item := range items {
+		itemType := strings.TrimSpace(item.Get("type").String())
 		role := strings.ToLower(strings.TrimSpace(item.Get("role").String()))
-		if role == "system" || role == "developer" {
+		if (itemType == "" || itemType == "message") && (role == "system" || role == "developer") {
 			changed = true
 			if text := codexInstructionTextFromMessage(item); text != "" {
 				moved = append(moved, text)
