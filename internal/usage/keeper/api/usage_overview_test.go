@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -26,6 +27,12 @@ func (s *usageFilterStub) GetUsageWithFilter(_ context.Context, filter servicedt
 	return s.usage, s.err
 }
 
+func (s *usageFilterStub) GetUsageAggregateWithFilter(_ context.Context, filter servicedto.UsageFilter) (*dto.StatisticsSnapshot, error) {
+	s.lastFilter = filter
+	s.filterCalls++
+	return s.usage, s.err
+}
+
 func (s *usageFilterStub) GetUsageOverview(_ context.Context, filter servicedto.UsageFilter) (*servicedto.UsageOverviewSnapshot, error) {
 	s.lastFilter = filter
 	s.overviewCalls++
@@ -44,7 +51,15 @@ func (s *usageFilterStub) GetUsageAnalysis(context.Context, servicedto.UsageFilt
 	return nil, s.err
 }
 
+func (s *usageFilterStub) ExportUsageSnapshot(context.Context, io.Writer, time.Time, servicedto.UsageFilter) error {
+	return s.err
+}
+
 func (s *usageFilterStub) ImportUsageSnapshot(context.Context, *dto.StatisticsSnapshot) (*servicedto.UsageImportResult, error) {
+	return nil, s.err
+}
+
+func (s *usageFilterStub) ImportUsageSnapshotStream(context.Context, io.Reader) (*servicedto.UsageImportResult, error) {
 	return nil, s.err
 }
 

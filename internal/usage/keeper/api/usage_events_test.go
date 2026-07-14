@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -23,6 +24,10 @@ type usageEventsStub struct {
 }
 
 func (s *usageEventsStub) GetUsageWithFilter(context.Context, servicedto.UsageFilter) (*dto.StatisticsSnapshot, error) {
+	return nil, nil
+}
+
+func (s *usageEventsStub) GetUsageAggregateWithFilter(context.Context, servicedto.UsageFilter) (*dto.StatisticsSnapshot, error) {
 	return nil, nil
 }
 
@@ -52,7 +57,15 @@ func (s *usageEventsStub) GetUsageAnalysis(context.Context, servicedto.UsageFilt
 	return nil, s.err
 }
 
+func (s *usageEventsStub) ExportUsageSnapshot(context.Context, io.Writer, time.Time, servicedto.UsageFilter) error {
+	return s.err
+}
+
 func (s *usageEventsStub) ImportUsageSnapshot(context.Context, *dto.StatisticsSnapshot) (*servicedto.UsageImportResult, error) {
+	return nil, s.err
+}
+
+func (s *usageEventsStub) ImportUsageSnapshotStream(context.Context, io.Reader) (*servicedto.UsageImportResult, error) {
 	return nil, s.err
 }
 

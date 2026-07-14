@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -15,6 +17,7 @@ import (
 	repodto "github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/repository/dto"
 	keeperservice "github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/service"
 	dto "github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/service/dto"
+	"github.com/sirupsen/logrus"
 )
 
 // Keep in sync with internal/usage/keeper/api/usage_filter.go.
@@ -24,6 +27,15 @@ var allowedManagementUsagePageSizes = map[int]struct{}{
 	100:  {},
 	500:  {},
 	1000: {},
+}
+
+var managementUsageRangeDurations = map[string]time.Duration{
+	"4h":  4 * time.Hour,
+	"8h":  8 * time.Hour,
+	"12h": 12 * time.Hour,
+	"24h": 24 * time.Hour,
+	"7d":  7 * 24 * time.Hour,
+	"30d": 30 * 24 * time.Hour,
 }
 
 type usageExportPayload struct {
@@ -60,21 +72,38 @@ func (h *Handler) ExportUsageStatistics(c *gin.Context) {
 		return
 	}
 
-	snapshot, err := h.usageService.GetUsageWithFilter(c.Request.Context(), dto.UsageFilter{})
+	filter, errFilter := buildUsageFilterFromRequest(c)
+	if errFilter != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errFilter.Error()})
+		return
+	}
+
+	exportFile, err := os.CreateTemp("", "cli-proxy-usage-export-*.json")
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-
-	payload := repodto.StatisticsSnapshot{}
-	if snapshot != nil {
-		payload = *snapshot
+	exportPath := exportFile.Name()
+	defer func() {
+		if errClose := exportFile.Close(); errClose != nil {
+			logrus.WithError(errClose).Error("failed to close usage export file")
+		}
+		if errRemove := os.Remove(exportPath); errRemove != nil && !errors.Is(errRemove, os.ErrNotExist) {
+			logrus.WithError(errRemove).Error("failed to remove usage export file")
+		}
+	}()
+	if err = h.usageService.ExportUsageSnapshot(c.Request.Context(), exportFile, time.Now().UTC(), filter); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
 	}
-	c.JSON(http.StatusOK, usageExportPayload{
-		Version:    2,
-		ExportedAt: time.Now().UTC(),
-		Usage:      payload,
-	})
+	if _, err = exportFile.Seek(0, io.SeekStart); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.Header("Content-Type", "application/json; charset=utf-8")
+	if _, err = io.Copy(c.Writer, exportFile); err != nil {
+		logrus.WithError(err).Error("failed to write usage export response")
+	}
 }
 
 // ImportUsageStatistics imports a previously exported usage snapshot into database storage.
@@ -84,36 +113,20 @@ func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 		return
 	}
 
-	data, err := c.GetRawData()
+	result, err := h.usageService.ImportUsageSnapshotStream(c.Request.Context(), c.Request.Body)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to read request body"})
-		return
-	}
-
-	var payload usageImportPayload
-	if err := json.Unmarshal(data, &payload); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json"})
-		return
-	}
-	if payload.Version != 0 && payload.Version != 1 && payload.Version != 2 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported version"})
-		return
-	}
-	if payload.Usage == nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "usage snapshot is required"})
-		return
-	}
-
-	result, err := h.usageService.ImportUsageSnapshot(c.Request.Context(), payload.Usage)
-	if err != nil {
-		if errors.Is(err, keeperservice.ErrInvalidUsageImportSnapshot) {
+		switch {
+		case errors.Is(err, keeperservice.ErrInvalidUsageImportJSON):
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json"})
+		case errors.Is(err, keeperservice.ErrUnsupportedUsageImportVersion):
+			c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported version"})
+		case errors.Is(err, keeperservice.ErrInvalidUsageImportSnapshot):
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-
 	c.JSON(http.StatusOK, gin.H{
 		"added":           result.Added,
 		"skipped":         result.Skipped,
@@ -138,7 +151,7 @@ func (h *Handler) GetUsageQueue(c *gin.Context) {
 	c.JSON(http.StatusOK, payload)
 }
 
-// GetDBUsageStatistics returns usage statistics from database with optional time range filter.
+// GetDBUsageStatistics returns aggregate usage statistics without request details.
 func (h *Handler) GetDBUsageStatistics(c *gin.Context) {
 	if h == nil || h.usageService == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "usage service not available"})
@@ -150,7 +163,7 @@ func (h *Handler) GetDBUsageStatistics(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errFilter.Error()})
 		return
 	}
-	snapshot, err := h.usageService.GetUsageWithFilter(c.Request.Context(), filter)
+	snapshot, err := h.usageService.GetUsageAggregateWithFilter(c.Request.Context(), filter)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -253,6 +266,37 @@ func parseUsageQueueCount(raw string) (int, error) {
 	return count, nil
 }
 
+func applyManagementUsageRange(filter *dto.UsageFilter, anchor time.Time) error {
+	if filter == nil {
+		return nil
+	}
+
+	switch filter.Range {
+	case "all":
+		return nil
+	case "today":
+		localAnchor := anchor.In(time.Local)
+		localStart := time.Date(localAnchor.Year(), localAnchor.Month(), localAnchor.Day(), 0, 0, 0, 0, time.Local)
+		startTime := localStart.UTC()
+		endTime := localStart.AddDate(0, 0, 1).Add(-time.Nanosecond).UTC()
+		filter.StartTime = &startTime
+		filter.EndTime = &endTime
+		return nil
+	case "custom":
+		return fmt.Errorf("custom range requires start_time and end_time")
+	default:
+		duration, ok := managementUsageRangeDurations[filter.Range]
+		if !ok {
+			return fmt.Errorf("unsupported usage range %q", filter.Range)
+		}
+		endTime := anchor.UTC()
+		startTime := endTime.Add(-duration)
+		filter.StartTime = &startTime
+		filter.EndTime = &endTime
+		return nil
+	}
+}
+
 // buildUsageFilterFromRequest parses management usage query parameters with
 // strict validation so invalid filters fail closed instead of being ignored.
 func buildUsageFilterFromRequest(c *gin.Context) (dto.UsageFilter, error) {
@@ -261,6 +305,7 @@ func buildUsageFilterFromRequest(c *gin.Context) (dto.UsageFilter, error) {
 	}
 
 	filter := dto.UsageFilter{
+		Range:    "all",
 		Page:     1,
 		PageSize: dto.DefaultUsageEventsLimit,
 		Limit:    dto.DefaultUsageEventsLimit,
@@ -269,12 +314,18 @@ func buildUsageFilterFromRequest(c *gin.Context) (dto.UsageFilter, error) {
 	if rangeVal := strings.TrimSpace(c.Query("range")); rangeVal != "" {
 		filter.Range = rangeVal
 	}
+	if filter.Range != "all" && filter.Range != "today" && filter.Range != "custom" {
+		if _, ok := managementUsageRangeDurations[filter.Range]; !ok {
+			return dto.UsageFilter{}, fmt.Errorf("unsupported usage range %q", filter.Range)
+		}
+	}
 
 	if startTimeStr := strings.TrimSpace(c.Query("start_time")); startTimeStr != "" {
 		t, err := time.Parse(time.RFC3339, startTimeStr)
 		if err != nil {
 			return dto.UsageFilter{}, fmt.Errorf("invalid start_time %q", startTimeStr)
 		}
+		t = t.UTC()
 		filter.StartTime = &t
 	}
 
@@ -283,11 +334,19 @@ func buildUsageFilterFromRequest(c *gin.Context) (dto.UsageFilter, error) {
 		if err != nil {
 			return dto.UsageFilter{}, fmt.Errorf("invalid end_time %q", endTimeStr)
 		}
+		t = t.UTC()
 		filter.EndTime = &t
 	}
 
 	if filter.StartTime != nil && filter.EndTime != nil && filter.StartTime.After(*filter.EndTime) {
 		return dto.UsageFilter{}, fmt.Errorf("start_time must be before end_time")
+	}
+	if filter.StartTime == nil && filter.EndTime == nil {
+		if err := applyManagementUsageRange(&filter, time.Now()); err != nil {
+			return dto.UsageFilter{}, err
+		}
+	} else if filter.Range == "custom" && (filter.StartTime == nil || filter.EndTime == nil) {
+		return dto.UsageFilter{}, fmt.Errorf("custom range requires start_time and end_time")
 	}
 
 	if pageStr := strings.TrimSpace(c.Query("page")); pageStr != "" {

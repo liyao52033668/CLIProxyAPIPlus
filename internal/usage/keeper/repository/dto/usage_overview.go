@@ -2,7 +2,7 @@ package dto
 
 import "time"
 
-// UsageOverviewSummaryRecord 是 overview 的 summary 聚合结果。
+// UsageOverviewSummaryRecord is the repository-layer overview summary.
 type UsageOverviewSummaryRecord struct {
 	RequestCount    int64
 	TokenCount      int64
@@ -15,7 +15,7 @@ type UsageOverviewSummaryRecord struct {
 	ReasoningTokens int64
 }
 
-// UsageOverviewSeriesRecord 是 overview 的 series 聚合结果。
+// UsageOverviewSeriesRecord is the repository-layer overview series.
 type UsageOverviewSeriesRecord struct {
 	Requests        map[string]int64
 	Tokens          map[string]int64
@@ -29,7 +29,7 @@ type UsageOverviewSeriesRecord struct {
 	Models          map[string]UsageOverviewSeriesRecord
 }
 
-// UsageOverviewHealthBlockRecord 是 overview health 的单个时间块。
+// UsageOverviewHealthBlockRecord is one repository-layer health time block.
 type UsageOverviewHealthBlockRecord struct {
 	StartTime time.Time
 	EndTime   time.Time
@@ -38,7 +38,7 @@ type UsageOverviewHealthBlockRecord struct {
 	Rate      float64
 }
 
-// UsageOverviewHealthRecord 是 overview health 的聚合结果。
+// UsageOverviewHealthRecord is the repository-layer health aggregate.
 type UsageOverviewHealthRecord struct {
 	TotalSuccess  int64
 	TotalFailure  int64
@@ -59,14 +59,21 @@ type UsageKeyCountRecord struct {
 	Cost    float64
 }
 
+// UsageCredentialKey identifies one credential without losing its source association.
+type UsageCredentialKey struct {
+	Source    string
+	AuthIndex string
+}
+
 // UsageKeyStatsRecord aggregates request outcomes by auth_index and source.
 // The management UI uses this instead of replaying per-request details.
 type UsageKeyStatsRecord struct {
 	BySource    map[string]UsageKeyCountRecord
 	ByAuthIndex map[string]UsageKeyCountRecord
+	Credentials map[UsageCredentialKey]UsageKeyCountRecord
 }
 
-// UsageOverviewRecord 是仓储层的完整 usage overview 结果。
+// UsageOverviewRecord is the complete repository-layer usage overview result.
 type UsageOverviewRecord struct {
 	Usage        *StatisticsSnapshot
 	Summary      UsageOverviewSummaryRecord

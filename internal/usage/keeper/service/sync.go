@@ -166,8 +166,8 @@ func (s *SyncService) SyncMetadata(ctx context.Context) error {
 	return err
 }
 
-// PullRedisUsageInbox 是 Redis 同步的拉取阶段：只 LPOP 队列消息并原样写入 redis_usage_inboxes。
-// 这个阶段不解码消息、不写 usage_events，保证 Redis 消费和本地处理职责分离。
+// PullRedisUsageInbox only pops Redis messages and stores them unchanged in redis_usage_inboxes.
+// Decoding and usage_events persistence remain separate local processing responsibilities.
 func (s *SyncService) PullRedisUsageInbox(ctx context.Context) (*servicedto.RedisInboxPullResult, error) {
 	if err := s.validate(syncMetadataOptional); err != nil {
 		return nil, err
@@ -200,8 +200,8 @@ func (s *SyncService) PullRedisUsageInbox(ctx context.Context) (*servicedto.Redi
 	return &servicedto.RedisInboxPullResult{Status: "completed", InsertedRows: len(inboxRows)}, nil
 }
 
-// ProcessRedisUsageInbox 是 Redis 同步的本地处理阶段：只读取 pending/process_failed inbox 行并写入 usage_events。
-// 成功处理后仅用 usage_event_key 记录 inbox 与最终事件的关联。
+// ProcessRedisUsageInbox reads pending or process_failed inbox rows and writes usage_events.
+// Successfully processed rows retain only usage_event_key as the final event association.
 func (s *SyncService) ProcessRedisUsageInbox(ctx context.Context) (*servicedto.RedisBatchSyncResult, error) {
 	if err := s.validate(syncMetadataOptional); err != nil {
 		return nil, err
@@ -218,7 +218,7 @@ func (s *SyncService) ProcessRedisUsageInbox(ctx context.Context) (*servicedto.R
 	return s.processRedisInboxRows(processableRows, fetchedAt)
 }
 
-// CleanupRedisUsageInbox 只清理 Redis inbox 表，供测试和单独维护入口使用；每日任务使用 CleanupStorage 统一执行。
+// CleanupRedisUsageInbox only cleans the Redis inbox table for tests and standalone maintenance.
 func (s *SyncService) CleanupRedisUsageInbox(ctx context.Context) error {
 	if err := s.validate(syncMetadataOptional); err != nil {
 		return err
@@ -227,7 +227,7 @@ func (s *SyncService) CleanupRedisUsageInbox(ctx context.Context) error {
 	return err
 }
 
-// CleanupStorage 是每日 03:00 维护任务调用的统一入口：先清 Redis inbox，最后 VACUUM 收缩 SQLite。
+// CleanupStorage runs scheduled usage retention and storage maintenance.
 func (s *SyncService) CleanupStorage(ctx context.Context) error {
 	if err := s.validate(syncMetadataOptional); err != nil {
 		return err
@@ -236,8 +236,8 @@ func (s *SyncService) CleanupStorage(ctx context.Context) error {
 	return err
 }
 
-// SyncRedisBatch 保留为兼容入口：先处理本地存量 inbox，空了再拉一次 Redis 并立即处理。
-// 后台任务不要调用它，后台必须使用拆分后的 PullRedisUsageInbox、ProcessRedisUsageInbox 和 CleanupStorage。
+// SyncRedisBatch remains a compatibility entry point that drains local inbox rows before one Redis pull.
+// Background jobs must use PullRedisUsageInbox, ProcessRedisUsageInbox, and CleanupStorage separately.
 func (s *SyncService) SyncRedisBatch(ctx context.Context) (*servicedto.RedisBatchSyncResult, error) {
 	if result, err := s.ProcessRedisUsageInbox(ctx); err != nil || result == nil || !result.Empty {
 		return result, err
@@ -248,8 +248,8 @@ func (s *SyncService) SyncRedisBatch(ctx context.Context) (*servicedto.RedisBatc
 	return s.ProcessRedisUsageInbox(ctx)
 }
 
-// processRedisInboxRows 只从已落库的原始消息解码和写入事件，坏消息会标记为 decode_failed，不阻塞同批其它数据。
-// 可解码但入库失败的消息标记为 process_failed，后续 ProcessRedisUsageInbox 会按 id 顺序重试。
+// processRedisInboxRows decodes stored messages and writes events without blocking valid rows on decode failures.
+// Persistence failures become process_failed rows that ProcessRedisUsageInbox retries in ID order.
 func (s *SyncService) processRedisInboxRows(inboxRows []entities.RedisUsageInbox, fetchedAt time.Time) (*servicedto.RedisBatchSyncResult, error) {
 	logrus.WithField("row_count", len(inboxRows)).Debug("redis usage inbox processing started")
 	validRows := make([]entities.RedisUsageInbox, 0, len(inboxRows))
@@ -319,7 +319,7 @@ func (s *SyncService) processRedisInboxRows(inboxRows []entities.RedisUsageInbox
 	}, returnErr
 }
 
-// persistRedisUsageEvents 写入 Redis inbox 解码出的 usage_events。
+// persistRedisUsageEvents writes usage_events decoded from Redis inbox rows.
 func (s *SyncService) persistRedisUsageEvents(events []entities.UsageEvent) (*servicedto.SyncResult, error) {
 	var err error
 	events, err = alignUsageEventKeysWithExistingCanonicalEvents(s.db, events)
@@ -342,10 +342,30 @@ func alignUsageEventKeysWithExistingCanonicalEvents(db *gorm.DB, events []entiti
 	if len(events) == 0 {
 		return events, nil
 	}
+
+	canonicalKeys := make(map[string]struct{}, len(events))
+	lookupTimestamps := make(map[time.Time]struct{}, len(events))
+	for i := range events {
+		events[i].Timestamp = events[i].Timestamp.UTC()
+		if strings.TrimSpace(events[i].RequestID) != "" {
+			continue
+		}
+		canonicalKeys[canonicalUsageEventKey(events[i])] = struct{}{}
+		lookupTimestamps[events[i].Timestamp] = struct{}{}
+	}
+
+	existingCanonicalKeys, err := loadExistingCanonicalUsageEventKeys(db, canonicalKeys, lookupTimestamps)
+	if err != nil {
+		return nil, err
+	}
+	processedCanonicalKeys, err := loadProcessedRedisInboxEventKeys(db, canonicalKeys)
+	if err != nil {
+		return nil, err
+	}
+
 	canonicalEventKeys := make(map[string]string, len(events))
 	consumedCanonicalKeys := make(map[string]struct{}, len(events))
 	for i := range events {
-		events[i].Timestamp = events[i].Timestamp.UTC()
 		canonicalKey := canonicalUsageEventKey(events[i])
 		incomingKey := strings.TrimSpace(events[i].EventKey)
 		if strings.TrimSpace(events[i].RequestID) != "" {
@@ -364,38 +384,16 @@ func alignUsageEventKeysWithExistingCanonicalEvents(db *gorm.DB, events []entiti
 			continue
 		}
 
-		var existing entities.UsageEvent
-		result := db.Select("event_key").Where(
-			"TRIM(api_group_key) = ? AND TRIM(model) = ? AND timestamp = ? AND TRIM(source) = ? AND TRIM(auth_index) = ? AND failed = ? AND input_tokens = ? AND output_tokens = ? AND reasoning_tokens = ? AND cached_tokens = ? AND total_tokens = ?",
-			strings.TrimSpace(events[i].APIGroupKey),
-			strings.TrimSpace(events[i].Model),
-			events[i].Timestamp,
-			strings.TrimSpace(events[i].Source),
-			strings.TrimSpace(events[i].AuthIndex),
-			events[i].Failed,
-			events[i].InputTokens,
-			events[i].OutputTokens,
-			events[i].ReasoningTokens,
-			events[i].CachedTokens,
-			events[i].TotalTokens,
-		).Order("id ASC").Limit(1).Find(&existing)
-		if result.Error != nil {
-			return nil, fmt.Errorf("find equivalent usage event: %w", result.Error)
-		}
-		if result.RowsAffected == 0 {
+		existingKey, found := existingCanonicalKeys[canonicalKey]
+		if !found {
 			canonicalEventKeys[canonicalKey] = incomingKey
 			continue
 		}
-		existingKey := strings.TrimSpace(existing.EventKey)
 		if existingKey != "" {
 			if incomingKey == canonicalKey {
 				events[i].EventKey = existingKey
 			} else if existingKey == canonicalKey {
-				alreadyConsumed, err := redisInboxAlreadyReferencesEventKey(db, canonicalKey)
-				if err != nil {
-					return nil, err
-				}
-				if !alreadyConsumed {
+				if _, alreadyConsumed := processedCanonicalKeys[canonicalKey]; !alreadyConsumed {
 					events[i].EventKey = existingKey
 					consumedCanonicalKeys[canonicalKey] = struct{}{}
 				}
@@ -408,12 +406,77 @@ func alignUsageEventKeysWithExistingCanonicalEvents(db *gorm.DB, events []entiti
 	return events, nil
 }
 
-func redisInboxAlreadyReferencesEventKey(db *gorm.DB, eventKey string) (bool, error) {
-	var count int64
-	if err := db.Model(&entities.RedisUsageInbox{}).Where("status = ? AND usage_event_key = ?", repository.RedisUsageInboxStatusProcessed, eventKey).Count(&count).Error; err != nil {
-		return false, fmt.Errorf("count redis inbox references: %w", err)
+const canonicalUsageEventLookupBatchSize = 500
+
+func loadExistingCanonicalUsageEventKeys(db *gorm.DB, canonicalKeys map[string]struct{}, timestamps map[time.Time]struct{}) (map[string]string, error) {
+	result := make(map[string]string, len(canonicalKeys))
+	if len(canonicalKeys) == 0 {
+		return result, nil
 	}
-	return count > 0, nil
+
+	values := make([]time.Time, 0, len(timestamps))
+	for timestamp := range timestamps {
+		values = append(values, timestamp)
+	}
+	for start := 0; start < len(values); start += canonicalUsageEventLookupBatchSize {
+		end := min(start+canonicalUsageEventLookupBatchSize, len(values))
+		var existing []entities.UsageEvent
+		err := db.Select([]string{
+			"id",
+			"event_key",
+			"api_group_key",
+			"model",
+			"timestamp",
+			"source",
+			"auth_index",
+			"failed",
+			"input_tokens",
+			"output_tokens",
+			"reasoning_tokens",
+			"cached_tokens",
+			"total_tokens",
+		}).Where("timestamp IN ?", values[start:end]).Order("id ASC").Find(&existing).Error
+		if err != nil {
+			return nil, fmt.Errorf("find equivalent usage events: %w", err)
+		}
+		for _, event := range existing {
+			canonicalKey := canonicalUsageEventKey(event)
+			if _, requested := canonicalKeys[canonicalKey]; !requested {
+				continue
+			}
+			if _, loaded := result[canonicalKey]; !loaded {
+				result[canonicalKey] = strings.TrimSpace(event.EventKey)
+			}
+		}
+	}
+	return result, nil
+}
+
+func loadProcessedRedisInboxEventKeys(db *gorm.DB, canonicalKeys map[string]struct{}) (map[string]struct{}, error) {
+	result := make(map[string]struct{}, len(canonicalKeys))
+	if len(canonicalKeys) == 0 {
+		return result, nil
+	}
+
+	values := make([]string, 0, len(canonicalKeys))
+	for canonicalKey := range canonicalKeys {
+		values = append(values, canonicalKey)
+	}
+	for start := 0; start < len(values); start += canonicalUsageEventLookupBatchSize {
+		end := min(start+canonicalUsageEventLookupBatchSize, len(values))
+		var eventKeys []string
+		err := db.Model(&entities.RedisUsageInbox{}).
+			Distinct("usage_event_key").
+			Where("status = ? AND usage_event_key IN ?", repository.RedisUsageInboxStatusProcessed, values[start:end]).
+			Pluck("usage_event_key", &eventKeys).Error
+		if err != nil {
+			return nil, fmt.Errorf("list redis inbox references: %w", err)
+		}
+		for _, eventKey := range eventKeys {
+			result[strings.TrimSpace(eventKey)] = struct{}{}
+		}
+	}
+	return result, nil
 }
 
 func canonicalUsageEventKey(event entities.UsageEvent) string {
@@ -452,7 +515,7 @@ func (s *SyncService) validate(syncMetadata bool) error {
 	return nil
 }
 
-// insertRedisInboxMessages 在解码前先把 Redis 原始消息落库，降低 LPOP 后本地处理失败导致的数据丢失风险。
+// insertRedisInboxMessages persists raw messages before decoding to prevent loss after LPOP.
 func insertRedisInboxMessages(db *gorm.DB, queueKey string, messages []string, poppedAt time.Time) ([]entities.RedisUsageInbox, error) {
 	inputs := make([]dto.RedisInboxInsert, 0, len(messages))
 	for _, message := range messages {
@@ -534,7 +597,7 @@ var authFileUsageIdentityExtensions = map[string]authFileUsageIdentityExtension{
 	"codex": extendCodexAuthFileUsageIdentity,
 }
 
-// auth_files 先走通用身份映射，再按 type 追加各来源特有字段，方便后续扩展新类型。
+// authFileUsageIdentity applies common identity fields before type-specific extensions.
 func authFileUsageIdentity(file authfiles.AuthFile) entities.UsageIdentity {
 	identity := baseAuthFileUsageIdentity(file)
 	if extend, ok := authFileUsageIdentityExtensions[strings.ToLower(strings.TrimSpace(file.Type))]; ok {
@@ -555,7 +618,7 @@ func baseAuthFileUsageIdentity(file authfiles.AuthFile) entities.UsageIdentity {
 	}
 }
 
-// Codex 的 ChatGPT id_token 字段只在 type=codex 且字段存在时写入；缺失字段保持 nil，入库后就是 NULL。
+// extendCodexAuthFileUsageIdentity stores ChatGPT id_token fields only when present.
 func extendCodexAuthFileUsageIdentity(file authfiles.AuthFile, identity *entities.UsageIdentity) {
 	identity.AccountID = resolveCodexAccountID(file)
 	identity.ActiveStart = resolveCodexActiveStart(file)
@@ -648,7 +711,7 @@ func providerMetadataUsageIdentities(inputs []servicedto.ProviderMetadataInput) 
 func flattenProviderMetadata(cfg providerconfig.ProviderMetadataConfig) []servicedto.ProviderMetadataInput {
 	items := make([]servicedto.ProviderMetadataInput, 0)
 	seen := make(map[string]struct{})
-	// Provider metadata 只生成 auth-index 身份；prefix 作为同一身份的附加字段保存，不再生成独立行。
+	// Provider metadata creates auth-index identities and stores prefix as an attribute.
 	appendItem := func(lookupKey, prefix, providerType, displayName, authIndex string) {
 		lookupKey = strings.TrimSpace(lookupKey)
 		prefix = strings.TrimSpace(prefix)

@@ -40,6 +40,33 @@ func TestUsageServiceGetUsageWithFilterDelegatesToFilteredSnapshot(t *testing.T)
 	}
 }
 
+func TestUsageServiceGetUsageAggregateWithFilterOmitsDetails(t *testing.T) {
+	db, err := repository.OpenDatabase(config.Config{SQLitePath: filepath.Join(t.TempDir(), "usage-service-aggregate.db")})
+	if err != nil {
+		t.Fatalf("OpenDatabase returned error: %v", err)
+	}
+	closeTestDatabase(t, db)
+	if _, _, err := repository.InsertUsageEvents(db, []entities.UsageEvent{{
+		EventKey: "event-aggregate", APIGroupKey: "provider-a", Model: "claude-sonnet",
+		Timestamp: time.Date(2026, 4, 16, 10, 0, 0, 0, time.UTC), Source: "source-a",
+		AuthIndex: "auth-a", TotalTokens: 20,
+	}}); err != nil {
+		t.Fatalf("InsertUsageEvents returned error: %v", err)
+	}
+
+	provider := NewUsageService(db)
+	snapshot, err := provider.GetUsageAggregateWithFilter(context.Background(), servicedto.UsageFilter{})
+	if err != nil {
+		t.Fatalf("GetUsageAggregateWithFilter returned error: %v", err)
+	}
+	if snapshot.TotalRequests != 1 || snapshot.TotalTokens != 20 {
+		t.Fatalf("unexpected aggregate snapshot: %+v", snapshot)
+	}
+	if details := snapshot.APIs["provider-a"].Models["claude-sonnet"].Details; len(details) != 0 {
+		t.Fatalf("expected aggregate snapshot to omit details, got %+v", details)
+	}
+}
+
 func TestUsageServiceGetUsageOverviewDelegatesToFilteredOverview(t *testing.T) {
 	db, err := repository.OpenDatabase(config.Config{SQLitePath: filepath.Join(t.TempDir(), "usage-service-overview.db")})
 	if err != nil {
@@ -55,8 +82,8 @@ func TestUsageServiceGetUsageOverviewDelegatesToFilteredOverview(t *testing.T) {
 		t.Fatalf("UpsertModelPriceSetting returned error: %v", err)
 	}
 	if _, _, err := repository.InsertUsageEvents(db, []entities.UsageEvent{
-		{EventKey: "event-1", APIGroupKey: "provider-a", Model: "claude-sonnet", Timestamp: time.Date(2026, 4, 16, 9, 0, 0, 0, time.UTC), InputTokens: 1000, OutputTokens: 500, CachedTokens: 100, ReasoningTokens: 50, TotalTokens: 1650},
-		{EventKey: "event-2", APIGroupKey: "provider-a", Model: "claude-sonnet", Timestamp: time.Date(2026, 4, 16, 10, 0, 0, 0, time.UTC), InputTokens: 500, OutputTokens: 250, CachedTokens: 0, ReasoningTokens: 25, TotalTokens: 775},
+		{EventKey: "event-1", APIGroupKey: "provider-a", Model: "claude-sonnet", Timestamp: time.Date(2026, 4, 16, 9, 0, 0, 0, time.UTC), Source: "account@example.com", AuthIndex: "credential-a", InputTokens: 1000, OutputTokens: 500, CachedTokens: 100, ReasoningTokens: 50, TotalTokens: 1650},
+		{EventKey: "event-2", APIGroupKey: "provider-a", Model: "claude-sonnet", Timestamp: time.Date(2026, 4, 16, 10, 0, 0, 0, time.UTC), Source: "account@example.com", AuthIndex: "credential-a", InputTokens: 500, OutputTokens: 250, CachedTokens: 0, ReasoningTokens: 25, TotalTokens: 775},
 	}); err != nil {
 		t.Fatalf("InsertUsageEvents returned error: %v", err)
 	}
@@ -79,5 +106,12 @@ func TestUsageServiceGetUsageOverviewDelegatesToFilteredOverview(t *testing.T) {
 	}
 	if math.Abs(overview.Series.Cost["2026-04-16T09:00:00Z"]-0.01023) > 0.000000001 || math.Abs(overview.Series.Cost["2026-04-16T10:00:00Z"]-0.00525) > 0.000000001 {
 		t.Fatalf("expected hourly cost series values, got %+v", overview.Series)
+	}
+	if len(overview.KeyStats.Credentials) != 1 {
+		t.Fatalf("expected one credential aggregate, got %+v", overview.KeyStats.Credentials)
+	}
+	credential := overview.KeyStats.Credentials[0]
+	if credential.Source != "account@example.com" || credential.AuthIndex != "credential-a" || credential.Success != 2 || credential.Tokens != 2425 {
+		t.Fatalf("unexpected credential aggregate: %+v", credential)
 	}
 }

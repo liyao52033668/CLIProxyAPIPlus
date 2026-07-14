@@ -19,6 +19,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
+	keeperapp "github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/app"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/service"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher"
@@ -894,6 +895,12 @@ func (s *Service) Run(ctx context.Context) error {
 	if db := usage.DefaultManager().GetDB(); db != nil {
 		s.server.SetUsageService(service.NewUsageService(db))
 		s.server.SetPricingService(service.NewPricingService(db))
+		maintenance := keeperapp.NewStorageCleanupRunner(service.NewLocalSyncService(db))
+		go func() {
+			if err := maintenance.Run(ctx); err != nil {
+				log.Errorf("usage storage cleanup stopped: %v", err)
+			}
+		}()
 		log.Info("usage service initialized for management API")
 	}
 

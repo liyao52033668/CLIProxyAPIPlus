@@ -37,6 +37,12 @@ func TestOpenDatabaseAutoMigratesCoreTables(t *testing.T) {
 	if !db.Migrator().HasTable("redis_usage_inboxes") {
 		t.Fatal("expected redis_usage_inboxes table to exist")
 	}
+	if !db.Migrator().HasTable("usage_hourly_aggregates") {
+		t.Fatal("expected usage_hourly_aggregates table to exist")
+	}
+	if !db.Migrator().HasTable("usage_event_keys") {
+		t.Fatal("expected usage_event_keys table to exist")
+	}
 }
 
 func TestOpenDatabaseCreatesFreshDatabaseFromCurrentSchemaWithoutRunningMigrations(t *testing.T) {
@@ -53,8 +59,8 @@ func TestOpenDatabaseCreatesFreshDatabaseFromCurrentSchemaWithoutRunningMigratio
 	if err := db.Table("schema_migrations").Count(&count).Error; err != nil {
 		t.Fatalf("count schema migrations: %v", err)
 	}
-	if count != 17 {
-		t.Fatalf("expected fresh database to mark 17 migrations applied, got %d", count)
+	if count != 19 {
+		t.Fatalf("expected fresh database to mark 19 migrations applied, got %d", count)
 	}
 	if strings.Contains(logs.String(), "schema migration started") {
 		t.Fatalf("expected fresh database creation not to run version migrations, got logs:\n%s", logs.String())
@@ -186,7 +192,7 @@ func TestInsertUsageEventsPersistsModelAlias(t *testing.T) {
 	}
 }
 
-func TestCleanupStorageCleansRedisInboxAndVacuums(t *testing.T) {
+func TestCleanupStorageVacuumsMonthlyAfterDeletingRows(t *testing.T) {
 	previousLocal := time.Local
 	location, err := time.LoadLocation("Asia/Shanghai")
 	if err != nil {
@@ -195,7 +201,7 @@ func TestCleanupStorageCleansRedisInboxAndVacuums(t *testing.T) {
 	time.Local = location
 	t.Cleanup(func() { time.Local = previousLocal })
 	db := openTestDatabase(t)
-	now := time.Date(2026, 4, 27, 2, 30, 0, 0, time.UTC)
+	now := time.Date(2026, 4, 30, 18, 30, 0, 0, time.UTC)
 
 	inboxRows, err := InsertRedisUsageInboxMessages(db, []dto.RedisInboxInsert{
 		{QueueKey: "queue", RawMessage: `{"request_id":"processed-old"}`, PoppedAt: now.AddDate(0, 0, -2)},
@@ -212,8 +218,15 @@ func TestCleanupStorageCleansRedisInboxAndVacuums(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CleanupStorage returned error: %v", err)
 	}
-	if result.RedisInbox.ProcessedDeleted != 1 {
+	if result.RedisInbox.ProcessedDeleted != 1 || !result.Vacuumed {
 		t.Fatalf("unexpected cleanup result: %+v", result)
+	}
+	second, err := CleanupStorage(db, now)
+	if err != nil {
+		t.Fatalf("second CleanupStorage returned error: %v", err)
+	}
+	if second.Vacuumed {
+		t.Fatalf("expected no VACUUM without deleted rows, got %+v", second)
 	}
 
 	var inboxRemaining []entities.RedisUsageInbox
@@ -222,6 +235,29 @@ func TestCleanupStorageCleansRedisInboxAndVacuums(t *testing.T) {
 	}
 	if len(inboxRemaining) != 1 || inboxRemaining[0].ID != inboxRows[1].ID {
 		t.Fatalf("expected only pending inbox row to remain, got %+v", inboxRemaining)
+	}
+}
+
+func TestShouldVacuumStorageOnlyAllowsSQLiteMonthlyDeletes(t *testing.T) {
+	monthlyCleanup := time.Date(2026, 5, 1, 12, 0, 0, 0, time.Local)
+	tests := []struct {
+		name        string
+		dialect     string
+		now         time.Time
+		deletedRows int64
+		want        bool
+	}{
+		{name: "sqlite monthly cleanup", dialect: "sqlite", now: monthlyCleanup, deletedRows: 1, want: true},
+		{name: "postgres monthly cleanup", dialect: "postgres", now: monthlyCleanup, deletedRows: 1, want: false},
+		{name: "sqlite without deletes", dialect: "sqlite", now: monthlyCleanup, deletedRows: 0, want: false},
+		{name: "sqlite outside monthly window", dialect: "sqlite", now: monthlyCleanup.AddDate(0, 0, 1), deletedRows: 1, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldVacuumStorage(tt.dialect, tt.now, tt.deletedRows); got != tt.want {
+				t.Fatalf("shouldVacuumStorage(%q, %s, %d) = %v, want %v", tt.dialect, tt.now, tt.deletedRows, got, tt.want)
+			}
+		})
 	}
 }
 

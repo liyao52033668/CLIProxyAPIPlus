@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,7 +15,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/repository/migration"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 func OpenDatabase(cfg config.Config) (*gorm.DB, error) {
@@ -108,44 +108,55 @@ func InsertUsageEvents(db *gorm.DB, events []entities.UsageEvent) (int, int, err
 		return 0, 0, nil
 	}
 
-	inserted := 0
-
-	// 按仓储默认批次拆分写入，避免单条 INSERT 的 SQLite 变量数量过多。
-	for start := 0; start < len(events); start += insertBatchSize(entities.UsageEvent{}) {
-		end := min(start+insertBatchSize(entities.UsageEvent{}), len(events))
-		batch := events[start:end]
-
-		// 每批仍按 event_key 去重，保持原有重复事件忽略语义。
-		result := db.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "event_key"}},
-			DoNothing: true,
-		}).Create(&batch)
-		if result.Error != nil {
-			return 0, 0, fmt.Errorf("insert usage events: %w", result.Error)
-		}
-		inserted += int(result.RowsAffected)
+	normalizedEvents := append([]entities.UsageEvent(nil), events...)
+	for i := range normalizedEvents {
+		normalizedEvents[i].Timestamp = normalizedEvents[i].Timestamp.UTC()
 	}
 
-	deduped := len(events) - inserted
-	return inserted, deduped, nil
+	inserted, err := insertUsageEventsWithArchiveKeys(db, normalizedEvents)
+	if err != nil {
+		return 0, 0, err
+	}
+	return inserted, len(events) - inserted, nil
 }
 
-// CleanupStorage 是每日维护任务的统一仓储清理入口：先清 Redis inbox，最后执行 VACUUM。
-// VACUUM 必须在删除完成后单独执行，任何一步失败都会停止后续步骤并把已完成部分的结果返回给上层日志。
+// CleanupStorage aggregates identity statistics, archives expired request details, cleans the Redis inbox, and vacuums the database.
 func CleanupStorage(db *gorm.DB, now time.Time) (dto.StorageCleanupResult, error) {
+	if db == nil {
+		return dto.StorageCleanupResult{}, fmt.Errorf("database is nil")
+	}
+	if err := AggregateUsageIdentityStats(context.Background(), db, now); err != nil {
+		return dto.StorageCleanupResult{}, err
+	}
+	usageResult, err := CleanupUsageEvents(db, now)
+	if err != nil {
+		return dto.StorageCleanupResult{UsageEvents: usageResult}, err
+	}
 	redisResult, err := CleanupRedisUsageInbox(db, now)
 	if err != nil {
-		return dto.StorageCleanupResult{RedisInbox: redisResult}, err
+		return dto.StorageCleanupResult{UsageEvents: usageResult, RedisInbox: redisResult}, err
 	}
-	if err := db.Exec("VACUUM").Error; err != nil {
-		return dto.StorageCleanupResult{RedisInbox: redisResult}, err
+	result := dto.StorageCleanupResult{UsageEvents: usageResult, RedisInbox: redisResult}
+	deletedRows := usageResult.ArchivedEvents + usageResult.DeletedEventKeys + redisResult.ProcessedDeleted + redisResult.FailedDeleted
+	if shouldVacuumStorage(db.Dialector.Name(), now, deletedRows) {
+		if err := db.Exec("VACUUM").Error; err != nil {
+			return result, err
+		}
+		result.Vacuumed = true
 	}
-	return dto.StorageCleanupResult{RedisInbox: redisResult}, nil
+	return result, nil
+}
+
+func shouldVacuumStorage(dialect string, now time.Time, deletedRows int64) bool {
+	return dialect == "sqlite" && now.In(time.Local).Day() == 1 && deletedRows > 0
 }
 
 func Vacuum(db *gorm.DB) error {
 	if db == nil {
 		return fmt.Errorf("database is nil")
+	}
+	if db.Dialector.Name() != "sqlite" {
+		return nil
 	}
 	return db.Exec("VACUUM").Error
 }

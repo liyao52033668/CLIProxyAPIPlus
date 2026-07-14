@@ -1,9 +1,11 @@
 package entities
 
-// All 返回需要 AutoMigrate 的核心数据库实体列表。
+// All returns the core database entities managed by AutoMigrate.
 func All() []any {
 	return []any{
 		&UsageEvent{},
+		&UsageHourlyAggregate{},
+		&UsageEventKey{},
 		&RedisUsageInbox{},
 		&ModelPriceSetting{},
 		&UsageIdentity{},

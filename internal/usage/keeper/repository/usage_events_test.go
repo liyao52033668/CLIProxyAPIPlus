@@ -1,7 +1,9 @@
 package repository
 
 import (
+	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -9,7 +11,26 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/entities"
+	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 )
+
+type usageQueryCaptureLogger struct {
+	statements []string
+}
+
+func (logger *usageQueryCaptureLogger) LogMode(gormlogger.LogLevel) gormlogger.Interface {
+	return logger
+}
+
+func (*usageQueryCaptureLogger) Info(context.Context, string, ...interface{})  {}
+func (*usageQueryCaptureLogger) Warn(context.Context, string, ...interface{})  {}
+func (*usageQueryCaptureLogger) Error(context.Context, string, ...interface{}) {}
+
+func (logger *usageQueryCaptureLogger) Trace(_ context.Context, _ time.Time, query func() (string, int64), _ error) {
+	statement, _ := query()
+	logger.statements = append(logger.statements, statement)
+}
 
 func TestListUsageEventsWithFilterAppliesTimeBoundsAndPagination(t *testing.T) {
 	db, err := OpenDatabase(config.Config{SQLitePath: filepath.Join(t.TempDir(), "usage-events.db")})
@@ -41,6 +62,86 @@ func TestListUsageEventsWithFilterAppliesTimeBoundsAndPagination(t *testing.T) {
 	}
 	if page.Events[0].Source != "source-c" {
 		t.Fatalf("expected newest in-range row first, got %+v", page.Events[0])
+	}
+	if len(page.Models) != 2 || page.Models[0] != "claude-opus" || page.Models[1] != "claude-sonnet" {
+		t.Fatalf("unexpected model options: %+v", page.Models)
+	}
+}
+
+func TestListUsageEventsWithFilterIncludesOffsetTimestampWithinUTCWindow(t *testing.T) {
+	db, err := OpenDatabase(config.Config{SQLitePath: filepath.Join(t.TempDir(), "usage-events-offset.db")})
+	if err != nil {
+		t.Fatalf("OpenDatabase returned error: %v", err)
+	}
+	closeTestDatabase(t, db)
+
+	location := time.FixedZone("UTC+8", 8*60*60)
+	timestamp := time.Date(2026, 7, 14, 20, 25, 0, 0, location)
+	if _, _, err := InsertUsageEvents(db, []entities.UsageEvent{{
+		EventKey: "event-offset", Model: "qmodel-latest", Timestamp: timestamp, Source: "qoder", TotalTokens: 10,
+	}}); err != nil {
+		t.Fatalf("InsertUsageEvents returned error: %v", err)
+	}
+
+	start := time.Date(2026, 7, 13, 16, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 7, 14, 15, 59, 59, 999999999, time.UTC)
+	page, err := ListUsageEventsWithFilter(db, dto.UsageQueryFilter{StartTime: &start, EndTime: &end, Page: 1, PageSize: 20})
+	if err != nil {
+		t.Fatalf("ListUsageEventsWithFilter returned error: %v", err)
+	}
+	if page.TotalCount != 1 || len(page.Events) != 1 {
+		t.Fatalf("expected offset timestamp within UTC window, got %+v", page)
+	}
+	if !page.Events[0].Timestamp.Equal(timestamp) {
+		t.Fatalf("timestamp = %s, want %s", page.Events[0].Timestamp, timestamp)
+	}
+}
+
+func TestListUsageEventsWithFilterSelectsOnlyResponseColumns(t *testing.T) {
+	db, err := OpenDatabase(config.Config{SQLitePath: filepath.Join(t.TempDir(), "usage-events-select.db")})
+	if err != nil {
+		t.Fatalf("OpenDatabase returned error: %v", err)
+	}
+	closeTestDatabase(t, db)
+	if _, _, err := InsertUsageEvents(db, []entities.UsageEvent{{
+		EventKey: "event-1", APIGroupKey: "provider-a", Model: "claude-sonnet",
+		Timestamp: time.Date(2026, 4, 16, 9, 0, 0, 0, time.UTC), Source: "source-a",
+		AuthIndex: "1", Provider: "provider", AuthType: "oauth", LatencyMS: 25, TotalTokens: 10,
+	}}); err != nil {
+		t.Fatalf("InsertUsageEvents returned error: %v", err)
+	}
+
+	capture := &usageQueryCaptureLogger{}
+	queryDB := db.Session(&gorm.Session{Logger: capture})
+	if _, err := ListUsageEventsWithFilter(queryDB, dto.UsageQueryFilter{Page: 1, PageSize: 20}); err != nil {
+		t.Fatalf("ListUsageEventsWithFilter returned error: %v", err)
+	}
+
+	foundPageQuery := false
+	foundModelQuery := false
+	for _, statement := range capture.statements {
+		lower := strings.ToLower(statement)
+		if strings.Contains(lower, "distinct trim(model)") {
+			foundModelQuery = true
+			continue
+		}
+		if !strings.Contains(lower, "order by timestamp desc, id desc") {
+			continue
+		}
+		foundPageQuery = true
+		for _, excluded := range []string{"event_key", "endpoint", "request_id", "model_alias", "created_at"} {
+			if strings.Contains(lower, excluded) {
+				t.Fatalf("event page query selected unused column %q: %s", excluded, statement)
+			}
+		}
+		for _, required := range []string{"latency_ms", "input_tokens", "output_tokens", "total_tokens"} {
+			if !strings.Contains(lower, required) {
+				t.Fatalf("event page query omitted required column %q: %s", required, statement)
+			}
+		}
+	}
+	if !foundPageQuery || !foundModelQuery {
+		t.Fatalf("expected captured event page and model queries, got %+v", capture.statements)
 	}
 }
 
@@ -191,9 +292,21 @@ func TestListUsageAnalysisWithFilterAggregatesApisAndModels(t *testing.T) {
 
 	start := time.Date(2026, 4, 16, 9, 30, 0, 0, time.UTC)
 	end := time.Date(2026, 4, 16, 11, 30, 0, 0, time.UTC)
-	apiRows, modelRows, err := ListUsageAnalysisWithFilter(db, dto.UsageQueryFilter{StartTime: &start, EndTime: &end})
+	capture := &usageQueryCaptureLogger{}
+	queryDB := db.Session(&gorm.Session{Logger: capture})
+	apiRows, modelRows, err := ListUsageAnalysisWithFilter(queryDB, dto.UsageQueryFilter{StartTime: &start, EndTime: &end})
 	if err != nil {
 		t.Fatalf("ListUsageAnalysisWithFilter returned error: %v", err)
+	}
+	aggregateQueries := 0
+	for _, statement := range capture.statements {
+		lower := strings.ToLower(statement)
+		if strings.Contains(lower, "usage_events") && strings.Contains(lower, "group by") {
+			aggregateQueries++
+		}
+	}
+	if aggregateQueries != 1 {
+		t.Fatalf("usage analysis aggregate queries = %d, want 1; statements=%+v", aggregateQueries, capture.statements)
 	}
 	if len(apiRows) != 2 {
 		t.Fatalf("expected two api rows, got %d", len(apiRows))

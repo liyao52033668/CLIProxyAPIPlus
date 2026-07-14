@@ -2,7 +2,10 @@ package management
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -17,6 +20,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/repository"
 	repodto "github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/repository/dto"
 	keeperservice "github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/service"
+	servicedto "github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/service/dto"
 	"gorm.io/gorm"
 )
 
@@ -43,6 +47,15 @@ func newManagementUsageHandler(t *testing.T, db *gorm.DB) *Handler {
 	h := &Handler{cfg: &config.Config{}}
 	h.SetUsageService(keeperservice.NewUsageService(db))
 	return h
+}
+
+type failingExportUsageProvider struct {
+	keeperservice.UsageProvider
+}
+
+func (p *failingExportUsageProvider) ExportUsageSnapshot(_ context.Context, output io.Writer, _ time.Time, _ servicedto.UsageFilter) error {
+	_, _ = io.WriteString(output, `{"partial":true}`)
+	return errors.New("export failed after partial generation")
 }
 
 func TestExportUsageStatisticsReturnsDatabaseSnapshot(t *testing.T) {
@@ -79,8 +92,8 @@ func TestExportUsageStatisticsReturnsDatabaseSnapshot(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("json.Unmarshal returned error: %v", err)
 	}
-	if payload.Version != 2 {
-		t.Fatalf("version = %d, want 2", payload.Version)
+	if payload.Version != 3 {
+		t.Fatalf("version = %d, want 3", payload.Version)
 	}
 	if payload.Usage.TotalRequests != 1 {
 		t.Fatalf("total_requests = %d, want 1", payload.Usage.TotalRequests)
@@ -95,6 +108,196 @@ func TestExportUsageStatisticsReturnsDatabaseSnapshot(t *testing.T) {
 	}
 	if len(modelSnapshot.Details) != 1 {
 		t.Fatalf("details len = %d, want 1", len(modelSnapshot.Details))
+	}
+}
+
+func TestExportUsageStatisticsReturnsErrorBeforeWritingPartialSnapshot(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openManagementUsageTestDatabase(t)
+	h := &Handler{cfg: &config.Config{}}
+	h.SetUsageService(&failingExportUsageProvider{UsageProvider: keeperservice.NewUsageService(db)})
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage/export", nil)
+
+	h.ExportUsageStatistics(ctx)
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusInternalServerError, recorder.Body.String())
+	}
+	if bytes.Contains(recorder.Body.Bytes(), []byte(`"partial"`)) {
+		t.Fatalf("partial export leaked into error response: %s", recorder.Body.String())
+	}
+}
+
+func TestExportUsageStatisticsFiltersSelectedTimeRange(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openManagementUsageTestDatabase(t)
+	insideTimestamp := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	events := []entities.UsageEvent{
+		{
+			EventKey:    "event-inside",
+			APIGroupKey: "provider-a",
+			Model:       "model-a",
+			Timestamp:   insideTimestamp,
+			TotalTokens: 10,
+		},
+		{
+			EventKey:    "event-outside",
+			APIGroupKey: "provider-a",
+			Model:       "model-a",
+			Timestamp:   insideTimestamp.Add(-24 * time.Hour),
+			TotalTokens: 20,
+		},
+	}
+	if _, _, err := repository.InsertUsageEvents(db, events); err != nil {
+		t.Fatalf("InsertUsageEvents returned error: %v", err)
+	}
+
+	h := newManagementUsageHandler(t, db)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(
+		http.MethodGet,
+		"/v0/management/usage/export?range=custom&start_time=2026-05-01T00:00:00Z&end_time=2026-05-01T23:59:59Z",
+		nil,
+	)
+
+	h.ExportUsageStatistics(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	var payload usageExportPayload
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("json.Unmarshal returned error: %v", err)
+	}
+	if payload.Usage.TotalRequests != 1 || payload.Usage.TotalTokens != 10 {
+		t.Fatalf("unexpected filtered totals: requests=%d tokens=%d", payload.Usage.TotalRequests, payload.Usage.TotalTokens)
+	}
+	details := payload.Usage.APIs["provider-a"].Models["model-a"].Details
+	if len(details) != 1 || !details[0].Timestamp.Equal(insideTimestamp) {
+		t.Fatalf("filtered details = %+v, want only %s", details, insideTimestamp)
+	}
+}
+
+func TestGetDBUsageStatisticsOmitsRequestDetails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openManagementUsageTestDatabase(t)
+	if _, _, err := repository.InsertUsageEvents(db, []entities.UsageEvent{{
+		EventKey:    "event-aggregate",
+		APIGroupKey: "provider-a",
+		Model:       "model-a",
+		Timestamp:   time.Now().UTC(),
+		Source:      "source-a",
+		AuthIndex:   "auth-a",
+		TotalTokens: 10,
+	}}); err != nil {
+		t.Fatalf("InsertUsageEvents returned error: %v", err)
+	}
+
+	h := newManagementUsageHandler(t, db)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage/db?range=all", nil)
+	h.GetDBUsageStatistics(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	var payload struct {
+		Usage repodto.StatisticsSnapshot `json:"usage"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal usage response: %v", err)
+	}
+	if payload.Usage.TotalRequests != 1 || payload.Usage.TotalTokens != 10 {
+		t.Fatalf("unexpected aggregate usage: %+v", payload.Usage)
+	}
+	if details := payload.Usage.APIs["provider-a"].Models["model-a"].Details; len(details) != 0 {
+		t.Fatalf("expected aggregate endpoint to omit request details, got %+v", details)
+	}
+}
+
+func TestDBUsageRangeKeepsOverviewEventsAndKeyStatsInSync(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openManagementUsageTestDatabase(t)
+	now := time.Now().UTC()
+	events := []entities.UsageEvent{
+		{
+			EventKey:    "recent-success",
+			APIGroupKey: "provider-a",
+			Model:       "model-a",
+			Timestamp:   now.Add(-time.Hour),
+			Source:      "source-a",
+			AuthIndex:   "auth-a",
+			TotalTokens: 10,
+		},
+		{
+			EventKey:    "recent-failure",
+			APIGroupKey: "provider-a",
+			Model:       "model-a",
+			Timestamp:   now.Add(-2 * time.Hour),
+			Source:      "source-a",
+			AuthIndex:   "auth-a",
+			Failed:      true,
+			TotalTokens: 5,
+		},
+		{
+			EventKey:    "old-success",
+			APIGroupKey: "provider-b",
+			Model:       "model-b",
+			Timestamp:   now.Add(-6 * time.Hour),
+			Source:      "source-b",
+			AuthIndex:   "auth-b",
+			TotalTokens: 20,
+		},
+	}
+	if _, _, err := repository.InsertUsageEvents(db, events); err != nil {
+		t.Fatalf("InsertUsageEvents returned error: %v", err)
+	}
+
+	h := newManagementUsageHandler(t, db)
+	overviewRecorder := httptest.NewRecorder()
+	overviewContext, _ := gin.CreateTestContext(overviewRecorder)
+	overviewContext.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage/db/overview?range=4h", nil)
+	h.GetDBUsageOverview(overviewContext)
+	if overviewRecorder.Code != http.StatusOK {
+		t.Fatalf("overview status = %d, want %d; body=%s", overviewRecorder.Code, http.StatusOK, overviewRecorder.Body.String())
+	}
+
+	var overview servicedto.UsageOverviewSnapshot
+	if err := json.Unmarshal(overviewRecorder.Body.Bytes(), &overview); err != nil {
+		t.Fatalf("unmarshal overview: %v", err)
+	}
+	if overview.Usage == nil {
+		t.Fatal("overview usage is nil")
+	}
+	if overview.Usage.TotalRequests != 2 || overview.Usage.SuccessCount != 1 || overview.Usage.FailureCount != 1 {
+		t.Fatalf("overview counts = total:%d success:%d failure:%d, want 2/1/1", overview.Usage.TotalRequests, overview.Usage.SuccessCount, overview.Usage.FailureCount)
+	}
+	keyCount := overview.KeyStats.ByAuthIndex["auth-a"]
+	if keyCount.Success != 1 || keyCount.Failure != 1 {
+		t.Fatalf("auth-a key stats = success:%d failure:%d, want 1/1", keyCount.Success, keyCount.Failure)
+	}
+	if _, ok := overview.KeyStats.ByAuthIndex["auth-b"]; ok {
+		t.Fatal("old auth-b event must not be included in 4h key stats")
+	}
+
+	eventsRecorder := httptest.NewRecorder()
+	eventsContext, _ := gin.CreateTestContext(eventsRecorder)
+	eventsContext.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage/db/events?range=4h&page=1&page_size=20", nil)
+	h.GetDBUsageEvents(eventsContext)
+	if eventsRecorder.Code != http.StatusOK {
+		t.Fatalf("events status = %d, want %d; body=%s", eventsRecorder.Code, http.StatusOK, eventsRecorder.Body.String())
+	}
+
+	var eventsPage servicedto.UsageEventsPage
+	if err := json.Unmarshal(eventsRecorder.Body.Bytes(), &eventsPage); err != nil {
+		t.Fatalf("unmarshal events: %v", err)
+	}
+	if eventsPage.TotalCount != 2 || len(eventsPage.Events) != 2 || eventsPage.PageSize != 20 {
+		t.Fatalf("events page = count:%d rows:%d page_size:%d, want 2/2/20", eventsPage.TotalCount, len(eventsPage.Events), eventsPage.PageSize)
 	}
 }
 
@@ -318,6 +521,52 @@ func TestBuildUsageFilterFromRequest(t *testing.T) {
 		}
 		if filter.Result != "success" {
 			t.Fatalf("result = %q, want success", filter.Result)
+		}
+	})
+
+	t.Run("preset range resolves UTC boundaries", func(t *testing.T) {
+		filter := servicedto.UsageFilter{Range: "4h"}
+		anchor := time.Date(2026, time.July, 14, 12, 30, 0, 0, time.FixedZone("UTC+8", 8*60*60))
+
+		if err := applyManagementUsageRange(&filter, anchor); err != nil {
+			t.Fatalf("applyManagementUsageRange returned error: %v", err)
+		}
+		wantEnd := anchor.UTC()
+		wantStart := wantEnd.Add(-4 * time.Hour)
+		if filter.StartTime == nil || !filter.StartTime.Equal(wantStart) {
+			t.Fatalf("start_time = %v, want %v", filter.StartTime, wantStart)
+		}
+		if filter.EndTime == nil || !filter.EndTime.Equal(wantEnd) {
+			t.Fatalf("end_time = %v, want %v", filter.EndTime, wantEnd)
+		}
+	})
+
+	t.Run("today resolves local day boundaries", func(t *testing.T) {
+		filter := servicedto.UsageFilter{Range: "today"}
+		anchor := time.Date(2026, time.July, 14, 12, 30, 0, 0, time.Local)
+
+		if err := applyManagementUsageRange(&filter, anchor); err != nil {
+			t.Fatalf("applyManagementUsageRange returned error: %v", err)
+		}
+		localStart := time.Date(2026, time.July, 14, 0, 0, 0, 0, time.Local)
+		wantStart := localStart.UTC()
+		wantEnd := localStart.AddDate(0, 0, 1).Add(-time.Nanosecond).UTC()
+		if filter.StartTime == nil || !filter.StartTime.Equal(wantStart) {
+			t.Fatalf("start_time = %v, want %v", filter.StartTime, wantStart)
+		}
+		if filter.EndTime == nil || !filter.EndTime.Equal(wantEnd) {
+			t.Fatalf("end_time = %v, want %v", filter.EndTime, wantEnd)
+		}
+	})
+
+	t.Run("unsupported range is rejected", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(rec)
+		ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage/events?range=invalid", nil)
+
+		_, err := buildUsageFilterFromRequest(ctx)
+		if err == nil {
+			t.Fatal("expected unsupported range error")
 		}
 	})
 

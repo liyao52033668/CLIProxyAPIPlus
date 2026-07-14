@@ -8,7 +8,7 @@ import (
 
 const DefaultUsageEventsLimit = 100
 
-// UsageFilter 是服务层的 usage 查询条件。
+// UsageFilter defines service-layer usage query conditions.
 type UsageFilter struct {
 	Range     string
 	StartTime *time.Time
@@ -23,7 +23,7 @@ type UsageFilter struct {
 	Result    string
 }
 
-// UsageImportResult 是 usage 快照导入数据库后的结果。
+// UsageImportResult reports the result of importing a usage snapshot.
 type UsageImportResult struct {
 	Added         int   `json:"added"`
 	Skipped       int   `json:"skipped"`
@@ -31,7 +31,7 @@ type UsageImportResult struct {
 	FailedCount   int64 `json:"failed_requests"`
 }
 
-// UsageEventsPage 是 usage events 列表的服务层结果。
+// UsageEventsPage is the service-layer usage event list result.
 type UsageEventsPage struct {
 	Events     []UsageEventRecord `json:"events"`
 	Models     []string           `json:"models"`
@@ -41,12 +41,12 @@ type UsageEventsPage struct {
 	TotalPages int                `json:"total_pages"`
 }
 
-// UsageEventFilterOptions 是 usage events 筛选项的服务层结果。
+// UsageEventFilterOptions is the service-layer event filter result.
 type UsageEventFilterOptions struct {
 	Models []string `json:"models"`
 }
 
-// UsageEventRecord 是单条 usage event 的服务层结果。
+// UsageEventRecord is one service-layer usage event.
 type UsageEventRecord struct {
 	ID              uint      `json:"id"`
 	Timestamp       time.Time `json:"timestamp"`
@@ -65,7 +65,7 @@ type UsageEventRecord struct {
 	TotalTokens     int64     `json:"total_tokens"`
 }
 
-// UsageAnalysisModelStat 是按模型聚合的分析结果。
+// UsageAnalysisModelStat is the per-model analysis aggregate.
 type UsageAnalysisModelStat struct {
 	Model              string
 	TotalRequests      int64
@@ -80,7 +80,7 @@ type UsageAnalysisModelStat struct {
 	LatencySampleCount int64
 }
 
-// UsageAnalysisAPIStat 是按 API 聚合的分析结果。
+// UsageAnalysisAPIStat is the per-API analysis aggregate.
 type UsageAnalysisAPIStat struct {
 	APIKey          string
 	DisplayName     string
@@ -95,13 +95,13 @@ type UsageAnalysisAPIStat struct {
 	Models          []UsageAnalysisModelStat
 }
 
-// UsageAnalysisSnapshot 是 analysis 的服务层结果。
+// UsageAnalysisSnapshot is the service-layer analysis result.
 type UsageAnalysisSnapshot struct {
 	APIs   []UsageAnalysisAPIStat
 	Models []UsageAnalysisModelStat
 }
 
-// UsageOverviewSummary 是 overview summary 的服务层结果。
+// UsageOverviewSummary is the service-layer overview summary.
 type UsageOverviewSummary struct {
 	RequestCount    int64
 	TokenCount      int64
@@ -114,7 +114,7 @@ type UsageOverviewSummary struct {
 	ReasoningTokens int64
 }
 
-// UsageOverviewSeries 是 overview series 的服务层结果。
+// UsageOverviewSeries is the service-layer overview series.
 type UsageOverviewSeries struct {
 	Requests        map[string]int64
 	Tokens          map[string]int64
@@ -128,7 +128,7 @@ type UsageOverviewSeries struct {
 	Models          map[string]UsageOverviewSeries
 }
 
-// UsageOverviewHealthBlock 是 overview health 的单个时间块。
+// UsageOverviewHealthBlock is one service-layer health time block.
 type UsageOverviewHealthBlock struct {
 	StartTime time.Time
 	EndTime   time.Time
@@ -137,7 +137,7 @@ type UsageOverviewHealthBlock struct {
 	Rate      float64
 }
 
-// UsageOverviewHealth 是 overview health 的聚合结果。
+// UsageOverviewHealth is the service-layer health aggregate.
 type UsageOverviewHealth struct {
 	TotalSuccess  int64
 	TotalFailure  int64
@@ -158,14 +158,25 @@ type UsageKeyCount struct {
 	Cost    float64 `json:"cost"`
 }
 
+// UsageCredentialCount keeps the source associated with its auth index.
+type UsageCredentialCount struct {
+	Source    string  `json:"source"`
+	AuthIndex string  `json:"auth_index"`
+	Success   int64   `json:"success"`
+	Failure   int64   `json:"failure"`
+	Tokens    int64   `json:"tokens"`
+	Cost      float64 `json:"cost"`
+}
+
 // UsageKeyStats aggregates request outcomes by auth_index and source for the
 // management UI, without shipping per-request details.
 type UsageKeyStats struct {
 	BySource    map[string]UsageKeyCount `json:"by_source"`
 	ByAuthIndex map[string]UsageKeyCount `json:"by_auth_index"`
+	Credentials []UsageCredentialCount   `json:"credentials"`
 }
 
-// UsageOverviewSnapshot 是 overview 的服务层结果。
+// UsageOverviewSnapshot is the service-layer overview result.
 type UsageOverviewSnapshot struct {
 	Usage        *repodto.StatisticsSnapshot
 	Summary      UsageOverviewSummary

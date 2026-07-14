@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/entities"
 	"github.com/sirupsen/logrus"
@@ -35,6 +36,8 @@ func TestOrderedMigrationsPreservesExecutionOrder(t *testing.T) {
 		"20260508_add_usage_event_model_alias",
 		"20260509_update_usage_identity_quota_fields",
 		"20260510_remove_usage_identity_quota_fields",
+		"20260714_create_usage_archives",
+		"20260714_normalize_usage_event_timestamps",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("expected ordered migrations %v, got %v", want, got)
@@ -43,6 +46,44 @@ func TestOrderedMigrationsPreservesExecutionOrder(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("expected ordered migrations %v, got %v", want, got)
 		}
+	}
+}
+
+func TestNormalizeUsageEventTimestampsMigrationConvertsOffsetsToUTC(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(testSQLiteDSN(filepath.Join(t.TempDir(), "timestamps.db"))), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	defer closeOpenedDatabase(t, db)
+	if err := db.AutoMigrate(&entities.UsageEvent{}); err != nil {
+		t.Fatalf("auto migrate usage event: %v", err)
+	}
+
+	location := time.FixedZone("UTC+8", 8*60*60)
+	timestamp := time.Date(2026, 7, 14, 20, 25, 0, 0, location)
+	if err := db.Create(&entities.UsageEvent{EventKey: "offset-event", Timestamp: timestamp}).Error; err != nil {
+		t.Fatalf("create offset usage event: %v", err)
+	}
+	if err := normalizeUsageEventTimestampsMigration(db); err != nil {
+		t.Fatalf("normalizeUsageEventTimestampsMigration returned error: %v", err)
+	}
+
+	start := time.Date(2026, 7, 13, 16, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 7, 14, 15, 59, 59, 999999999, time.UTC)
+	var count int64
+	if err := db.Model(&entities.UsageEvent{}).Where("timestamp >= ? AND timestamp <= ?", start, end).Count(&count).Error; err != nil {
+		t.Fatalf("count normalized usage event: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("normalized event count = %d, want 1", count)
+	}
+
+	var event entities.UsageEvent
+	if err := db.Where("event_key = ?", "offset-event").First(&event).Error; err != nil {
+		t.Fatalf("load normalized usage event: %v", err)
+	}
+	if !event.Timestamp.Equal(timestamp) || event.Timestamp.Location() != time.UTC {
+		t.Fatalf("normalized timestamp = %s (%s), want UTC instant %s", event.Timestamp, event.Timestamp.Location(), timestamp.UTC())
 	}
 }
 
@@ -63,6 +104,9 @@ func TestOpenDatabaseRunsSchemaMigrationsAndAddsUsageEventRedisFields(t *testing
 	}
 	if !db.Migrator().HasColumn(&entities.UsageIdentity{}, "lookup_key") {
 		t.Fatal("expected usage_identities.lookup_key column to exist")
+	}
+	if !db.Migrator().HasTable(&entities.UsageHourlyAggregate{}) || !db.Migrator().HasTable(&entities.UsageEventKey{}) {
+		t.Fatal("expected usage archive tables to exist")
 	}
 
 	var versions []string
@@ -87,6 +131,8 @@ func TestOpenDatabaseRunsSchemaMigrationsAndAddsUsageEventRedisFields(t *testing
 		"20260508_add_usage_event_model_alias",
 		"20260509_update_usage_identity_quota_fields",
 		"20260510_remove_usage_identity_quota_fields",
+		"20260714_create_usage_archives",
+		"20260714_normalize_usage_event_timestamps",
 	}
 	if len(versions) != len(expected) {
 		t.Fatalf("expected migration versions %v, got %v", expected, versions)

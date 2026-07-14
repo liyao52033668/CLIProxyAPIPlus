@@ -206,10 +206,14 @@ func initializeUsageDatabase(dataDir string, usePostgresStore bool, pgStoreDSN s
 		return openRuntimePostgresUsageDatabase(pgStoreDSN)
 	}
 
-	if dataDir == "" {
-		dataDir = "/CLIProxyAPI/data"
+	resolvedDataDir, err := util.ResolveAuthDir(dataDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve usage data directory: %w", err)
 	}
-	usageDBPath := filepath.Join(dataDir, "usage.db")
+	if err := os.MkdirAll(resolvedDataDir, 0o700); err != nil {
+		return nil, fmt.Errorf("create usage data directory %s: %w", resolvedDataDir, err)
+	}
+	usageDBPath := filepath.Join(resolvedDataDir, "usage.db")
 	if useGitStore {
 		if err := restoreGitStoreUsageDatabase(gitStoreInst, usageDBPath); err != nil {
 			return nil, err

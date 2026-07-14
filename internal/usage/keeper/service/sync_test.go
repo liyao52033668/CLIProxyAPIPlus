@@ -597,6 +597,97 @@ func TestSyncRedisBatchKeepsDistinctRedisRequestIDsWithSameCanonicalFields(t *te
 	assertUsageEventCount(t, db, 2)
 }
 
+func TestAlignUsageEventKeysLoadsExistingEventsInBatches(t *testing.T) {
+	db, logs := openSyncTestDatabaseWithLogs(t)
+	seedEvents := make([]entities.UsageEvent, 0, 120)
+	incomingEvents := make([]entities.UsageEvent, 0, 120)
+	for i := 0; i < 120; i++ {
+		timestamp := time.Date(2026, 4, 27, 8, 0, 0, i, time.UTC)
+		event := entities.UsageEvent{
+			EventKey:        "existing-" + strconv.Itoa(i),
+			APIGroupKey:     "external-api-key",
+			Model:           "claude-sonnet",
+			Timestamp:       timestamp,
+			Source:          "codex-a",
+			AuthIndex:       "1",
+			InputTokens:     int64(i + 1),
+			OutputTokens:    20,
+			ReasoningTokens: 5,
+			CachedTokens:    4,
+			TotalTokens:     int64(i + 30),
+		}
+		seedEvents = append(seedEvents, event)
+		incoming := event
+		incoming.EventKey = canonicalUsageEventKey(incoming)
+		incomingEvents = append(incomingEvents, incoming)
+	}
+	if _, _, err := repository.InsertUsageEvents(db, seedEvents); err != nil {
+		t.Fatalf("seed usage events: %v", err)
+	}
+	logs.Reset()
+
+	aligned, err := alignUsageEventKeysWithExistingCanonicalEvents(db, incomingEvents)
+	if err != nil {
+		t.Fatalf("alignUsageEventKeysWithExistingCanonicalEvents returned error: %v", err)
+	}
+	for i, event := range aligned {
+		expected := "existing-" + strconv.Itoa(i)
+		if event.EventKey != expected {
+			t.Fatalf("expected event %d to align to %q, got %q", i, expected, event.EventKey)
+		}
+	}
+
+	sqlLog := logs.String()
+	if queries := strings.Count(sqlLog, "FROM `usage_events`"); queries != 1 {
+		t.Fatalf("expected one batched usage_events lookup, got %d queries: %s", queries, sqlLog)
+	}
+	if queries := strings.Count(sqlLog, "FROM `redis_usage_inboxes`"); queries != 1 {
+		t.Fatalf("expected one batched redis inbox lookup, got %d queries: %s", queries, sqlLog)
+	}
+}
+
+func TestAlignUsageEventKeysDoesNotReuseProcessedCanonicalKey(t *testing.T) {
+	db := openSyncTestDatabase(t)
+	timestamp := time.Date(2026, 4, 27, 8, 0, 0, 0, time.UTC)
+	event := entities.UsageEvent{
+		APIGroupKey:  "external-api-key",
+		Model:        "claude-sonnet",
+		Timestamp:    timestamp,
+		Source:       "codex-a",
+		AuthIndex:    "1",
+		InputTokens:  10,
+		OutputTokens: 20,
+		TotalTokens:  30,
+	}
+	canonicalKey := canonicalUsageEventKey(event)
+	event.EventKey = canonicalKey
+	if _, _, err := repository.InsertUsageEvents(db, []entities.UsageEvent{event}); err != nil {
+		t.Fatalf("seed canonical usage event: %v", err)
+	}
+	rows, err := repository.InsertRedisUsageInboxMessages(db, []dto.RedisInboxInsert{{
+		QueueKey:   cpa.ManagementUsageQueueKey,
+		RawMessage: `{}`,
+		PoppedAt:   timestamp,
+	}})
+	if err != nil {
+		t.Fatalf("seed redis inbox row: %v", err)
+	}
+	if err := repository.MarkRedisUsageInboxProcessed(db, rows[0].ID, canonicalKey, timestamp); err != nil {
+		t.Fatalf("mark redis inbox row processed: %v", err)
+	}
+
+	incoming := event
+	incoming.ID = 0
+	incoming.EventKey = "distinct-legacy-key"
+	aligned, err := alignUsageEventKeysWithExistingCanonicalEvents(db, []entities.UsageEvent{incoming})
+	if err != nil {
+		t.Fatalf("alignUsageEventKeysWithExistingCanonicalEvents returned error: %v", err)
+	}
+	if aligned[0].EventKey != incoming.EventKey {
+		t.Fatalf("expected processed canonical key not to be reused, got %q", aligned[0].EventKey)
+	}
+}
+
 func TestSyncRedisBatchWritesDebugLogsWithoutRawPayload(t *testing.T) {
 	db := openSyncTestDatabase(t)
 	logs := captureSyncDebugLogs(t)

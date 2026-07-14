@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -83,15 +84,26 @@ func ResolveAuthDir(authDir string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("resolve auth dir: %w", err)
 		}
-		remainder := strings.TrimPrefix(authDir, "~")
-		remainder = strings.TrimLeft(remainder, "/\\")
+		remainder := strings.TrimLeft(strings.TrimPrefix(authDir, "~"), "/\\")
 		if remainder == "" {
-			return filepath.Clean(home), nil
+			return normalizeConfiguredPath(home), nil
 		}
-		normalized := strings.ReplaceAll(remainder, "\\", "/")
-		return filepath.Clean(filepath.Join(home, filepath.FromSlash(normalized))), nil
+		return filepath.Clean(filepath.Join(home, normalizeConfiguredPath(remainder))), nil
 	}
-	return filepath.Clean(authDir), nil
+	if runtime.GOOS != "windows" && strings.HasPrefix(authDir, `\`) {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve auth dir: %w", err)
+		}
+		remainder := strings.TrimLeft(authDir, "/\\")
+		return filepath.Clean(filepath.Join(home, normalizeConfiguredPath(remainder))), nil
+	}
+	return normalizeConfiguredPath(authDir), nil
+}
+
+func normalizeConfiguredPath(value string) string {
+	normalized := strings.ReplaceAll(value, "\\", "/")
+	return filepath.Clean(filepath.FromSlash(normalized))
 }
 
 // CountAuthFiles returns the number of auth records available through the provided Store.
@@ -120,7 +132,7 @@ func WritablePath() string {
 		if value, ok := os.LookupEnv(key); ok {
 			trimmed := strings.TrimSpace(value)
 			if trimmed != "" {
-				return filepath.Clean(trimmed)
+				return normalizeConfiguredPath(trimmed)
 			}
 		}
 	}

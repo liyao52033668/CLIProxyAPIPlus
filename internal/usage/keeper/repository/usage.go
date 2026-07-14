@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -15,25 +16,17 @@ func BuildUsageSnapshot(db *gorm.DB) (*dto.StatisticsSnapshot, error) {
 	return BuildUsageSnapshotWithFilter(db, dto.UsageQueryFilter{})
 }
 
-// Request Event Log Tab：先按列表条件统计总数，再加载当前页和筛选项。
+// ListUsageEventsWithFilter counts matching events and loads only the requested page.
 func ListUsageEventsWithFilter(db *gorm.DB, filter dto.UsageQueryFilter) (*dto.UsageEventsPageRecord, error) {
 	if db == nil {
 		return nil, fmt.Errorf("database is nil")
 	}
 
-	// 第一步：应用列表筛选，统计分页总数。
-	baseQuery := queryUsageEvents(db)
-	baseQuery = applyUsageEventListQuery(baseQuery, filter)
+	baseQuery := applyUsageEventListQuery(queryUsageEvents(db), filter)
 
 	var totalCount int64
 	if err := baseQuery.Count(&totalCount).Error; err != nil {
 		return nil, fmt.Errorf("count usage events: %w", err)
-	}
-
-	// 第二步：model 筛选项只跟随时间窗口，不跟随当前列表筛选。
-	modelOptions, err := listUsageEventModelFilterOptions(db, filter)
-	if err != nil {
-		return nil, err
 	}
 
 	page := filter.Page
@@ -56,7 +49,7 @@ func ListUsageEventsWithFilter(db *gorm.DB, filter dto.UsageQueryFilter) (*dto.U
 	}
 
 	query := applyUsageEventListQuery(db.Model(&entities.UsageEvent{}), filter)
-	query = query.Order("timestamp DESC, id DESC").Limit(pageSize).Offset(offset)
+	query = query.Select(usageEventListSelectColumns).Order("timestamp DESC, id DESC").Limit(pageSize).Offset(offset)
 
 	var events []entities.UsageEvent
 	if err := query.Find(&events).Error; err != nil {
@@ -83,14 +76,18 @@ func ListUsageEventsWithFilter(db *gorm.DB, filter dto.UsageQueryFilter) (*dto.U
 			TotalTokens:     event.TotalTokens,
 		})
 	}
+	models, err := listUsageEventModelFilterOptions(db, filter)
+	if err != nil {
+		return nil, err
+	}
 	totalPages := 0
 	if totalCount > 0 {
 		totalPages = int((totalCount + int64(pageSize) - 1) / int64(pageSize))
 	}
-	return &dto.UsageEventsPageRecord{Events: rows, Models: modelOptions, TotalCount: totalCount, Page: page, PageSize: pageSize, TotalPages: totalPages}, nil
+	return &dto.UsageEventsPageRecord{Events: rows, Models: models, TotalCount: totalCount, Page: page, PageSize: pageSize, TotalPages: totalPages}, nil
 }
 
-// Request Event Log Filter Options：只按时间窗口收集 model 候选值。
+// ListUsageEventFilterOptionsWithFilter collects model candidates for the time window.
 func ListUsageEventFilterOptionsWithFilter(db *gorm.DB, filter dto.UsageQueryFilter) (*dto.UsageEventFilterOptionsRecord, error) {
 	if db == nil {
 		return nil, fmt.Errorf("database is nil")
@@ -103,15 +100,32 @@ func ListUsageEventFilterOptionsWithFilter(db *gorm.DB, filter dto.UsageQueryFil
 }
 
 func listUsageEventModelFilterOptions(db *gorm.DB, filter dto.UsageQueryFilter) ([]string, error) {
-	// 第一步：model 候选值只来自 usage_events，并且只套用时间窗口。
 	query := applyUsageEventFilterOptionsQuery(queryUsageEvents(db), filter)
 
-	// 第二步：去重并排除空 model，保持下拉选项稳定排序。
+	// Exclude blank models and keep filter options stable.
 	var values []string
 	if err := query.Select("DISTINCT TRIM(model)").Where("TRIM(model) <> ''").Order("TRIM(model) ASC").Pluck("model", &values).Error; err != nil {
 		return nil, fmt.Errorf("load usage event model filter options: %w", err)
 	}
 	return values, nil
+}
+
+var usageEventListSelectColumns = []string{
+	"id",
+	"timestamp",
+	"api_group_key",
+	"model",
+	"auth_type",
+	"provider",
+	"source",
+	"auth_index",
+	"failed",
+	"latency_ms",
+	"input_tokens",
+	"output_tokens",
+	"reasoning_tokens",
+	"cached_tokens",
+	"total_tokens",
 }
 
 func queryUsageEvents(db *gorm.DB) *gorm.DB {
@@ -128,22 +142,22 @@ func applyUsageQueryWindow(query *gorm.DB, filter dto.UsageQueryFilter) *gorm.DB
 	return query
 }
 
-// Overview Tab 第一步：只应用时间窗口，后续 Overview 专属条件也从这里加。
+// Overview queries apply only the selected time window.
 func applyUsageOverviewQuery(query *gorm.DB, filter dto.UsageQueryFilter) *gorm.DB {
 	return applyUsageQueryWindow(query, filter)
 }
 
-// Analysis Tab 第一步：只应用时间窗口，避免 Request Event Log 的筛选污染聚合。
+// Analysis queries apply only the selected time window.
 func applyUsageAnalysisTabQuery(query *gorm.DB, filter dto.UsageQueryFilter) *gorm.DB {
 	return applyUsageQueryWindow(query, filter)
 }
 
-// Request Event Log 筛选项第一步：只应用时间窗口，不叠加当前列表筛选。
+// Filter-option queries ignore active event-list filters.
 func applyUsageEventFilterOptionsQuery(query *gorm.DB, filter dto.UsageQueryFilter) *gorm.DB {
 	return applyUsageQueryWindow(query, filter)
 }
 
-// Request Event Log 列表第一步：在时间窗口上叠加 model/source/auth_index/result。
+// Event-list queries combine the time window with active list filters.
 func applyUsageEventListQuery(query *gorm.DB, filter dto.UsageQueryFilter) *gorm.DB {
 	query = applyUsageQueryWindow(query, filter)
 	if model := strings.TrimSpace(filter.Model); model != "" {
@@ -151,7 +165,7 @@ func applyUsageEventListQuery(query *gorm.DB, filter dto.UsageQueryFilter) *gorm
 	}
 	if source := strings.TrimSpace(filter.Source); source != "" {
 		if authIndex := strings.TrimSpace(filter.AuthIndex); authIndex != "" {
-			// 第二步：API 层会把 Source 下拉转成 auth_index，这里兼容直接传 source 的仓储调用。
+			// Keep direct repository callers compatible with source-based filtering.
 			query = query.Where("(TRIM(auth_index) = ? OR TRIM(source) = ?)", authIndex, source)
 		} else {
 			query = query.Where("TRIM(source) = ?", source)
@@ -168,58 +182,29 @@ func applyUsageEventListQuery(query *gorm.DB, filter dto.UsageQueryFilter) *gorm
 	return query
 }
 
-// Analysis 第一步：按时间窗口做 API / model / API+model 聚合。
+type usageAnalysisAggregateRow struct {
+	APIGroupKey        string
+	Model              string
+	TotalRequests      int64
+	SuccessCount       int64
+	FailureCount       int64
+	InputTokens        int64
+	OutputTokens       int64
+	ReasoningTokens    int64
+	CachedTokens       int64
+	TotalTokens        int64
+	TotalLatencyMS     int64
+	LatencySampleCount int64
+}
+
+// ListUsageAnalysisWithFilter scans API-model aggregates once and folds API and model totals in memory.
 func ListUsageAnalysisWithFilter(db *gorm.DB, filter dto.UsageQueryFilter) ([]dto.UsageAnalysisAPIStatRecord, []dto.UsageAnalysisModelStatRecord, error) {
 	if db == nil {
 		return nil, nil, fmt.Errorf("database is nil")
 	}
 
-	baseQuery := applyUsageAnalysisTabQuery(db.Model(&entities.UsageEvent{}), filter)
-
-	apiQuery := baseQuery.Session(&gorm.Session{})
-	apiQuery = apiQuery.Select(strings.Join([]string{
-		"TRIM(api_group_key) AS api_group_key",
-		"COUNT(*) AS total_requests",
-		"SUM(CASE WHEN failed THEN 0 ELSE 1 END) AS success_count",
-		"SUM(CASE WHEN failed THEN 1 ELSE 0 END) AS failure_count",
-		"SUM(input_tokens) AS input_tokens",
-		"SUM(output_tokens) AS output_tokens",
-		"SUM(reasoning_tokens) AS reasoning_tokens",
-		"SUM(cached_tokens) AS cached_tokens",
-		"SUM(total_tokens) AS total_tokens",
-	}, ", "))
-	apiQuery = apiQuery.Group("TRIM(api_group_key)")
-	apiQuery = apiQuery.Order("total_requests DESC, api_group_key ASC")
-
-	var apiRows []dto.UsageAnalysisAPIStatRecord
-	if err := apiQuery.Scan(&apiRows).Error; err != nil {
-		return nil, nil, fmt.Errorf("load usage analysis api stats: %w", err)
-	}
-
-	modelQuery := baseQuery.Session(&gorm.Session{})
-	modelQuery = modelQuery.Select(strings.Join([]string{
-		"TRIM(model) AS model",
-		"COUNT(*) AS total_requests",
-		"SUM(CASE WHEN failed THEN 0 ELSE 1 END) AS success_count",
-		"SUM(CASE WHEN failed THEN 1 ELSE 0 END) AS failure_count",
-		"SUM(input_tokens) AS input_tokens",
-		"SUM(output_tokens) AS output_tokens",
-		"SUM(reasoning_tokens) AS reasoning_tokens",
-		"SUM(cached_tokens) AS cached_tokens",
-		"SUM(total_tokens) AS total_tokens",
-		"SUM(latency_ms) AS total_latency_ms",
-		"SUM(CASE WHEN latency_ms > 0 THEN 1 ELSE 0 END) AS latency_sample_count",
-	}, ", "))
-	modelQuery = modelQuery.Group("TRIM(model)")
-	modelQuery = modelQuery.Order("total_requests DESC, model ASC")
-
-	var modelRows []dto.UsageAnalysisModelStatRecord
-	if err := modelQuery.Scan(&modelRows).Error; err != nil {
-		return nil, nil, fmt.Errorf("load usage analysis model stats: %w", err)
-	}
-
-	apiModelQuery := baseQuery.Session(&gorm.Session{})
-	apiModelQuery = apiModelQuery.Select(strings.Join([]string{
+	query := applyUsageAnalysisTabQuery(db.Model(&entities.UsageEvent{}), filter)
+	query = query.Select(strings.Join([]string{
 		"TRIM(api_group_key) AS api_group_key",
 		"TRIM(model) AS model",
 		"COUNT(*) AS total_requests",
@@ -233,43 +218,34 @@ func ListUsageAnalysisWithFilter(db *gorm.DB, filter dto.UsageQueryFilter) ([]dt
 		"SUM(latency_ms) AS total_latency_ms",
 		"SUM(CASE WHEN latency_ms > 0 THEN 1 ELSE 0 END) AS latency_sample_count",
 	}, ", "))
-	apiModelQuery = apiModelQuery.Group("TRIM(api_group_key), TRIM(model)")
-	apiModelQuery = apiModelQuery.Order("api_group_key ASC, total_requests DESC, model ASC")
+	query = query.Group("TRIM(api_group_key), TRIM(model)")
 
-	var apiModelRows []struct {
-		APIGroupKey        string
-		Model              string
-		TotalRequests      int64
-		SuccessCount       int64
-		FailureCount       int64
-		InputTokens        int64
-		OutputTokens       int64
-		ReasoningTokens    int64
-		CachedTokens       int64
-		TotalTokens        int64
-		TotalLatencyMS     int64
-		LatencySampleCount int64
-	}
-	if err := apiModelQuery.Scan(&apiModelRows).Error; err != nil {
+	var aggregateRows []usageAnalysisAggregateRow
+	if err := query.Scan(&aggregateRows).Error; err != nil {
 		return nil, nil, fmt.Errorf("load usage analysis api model stats: %w", err)
 	}
 
-	modelsByAPI := make(map[string][]dto.UsageAnalysisModelStatRecord, len(apiRows))
-	for _, row := range apiModelRows {
-		modelsByAPI[row.APIGroupKey] = append(modelsByAPI[row.APIGroupKey], dto.UsageAnalysisModelStatRecord{
-			Model:              row.Model,
-			TotalRequests:      row.TotalRequests,
-			SuccessCount:       row.SuccessCount,
-			FailureCount:       row.FailureCount,
-			InputTokens:        row.InputTokens,
-			OutputTokens:       row.OutputTokens,
-			ReasoningTokens:    row.ReasoningTokens,
-			CachedTokens:       row.CachedTokens,
-			TotalTokens:        row.TotalTokens,
-			TotalLatencyMS:     row.TotalLatencyMS,
-			LatencySampleCount: row.LatencySampleCount,
-		})
+	archiveQuery := applyUsageAggregateQueryWindow(db.Model(&entities.UsageHourlyAggregate{}), filter)
+	archiveQuery = archiveQuery.Select(strings.Join([]string{
+		"TRIM(api_group_key) AS api_group_key",
+		"TRIM(model) AS model",
+		"SUM(request_count) AS total_requests",
+		"SUM(success_count) AS success_count",
+		"SUM(failure_count) AS failure_count",
+		"SUM(input_tokens) AS input_tokens",
+		"SUM(output_tokens) AS output_tokens",
+		"SUM(reasoning_tokens) AS reasoning_tokens",
+		"SUM(cached_tokens) AS cached_tokens",
+		"SUM(total_tokens) AS total_tokens",
+		"SUM(total_latency_ms) AS total_latency_ms",
+		"SUM(latency_sample_count) AS latency_sample_count",
+	}, ", ")).Group("TRIM(api_group_key), TRIM(model)")
+	var archivedRows []usageAnalysisAggregateRow
+	if err := archiveQuery.Scan(&archivedRows).Error; err != nil {
+		return nil, nil, fmt.Errorf("load archived usage analysis api model stats: %w", err)
 	}
+	aggregateRows = append(aggregateRows, archivedRows...)
+
 	normalize := func(value string) string {
 		trimmed := strings.TrimSpace(value)
 		if trimmed == "" {
@@ -278,23 +254,91 @@ func ListUsageAnalysisWithFilter(db *gorm.DB, filter dto.UsageQueryFilter) ([]dt
 		return trimmed
 	}
 
-	resultAPIs := make([]dto.UsageAnalysisAPIStatRecord, 0, len(apiRows))
-	for _, row := range apiRows {
-		row.APIGroupKey = normalize(row.APIGroupKey)
-		row.DisplayName = row.APIGroupKey
-		models := modelsByAPI[strings.TrimSpace(row.APIGroupKey)]
-		if len(models) == 0 {
-			models = modelsByAPI[row.APIGroupKey]
+	apisByKey := make(map[string]dto.UsageAnalysisAPIStatRecord)
+	modelsByAPI := make(map[string]map[string]dto.UsageAnalysisModelStatRecord)
+	modelsByKey := make(map[string]dto.UsageAnalysisModelStatRecord)
+	for _, row := range aggregateRows {
+		apiKey := strings.TrimSpace(row.APIGroupKey)
+		modelKey := strings.TrimSpace(row.Model)
+		apiModels := modelsByAPI[apiKey]
+		if apiModels == nil {
+			apiModels = make(map[string]dto.UsageAnalysisModelStatRecord)
 		}
-		for index := range models {
-			models[index].Model = normalize(models[index].Model)
+		modelStat := apiModels[modelKey]
+		modelStat.Model = normalize(modelKey)
+		modelStat.TotalRequests += row.TotalRequests
+		modelStat.SuccessCount += row.SuccessCount
+		modelStat.FailureCount += row.FailureCount
+		modelStat.InputTokens += row.InputTokens
+		modelStat.OutputTokens += row.OutputTokens
+		modelStat.ReasoningTokens += row.ReasoningTokens
+		modelStat.CachedTokens += row.CachedTokens
+		modelStat.TotalTokens += row.TotalTokens
+		modelStat.TotalLatencyMS += row.TotalLatencyMS
+		modelStat.LatencySampleCount += row.LatencySampleCount
+		apiModels[modelKey] = modelStat
+		modelsByAPI[apiKey] = apiModels
+
+		apiStat := apisByKey[apiKey]
+		apiStat.APIGroupKey = normalize(apiKey)
+		apiStat.DisplayName = apiStat.APIGroupKey
+		apiStat.TotalRequests += row.TotalRequests
+		apiStat.SuccessCount += row.SuccessCount
+		apiStat.FailureCount += row.FailureCount
+		apiStat.InputTokens += row.InputTokens
+		apiStat.OutputTokens += row.OutputTokens
+		apiStat.ReasoningTokens += row.ReasoningTokens
+		apiStat.CachedTokens += row.CachedTokens
+		apiStat.TotalTokens += row.TotalTokens
+		apisByKey[apiKey] = apiStat
+
+		globalModel := modelsByKey[modelKey]
+		globalModel.Model = normalize(modelKey)
+		globalModel.TotalRequests += row.TotalRequests
+		globalModel.SuccessCount += row.SuccessCount
+		globalModel.FailureCount += row.FailureCount
+		globalModel.InputTokens += row.InputTokens
+		globalModel.OutputTokens += row.OutputTokens
+		globalModel.ReasoningTokens += row.ReasoningTokens
+		globalModel.CachedTokens += row.CachedTokens
+		globalModel.TotalTokens += row.TotalTokens
+		globalModel.TotalLatencyMS += row.TotalLatencyMS
+		globalModel.LatencySampleCount += row.LatencySampleCount
+		modelsByKey[modelKey] = globalModel
+	}
+
+	resultAPIs := make([]dto.UsageAnalysisAPIStatRecord, 0, len(apisByKey))
+	for apiKey, apiStat := range apisByKey {
+		apiModels := modelsByAPI[apiKey]
+		apiStat.Models = make([]dto.UsageAnalysisModelStatRecord, 0, len(apiModels))
+		for _, modelStat := range apiModels {
+			apiStat.Models = append(apiStat.Models, modelStat)
 		}
-		row.Models = models
-		resultAPIs = append(resultAPIs, row)
+		sort.Slice(apiStat.Models, func(i, j int) bool {
+			if apiStat.Models[i].TotalRequests != apiStat.Models[j].TotalRequests {
+				return apiStat.Models[i].TotalRequests > apiStat.Models[j].TotalRequests
+			}
+			return apiStat.Models[i].Model < apiStat.Models[j].Model
+		})
+		resultAPIs = append(resultAPIs, apiStat)
 	}
-	for index := range modelRows {
-		modelRows[index].Model = normalize(modelRows[index].Model)
+	sort.Slice(resultAPIs, func(i, j int) bool {
+		if resultAPIs[i].TotalRequests != resultAPIs[j].TotalRequests {
+			return resultAPIs[i].TotalRequests > resultAPIs[j].TotalRequests
+		}
+		return resultAPIs[i].APIGroupKey < resultAPIs[j].APIGroupKey
+	})
+
+	modelRows := make([]dto.UsageAnalysisModelStatRecord, 0, len(modelsByKey))
+	for _, modelStat := range modelsByKey {
+		modelRows = append(modelRows, modelStat)
 	}
+	sort.Slice(modelRows, func(i, j int) bool {
+		if modelRows[i].TotalRequests != modelRows[j].TotalRequests {
+			return modelRows[i].TotalRequests > modelRows[j].TotalRequests
+		}
+		return modelRows[i].Model < modelRows[j].Model
+	})
 
 	return resultAPIs, modelRows, nil
 }
@@ -311,6 +355,12 @@ func BuildUsageSnapshotWithFilter(db *gorm.DB, filter dto.UsageQueryFilter) (*dt
 	}
 
 	snapshot := newEmptyUsageSnapshot()
+	if err := streamUsageHourlyAggregatesWithFilter(db, filter, func(aggregate entities.UsageHourlyAggregate) error {
+		applyUsageAggregateToSnapshot(snapshot, aggregate)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
 	if err := streamUsageEventsWithFilter(db, filter, usageSnapshotSelectColumns, func(event entities.UsageEvent) error {
 		applyUsageEventToSnapshot(snapshot, event, true)
 		return nil
@@ -318,6 +368,28 @@ func BuildUsageSnapshotWithFilter(db *gorm.DB, filter dto.UsageQueryFilter) (*dt
 		return nil, err
 	}
 	finalizeUsageSnapshot(snapshot, true)
+	return snapshot, nil
+}
+
+// BuildUsageAggregateSnapshotWithFilter streams matching events without request details.
+func BuildUsageAggregateSnapshotWithFilter(db *gorm.DB, filter dto.UsageQueryFilter) (*dto.StatisticsSnapshot, error) {
+	if db == nil {
+		return nil, fmt.Errorf("database is nil")
+	}
+
+	snapshot := newEmptyUsageSnapshot()
+	if err := streamUsageHourlyAggregatesWithFilter(db, filter, func(aggregate entities.UsageHourlyAggregate) error {
+		applyUsageAggregateToSnapshot(snapshot, aggregate)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	if err := streamUsageEventsWithFilter(db, filter, usageAggregateSelectColumns, func(event entities.UsageEvent) error {
+		applyUsageEventToSnapshot(snapshot, event, false)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
 	return snapshot, nil
 }
 
@@ -336,6 +408,13 @@ func BuildUsageOverviewWithFilter(db *gorm.DB, filter dto.UsageQueryFilter) (*dt
 	overview := newUsageOverviewRecord(filter)
 	bucketByDay := shouldBucketUsageOverviewByDay(filter, overview.Summary.WindowMinutes)
 	latestHourlyStart := latestHourlySeriesStart(filter)
+	if err := streamUsageHourlyAggregatesWithFilter(db, filter, func(aggregate entities.UsageHourlyAggregate) error {
+		applyUsageAggregateToSnapshot(overview.Usage, aggregate)
+		applyUsageAggregateToOverview(overview, aggregate, bucketByDay, latestHourlyStart, pricingByModel)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
 	if err := streamUsageEventsWithFilter(db, filter, usageOverviewSelectColumns, func(event entities.UsageEvent) error {
 		applyUsageEventToSnapshot(overview.Usage, event, false)
 		applyUsageEventToOverview(overview, event, bucketByDay, latestHourlyStart, pricingByModel)
@@ -395,7 +474,17 @@ func newUsageKeyStatsRecord() dto.UsageKeyStatsRecord {
 	return dto.UsageKeyStatsRecord{
 		BySource:    map[string]dto.UsageKeyCountRecord{},
 		ByAuthIndex: map[string]dto.UsageKeyCountRecord{},
+		Credentials: map[dto.UsageCredentialKey]dto.UsageKeyCountRecord{},
 	}
+}
+
+var usageAggregateSelectColumns = []string{
+	"id",
+	"api_group_key",
+	"model",
+	"timestamp",
+	"failed",
+	"total_tokens",
 }
 
 var usageOverviewSelectColumns = []string{
@@ -427,6 +516,44 @@ var usageSnapshotSelectColumns = []string{
 	"reasoning_tokens",
 	"cached_tokens",
 	"total_tokens",
+}
+
+// StreamUsageEventsForExport reads export fields in API, model, and timestamp order.
+func StreamUsageEventsForExport(ctx context.Context, db *gorm.DB, filter dto.UsageQueryFilter, handle func(entities.UsageEvent) error) (err error) {
+	if db == nil {
+		return fmt.Errorf("database is nil")
+	}
+	if handle == nil {
+		return fmt.Errorf("usage event handler is nil")
+	}
+
+	query := applyUsageQueryWindow(db.WithContext(ctx).Model(&entities.UsageEvent{}), filter)
+	rows, errRows := query.
+		Select(usageSnapshotSelectColumns).
+		Order("CASE WHEN TRIM(api_group_key) = '' THEN 'unknown' ELSE TRIM(api_group_key) END ASC, CASE WHEN TRIM(model) = '' THEN 'unknown' ELSE TRIM(model) END ASC, timestamp ASC, id ASC").
+		Rows()
+	if errRows != nil {
+		return fmt.Errorf("open usage event export stream: %w", errRows)
+	}
+	defer func() {
+		if errClose := rows.Close(); err == nil && errClose != nil {
+			err = fmt.Errorf("close usage event export stream: %w", errClose)
+		}
+	}()
+
+	for rows.Next() {
+		var event entities.UsageEvent
+		if errScan := db.ScanRows(rows, &event); errScan != nil {
+			return fmt.Errorf("scan usage event export row: %w", errScan)
+		}
+		if errHandle := handle(event); errHandle != nil {
+			return errHandle
+		}
+	}
+	if errRows := rows.Err(); errRows != nil {
+		return fmt.Errorf("read usage event export stream: %w", errRows)
+	}
+	return nil
 }
 
 // streamUsageEventsWithFilter pages through usage_events with keyset pagination
@@ -543,6 +670,37 @@ func applyUsageEventToSnapshot(snapshot *dto.StatisticsSnapshot, event entities.
 	snapshot.APIs[apiKey] = apiSnapshot
 }
 
+func applyUsageAggregateToSnapshot(snapshot *dto.StatisticsSnapshot, aggregate entities.UsageHourlyAggregate) {
+	apiKey := normalizeUsageOverviewDimension(aggregate.APIGroupKey)
+	modelName := normalizeUsageOverviewDimension(aggregate.Model)
+	apiSnapshot := snapshot.APIs[apiKey]
+	if apiSnapshot.Models == nil {
+		apiSnapshot.Models = map[string]dto.ModelSnapshot{}
+	}
+	modelSnapshot := apiSnapshot.Models[modelName]
+	modelSnapshot.TotalRequests += aggregate.RequestCount
+	modelSnapshot.SuccessCount += aggregate.SuccessCount
+	modelSnapshot.FailureCount += aggregate.FailureCount
+	modelSnapshot.TotalTokens += aggregate.TotalTokens
+	apiSnapshot.TotalRequests += aggregate.RequestCount
+	apiSnapshot.SuccessCount += aggregate.SuccessCount
+	apiSnapshot.FailureCount += aggregate.FailureCount
+	apiSnapshot.TotalTokens += aggregate.TotalTokens
+	snapshot.TotalRequests += aggregate.RequestCount
+	snapshot.SuccessCount += aggregate.SuccessCount
+	snapshot.FailureCount += aggregate.FailureCount
+	snapshot.TotalTokens += aggregate.TotalTokens
+
+	dayKey := aggregate.BucketStart.In(time.Local).Format("2006-01-02")
+	hourKey := aggregate.BucketStart.UTC().Format("2006-01-02T15:00:00Z")
+	snapshot.RequestsByDay[dayKey] += aggregate.RequestCount
+	snapshot.RequestsByHour[hourKey] += aggregate.RequestCount
+	snapshot.TokensByDay[dayKey] += aggregate.TotalTokens
+	snapshot.TokensByHour[hourKey] += aggregate.TotalTokens
+	apiSnapshot.Models[modelName] = modelSnapshot
+	snapshot.APIs[apiKey] = apiSnapshot
+}
+
 func finalizeUsageSnapshot(snapshot *dto.StatisticsSnapshot, includeDetails bool) {
 	if !includeDetails {
 		return
@@ -601,8 +759,40 @@ func applyUsageEventToOverviewSeries(series *dto.UsageOverviewSeriesRecord, even
 	series.Models[modelName] = modelSeries
 }
 
+func applyUsageAggregateToOverviewSeries(series *dto.UsageOverviewSeriesRecord, aggregate entities.UsageHourlyAggregate, cost float64, bucketKey string, bucketMinutes int64) {
+	series.Requests[bucketKey] += aggregate.RequestCount
+	series.Tokens[bucketKey] += aggregate.TotalTokens
+	series.Cost[bucketKey] += cost
+	series.InputTokens[bucketKey] += aggregate.InputTokens
+	series.OutputTokens[bucketKey] += aggregate.OutputTokens
+	series.CachedTokens[bucketKey] += aggregate.CachedTokens
+	series.ReasoningTokens[bucketKey] += aggregate.ReasoningTokens
+	series.RPM[bucketKey] = float64(series.Requests[bucketKey]) / float64(bucketMinutes)
+	series.TPM[bucketKey] = float64(series.Tokens[bucketKey]) / float64(bucketMinutes)
+
+	modelName := normalizeUsageOverviewDimension(aggregate.Model)
+	modelSeries := series.Models[modelName]
+	if modelSeries.Requests == nil {
+		modelSeries = newUsageOverviewSeriesRecord()
+	}
+	modelSeries.Requests[bucketKey] += aggregate.RequestCount
+	modelSeries.Tokens[bucketKey] += aggregate.TotalTokens
+	modelSeries.Cost[bucketKey] += cost
+	modelSeries.InputTokens[bucketKey] += aggregate.InputTokens
+	modelSeries.OutputTokens[bucketKey] += aggregate.OutputTokens
+	modelSeries.CachedTokens[bucketKey] += aggregate.CachedTokens
+	modelSeries.ReasoningTokens[bucketKey] += aggregate.ReasoningTokens
+	modelSeries.RPM[bucketKey] = float64(modelSeries.Requests[bucketKey]) / float64(bucketMinutes)
+	modelSeries.TPM[bucketKey] = float64(modelSeries.Tokens[bucketKey]) / float64(bucketMinutes)
+	series.Models[modelName] = modelSeries
+}
+
 func usageEventRequiresPricing(event entities.UsageEvent) bool {
 	return event.InputTokens > 0 || event.OutputTokens > 0 || event.CachedTokens > 0
+}
+
+func usageAggregateRequiresPricing(aggregate entities.UsageHourlyAggregate) bool {
+	return aggregate.InputTokens > 0 || aggregate.OutputTokens > 0 || aggregate.CachedTokens > 0
 }
 
 func applyUsageEventToOverview(overview *dto.UsageOverviewRecord, event entities.UsageEvent, bucketByDay bool, latestHourlyStart *time.Time, pricingByModel map[string]entities.ModelPriceSetting) {
@@ -634,6 +824,30 @@ func applyUsageEventToOverview(overview *dto.UsageOverviewRecord, event entities
 	updateUsageOverviewHealthBlock(overview.Health.BlockDetails, event)
 }
 
+func applyUsageAggregateToOverview(overview *dto.UsageOverviewRecord, aggregate entities.UsageHourlyAggregate, bucketByDay bool, latestHourlyStart *time.Time, pricingByModel map[string]entities.ModelPriceSetting) {
+	overview.Summary.CachedTokens += aggregate.CachedTokens
+	overview.Summary.ReasoningTokens += aggregate.ReasoningTokens
+	overview.Health.TotalSuccess += aggregate.SuccessCount
+	overview.Health.TotalFailure += aggregate.FailureCount
+	pricing, ok := pricingByModel[strings.TrimSpace(aggregate.Model)]
+	if !ok && usageAggregateRequiresPricing(aggregate) {
+		overview.Summary.CostAvailable = false
+	}
+	cost := calculateUsageAggregateCost(aggregate, pricing)
+	overview.Summary.TotalCost += cost
+	applyUsageAggregateToKeyStats(&overview.KeyStats, aggregate, cost)
+
+	bucketKey, bucketMinutes := usageOverviewBucket(aggregate.BucketStart.UTC(), bucketByDay)
+	applyUsageAggregateToOverviewSeries(&overview.Series, aggregate, cost, bucketKey, bucketMinutes)
+	hourKey, hourMinutes := usageOverviewBucket(aggregate.BucketStart.UTC(), false)
+	if latestHourlyStart == nil || !aggregate.BucketStart.UTC().Before(*latestHourlyStart) {
+		applyUsageAggregateToOverviewSeries(&overview.HourlySeries, aggregate, cost, hourKey, hourMinutes)
+	}
+	dayKey, dayMinutes := usageOverviewBucket(aggregate.BucketStart.UTC(), true)
+	applyUsageAggregateToOverviewSeries(&overview.DailySeries, aggregate, cost, dayKey, dayMinutes)
+	updateUsageOverviewHealthBlockWithAggregate(overview.Health.BlockDetails, aggregate)
+}
+
 func applyUsageEventToKeyStats(stats *dto.UsageKeyStatsRecord, event entities.UsageEvent, cost float64) {
 	if stats == nil {
 		return
@@ -644,8 +858,13 @@ func applyUsageEventToKeyStats(stats *dto.UsageKeyStatsRecord, event entities.Us
 	if stats.ByAuthIndex == nil {
 		stats.ByAuthIndex = map[string]dto.UsageKeyCountRecord{}
 	}
+	if stats.Credentials == nil {
+		stats.Credentials = map[dto.UsageCredentialKey]dto.UsageKeyCountRecord{}
+	}
 
-	if source := strings.TrimSpace(event.Source); source != "" {
+	source := strings.TrimSpace(event.Source)
+	authIndex := strings.TrimSpace(event.AuthIndex)
+	if source != "" {
 		count := stats.BySource[source]
 		if event.Failed {
 			count.Failure++
@@ -656,7 +875,7 @@ func applyUsageEventToKeyStats(stats *dto.UsageKeyStatsRecord, event entities.Us
 		count.Cost += cost
 		stats.BySource[source] = count
 	}
-	if authIndex := strings.TrimSpace(event.AuthIndex); authIndex != "" {
+	if authIndex != "" {
 		count := stats.ByAuthIndex[authIndex]
 		if event.Failed {
 			count.Failure++
@@ -666,6 +885,43 @@ func applyUsageEventToKeyStats(stats *dto.UsageKeyStatsRecord, event entities.Us
 		count.Tokens += event.TotalTokens
 		count.Cost += cost
 		stats.ByAuthIndex[authIndex] = count
+	}
+	if source != "" || authIndex != "" {
+		key := dto.UsageCredentialKey{Source: source, AuthIndex: authIndex}
+		count := stats.Credentials[key]
+		if event.Failed {
+			count.Failure++
+		} else {
+			count.Success++
+		}
+		count.Tokens += event.TotalTokens
+		count.Cost += cost
+		stats.Credentials[key] = count
+	}
+}
+
+func applyUsageAggregateToKeyStats(stats *dto.UsageKeyStatsRecord, aggregate entities.UsageHourlyAggregate, cost float64) {
+	if stats == nil {
+		return
+	}
+	source := strings.TrimSpace(aggregate.Source)
+	authIndex := strings.TrimSpace(aggregate.AuthIndex)
+	apply := func(count dto.UsageKeyCountRecord) dto.UsageKeyCountRecord {
+		count.Success += aggregate.SuccessCount
+		count.Failure += aggregate.FailureCount
+		count.Tokens += aggregate.TotalTokens
+		count.Cost += cost
+		return count
+	}
+	if source != "" {
+		stats.BySource[source] = apply(stats.BySource[source])
+	}
+	if authIndex != "" {
+		stats.ByAuthIndex[authIndex] = apply(stats.ByAuthIndex[authIndex])
+	}
+	if source != "" || authIndex != "" {
+		key := dto.UsageCredentialKey{Source: source, AuthIndex: authIndex}
+		stats.Credentials[key] = apply(stats.Credentials[key])
 	}
 }
 
@@ -791,15 +1047,20 @@ func loadPriceSettingsByModel(db *gorm.DB) (map[string]entities.ModelPriceSettin
 }
 
 func calculateUsageEventCost(event entities.UsageEvent, pricing entities.ModelPriceSetting) float64 {
-	inputTokens := event.InputTokens
+	return calculateUsageCost(event.InputTokens, event.OutputTokens, event.CachedTokens, pricing)
+}
+
+func calculateUsageAggregateCost(aggregate entities.UsageHourlyAggregate, pricing entities.ModelPriceSetting) float64 {
+	return calculateUsageCost(aggregate.InputTokens, aggregate.OutputTokens, aggregate.CachedTokens, pricing)
+}
+
+func calculateUsageCost(inputTokens, outputTokens, cachedTokens int64, pricing entities.ModelPriceSetting) float64 {
 	if inputTokens < 0 {
 		inputTokens = 0
 	}
-	completionTokens := event.OutputTokens
-	if completionTokens < 0 {
-		completionTokens = 0
+	if outputTokens < 0 {
+		outputTokens = 0
 	}
-	cachedTokens := event.CachedTokens
 	if cachedTokens < 0 {
 		cachedTokens = 0
 	}
@@ -808,7 +1069,7 @@ func calculateUsageEventCost(event entities.UsageEvent, pricing entities.ModelPr
 		promptTokens = 0
 	}
 	return (float64(promptTokens)/1_000_000.0)*pricing.PromptPricePer1M +
-		(float64(completionTokens)/1_000_000.0)*pricing.CompletionPricePer1M +
+		(float64(outputTokens)/1_000_000.0)*pricing.CompletionPricePer1M +
 		(float64(cachedTokens)/1_000_000.0)*pricing.CachePricePer1M
 }
 
@@ -918,21 +1179,43 @@ func usageOverviewHealthWindow(filter dto.UsageQueryFilter, totalBlocks int, spa
 }
 
 func updateUsageOverviewHealthBlock(blocks []dto.UsageOverviewHealthBlockRecord, event entities.UsageEvent) {
-	timestamp := event.Timestamp.UTC()
-	for index := range blocks {
-		block := &blocks[index]
-		if timestamp.Before(block.StartTime) || !timestamp.Before(block.EndTime) {
-			continue
-		}
-		if event.Failed {
-			block.Failure++
-		} else {
-			block.Success++
-		}
-		total := block.Success + block.Failure
-		if total > 0 {
-			block.Rate = float64(block.Success) / float64(total)
-		}
+	if event.Failed {
+		updateUsageOverviewHealthBlockCounts(blocks, event.Timestamp, 0, 1)
+	} else {
+		updateUsageOverviewHealthBlockCounts(blocks, event.Timestamp, 1, 0)
+	}
+}
+
+func updateUsageOverviewHealthBlockWithAggregate(blocks []dto.UsageOverviewHealthBlockRecord, aggregate entities.UsageHourlyAggregate) {
+	updateUsageOverviewHealthBlockCounts(blocks, aggregate.BucketStart, aggregate.SuccessCount, aggregate.FailureCount)
+}
+
+func updateUsageOverviewHealthBlockCounts(blocks []dto.UsageOverviewHealthBlockRecord, eventTime time.Time, success, failure int64) {
+	if len(blocks) == 0 {
 		return
+	}
+	windowStart := blocks[0].StartTime
+	span := blocks[0].EndTime.Sub(windowStart)
+	if span <= 0 {
+		return
+	}
+	timestamp := eventTime.UTC()
+	windowEnd := blocks[len(blocks)-1].EndTime
+	if timestamp.Before(windowStart) || !timestamp.Before(windowEnd) {
+		return
+	}
+	index := int(timestamp.Sub(windowStart) / span)
+	if index < 0 || index >= len(blocks) {
+		return
+	}
+	block := &blocks[index]
+	if timestamp.Before(block.StartTime) || !timestamp.Before(block.EndTime) {
+		return
+	}
+	block.Success += success
+	block.Failure += failure
+	total := block.Success + block.Failure
+	if total > 0 {
+		block.Rate = float64(block.Success) / float64(total)
 	}
 }

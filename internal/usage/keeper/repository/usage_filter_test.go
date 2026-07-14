@@ -175,6 +175,14 @@ func TestBuildUsageOverviewWithFilterComputesSummaryAndSeries(t *testing.T) {
 	if overview.KeyStats.BySource["auth-b.json"].Success != 1 || overview.KeyStats.BySource["auth-b.json"].Failure != 0 {
 		t.Fatalf("unexpected key stats for source auth-b.json: %+v", overview.KeyStats)
 	}
+	credentialA := overview.KeyStats.Credentials[dto.UsageCredentialKey{Source: "auth-a.json", AuthIndex: "idx-a"}]
+	if credentialA.Success != 1 || credentialA.Failure != 1 || credentialA.Tokens != 4950 {
+		t.Fatalf("unexpected credential stats for auth-a.json/idx-a: %+v", credentialA)
+	}
+	credentialB := overview.KeyStats.Credentials[dto.UsageCredentialKey{Source: "auth-b.json", AuthIndex: "idx-b"}]
+	if credentialB.Success != 1 || credentialB.Failure != 0 || credentialB.Tokens != 825 {
+		t.Fatalf("unexpected credential stats for auth-b.json/idx-b: %+v", credentialB)
+	}
 	if math.Abs(overview.KeyStats.ByAuthIndex["idx-a"].Cost-0.03069) > 0.000000001 {
 		t.Fatalf("unexpected cost stats for idx-a: %+v", overview.KeyStats.ByAuthIndex["idx-a"])
 	}
