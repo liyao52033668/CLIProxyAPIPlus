@@ -59,8 +59,7 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 
 
 ## Review Policy (Mandatory)
-
-*   Automatic execution of reviews, code reviews, project-wide checks, or similar operations upon task completion is **prohibited** by default.
-*   Reviews may only be performed when explicitly requested by the user (e.g., "Review," "Check the entire project," "Comprehensive check").
-*   Upon completing a single task, partial modification, or minor change, the task must be concluded immediately; do not initiate any reviews, tests, or expanded checks on your own initiative.
-*   Adhere strictly to the task scope defined by the user; do not add extra steps simply because the task has been completed.
+- Automatic execution of reviews, code reviews, project-wide checks, or similar operations upon task completion is **prohibited** by default.
+- Reviews may only be performed when explicitly requested by the user (e.g., "Review," "Check the entire project," "Comprehensive check").
+- Upon completing a single task, partial modification, or minor change, the task must be concluded immediately; do not initiate any reviews, tests, or expanded checks on your own initiative.
+- Adhere strictly to the task scope defined by the user; do not add extra steps simply because the task has been completed.
