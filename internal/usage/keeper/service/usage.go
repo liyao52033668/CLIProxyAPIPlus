@@ -100,6 +100,14 @@ func (s *usageService) GetUsageAggregateWithFilter(_ context.Context, filter ser
 	})
 }
 
+func (s *usageService) GetRecentUsageMinuteBuckets(ctx context.Context, filter servicedto.UsageFilter) (map[string]repodto.UsageBucketSnapshot, error) {
+	return repository.BuildRecentUsageMinuteBucketsWithFilter(s.db.WithContext(ctx), repodto.UsageQueryFilter{
+		Range:     filter.Range,
+		StartTime: filter.StartTime,
+		EndTime:   filter.EndTime,
+	})
+}
+
 // GetUsageOverview builds the aggregate overview for the selected time window.
 func (s *usageService) GetUsageOverview(_ context.Context, filter servicedto.UsageFilter) (*servicedto.UsageOverviewSnapshot, error) {
 	overview, err := repository.BuildUsageOverviewWithFilter(s.db, repodto.UsageQueryFilter{

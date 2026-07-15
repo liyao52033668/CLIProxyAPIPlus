@@ -63,6 +63,58 @@ func TestRequestStatisticsPluginRecordsUsageInMemory(t *testing.T) {
 	}
 }
 
+func TestRequestStatisticsBuildsRangeOverviewFromMemoryBuckets(t *testing.T) {
+	stats := NewRequestStatistics()
+	plugin := &requestStatisticsPlugin{stats: stats}
+	anchor := time.Now().UTC().Truncate(time.Hour).Add(30 * time.Minute)
+	plugin.HandleUsage(context.Background(), coreusage.Record{
+		APIKey:      "group-a",
+		Model:       "model-a",
+		RequestedAt: anchor.Add(-26 * time.Hour),
+		Detail:      coreusage.Detail{InputTokens: 70, OutputTokens: 30},
+	})
+	plugin.HandleUsage(context.Background(), coreusage.Record{
+		APIKey:      "group-a",
+		Model:       "model-a",
+		RequestedAt: anchor.Add(-2 * time.Hour),
+		Detail:      coreusage.Detail{InputTokens: 6, OutputTokens: 2, ReasoningTokens: 1, CachedTokens: 1},
+	})
+	plugin.HandleUsage(context.Background(), coreusage.Record{
+		APIKey:      "group-a",
+		Model:       "model-b",
+		RequestedAt: anchor.Add(-time.Hour),
+		Failed:      true,
+		Detail:      coreusage.Detail{InputTokens: 10, OutputTokens: 10},
+	})
+
+	start := anchor.Add(-4 * time.Hour)
+	overview := stats.UsageOverview(servicedto.UsageFilter{Range: "4h", StartTime: &start, EndTime: &anchor})
+	if overview.Usage.TotalRequests != 2 || overview.Usage.SuccessCount != 1 || overview.Usage.FailureCount != 1 || overview.Usage.TotalTokens != 30 {
+		t.Fatalf("unexpected 4h totals: %+v", overview.Usage)
+	}
+	if overview.Summary.RequestCount != 0 || overview.Summary.TokenCount != 0 || overview.Summary.WindowMinutes != 30 || overview.Summary.CachedTokens != 1 || overview.Summary.ReasoningTokens != 1 {
+		t.Fatalf("unexpected 4h summary: %+v", overview.Summary)
+	}
+	if len(overview.HourlySeries.Requests) != 5 || len(overview.DailySeries.Requests) == 0 {
+		t.Fatalf("unexpected range series: hourly=%v daily=%v", overview.HourlySeries.Requests, overview.DailySeries.Requests)
+	}
+	if overview.HourlySeries.Requests[anchor.Add(-2*time.Hour).Truncate(time.Hour).Format(time.RFC3339)] != 1 {
+		t.Fatalf("missing recent hourly point: %v", overview.HourlySeries.Requests)
+	}
+	model := overview.Usage.APIs["group-a"].Models["model-a"]
+	if model.TotalRequests != 1 || model.InputTokens != 6 || model.OutputTokens != 2 || model.TotalTokens != 10 {
+		t.Fatalf("unexpected filtered model totals: %+v", model)
+	}
+
+	all := stats.UsageOverview(servicedto.UsageFilter{Range: "all"})
+	if all.Usage.TotalRequests != 3 || all.Usage.TotalTokens != 130 {
+		t.Fatalf("unexpected all-time totals: %+v", all.Usage)
+	}
+	if len(all.DailySeries.Requests) < 2 || len(all.Series.Requests) < 2 {
+		t.Fatalf("unexpected all-time series: series=%v daily=%v", all.Series.Requests, all.DailySeries.Requests)
+	}
+}
+
 func TestRestoreRequestStatisticsLoadsDatabaseBaseline(t *testing.T) {
 	db, err := repository.OpenDatabase(usageconfig.Config{SQLitePath: filepath.Join(t.TempDir(), "usage.db")})
 	if err != nil {
@@ -85,6 +137,9 @@ func TestRestoreRequestStatisticsLoadsDatabaseBaseline(t *testing.T) {
 			APIGroupKey:  "group-a",
 			Model:        "model-a",
 			Timestamp:    requestedAt,
+			Source:       "source-a",
+			AuthIndex:    "auth-a",
+			LatencyMS:    120,
 			InputTokens:  12,
 			OutputTokens: 4,
 			TotalTokens:  16,
@@ -94,7 +149,10 @@ func TestRestoreRequestStatisticsLoadsDatabaseBaseline(t *testing.T) {
 			APIGroupKey:  "group-a",
 			Model:        "model-a",
 			Timestamp:    requestedAt.Add(time.Minute),
+			Source:       "source-a",
+			AuthIndex:    "auth-b",
 			Failed:       true,
+			LatencyMS:    180,
 			InputTokens:  3,
 			OutputTokens: 1,
 			TotalTokens:  4,
@@ -113,7 +171,7 @@ func TestRestoreRequestStatisticsLoadsDatabaseBaseline(t *testing.T) {
 		t.Fatalf("unexpected restored totals: %+v", snapshot)
 	}
 	model := snapshot.APIs["group-a"].Models["model-a"]
-	if model.InputTokens != 15 || model.OutputTokens != 5 || model.TotalTokens != 20 {
+	if model.InputTokens != 15 || model.OutputTokens != 5 || model.TotalTokens != 20 || model.TotalLatencyMS != 300 || model.LatencySampleCount != 2 || len(model.Hourly) == 0 {
 		t.Fatalf("unexpected restored model totals: %+v", model)
 	}
 	dayKey := requestedAt.In(time.Local).Format("2006-01-02")
@@ -127,6 +185,60 @@ func TestRestoreRequestStatisticsLoadsDatabaseBaseline(t *testing.T) {
 	}
 	if page.Events[0].Failed != true || page.Events[0].TotalTokens != 4 || page.Events[1].TotalTokens != 16 {
 		t.Fatalf("unexpected restored event order: %+v", page.Events)
+	}
+	keyStats, health, _ := stats.UsageEventOverview(servicedto.UsageFilter{})
+	if keyStats.BySource["source-a"].Success != 1 || keyStats.BySource["source-a"].Failure != 1 || len(keyStats.Credentials) != 2 {
+		t.Fatalf("unexpected restored credential stats: %+v", keyStats)
+	}
+	if health.TotalSuccess != 1 || health.TotalFailure != 1 {
+		t.Fatalf("unexpected restored health: %+v", health)
+	}
+}
+
+func TestRestoreRequestStatisticsBuildsRatesBeyondEventCacheLimit(t *testing.T) {
+	db, err := repository.OpenDatabase(usageconfig.Config{SQLitePath: filepath.Join(t.TempDir(), "usage.db")})
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("get sql database: %v", err)
+	}
+	t.Cleanup(func() {
+		if errClose := sqlDB.Close(); errClose != nil {
+			t.Fatalf("close database: %v", errClose)
+		}
+	})
+
+	const eventCount = maxInMemoryUsageEvents + 105
+	requestedAt := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	events := make([]entities.UsageEvent, eventCount)
+	for i := range events {
+		events[i] = entities.UsageEvent{
+			EventKey:     fmt.Sprintf("rate-event-%d", i),
+			APIGroupKey:  "group-a",
+			Model:        "model-a",
+			Timestamp:    requestedAt,
+			InputTokens:  2,
+			OutputTokens: 1,
+			TotalTokens:  3,
+		}
+	}
+	if inserted, _, errInsert := repository.InsertUsageEvents(db, events); errInsert != nil || inserted != eventCount {
+		t.Fatalf("insert usage events: inserted=%d err=%v", inserted, errInsert)
+	}
+
+	stats := NewRequestStatistics()
+	if err = RestoreRequestStatistics(context.Background(), db, stats); err != nil {
+		t.Fatalf("restore request statistics: %v", err)
+	}
+	overview := stats.UsageOverview(servicedto.UsageFilter{Range: "24h"})
+	if overview.Summary.RequestCount != eventCount || overview.Summary.TokenCount != eventCount*3 {
+		t.Fatalf("unexpected restored rate summary: %+v", overview.Summary)
+	}
+	page := stats.ListUsageEvents(servicedto.UsageFilter{Page: 1, PageSize: 20})
+	if page.TotalCount > maxInMemoryUsageEvents || page.Cache == nil || !page.Cache.HasOlderEvents {
+		t.Fatalf("unexpected bounded event cache: %+v", page)
 	}
 }
 
@@ -234,6 +346,9 @@ func TestRequestStatisticsRejectsOversizedAndExpiredUsageEvents(t *testing.T) {
 func TestRequestStatisticsBuildsEventOverviewFromMemory(t *testing.T) {
 	stats := NewRequestStatistics()
 	now := time.Now().UTC()
+	stats.record("api-a", "model-a", "old-source", "old-auth", now.Add(-25*time.Hour), false, 5, 0, 0, 0, 5, 10)
+	stats.record("api-a", "model-a", "source-a", "auth-a", now.Add(-2*time.Hour), false, 10, 0, 0, 0, 10, 20)
+	stats.record("api-a", "model-a", "source-a", "auth-b", now.Add(-time.Hour), true, 20, 0, 0, 0, 20, 30)
 	stats.ReplaceEvents([]servicedto.UsageEventRecord{
 		{ID: 1, Timestamp: now.Add(-25 * time.Hour), Source: "old-source", AuthIndex: "old-auth", TotalTokens: 5},
 		{ID: 2, Timestamp: now.Add(-2 * time.Hour), Source: "source-a", AuthIndex: "auth-a", TotalTokens: 10},

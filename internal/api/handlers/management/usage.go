@@ -62,17 +62,24 @@ func (h *Handler) GetUsageStatistics(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errFilter.Error()})
 		return
 	}
-	var snapshot usage.StatisticsSnapshot
+	var overview usage.UsageOverviewSnapshot
 	var eventCache dto.UsageEventCacheInfo
 	var keyStats dto.UsageKeyStats
 	var serviceHealth dto.UsageOverviewHealth
 	if h != nil && h.usageStats != nil {
-		snapshot = h.usageStats.Snapshot()
+		overview = h.usageStats.UsageOverview(filter)
 		keyStats, serviceHealth, eventCache = h.usageStats.UsageEventOverview(filter)
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"usage":           snapshot,
-		"failed_requests": snapshot.FailureCount,
+		"usage":           overview.Usage,
+		"failed_requests": overview.Usage.FailureCount,
+		"summary":         overview.Summary,
+		"series":          overview.Series,
+		"hourly_series":   overview.HourlySeries,
+		"daily_series":    overview.DailySeries,
+		"range_start":     overview.StartTime,
+		"range_end":       overview.EndTime,
+		"bucket_by_day":   overview.BucketByDay,
 		"event_cache":     eventCache,
 		"key_stats":       keyStats,
 		"service_health":  serviceHealth,

@@ -30,7 +30,8 @@ const (
 	usageEventHealthColumns      = 96
 	usageEventHealthDefaultSpan  = 15 * time.Minute
 	usageEventHealthPresetWindow = 24 * time.Hour
-	usageEventHealthPresetSpan   = (usageEventHealthPresetWindow + time.Duration(usageEventHealthRows*usageEventHealthColumns) - 1) / time.Duration(usageEventHealthRows*usageEventHealthColumns)
+	recentUsageRateWindow        = 30 * time.Minute
+	recentUsageMinuteRetention   = 2 * time.Hour
 )
 
 var statisticsEnabled = true
@@ -67,25 +68,56 @@ type APISnapshot struct {
 	Models        map[string]*ModelSnapshot `json:"models"`
 }
 
+type UsageBucketSnapshot struct {
+	TotalRequests      int64
+	SuccessCount       int64
+	FailureCount       int64
+	InputTokens        int64
+	OutputTokens       int64
+	ReasoningTokens    int64
+	CachedTokens       int64
+	TotalTokens        int64
+	TotalLatencyMS     int64
+	LatencySampleCount int64
+}
+
 type ModelSnapshot struct {
-	TotalRequests int64 `json:"total_requests"`
-	SuccessCount  int64 `json:"success_count"`
-	FailureCount  int64 `json:"failure_count"`
-	TotalTokens   int64 `json:"total_tokens"`
-	InputTokens   int64 `json:"input_tokens"`
-	OutputTokens  int64 `json:"output_tokens"`
+	TotalRequests      int64                          `json:"total_requests"`
+	SuccessCount       int64                          `json:"success_count"`
+	FailureCount       int64                          `json:"failure_count"`
+	TotalTokens        int64                          `json:"total_tokens"`
+	InputTokens        int64                          `json:"input_tokens"`
+	OutputTokens       int64                          `json:"output_tokens"`
+	ReasoningTokens    int64                          `json:"reasoning_tokens"`
+	CachedTokens       int64                          `json:"cached_tokens"`
+	TotalLatencyMS     int64                          `json:"total_latency_ms"`
+	LatencySampleCount int64                          `json:"latency_sample_count"`
+	Hourly             map[string]UsageBucketSnapshot `json:"-"`
+}
+
+type UsageOverviewSnapshot struct {
+	Usage        StatisticsSnapshot
+	Summary      servicedto.UsageOverviewSummary
+	Series       servicedto.UsageOverviewSeries
+	HourlySeries servicedto.UsageOverviewSeries
+	DailySeries  servicedto.UsageOverviewSeries
+	StartTime    *time.Time
+	EndTime      *time.Time
+	BucketByDay  bool
 }
 
 type StatisticsSnapshot struct {
-	TotalRequests  int64                   `json:"total_requests"`
-	SuccessCount   int64                   `json:"success_count"`
-	FailureCount   int64                   `json:"failure_count"`
-	TotalTokens    int64                   `json:"total_tokens"`
-	APIs           map[string]*APISnapshot `json:"apis"`
-	RequestsByDay  map[string]int64        `json:"requests_by_day"`
-	RequestsByHour map[string]int64        `json:"requests_by_hour"`
-	TokensByDay    map[string]int64        `json:"tokens_by_day"`
-	TokensByHour   map[string]int64        `json:"tokens_by_hour"`
+	TotalRequests    int64                                                 `json:"total_requests"`
+	SuccessCount     int64                                                 `json:"success_count"`
+	FailureCount     int64                                                 `json:"failure_count"`
+	TotalTokens      int64                                                 `json:"total_tokens"`
+	APIs             map[string]*APISnapshot                               `json:"apis"`
+	RequestsByDay    map[string]int64                                      `json:"requests_by_day"`
+	RequestsByHour   map[string]int64                                      `json:"requests_by_hour"`
+	TokensByDay      map[string]int64                                      `json:"tokens_by_day"`
+	TokensByHour     map[string]int64                                      `json:"tokens_by_hour"`
+	CredentialHourly map[string]map[usageCredentialKey]UsageBucketSnapshot `json:"-"`
+	MinuteBuckets    map[string]UsageBucketSnapshot                        `json:"-"`
 }
 
 type MergeResult struct {
@@ -105,6 +137,8 @@ type RequestStatistics struct {
 	requestsByHour         map[string]int64
 	tokensByDay            map[string]int64
 	tokensByHour           map[string]int64
+	credentialHourly       map[string]map[usageCredentialKey]UsageBucketSnapshot
+	minuteBuckets          map[string]UsageBucketSnapshot
 	events                 []servicedto.UsageEventRecord
 	eventBytes             int64
 	nextEventID            uint
@@ -126,12 +160,14 @@ func GetRequestStatistics() *RequestStatistics {
 
 func NewRequestStatistics() *RequestStatistics {
 	return &RequestStatistics{
-		apis:           make(map[string]*APISnapshot),
-		requestsByDay:  make(map[string]int64),
-		requestsByHour: make(map[string]int64),
-		tokensByDay:    make(map[string]int64),
-		tokensByHour:   make(map[string]int64),
-		nextEventID:    1,
+		apis:             make(map[string]*APISnapshot),
+		requestsByDay:    make(map[string]int64),
+		requestsByHour:   make(map[string]int64),
+		tokensByDay:      make(map[string]int64),
+		tokensByHour:     make(map[string]int64),
+		credentialHourly: make(map[string]map[usageCredentialKey]UsageBucketSnapshot),
+		minuteBuckets:    make(map[string]UsageBucketSnapshot),
+		nextEventID:      1,
 	}
 }
 
@@ -140,11 +176,13 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 	defer s.mu.RUnlock()
 
 	snapshot := StatisticsSnapshot{
-		APIs:           make(map[string]*APISnapshot),
-		RequestsByDay:  make(map[string]int64),
-		RequestsByHour: make(map[string]int64),
-		TokensByDay:    make(map[string]int64),
-		TokensByHour:   make(map[string]int64),
+		APIs:             make(map[string]*APISnapshot),
+		RequestsByDay:    make(map[string]int64),
+		RequestsByHour:   make(map[string]int64),
+		TokensByDay:      make(map[string]int64),
+		TokensByHour:     make(map[string]int64),
+		CredentialHourly: cloneCredentialBuckets(s.credentialHourly),
+		MinuteBuckets:    cloneUsageBuckets(s.minuteBuckets),
 	}
 
 	for day, count := range s.requestsByDay {
@@ -172,12 +210,17 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 		for modelName, modelStats := range apiStats.Models {
 			if modelStats != nil {
 				apiSnapshot.Models[modelName] = &ModelSnapshot{
-					TotalRequests: modelStats.TotalRequests,
-					SuccessCount:  modelStats.SuccessCount,
-					FailureCount:  modelStats.FailureCount,
-					TotalTokens:   modelStats.TotalTokens,
-					InputTokens:   modelStats.InputTokens,
-					OutputTokens:  modelStats.OutputTokens,
+					TotalRequests:      modelStats.TotalRequests,
+					SuccessCount:       modelStats.SuccessCount,
+					FailureCount:       modelStats.FailureCount,
+					TotalTokens:        modelStats.TotalTokens,
+					InputTokens:        modelStats.InputTokens,
+					OutputTokens:       modelStats.OutputTokens,
+					ReasoningTokens:    modelStats.ReasoningTokens,
+					CachedTokens:       modelStats.CachedTokens,
+					TotalLatencyMS:     modelStats.TotalLatencyMS,
+					LatencySampleCount: modelStats.LatencySampleCount,
+					Hourly:             cloneUsageBuckets(modelStats.Hourly),
 				}
 			}
 		}
@@ -192,16 +235,22 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 }
 
 func (s *RequestStatistics) Record(apiName, modelName string, timestamp time.Time, failed bool, inputTokens, outputTokens, totalTokens int64) {
+	s.record(apiName, modelName, "", "", timestamp, failed, inputTokens, outputTokens, 0, 0, totalTokens, 0)
+}
+
+func (s *RequestStatistics) record(apiName, modelName, source, authIndex string, timestamp time.Time, failed bool, inputTokens, outputTokens, reasoningTokens, cachedTokens, totalTokens, latencyMS int64) {
 	if s == nil {
 		return
 	}
 	apiName = normalizeDimension(apiName)
 	modelName = normalizeDimension(modelName)
+	source = strings.TrimSpace(source)
+	authIndex = strings.TrimSpace(authIndex)
 	if timestamp.IsZero() {
 		timestamp = time.Now()
 	}
 	if totalTokens == 0 {
-		totalTokens = inputTokens + outputTokens
+		totalTokens = inputTokens + outputTokens + reasoningTokens + cachedTokens
 	}
 
 	s.mu.Lock()
@@ -215,8 +264,11 @@ func (s *RequestStatistics) Record(apiName, modelName string, timestamp time.Tim
 	}
 	modelStats := apiStats.Models[modelName]
 	if modelStats == nil {
-		modelStats = &ModelSnapshot{}
+		modelStats = &ModelSnapshot{Hourly: make(map[string]UsageBucketSnapshot)}
 		apiStats.Models[modelName] = modelStats
+	}
+	if modelStats.Hourly == nil {
+		modelStats.Hourly = make(map[string]UsageBucketSnapshot)
 	}
 
 	apiStats.TotalRequests++
@@ -225,6 +277,12 @@ func (s *RequestStatistics) Record(apiName, modelName string, timestamp time.Tim
 	modelStats.TotalTokens += totalTokens
 	modelStats.InputTokens += inputTokens
 	modelStats.OutputTokens += outputTokens
+	modelStats.ReasoningTokens += reasoningTokens
+	modelStats.CachedTokens += cachedTokens
+	if latencyMS > 0 {
+		modelStats.TotalLatencyMS += latencyMS
+		modelStats.LatencySampleCount++
+	}
 	if failed {
 		apiStats.FailureCount++
 		modelStats.FailureCount++
@@ -239,6 +297,51 @@ func (s *RequestStatistics) Record(apiName, modelName string, timestamp time.Tim
 	s.requestsByHour[hourKey]++
 	s.tokensByDay[dayKey] += totalTokens
 	s.tokensByHour[hourKey] += totalTokens
+	bucket := modelStats.Hourly[hourKey]
+	bucket.TotalRequests++
+	bucket.InputTokens += inputTokens
+	bucket.OutputTokens += outputTokens
+	bucket.ReasoningTokens += reasoningTokens
+	bucket.CachedTokens += cachedTokens
+	bucket.TotalTokens += totalTokens
+	if latencyMS > 0 {
+		bucket.TotalLatencyMS += latencyMS
+		bucket.LatencySampleCount++
+	}
+	if failed {
+		bucket.FailureCount++
+	} else {
+		bucket.SuccessCount++
+	}
+	modelStats.Hourly[hourKey] = bucket
+
+	if source != "" || authIndex != "" {
+		credentialBuckets := s.credentialHourly[hourKey]
+		if credentialBuckets == nil {
+			credentialBuckets = make(map[usageCredentialKey]UsageBucketSnapshot)
+		}
+		credentialKey := usageCredentialKey{source: source, authIndex: authIndex}
+		credentialBuckets[credentialKey] = mergeUsageBucket(credentialBuckets[credentialKey], UsageBucketSnapshot{
+			TotalRequests: 1,
+			SuccessCount:  boolCount(!failed),
+			FailureCount:  boolCount(failed),
+			TotalTokens:   totalTokens,
+		})
+		s.credentialHourly[hourKey] = credentialBuckets
+	}
+
+	minuteKey := timestamp.UTC().Truncate(time.Minute).Format(time.RFC3339)
+	s.minuteBuckets[minuteKey] = mergeUsageBucket(s.minuteBuckets[minuteKey], UsageBucketSnapshot{
+		TotalRequests:   1,
+		SuccessCount:    boolCount(!failed),
+		FailureCount:    boolCount(failed),
+		InputTokens:     inputTokens,
+		OutputTokens:    outputTokens,
+		ReasoningTokens: reasoningTokens,
+		CachedTokens:    cachedTokens,
+		TotalTokens:     totalTokens,
+	})
+	s.pruneMinuteBucketsLocked(time.Now().UTC())
 }
 
 func (s *RequestStatistics) RecordEvent(record coreusage.Record) {
@@ -423,9 +526,8 @@ func (s *RequestStatistics) UsageEventOverview(filter servicedto.UsageFilter) (s
 		ByAuthIndex: make(map[string]servicedto.UsageKeyCount),
 		Credentials: []servicedto.UsageCredentialCount{},
 	}
-	health := newUsageEventHealth(filter, time.Now().UTC())
 	if s == nil {
-		return keyStats, health, servicedto.UsageEventCacheInfo{
+		return keyStats, buildUsageAggregateHealth(StatisticsSnapshot{}, filter, time.Now().UTC()), servicedto.UsageEventCacheInfo{
 			MaxEvents:     maxInMemoryUsageEvents,
 			MaxBytes:      maxInMemoryUsageEventBytes,
 			MaxAgeSeconds: int64(maxInMemoryUsageEventAge / time.Second),
@@ -433,13 +535,28 @@ func (s *RequestStatistics) UsageEventOverview(filter servicedto.UsageFilter) (s
 		}
 	}
 
-	events, cacheInfo := s.snapshotUsageEvents()
-	start, end := usageEventWindowBounds(events, filter)
+	snapshot := s.Snapshot()
+	cacheInfo := s.UsageEventCacheInfo()
 	credentials := make(map[usageCredentialKey]servicedto.UsageKeyCount)
-	for i := start; i < end; i++ {
-		event := events[i]
-		updateUsageEventKeyStats(&keyStats, credentials, event)
-		updateUsageEventHealth(&health, event)
+	for hourKey, buckets := range snapshot.CredentialHourly {
+		hour, err := time.Parse(time.RFC3339, hourKey)
+		if err != nil || !memoryUsageHourInRange(hour, filter) {
+			continue
+		}
+		for key, bucket := range buckets {
+			count := servicedto.UsageKeyCount{
+				Success: bucket.SuccessCount,
+				Failure: bucket.FailureCount,
+				Tokens:  bucket.TotalTokens,
+			}
+			if key.source != "" {
+				keyStats.BySource[key.source] = mergeUsageKeyCount(keyStats.BySource[key.source], count)
+			}
+			if key.authIndex != "" {
+				keyStats.ByAuthIndex[key.authIndex] = mergeUsageKeyCount(keyStats.ByAuthIndex[key.authIndex], count)
+			}
+			credentials[key] = mergeUsageKeyCount(credentials[key], count)
+		}
 	}
 	credentialKeys := make([]usageCredentialKey, 0, len(credentials))
 	for key := range credentials {
@@ -462,10 +579,7 @@ func (s *RequestStatistics) UsageEventOverview(filter servicedto.UsageFilter) (s
 			Cost:      count.Cost,
 		})
 	}
-	if total := health.TotalSuccess + health.TotalFailure; total > 0 {
-		health.SuccessRate = float64(health.TotalSuccess) / float64(total) * 100
-	}
-	return keyStats, health, cacheInfo
+	return keyStats, buildUsageAggregateHealth(snapshot, filter, time.Now().UTC()), cacheInfo
 }
 
 // UsageEventCacheInfo returns the current bounded event cache state.
@@ -549,50 +663,77 @@ func (s *RequestStatistics) usageEventCacheInfoLocked() servicedto.UsageEventCac
 	return info
 }
 
-func updateUsageEventKeyStats(stats *servicedto.UsageKeyStats, credentials map[usageCredentialKey]servicedto.UsageKeyCount, event servicedto.UsageEventRecord) {
-	if stats == nil {
-		return
-	}
-	source := strings.TrimSpace(event.Source)
-	authIndex := strings.TrimSpace(event.AuthIndex)
-	apply := func(count servicedto.UsageKeyCount) servicedto.UsageKeyCount {
-		if event.Failed {
-			count.Failure++
-		} else {
-			count.Success++
-		}
-		count.Tokens += event.TotalTokens
-		return count
-	}
-	if source != "" {
-		stats.BySource[source] = apply(stats.BySource[source])
-	}
-	if authIndex != "" {
-		stats.ByAuthIndex[authIndex] = apply(stats.ByAuthIndex[authIndex])
-	}
-	if source != "" || authIndex != "" {
-		key := usageCredentialKey{source: source, authIndex: authIndex}
-		credentials[key] = apply(credentials[key])
-	}
+func mergeUsageKeyCount(left, right servicedto.UsageKeyCount) servicedto.UsageKeyCount {
+	left.Success += right.Success
+	left.Failure += right.Failure
+	left.Tokens += right.Tokens
+	left.Cost += right.Cost
+	return left
 }
 
-func newUsageEventHealth(filter servicedto.UsageFilter, now time.Time) servicedto.UsageOverviewHealth {
-	span := usageEventHealthDefaultSpan
-	shortRange := isShortUsageEventHealthRange(filter.Range)
-	if shortRange {
-		span = usageEventHealthPresetSpan
+func buildUsageAggregateHealth(snapshot StatisticsSnapshot, filter servicedto.UsageFilter, now time.Time) servicedto.UsageOverviewHealth {
+	windowStart, windowEnd := usageAggregateHealthBounds(snapshot, filter, now)
+	blockCount := usageEventHealthRows * usageEventHealthColumns
+	span := (windowEnd.Sub(windowStart) + time.Duration(blockCount) - 1) / time.Duration(blockCount)
+	if span <= 0 {
+		span = time.Second
 	}
-	windowEnd := now.UTC()
-	if filter.EndTime != nil {
-		windowEnd = filter.EndTime.UTC()
+	health := buildUsageEventHealthBlocks(windowStart, windowStart.Add(time.Duration(blockCount)*span), span)
+	for _, apiStats := range snapshot.APIs {
+		if apiStats == nil {
+			continue
+		}
+		for _, modelStats := range apiStats.Models {
+			if modelStats == nil {
+				continue
+			}
+			for hourKey, bucket := range modelStats.Hourly {
+				hour, err := time.Parse(time.RFC3339, hourKey)
+				if err != nil || !memoryUsageHourInRange(hour, filter) {
+					continue
+				}
+				updateUsageBucketHealth(&health, hour, bucket)
+			}
+		}
 	}
-	if shortRange {
-		windowStart := windowEnd.Add(-usageEventHealthPresetWindow)
-		return buildUsageEventHealthBlocks(windowStart, windowEnd, span)
+	if total := health.TotalSuccess + health.TotalFailure; total > 0 {
+		health.SuccessRate = float64(health.TotalSuccess) / float64(total) * 100
 	}
-	windowEnd = windowEnd.Truncate(span).Add(span)
-	windowStart := windowEnd.Add(-time.Duration(usageEventHealthRows*usageEventHealthColumns) * span)
-	return buildUsageEventHealthBlocks(windowStart, windowEnd, span)
+	return health
+}
+
+func usageAggregateHealthBounds(snapshot StatisticsSnapshot, filter servicedto.UsageFilter, now time.Time) (time.Time, time.Time) {
+	if filter.StartTime != nil && filter.EndTime != nil {
+		return filter.StartTime.UTC(), filter.EndTime.UTC()
+	}
+	var earliest time.Time
+	var latest time.Time
+	for _, apiStats := range snapshot.APIs {
+		if apiStats == nil {
+			continue
+		}
+		for _, modelStats := range apiStats.Models {
+			if modelStats == nil {
+				continue
+			}
+			for hourKey := range modelStats.Hourly {
+				hour, err := time.Parse(time.RFC3339, hourKey)
+				if err != nil {
+					continue
+				}
+				if earliest.IsZero() || hour.Before(earliest) {
+					earliest = hour
+				}
+				if latest.IsZero() || hour.After(latest) {
+					latest = hour
+				}
+			}
+		}
+	}
+	if earliest.IsZero() || latest.IsZero() {
+		return now.UTC().Add(-usageEventHealthPresetWindow), now.UTC()
+	}
+	return earliest.UTC(), latest.UTC().Add(time.Hour)
 }
 
 func buildUsageEventHealthBlocks(windowStart, windowEnd time.Time, span time.Duration) servicedto.UsageOverviewHealth {
@@ -615,19 +756,16 @@ func buildUsageEventHealthBlocks(windowStart, windowEnd time.Time, span time.Dur
 	}
 }
 
-func updateUsageEventHealth(health *servicedto.UsageOverviewHealth, event servicedto.UsageEventRecord) {
+func updateUsageBucketHealth(health *servicedto.UsageOverviewHealth, timestamp time.Time, bucket UsageBucketSnapshot) {
 	if health == nil {
 		return
 	}
-	if event.Failed {
-		health.TotalFailure++
-	} else {
-		health.TotalSuccess++
-	}
+	health.TotalSuccess += bucket.SuccessCount
+	health.TotalFailure += bucket.FailureCount
 	if len(health.BlockDetails) == 0 {
 		return
 	}
-	timestamp := event.Timestamp.UTC()
+	timestamp = timestamp.UTC()
 	if timestamp.Before(health.WindowStart) || !timestamp.Before(health.WindowEnd) {
 		return
 	}
@@ -640,22 +778,10 @@ func updateUsageEventHealth(health *servicedto.UsageOverviewHealth, event servic
 		return
 	}
 	block := &health.BlockDetails[index]
-	if event.Failed {
-		block.Failure++
-	} else {
-		block.Success++
-	}
+	block.Success += bucket.SuccessCount
+	block.Failure += bucket.FailureCount
 	total := block.Success + block.Failure
 	block.Rate = float64(block.Success) / float64(total)
-}
-
-func isShortUsageEventHealthRange(value string) bool {
-	switch value {
-	case "4h", "8h", "12h", "24h", "today":
-		return true
-	default:
-		return false
-	}
 }
 
 func estimateUsageEventBytes(event servicedto.UsageEventRecord) int64 {
@@ -792,12 +918,23 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 				result.Skipped++
 			}
 
-			s.apis[apiName].Models[modelName].TotalRequests += modelStats.TotalRequests
-			s.apis[apiName].Models[modelName].SuccessCount += modelStats.SuccessCount
-			s.apis[apiName].Models[modelName].FailureCount += modelStats.FailureCount
-			s.apis[apiName].Models[modelName].TotalTokens += modelStats.TotalTokens
-			s.apis[apiName].Models[modelName].InputTokens += modelStats.InputTokens
-			s.apis[apiName].Models[modelName].OutputTokens += modelStats.OutputTokens
+			targetModel := s.apis[apiName].Models[modelName]
+			targetModel.TotalRequests += modelStats.TotalRequests
+			targetModel.SuccessCount += modelStats.SuccessCount
+			targetModel.FailureCount += modelStats.FailureCount
+			targetModel.TotalTokens += modelStats.TotalTokens
+			targetModel.InputTokens += modelStats.InputTokens
+			targetModel.OutputTokens += modelStats.OutputTokens
+			targetModel.ReasoningTokens += modelStats.ReasoningTokens
+			targetModel.CachedTokens += modelStats.CachedTokens
+			targetModel.TotalLatencyMS += modelStats.TotalLatencyMS
+			targetModel.LatencySampleCount += modelStats.LatencySampleCount
+			if targetModel.Hourly == nil {
+				targetModel.Hourly = make(map[string]UsageBucketSnapshot)
+			}
+			for hour, bucket := range modelStats.Hourly {
+				targetModel.Hourly[hour] = mergeUsageBucket(targetModel.Hourly[hour], bucket)
+			}
 		}
 	}
 	for day, count := range snapshot.RequestsByDay {
@@ -812,6 +949,20 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 	for hour, count := range snapshot.TokensByHour {
 		s.tokensByHour[hour] += count
 	}
+	for hour, buckets := range snapshot.CredentialHourly {
+		target := s.credentialHourly[hour]
+		if target == nil {
+			target = make(map[usageCredentialKey]UsageBucketSnapshot)
+		}
+		for key, bucket := range buckets {
+			target[key] = mergeUsageBucket(target[key], bucket)
+		}
+		s.credentialHourly[hour] = target
+	}
+	for minute, bucket := range snapshot.MinuteBuckets {
+		s.minuteBuckets[minute] = mergeUsageBucket(s.minuteBuckets[minute], bucket)
+	}
+	s.pruneMinuteBucketsLocked(time.Now().UTC())
 
 	return result
 }
@@ -829,6 +980,8 @@ func (s *RequestStatistics) ReplaceSnapshot(snapshot StatisticsSnapshot) {
 	s.requestsByHour = replacement.requestsByHour
 	s.tokensByDay = replacement.tokensByDay
 	s.tokensByHour = replacement.tokensByHour
+	s.credentialHourly = replacement.credentialHourly
+	s.minuteBuckets = replacement.minuteBuckets
 	s.mu.Unlock()
 }
 
@@ -846,6 +999,8 @@ func (s *RequestStatistics) ReplaceAll(snapshot StatisticsSnapshot, events []ser
 	s.requestsByHour = replacement.requestsByHour
 	s.tokensByDay = replacement.tokensByDay
 	s.tokensByHour = replacement.tokensByHour
+	s.credentialHourly = replacement.credentialHourly
+	s.minuteBuckets = replacement.minuteBuckets
 	s.events = replacement.events
 	s.eventBytes = replacement.eventBytes
 	s.nextEventID = replacement.nextEventID
@@ -880,6 +1035,12 @@ func (s *RequestStatistics) ensureMaps() {
 	if s.tokensByHour == nil {
 		s.tokensByHour = make(map[string]int64)
 	}
+	if s.credentialHourly == nil {
+		s.credentialHourly = make(map[string]map[usageCredentialKey]UsageBucketSnapshot)
+	}
+	if s.minuteBuckets == nil {
+		s.minuteBuckets = make(map[string]UsageBucketSnapshot)
+	}
 }
 
 func normalizeDimension(value string) string {
@@ -888,6 +1049,331 @@ func normalizeDimension(value string) string {
 		return "unknown"
 	}
 	return value
+}
+
+func cloneUsageBuckets(source map[string]UsageBucketSnapshot) map[string]UsageBucketSnapshot {
+	if len(source) == 0 {
+		return nil
+	}
+	result := make(map[string]UsageBucketSnapshot, len(source))
+	for key, bucket := range source {
+		result[key] = bucket
+	}
+	return result
+}
+
+func cloneCredentialBuckets(source map[string]map[usageCredentialKey]UsageBucketSnapshot) map[string]map[usageCredentialKey]UsageBucketSnapshot {
+	if len(source) == 0 {
+		return nil
+	}
+	result := make(map[string]map[usageCredentialKey]UsageBucketSnapshot, len(source))
+	for hour, buckets := range source {
+		cloned := make(map[usageCredentialKey]UsageBucketSnapshot, len(buckets))
+		for key, bucket := range buckets {
+			cloned[key] = bucket
+		}
+		result[hour] = cloned
+	}
+	return result
+}
+
+func boolCount(value bool) int64 {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+func (s *RequestStatistics) pruneMinuteBucketsLocked(now time.Time) {
+	cutoff := now.UTC().Add(-recentUsageMinuteRetention).Truncate(time.Minute)
+	for key := range s.minuteBuckets {
+		minute, err := time.Parse(time.RFC3339, key)
+		if err != nil || minute.Before(cutoff) {
+			delete(s.minuteBuckets, key)
+		}
+	}
+}
+
+func recentUsageBucket(buckets map[string]UsageBucketSnapshot, now time.Time) UsageBucketSnapshot {
+	windowEnd := now.UTC()
+	windowStart := windowEnd.Add(-recentUsageRateWindow)
+	result := UsageBucketSnapshot{}
+	for key, bucket := range buckets {
+		minute, err := time.Parse(time.RFC3339, key)
+		if err != nil || minute.Before(windowStart) || minute.After(windowEnd) {
+			continue
+		}
+		result = mergeUsageBucket(result, bucket)
+	}
+	return result
+}
+
+func mergeUsageBucket(left, right UsageBucketSnapshot) UsageBucketSnapshot {
+	left.TotalRequests += right.TotalRequests
+	left.SuccessCount += right.SuccessCount
+	left.FailureCount += right.FailureCount
+	left.InputTokens += right.InputTokens
+	left.OutputTokens += right.OutputTokens
+	left.ReasoningTokens += right.ReasoningTokens
+	left.CachedTokens += right.CachedTokens
+	left.TotalTokens += right.TotalTokens
+	left.TotalLatencyMS += right.TotalLatencyMS
+	left.LatencySampleCount += right.LatencySampleCount
+	return left
+}
+
+func (s *RequestStatistics) UsageOverview(filter servicedto.UsageFilter) UsageOverviewSnapshot {
+	snapshot := s.Snapshot()
+	overview := UsageOverviewSnapshot{
+		Usage: StatisticsSnapshot{
+			APIs:           make(map[string]*APISnapshot),
+			RequestsByDay:  make(map[string]int64),
+			RequestsByHour: make(map[string]int64),
+			TokensByDay:    make(map[string]int64),
+			TokensByHour:   make(map[string]int64),
+		},
+		Summary:      servicedto.UsageOverviewSummary{CostAvailable: false},
+		Series:       newMemoryUsageOverviewSeries(),
+		HourlySeries: newMemoryUsageOverviewSeries(),
+		DailySeries:  newMemoryUsageOverviewSeries(),
+		StartTime:    filter.StartTime,
+		EndTime:      filter.EndTime,
+	}
+	overview.Summary.WindowMinutes = memoryUsageWindowMinutes(filter)
+	overview.BucketByDay = memoryUsageBucketByDay(filter, overview.Summary.WindowMinutes)
+	latestHourlyStart := memoryUsageLatestHourlyStart(filter.EndTime)
+
+	for apiName, apiStats := range snapshot.APIs {
+		if apiStats == nil {
+			continue
+		}
+		apiResult := &APISnapshot{DisplayName: apiStats.DisplayName, Models: make(map[string]*ModelSnapshot)}
+		for modelName, modelStats := range apiStats.Models {
+			if modelStats == nil || (filter.Model != "" && modelName != filter.Model) {
+				continue
+			}
+			modelResult := &ModelSnapshot{}
+			if len(modelStats.Hourly) == 0 && filter.StartTime == nil && filter.EndTime == nil {
+				modelResult.TotalRequests = modelStats.TotalRequests
+				modelResult.SuccessCount = modelStats.SuccessCount
+				modelResult.FailureCount = modelStats.FailureCount
+				modelResult.InputTokens = modelStats.InputTokens
+				modelResult.OutputTokens = modelStats.OutputTokens
+				modelResult.ReasoningTokens = modelStats.ReasoningTokens
+				modelResult.CachedTokens = modelStats.CachedTokens
+				modelResult.TotalTokens = modelStats.TotalTokens
+				modelResult.TotalLatencyMS = modelStats.TotalLatencyMS
+				modelResult.LatencySampleCount = modelStats.LatencySampleCount
+			}
+			for hourKey, bucket := range modelStats.Hourly {
+				hour, err := time.Parse(time.RFC3339, hourKey)
+				if err != nil || !memoryUsageHourInRange(hour, filter) {
+					continue
+				}
+				applyMemoryUsageBucketToModel(modelResult, bucket)
+				dayKey := hour.In(time.Local).Format("2006-01-02")
+				overview.Usage.RequestsByHour[hourKey] += bucket.TotalRequests
+				overview.Usage.TokensByHour[hourKey] += bucket.TotalTokens
+				overview.Usage.RequestsByDay[dayKey] += bucket.TotalRequests
+				overview.Usage.TokensByDay[dayKey] += bucket.TotalTokens
+
+				seriesKey, seriesMinutes := memoryUsageSeriesBucket(hour, overview.BucketByDay)
+				applyMemoryUsageBucketToSeries(&overview.Series, modelName, seriesKey, seriesMinutes, bucket)
+				if latestHourlyStart == nil || !hour.Before(*latestHourlyStart) {
+					applyMemoryUsageBucketToSeries(&overview.HourlySeries, modelName, hourKey, 60, bucket)
+				}
+				applyMemoryUsageBucketToSeries(&overview.DailySeries, modelName, dayKey, 24*60, bucket)
+			}
+			if modelResult.TotalRequests == 0 {
+				continue
+			}
+			apiResult.Models[modelName] = modelResult
+			apiResult.TotalRequests += modelResult.TotalRequests
+			apiResult.SuccessCount += modelResult.SuccessCount
+			apiResult.FailureCount += modelResult.FailureCount
+			apiResult.TotalTokens += modelResult.TotalTokens
+			overview.Summary.CachedTokens += modelResult.CachedTokens
+			overview.Summary.ReasoningTokens += modelResult.ReasoningTokens
+		}
+		if apiResult.TotalRequests == 0 {
+			continue
+		}
+		overview.Usage.APIs[apiName] = apiResult
+		overview.Usage.TotalRequests += apiResult.TotalRequests
+		overview.Usage.SuccessCount += apiResult.SuccessCount
+		overview.Usage.FailureCount += apiResult.FailureCount
+		overview.Usage.TotalTokens += apiResult.TotalTokens
+	}
+
+	recentBucket := recentUsageBucket(snapshot.MinuteBuckets, time.Now().UTC())
+	overview.Summary.WindowMinutes = int64(recentUsageRateWindow / time.Minute)
+	overview.Summary.RequestCount = recentBucket.TotalRequests
+	overview.Summary.TokenCount = recentBucket.TotalTokens
+	overview.Summary.RPM = float64(recentBucket.TotalRequests) / float64(overview.Summary.WindowMinutes)
+	overview.Summary.TPM = float64(recentBucket.TotalTokens) / float64(overview.Summary.WindowMinutes)
+	fillMemoryUsageOverviewSeries(&overview, filter)
+	return overview
+}
+
+func applyMemoryUsageBucketToModel(model *ModelSnapshot, bucket UsageBucketSnapshot) {
+	model.TotalRequests += bucket.TotalRequests
+	model.SuccessCount += bucket.SuccessCount
+	model.FailureCount += bucket.FailureCount
+	model.InputTokens += bucket.InputTokens
+	model.OutputTokens += bucket.OutputTokens
+	model.ReasoningTokens += bucket.ReasoningTokens
+	model.CachedTokens += bucket.CachedTokens
+	model.TotalTokens += bucket.TotalTokens
+	model.TotalLatencyMS += bucket.TotalLatencyMS
+	model.LatencySampleCount += bucket.LatencySampleCount
+}
+
+func newMemoryUsageOverviewSeries() servicedto.UsageOverviewSeries {
+	return servicedto.UsageOverviewSeries{
+		Requests:        make(map[string]int64),
+		Tokens:          make(map[string]int64),
+		RPM:             make(map[string]float64),
+		TPM:             make(map[string]float64),
+		Cost:            make(map[string]float64),
+		InputTokens:     make(map[string]int64),
+		OutputTokens:    make(map[string]int64),
+		CachedTokens:    make(map[string]int64),
+		ReasoningTokens: make(map[string]int64),
+		Models:          make(map[string]servicedto.UsageOverviewSeries),
+	}
+}
+
+func applyMemoryUsageBucketToSeries(series *servicedto.UsageOverviewSeries, modelName, key string, bucketMinutes int64, bucket UsageBucketSnapshot) {
+	series.Requests[key] += bucket.TotalRequests
+	series.Tokens[key] += bucket.TotalTokens
+	series.InputTokens[key] += bucket.InputTokens
+	series.OutputTokens[key] += bucket.OutputTokens
+	series.CachedTokens[key] += bucket.CachedTokens
+	series.ReasoningTokens[key] += bucket.ReasoningTokens
+	series.RPM[key] = float64(series.Requests[key]) / float64(bucketMinutes)
+	series.TPM[key] = float64(series.Tokens[key]) / float64(bucketMinutes)
+	series.Cost[key] += 0
+
+	modelSeries, ok := series.Models[modelName]
+	if !ok {
+		modelSeries = newMemoryUsageOverviewSeries()
+	}
+	modelSeries.Requests[key] += bucket.TotalRequests
+	modelSeries.Tokens[key] += bucket.TotalTokens
+	modelSeries.InputTokens[key] += bucket.InputTokens
+	modelSeries.OutputTokens[key] += bucket.OutputTokens
+	modelSeries.CachedTokens[key] += bucket.CachedTokens
+	modelSeries.ReasoningTokens[key] += bucket.ReasoningTokens
+	modelSeries.RPM[key] = float64(modelSeries.Requests[key]) / float64(bucketMinutes)
+	modelSeries.TPM[key] = float64(modelSeries.Tokens[key]) / float64(bucketMinutes)
+	modelSeries.Cost[key] += 0
+	series.Models[modelName] = modelSeries
+}
+
+func memoryUsageHourInRange(hour time.Time, filter servicedto.UsageFilter) bool {
+	if filter.StartTime != nil && hour.Before(filter.StartTime.UTC().Truncate(time.Hour)) {
+		return false
+	}
+	if filter.EndTime != nil && hour.After(filter.EndTime.UTC()) {
+		return false
+	}
+	return true
+}
+
+func memoryUsageWindowMinutes(filter servicedto.UsageFilter) int64 {
+	if filter.StartTime == nil || filter.EndTime == nil {
+		return 0
+	}
+	duration := filter.EndTime.UTC().Sub(filter.StartTime.UTC())
+	if duration < 0 {
+		return 0
+	}
+	minutes := int64((duration + time.Minute - 1) / time.Minute)
+	return max(minutes, 1)
+}
+
+func memoryUsageBucketByDay(filter servicedto.UsageFilter, windowMinutes int64) bool {
+	return filter.Range == "all" || filter.Range == "7d" || windowMinutes >= 7*24*60
+}
+
+func memoryUsageLatestHourlyStart(endTime *time.Time) *time.Time {
+	if endTime == nil {
+		return nil
+	}
+	start := endTime.UTC().Truncate(time.Hour).Add(-23 * time.Hour)
+	return &start
+}
+
+func memoryUsageSeriesBucket(timestamp time.Time, byDay bool) (string, int64) {
+	if byDay {
+		return timestamp.In(time.Local).Format("2006-01-02"), 24 * 60
+	}
+	return timestamp.UTC().Format("2006-01-02T15:00:00Z"), 60
+}
+
+func fillMemoryUsageOverviewSeries(overview *UsageOverviewSnapshot, filter servicedto.UsageFilter) {
+	if filter.StartTime == nil || filter.EndTime == nil {
+		return
+	}
+	fillMemoryUsageSeries(&overview.Series, *filter.StartTime, *filter.EndTime, overview.BucketByDay)
+	hourlyStart := filter.StartTime.UTC()
+	if latest := memoryUsageLatestHourlyStart(filter.EndTime); latest != nil && hourlyStart.Before(*latest) {
+		hourlyStart = *latest
+	}
+	fillMemoryUsageSeries(&overview.HourlySeries, hourlyStart, *filter.EndTime, false)
+	fillMemoryUsageSeries(&overview.DailySeries, *filter.StartTime, *filter.EndTime, true)
+}
+
+func fillMemoryUsageSeries(series *servicedto.UsageOverviewSeries, startTime, endTime time.Time, byDay bool) {
+	var current time.Time
+	var end time.Time
+	var step time.Duration
+	var format string
+	var bucketMinutes int64
+	if byDay {
+		localStart := startTime.In(time.Local)
+		localEnd := endTime.In(time.Local)
+		current = time.Date(localStart.Year(), localStart.Month(), localStart.Day(), 0, 0, 0, 0, time.Local)
+		end = time.Date(localEnd.Year(), localEnd.Month(), localEnd.Day(), 0, 0, 0, 0, time.Local)
+		step = 24 * time.Hour
+		format = "2006-01-02"
+		bucketMinutes = 24 * 60
+	} else {
+		current = startTime.UTC().Truncate(time.Hour)
+		end = endTime.UTC().Truncate(time.Hour)
+		step = time.Hour
+		format = "2006-01-02T15:00:00Z"
+		bucketMinutes = 60
+	}
+	for !current.After(end) {
+		key := current.Format(format)
+		if _, ok := series.Requests[key]; !ok {
+			series.Requests[key] = 0
+			series.Tokens[key] = 0
+			series.InputTokens[key] = 0
+			series.OutputTokens[key] = 0
+			series.CachedTokens[key] = 0
+			series.ReasoningTokens[key] = 0
+			series.RPM[key] = 0
+			series.TPM[key] = 0
+			series.Cost[key] = 0
+		}
+		for modelName, modelSeries := range series.Models {
+			if _, ok := modelSeries.Requests[key]; !ok {
+				modelSeries.Requests[key] = 0
+				modelSeries.Tokens[key] = 0
+				modelSeries.InputTokens[key] = 0
+				modelSeries.OutputTokens[key] = 0
+				modelSeries.CachedTokens[key] = 0
+				modelSeries.ReasoningTokens[key] = 0
+				modelSeries.RPM[key] = 0 / float64(bucketMinutes)
+				modelSeries.TPM[key] = 0 / float64(bucketMinutes)
+				modelSeries.Cost[key] = 0
+				series.Models[modelName] = modelSeries
+			}
+		}
+		current = current.Add(step)
+	}
 }
 
 func RestoreRequestStatistics(ctx context.Context, db *gorm.DB, stats *RequestStatistics) error {
@@ -908,6 +1394,10 @@ func RestoreRequestStatistics(ctx context.Context, db *gorm.DB, stats *RequestSt
 		return fmt.Errorf("restore request statistics: %w", err)
 	}
 	return nil
+}
+
+type recentUsageMinuteBucketProvider interface {
+	GetRecentUsageMinuteBuckets(context.Context, servicedto.UsageFilter) (map[string]dto.UsageBucketSnapshot, error)
 }
 
 func ReloadRequestStatistics(ctx context.Context, provider service.UsageProvider, stats *RequestStatistics) error {
@@ -938,24 +1428,61 @@ func ReloadRequestStatistics(ctx context.Context, provider service.UsageProvider
 	}
 
 	snapshot := StatisticsSnapshot{
-		TotalRequests:  aggregate.TotalRequests,
-		SuccessCount:   aggregate.SuccessCount,
-		FailureCount:   aggregate.FailureCount,
-		TotalTokens:    aggregate.TotalTokens,
-		APIs:           make(map[string]*APISnapshot, len(aggregate.APIs)),
-		RequestsByDay:  aggregate.RequestsByDay,
-		RequestsByHour: aggregate.RequestsByHour,
-		TokensByDay:    aggregate.TokensByDay,
-		TokensByHour:   aggregate.TokensByHour,
+		TotalRequests:    aggregate.TotalRequests,
+		SuccessCount:     aggregate.SuccessCount,
+		FailureCount:     aggregate.FailureCount,
+		TotalTokens:      aggregate.TotalTokens,
+		APIs:             make(map[string]*APISnapshot, len(aggregate.APIs)),
+		RequestsByDay:    aggregate.RequestsByDay,
+		RequestsByHour:   aggregate.RequestsByHour,
+		TokensByDay:      aggregate.TokensByDay,
+		TokensByHour:     aggregate.TokensByHour,
+		CredentialHourly: make(map[string]map[usageCredentialKey]UsageBucketSnapshot, len(aggregate.CredentialHourly)),
+		MinuteBuckets:    make(map[string]UsageBucketSnapshot),
+	}
+	for hour, buckets := range aggregate.CredentialHourly {
+		converted := make(map[usageCredentialKey]UsageBucketSnapshot, len(buckets))
+		for _, bucket := range buckets {
+			key := usageCredentialKey{source: bucket.Source, authIndex: bucket.AuthIndex}
+			converted[key] = UsageBucketSnapshot{
+				TotalRequests: bucket.SuccessCount + bucket.FailureCount,
+				SuccessCount:  bucket.SuccessCount,
+				FailureCount:  bucket.FailureCount,
+				TotalTokens:   bucket.TotalTokens,
+			}
+		}
+		snapshot.CredentialHourly[hour] = converted
 	}
 	for apiKey, apiStats := range aggregate.APIs {
 		models := make(map[string]*ModelSnapshot, len(apiStats.Models))
 		for modelName, modelStats := range apiStats.Models {
+			hourly := make(map[string]UsageBucketSnapshot, len(modelStats.Hourly))
+			for hour, bucket := range modelStats.Hourly {
+				hourly[hour] = UsageBucketSnapshot{
+					TotalRequests:      bucket.TotalRequests,
+					SuccessCount:       bucket.SuccessCount,
+					FailureCount:       bucket.FailureCount,
+					InputTokens:        bucket.InputTokens,
+					OutputTokens:       bucket.OutputTokens,
+					ReasoningTokens:    bucket.ReasoningTokens,
+					CachedTokens:       bucket.CachedTokens,
+					TotalTokens:        bucket.TotalTokens,
+					TotalLatencyMS:     bucket.TotalLatencyMS,
+					LatencySampleCount: bucket.LatencySampleCount,
+				}
+			}
 			models[modelName] = &ModelSnapshot{
-				TotalRequests: modelStats.TotalRequests,
-				SuccessCount:  modelStats.SuccessCount,
-				FailureCount:  modelStats.FailureCount,
-				TotalTokens:   modelStats.TotalTokens,
+				TotalRequests:      modelStats.TotalRequests,
+				SuccessCount:       modelStats.SuccessCount,
+				FailureCount:       modelStats.FailureCount,
+				TotalTokens:        modelStats.TotalTokens,
+				InputTokens:        modelStats.InputTokens,
+				OutputTokens:       modelStats.OutputTokens,
+				ReasoningTokens:    modelStats.ReasoningTokens,
+				CachedTokens:       modelStats.CachedTokens,
+				TotalLatencyMS:     modelStats.TotalLatencyMS,
+				LatencySampleCount: modelStats.LatencySampleCount,
+				Hourly:             hourly,
 			}
 		}
 		snapshot.APIs[apiKey] = &APISnapshot{
@@ -992,6 +1519,51 @@ func ReloadRequestStatistics(ctx context.Context, provider service.UsageProvider
 			}
 			modelSnapshot.InputTokens = modelStats.InputTokens
 			modelSnapshot.OutputTokens = modelStats.OutputTokens
+			modelSnapshot.ReasoningTokens = modelStats.ReasoningTokens
+			modelSnapshot.CachedTokens = modelStats.CachedTokens
+			modelSnapshot.TotalLatencyMS = modelStats.TotalLatencyMS
+			modelSnapshot.LatencySampleCount = modelStats.LatencySampleCount
+		}
+	}
+	now := time.Now().UTC()
+	minuteCutoff := now.Add(-recentUsageMinuteRetention)
+	if minuteProvider, ok := provider.(recentUsageMinuteBucketProvider); ok {
+		minuteBuckets, errMinuteBuckets := minuteProvider.GetRecentUsageMinuteBuckets(ctx, servicedto.UsageFilter{
+			Range:     "custom",
+			StartTime: &minuteCutoff,
+			EndTime:   &now,
+		})
+		if errMinuteBuckets != nil {
+			return fmt.Errorf("load recent usage minute buckets: %w", errMinuteBuckets)
+		}
+		for minuteKey, bucket := range minuteBuckets {
+			snapshot.MinuteBuckets[minuteKey] = UsageBucketSnapshot{
+				TotalRequests:   bucket.TotalRequests,
+				SuccessCount:    bucket.SuccessCount,
+				FailureCount:    bucket.FailureCount,
+				InputTokens:     bucket.InputTokens,
+				OutputTokens:    bucket.OutputTokens,
+				ReasoningTokens: bucket.ReasoningTokens,
+				CachedTokens:    bucket.CachedTokens,
+				TotalTokens:     bucket.TotalTokens,
+			}
+		}
+	} else {
+		for _, event := range eventsPage.Events {
+			if event.Timestamp.Before(minuteCutoff) {
+				continue
+			}
+			minuteKey := event.Timestamp.UTC().Truncate(time.Minute).Format(time.RFC3339)
+			snapshot.MinuteBuckets[minuteKey] = mergeUsageBucket(snapshot.MinuteBuckets[minuteKey], UsageBucketSnapshot{
+				TotalRequests:   1,
+				SuccessCount:    boolCount(!event.Failed),
+				FailureCount:    boolCount(event.Failed),
+				InputTokens:     event.InputTokens,
+				OutputTokens:    event.OutputTokens,
+				ReasoningTokens: event.ReasoningTokens,
+				CachedTokens:    event.CachedTokens,
+				TotalTokens:     event.TotalTokens,
+			})
 		}
 	}
 	stats.ReplaceAll(snapshot, eventsPage.Events)
@@ -1010,7 +1582,20 @@ func (p *requestStatisticsPlugin) HandleUsage(_ context.Context, record coreusag
 	if totalTokens == 0 {
 		totalTokens = record.Detail.InputTokens + record.Detail.OutputTokens + record.Detail.ReasoningTokens + record.Detail.CachedTokens
 	}
-	p.stats.Record(record.APIKey, record.Model, record.RequestedAt, record.Failed, record.Detail.InputTokens, record.Detail.OutputTokens, totalTokens)
+	p.stats.record(
+		record.APIKey,
+		record.Model,
+		record.Source,
+		record.AuthIndex,
+		record.RequestedAt,
+		record.Failed,
+		record.Detail.InputTokens,
+		record.Detail.OutputTokens,
+		record.Detail.ReasoningTokens,
+		record.Detail.CachedTokens,
+		totalTokens,
+		record.Latency.Milliseconds(),
+	)
 	p.stats.RecordEvent(record)
 }
 

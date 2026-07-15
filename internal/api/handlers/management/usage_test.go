@@ -57,17 +57,23 @@ func newManagementUsageHandler(t *testing.T, db *gorm.DB) *Handler {
 
 func TestGetUsageStatisticsIncludesMemoryEventOverview(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	stats := memoryusage.NewRequestStatistics()
-	stats.ReplaceEvents([]servicedto.UsageEventRecord{
-		{
-			Timestamp:   time.Now().UTC().Add(-time.Hour),
-			Source:      "source-a",
-			AuthIndex:   "auth-a",
-			TotalTokens: 25,
-		},
-	})
-	h := &Handler{cfg: &config.Config{}}
-	h.SetUsageStatistics(stats)
+	db := openManagementUsageTestDatabase(t)
+	requestedAt := time.Now().UTC().Add(-time.Minute)
+	if _, _, err := repository.InsertUsageEvents(db, []entities.UsageEvent{{
+		EventKey:     "memory-overview-event",
+		APIGroupKey:  "group-a",
+		Model:        "model-a",
+		Timestamp:    requestedAt,
+		Source:       "source-a",
+		AuthIndex:    "auth-a",
+		LatencyMS:    40,
+		InputTokens:  15,
+		OutputTokens: 10,
+		TotalTokens:  25,
+	}}); err != nil {
+		t.Fatalf("insert usage event: %v", err)
+	}
+	h := newManagementUsageHandler(t, db)
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
 	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage?range=24h", nil)
@@ -76,12 +82,23 @@ func TestGetUsageStatisticsIncludesMemoryEventOverview(t *testing.T) {
 		t.Fatalf("usage status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
 	}
 	var response struct {
-		EventCache    servicedto.UsageEventCacheInfo `json:"event_cache"`
-		KeyStats      servicedto.UsageKeyStats       `json:"key_stats"`
-		ServiceHealth servicedto.UsageOverviewHealth `json:"service_health"`
+		Usage         memoryusage.StatisticsSnapshot  `json:"usage"`
+		Summary       servicedto.UsageOverviewSummary `json:"summary"`
+		Series        servicedto.UsageOverviewSeries  `json:"series"`
+		HourlySeries  servicedto.UsageOverviewSeries  `json:"hourly_series"`
+		DailySeries   servicedto.UsageOverviewSeries  `json:"daily_series"`
+		EventCache    servicedto.UsageEventCacheInfo  `json:"event_cache"`
+		KeyStats      servicedto.UsageKeyStats        `json:"key_stats"`
+		ServiceHealth servicedto.UsageOverviewHealth  `json:"service_health"`
 	}
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatalf("unmarshal usage response: %v", err)
+	}
+	if response.Usage.TotalRequests != 1 || response.Usage.TotalTokens != 25 || response.Summary.RequestCount != 1 {
+		t.Fatalf("unexpected memory range overview: %+v", response)
+	}
+	if len(response.Series.Requests) == 0 || len(response.HourlySeries.Requests) == 0 || len(response.DailySeries.Requests) == 0 {
+		t.Fatalf("missing memory overview series: %+v", response)
 	}
 	if response.EventCache.RetainedCount != 1 || response.KeyStats.ByAuthIndex["auth-a"].Tokens != 25 {
 		t.Fatalf("unexpected memory event overview: %+v", response)

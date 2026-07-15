@@ -119,29 +119,29 @@ type UsageAnalysisSnapshot struct {
 
 // UsageOverviewSummary is the service-layer overview summary.
 type UsageOverviewSummary struct {
-	RequestCount    int64
-	TokenCount      int64
-	WindowMinutes   int64
-	RPM             float64
-	TPM             float64
-	TotalCost       float64
-	CostAvailable   bool
-	CachedTokens    int64
-	ReasoningTokens int64
+	RequestCount    int64   `json:"request_count"`
+	TokenCount      int64   `json:"token_count"`
+	WindowMinutes   int64   `json:"window_minutes"`
+	RPM             float64 `json:"rpm"`
+	TPM             float64 `json:"tpm"`
+	TotalCost       float64 `json:"total_cost"`
+	CostAvailable   bool    `json:"cost_available"`
+	CachedTokens    int64   `json:"cached_tokens"`
+	ReasoningTokens int64   `json:"reasoning_tokens"`
 }
 
 // UsageOverviewSeries is the service-layer overview series.
 type UsageOverviewSeries struct {
-	Requests        map[string]int64
-	Tokens          map[string]int64
-	RPM             map[string]float64
-	TPM             map[string]float64
-	Cost            map[string]float64
-	InputTokens     map[string]int64
-	OutputTokens    map[string]int64
-	CachedTokens    map[string]int64
-	ReasoningTokens map[string]int64
-	Models          map[string]UsageOverviewSeries
+	Requests        map[string]int64               `json:"requests"`
+	Tokens          map[string]int64               `json:"tokens"`
+	RPM             map[string]float64             `json:"rpm"`
+	TPM             map[string]float64             `json:"tpm"`
+	Cost            map[string]float64             `json:"cost"`
+	InputTokens     map[string]int64               `json:"input_tokens"`
+	OutputTokens    map[string]int64               `json:"output_tokens"`
+	CachedTokens    map[string]int64               `json:"cached_tokens"`
+	ReasoningTokens map[string]int64               `json:"reasoning_tokens"`
+	Models          map[string]UsageOverviewSeries `json:"models"`
 }
 
 // UsageOverviewHealthBlock is one service-layer health time block.
@@ -194,14 +194,14 @@ type UsageKeyStats struct {
 
 // UsageOverviewSnapshot is the service-layer overview result.
 type UsageOverviewSnapshot struct {
-	Usage        *repodto.StatisticsSnapshot
-	Summary      UsageOverviewSummary
-	Series       UsageOverviewSeries
-	HourlySeries UsageOverviewSeries
-	DailySeries  UsageOverviewSeries
-	Health       UsageOverviewHealth
-	KeyStats     UsageKeyStats `json:"key_stats"`
-	StartTime    *time.Time
-	EndTime      *time.Time
-	BucketByDay  bool
+	Usage        *repodto.StatisticsSnapshot `json:"usage"`
+	Summary      UsageOverviewSummary        `json:"summary"`
+	Series       UsageOverviewSeries         `json:"series"`
+	HourlySeries UsageOverviewSeries         `json:"hourly_series"`
+	DailySeries  UsageOverviewSeries         `json:"daily_series"`
+	Health       UsageOverviewHealth         `json:"service_health"`
+	KeyStats     UsageKeyStats               `json:"key_stats"`
+	StartTime    *time.Time                  `json:"range_start,omitempty"`
+	EndTime      *time.Time                  `json:"range_end,omitempty"`
+	BucketByDay  bool                        `json:"bucket_by_day"`
 }

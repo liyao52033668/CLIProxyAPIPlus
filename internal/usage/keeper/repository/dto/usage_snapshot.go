@@ -2,20 +2,21 @@ package dto
 
 import "time"
 
-// StatisticsSnapshot 是仓储层构建的 usage 统计快照。
+// StatisticsSnapshot is the repository-layer usage statistics snapshot.
 type StatisticsSnapshot struct {
-	TotalRequests  int64                  `json:"total_requests"`
-	SuccessCount   int64                  `json:"success_count"`
-	FailureCount   int64                  `json:"failure_count"`
-	TotalTokens    int64                  `json:"total_tokens"`
-	APIs           map[string]APISnapshot `json:"apis"`
-	RequestsByDay  map[string]int64       `json:"requests_by_day"`
-	RequestsByHour map[string]int64       `json:"requests_by_hour"`
-	TokensByDay    map[string]int64       `json:"tokens_by_day"`
-	TokensByHour   map[string]int64       `json:"tokens_by_hour"`
+	TotalRequests    int64                                               `json:"total_requests"`
+	SuccessCount     int64                                               `json:"success_count"`
+	FailureCount     int64                                               `json:"failure_count"`
+	TotalTokens      int64                                               `json:"total_tokens"`
+	APIs             map[string]APISnapshot                              `json:"apis"`
+	RequestsByDay    map[string]int64                                    `json:"requests_by_day"`
+	RequestsByHour   map[string]int64                                    `json:"requests_by_hour"`
+	TokensByDay      map[string]int64                                    `json:"tokens_by_day"`
+	TokensByHour     map[string]int64                                    `json:"tokens_by_hour"`
+	CredentialHourly map[string]map[string]UsageCredentialBucketSnapshot `json:"-"`
 }
 
-// APISnapshot 是按 API 分组的 usage 统计快照。
+// APISnapshot is one API group in a usage statistics snapshot.
 type APISnapshot struct {
 	DisplayName   string                   `json:"display_name,omitempty"`
 	TotalRequests int64                    `json:"total_requests"`
@@ -25,16 +26,45 @@ type APISnapshot struct {
 	Models        map[string]ModelSnapshot `json:"models"`
 }
 
-// ModelSnapshot 是按模型分组的 usage 统计快照。
-type ModelSnapshot struct {
-	TotalRequests int64           `json:"total_requests"`
-	SuccessCount  int64           `json:"success_count"`
-	FailureCount  int64           `json:"failure_count"`
-	TotalTokens   int64           `json:"total_tokens"`
-	Details       []RequestDetail `json:"details"`
+// UsageBucketSnapshot stores compact metrics for one hourly bucket.
+type UsageBucketSnapshot struct {
+	TotalRequests      int64
+	SuccessCount       int64
+	FailureCount       int64
+	InputTokens        int64
+	OutputTokens       int64
+	ReasoningTokens    int64
+	CachedTokens       int64
+	TotalTokens        int64
+	TotalLatencyMS     int64
+	LatencySampleCount int64
 }
 
-// RequestDetail 是单次 usage 请求明细。
+type UsageCredentialBucketSnapshot struct {
+	Source       string
+	AuthIndex    string
+	SuccessCount int64
+	FailureCount int64
+	TotalTokens  int64
+}
+
+// ModelSnapshot is one model in a usage statistics snapshot.
+type ModelSnapshot struct {
+	TotalRequests      int64                          `json:"total_requests"`
+	SuccessCount       int64                          `json:"success_count"`
+	FailureCount       int64                          `json:"failure_count"`
+	TotalTokens        int64                          `json:"total_tokens"`
+	InputTokens        int64                          `json:"input_tokens,omitempty"`
+	OutputTokens       int64                          `json:"output_tokens,omitempty"`
+	ReasoningTokens    int64                          `json:"reasoning_tokens,omitempty"`
+	CachedTokens       int64                          `json:"cached_tokens,omitempty"`
+	TotalLatencyMS     int64                          `json:"total_latency_ms"`
+	LatencySampleCount int64                          `json:"latency_sample_count"`
+	Hourly             map[string]UsageBucketSnapshot `json:"-"`
+	Details            []RequestDetail                `json:"details"`
+}
+
+// RequestDetail is one usage request detail.
 type RequestDetail struct {
 	Timestamp     time.Time  `json:"timestamp"`
 	LatencyMS     int64      `json:"latency_ms"`
@@ -47,7 +77,7 @@ type RequestDetail struct {
 	Tokens        TokenStats `json:"tokens"`
 }
 
-// TokenStats 是单次请求的 token 统计。
+// TokenStats stores token counts for one request.
 type TokenStats struct {
 	InputTokens     int64 `json:"input_tokens"`
 	OutputTokens    int64 `json:"output_tokens"`

@@ -393,6 +393,44 @@ func BuildUsageAggregateSnapshotWithFilter(db *gorm.DB, filter dto.UsageQueryFil
 	return snapshot, nil
 }
 
+func BuildRecentUsageMinuteBucketsWithFilter(db *gorm.DB, filter dto.UsageQueryFilter) (map[string]dto.UsageBucketSnapshot, error) {
+	if db == nil {
+		return nil, fmt.Errorf("database is nil")
+	}
+
+	buckets := make(map[string]dto.UsageBucketSnapshot)
+	columns := []string{
+		"id",
+		"timestamp",
+		"failed",
+		"input_tokens",
+		"output_tokens",
+		"reasoning_tokens",
+		"cached_tokens",
+		"total_tokens",
+	}
+	if err := streamUsageEventsWithFilter(db, filter, columns, func(event entities.UsageEvent) error {
+		minuteKey := event.Timestamp.UTC().Truncate(time.Minute).Format(time.RFC3339)
+		bucket := buckets[minuteKey]
+		bucket.TotalRequests++
+		bucket.InputTokens += event.InputTokens
+		bucket.OutputTokens += event.OutputTokens
+		bucket.ReasoningTokens += event.ReasoningTokens
+		bucket.CachedTokens += event.CachedTokens
+		bucket.TotalTokens += event.TotalTokens
+		if event.Failed {
+			bucket.FailureCount++
+		} else {
+			bucket.SuccessCount++
+		}
+		buckets[minuteKey] = bucket
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return buckets, nil
+}
+
 // Overview streams matching events in pages and builds summary/series/health
 // without loading the full result set or per-request details.
 func BuildUsageOverviewWithFilter(db *gorm.DB, filter dto.UsageQueryFilter) (*dto.UsageOverviewRecord, error) {
@@ -446,11 +484,12 @@ func buildUsageOverviewFromEvents(events []entities.UsageEvent, filter dto.Usage
 
 func newEmptyUsageSnapshot() *dto.StatisticsSnapshot {
 	return &dto.StatisticsSnapshot{
-		APIs:           map[string]dto.APISnapshot{},
-		RequestsByDay:  map[string]int64{},
-		RequestsByHour: map[string]int64{},
-		TokensByDay:    map[string]int64{},
-		TokensByHour:   map[string]int64{},
+		APIs:             map[string]dto.APISnapshot{},
+		RequestsByDay:    map[string]int64{},
+		RequestsByHour:   map[string]int64{},
+		TokensByDay:      map[string]int64{},
+		TokensByHour:     map[string]int64{},
+		CredentialHourly: map[string]map[string]dto.UsageCredentialBucketSnapshot{},
 	}
 }
 
@@ -483,7 +522,14 @@ var usageAggregateSelectColumns = []string{
 	"api_group_key",
 	"model",
 	"timestamp",
+	"source",
+	"auth_index",
 	"failed",
+	"latency_ms",
+	"input_tokens",
+	"output_tokens",
+	"reasoning_tokens",
+	"cached_tokens",
 	"total_tokens",
 }
 
@@ -495,6 +541,7 @@ var usageOverviewSelectColumns = []string{
 	"source",
 	"auth_index",
 	"failed",
+	"latency_ms",
 	"input_tokens",
 	"output_tokens",
 	"reasoning_tokens",
@@ -644,7 +691,18 @@ func applyUsageEventToSnapshot(snapshot *dto.StatisticsSnapshot, event entities.
 		modelSnapshot.Details = append(modelSnapshot.Details, detail)
 	}
 	modelSnapshot.TotalRequests++
+	modelSnapshot.InputTokens += event.InputTokens
+	modelSnapshot.OutputTokens += event.OutputTokens
+	modelSnapshot.ReasoningTokens += event.ReasoningTokens
+	modelSnapshot.CachedTokens += event.CachedTokens
 	modelSnapshot.TotalTokens += event.TotalTokens
+	if event.LatencyMS > 0 {
+		modelSnapshot.TotalLatencyMS += event.LatencyMS
+		modelSnapshot.LatencySampleCount++
+	}
+	if modelSnapshot.Hourly == nil {
+		modelSnapshot.Hourly = map[string]dto.UsageBucketSnapshot{}
+	}
 	apiSnapshot.TotalRequests++
 	apiSnapshot.TotalTokens += event.TotalTokens
 	snapshot.TotalRequests++
@@ -665,6 +723,24 @@ func applyUsageEventToSnapshot(snapshot *dto.StatisticsSnapshot, event entities.
 	snapshot.RequestsByHour[hourKey]++
 	snapshot.TokensByDay[dayKey] += event.TotalTokens
 	snapshot.TokensByHour[hourKey] += event.TotalTokens
+	bucket := modelSnapshot.Hourly[hourKey]
+	bucket.TotalRequests++
+	bucket.InputTokens += event.InputTokens
+	bucket.OutputTokens += event.OutputTokens
+	bucket.ReasoningTokens += event.ReasoningTokens
+	bucket.CachedTokens += event.CachedTokens
+	bucket.TotalTokens += event.TotalTokens
+	if event.LatencyMS > 0 {
+		bucket.TotalLatencyMS += event.LatencyMS
+		bucket.LatencySampleCount++
+	}
+	if event.Failed {
+		bucket.FailureCount++
+	} else {
+		bucket.SuccessCount++
+	}
+	modelSnapshot.Hourly[hourKey] = bucket
+	applyUsageCredentialBucket(snapshot, hourKey, event.Source, event.AuthIndex, event.Failed, event.TotalTokens)
 
 	apiSnapshot.Models[modelName] = modelSnapshot
 	snapshot.APIs[apiKey] = apiSnapshot
@@ -681,7 +757,16 @@ func applyUsageAggregateToSnapshot(snapshot *dto.StatisticsSnapshot, aggregate e
 	modelSnapshot.TotalRequests += aggregate.RequestCount
 	modelSnapshot.SuccessCount += aggregate.SuccessCount
 	modelSnapshot.FailureCount += aggregate.FailureCount
+	modelSnapshot.InputTokens += aggregate.InputTokens
+	modelSnapshot.OutputTokens += aggregate.OutputTokens
+	modelSnapshot.ReasoningTokens += aggregate.ReasoningTokens
+	modelSnapshot.CachedTokens += aggregate.CachedTokens
 	modelSnapshot.TotalTokens += aggregate.TotalTokens
+	modelSnapshot.TotalLatencyMS += aggregate.TotalLatencyMS
+	modelSnapshot.LatencySampleCount += aggregate.LatencySampleCount
+	if modelSnapshot.Hourly == nil {
+		modelSnapshot.Hourly = map[string]dto.UsageBucketSnapshot{}
+	}
 	apiSnapshot.TotalRequests += aggregate.RequestCount
 	apiSnapshot.SuccessCount += aggregate.SuccessCount
 	apiSnapshot.FailureCount += aggregate.FailureCount
@@ -697,8 +782,78 @@ func applyUsageAggregateToSnapshot(snapshot *dto.StatisticsSnapshot, aggregate e
 	snapshot.RequestsByHour[hourKey] += aggregate.RequestCount
 	snapshot.TokensByDay[dayKey] += aggregate.TotalTokens
 	snapshot.TokensByHour[hourKey] += aggregate.TotalTokens
+	bucket := modelSnapshot.Hourly[hourKey]
+	bucket.TotalRequests += aggregate.RequestCount
+	bucket.SuccessCount += aggregate.SuccessCount
+	bucket.FailureCount += aggregate.FailureCount
+	bucket.InputTokens += aggregate.InputTokens
+	bucket.OutputTokens += aggregate.OutputTokens
+	bucket.ReasoningTokens += aggregate.ReasoningTokens
+	bucket.CachedTokens += aggregate.CachedTokens
+	bucket.TotalTokens += aggregate.TotalTokens
+	bucket.TotalLatencyMS += aggregate.TotalLatencyMS
+	bucket.LatencySampleCount += aggregate.LatencySampleCount
+	modelSnapshot.Hourly[hourKey] = bucket
+	applyUsageCredentialAggregate(snapshot, hourKey, aggregate)
 	apiSnapshot.Models[modelName] = modelSnapshot
 	snapshot.APIs[apiKey] = apiSnapshot
+}
+
+func applyUsageCredentialBucket(snapshot *dto.StatisticsSnapshot, hourKey, source, authIndex string, failed bool, totalTokens int64) {
+	if snapshot == nil {
+		return
+	}
+	source = strings.TrimSpace(source)
+	authIndex = strings.TrimSpace(authIndex)
+	if source == "" && authIndex == "" {
+		return
+	}
+	if snapshot.CredentialHourly == nil {
+		snapshot.CredentialHourly = make(map[string]map[string]dto.UsageCredentialBucketSnapshot)
+	}
+	buckets := snapshot.CredentialHourly[hourKey]
+	if buckets == nil {
+		buckets = make(map[string]dto.UsageCredentialBucketSnapshot)
+	}
+	key := source + "\x00" + authIndex
+	bucket := buckets[key]
+	bucket.Source = source
+	bucket.AuthIndex = authIndex
+	bucket.TotalTokens += totalTokens
+	if failed {
+		bucket.FailureCount++
+	} else {
+		bucket.SuccessCount++
+	}
+	buckets[key] = bucket
+	snapshot.CredentialHourly[hourKey] = buckets
+}
+
+func applyUsageCredentialAggregate(snapshot *dto.StatisticsSnapshot, hourKey string, aggregate entities.UsageHourlyAggregate) {
+	if snapshot == nil {
+		return
+	}
+	source := strings.TrimSpace(aggregate.Source)
+	authIndex := strings.TrimSpace(aggregate.AuthIndex)
+	if source == "" && authIndex == "" {
+		return
+	}
+	if snapshot.CredentialHourly == nil {
+		snapshot.CredentialHourly = make(map[string]map[string]dto.UsageCredentialBucketSnapshot)
+	}
+	buckets := snapshot.CredentialHourly[hourKey]
+	if buckets == nil {
+		buckets = make(map[string]dto.UsageCredentialBucketSnapshot)
+	}
+	key := source + "\x00" + authIndex
+	bucket := buckets[key]
+	bucket.Source = source
+	bucket.AuthIndex = authIndex
+	bucket.SuccessCount += aggregate.SuccessCount
+	bucket.FailureCount += aggregate.FailureCount
+	bucket.TotalTokens += aggregate.TotalTokens
+	buckets[key] = bucket
+	snapshot.CredentialHourly[hourKey] = buckets
 }
 
 func finalizeUsageSnapshot(snapshot *dto.StatisticsSnapshot, includeDetails bool) {
