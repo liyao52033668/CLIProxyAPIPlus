@@ -740,7 +740,7 @@ func applyUsageEventToSnapshot(snapshot *dto.StatisticsSnapshot, event entities.
 		bucket.SuccessCount++
 	}
 	modelSnapshot.Hourly[hourKey] = bucket
-	applyUsageCredentialBucket(snapshot, hourKey, event.Source, event.AuthIndex, event.Failed, event.TotalTokens)
+	applyUsageCredentialBucket(snapshot, hourKey, event.Source, event.AuthIndex, modelName, event.Failed, event.InputTokens, event.OutputTokens, event.ReasoningTokens, event.CachedTokens, event.TotalTokens)
 
 	apiSnapshot.Models[modelName] = modelSnapshot
 	snapshot.APIs[apiKey] = apiSnapshot
@@ -799,12 +799,13 @@ func applyUsageAggregateToSnapshot(snapshot *dto.StatisticsSnapshot, aggregate e
 	snapshot.APIs[apiKey] = apiSnapshot
 }
 
-func applyUsageCredentialBucket(snapshot *dto.StatisticsSnapshot, hourKey, source, authIndex string, failed bool, totalTokens int64) {
+func applyUsageCredentialBucket(snapshot *dto.StatisticsSnapshot, hourKey, source, authIndex, model string, failed bool, inputTokens, outputTokens, reasoningTokens, cachedTokens, totalTokens int64) {
 	if snapshot == nil {
 		return
 	}
 	source = strings.TrimSpace(source)
 	authIndex = strings.TrimSpace(authIndex)
+	model = normalizeUsageOverviewDimension(model)
 	if source == "" && authIndex == "" {
 		return
 	}
@@ -815,10 +816,15 @@ func applyUsageCredentialBucket(snapshot *dto.StatisticsSnapshot, hourKey, sourc
 	if buckets == nil {
 		buckets = make(map[string]dto.UsageCredentialBucketSnapshot)
 	}
-	key := source + "\x00" + authIndex
+	key := source + "\x00" + authIndex + "\x00" + model
 	bucket := buckets[key]
 	bucket.Source = source
 	bucket.AuthIndex = authIndex
+	bucket.Model = model
+	bucket.InputTokens += inputTokens
+	bucket.OutputTokens += outputTokens
+	bucket.ReasoningTokens += reasoningTokens
+	bucket.CachedTokens += cachedTokens
 	bucket.TotalTokens += totalTokens
 	if failed {
 		bucket.FailureCount++
@@ -845,12 +851,18 @@ func applyUsageCredentialAggregate(snapshot *dto.StatisticsSnapshot, hourKey str
 	if buckets == nil {
 		buckets = make(map[string]dto.UsageCredentialBucketSnapshot)
 	}
-	key := source + "\x00" + authIndex
+	model := normalizeUsageOverviewDimension(aggregate.Model)
+	key := source + "\x00" + authIndex + "\x00" + model
 	bucket := buckets[key]
 	bucket.Source = source
 	bucket.AuthIndex = authIndex
+	bucket.Model = model
 	bucket.SuccessCount += aggregate.SuccessCount
 	bucket.FailureCount += aggregate.FailureCount
+	bucket.InputTokens += aggregate.InputTokens
+	bucket.OutputTokens += aggregate.OutputTokens
+	bucket.ReasoningTokens += aggregate.ReasoningTokens
+	bucket.CachedTokens += aggregate.CachedTokens
 	bucket.TotalTokens += aggregate.TotalTokens
 	buckets[key] = bucket
 	snapshot.CredentialHourly[hourKey] = buckets

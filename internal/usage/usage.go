@@ -20,8 +20,8 @@ import (
 )
 
 const (
-	maxInMemoryUsageEvents       = 1_000
-	usageEventTrimBatch          = 100
+	maxInMemoryUsageEvents       = 5_000
+	usageEventTrimBatch          = 2_000
 	maxInMemoryUsageEventBytes   = int64(32 << 20)
 	maxInMemoryUsageEventSize    = int64(16 << 10)
 	maxInMemoryUsageEventAge     = 7 * 24 * time.Hour
@@ -29,7 +29,7 @@ const (
 	usageEventHealthRows         = 7
 	usageEventHealthColumns      = 96
 	usageEventHealthDefaultSpan  = 15 * time.Minute
-	usageEventHealthPresetWindow = 24 * time.Hour
+	usageEventHealthPresetWindow = 7 * 24 * time.Hour
 	recentUsageRateWindow        = 30 * time.Minute
 	recentUsageMinuteRetention   = 2 * time.Hour
 )
@@ -128,6 +128,7 @@ type MergeResult struct {
 type usageCredentialKey struct {
 	source    string
 	authIndex string
+	model     string
 }
 
 type RequestStatistics struct {
@@ -320,12 +321,16 @@ func (s *RequestStatistics) record(apiName, modelName, source, authIndex string,
 		if credentialBuckets == nil {
 			credentialBuckets = make(map[usageCredentialKey]UsageBucketSnapshot)
 		}
-		credentialKey := usageCredentialKey{source: source, authIndex: authIndex}
+		credentialKey := usageCredentialKey{source: source, authIndex: authIndex, model: modelName}
 		credentialBuckets[credentialKey] = mergeUsageBucket(credentialBuckets[credentialKey], UsageBucketSnapshot{
-			TotalRequests: 1,
-			SuccessCount:  boolCount(!failed),
-			FailureCount:  boolCount(failed),
-			TotalTokens:   totalTokens,
+			TotalRequests:   1,
+			SuccessCount:    boolCount(!failed),
+			FailureCount:    boolCount(failed),
+			InputTokens:     inputTokens,
+			OutputTokens:    outputTokens,
+			ReasoningTokens: reasoningTokens,
+			CachedTokens:    cachedTokens,
+			TotalTokens:     totalTokens,
 		})
 		s.credentialHourly[hourKey] = credentialBuckets
 	}
@@ -527,7 +532,7 @@ func (s *RequestStatistics) UsageEventOverview(filter servicedto.UsageFilter) (s
 		Credentials: []servicedto.UsageCredentialCount{},
 	}
 	if s == nil {
-		return keyStats, buildUsageAggregateHealth(StatisticsSnapshot{}, filter, time.Now().UTC()), servicedto.UsageEventCacheInfo{
+		return keyStats, buildUsageAggregateHealth(StatisticsSnapshot{}, time.Now().UTC()), servicedto.UsageEventCacheInfo{
 			MaxEvents:     maxInMemoryUsageEvents,
 			MaxBytes:      maxInMemoryUsageEventBytes,
 			MaxAgeSeconds: int64(maxInMemoryUsageEventAge / time.Second),
@@ -537,7 +542,7 @@ func (s *RequestStatistics) UsageEventOverview(filter servicedto.UsageFilter) (s
 
 	snapshot := s.Snapshot()
 	cacheInfo := s.UsageEventCacheInfo()
-	credentials := make(map[usageCredentialKey]servicedto.UsageKeyCount)
+	credentials := make(map[usageCredentialKey]UsageBucketSnapshot)
 	for hourKey, buckets := range snapshot.CredentialHourly {
 		hour, err := time.Parse(time.RFC3339, hourKey)
 		if err != nil || !memoryUsageHourInRange(hour, filter) {
@@ -555,7 +560,7 @@ func (s *RequestStatistics) UsageEventOverview(filter servicedto.UsageFilter) (s
 			if key.authIndex != "" {
 				keyStats.ByAuthIndex[key.authIndex] = mergeUsageKeyCount(keyStats.ByAuthIndex[key.authIndex], count)
 			}
-			credentials[key] = mergeUsageKeyCount(credentials[key], count)
+			credentials[key] = mergeUsageBucket(credentials[key], bucket)
 		}
 	}
 	credentialKeys := make([]usageCredentialKey, 0, len(credentials))
@@ -563,23 +568,30 @@ func (s *RequestStatistics) UsageEventOverview(filter servicedto.UsageFilter) (s
 		credentialKeys = append(credentialKeys, key)
 	}
 	sort.Slice(credentialKeys, func(i, j int) bool {
-		if credentialKeys[i].source == credentialKeys[j].source {
+		if credentialKeys[i].source != credentialKeys[j].source {
+			return credentialKeys[i].source < credentialKeys[j].source
+		}
+		if credentialKeys[i].authIndex != credentialKeys[j].authIndex {
 			return credentialKeys[i].authIndex < credentialKeys[j].authIndex
 		}
-		return credentialKeys[i].source < credentialKeys[j].source
+		return credentialKeys[i].model < credentialKeys[j].model
 	})
 	for _, key := range credentialKeys {
-		count := credentials[key]
+		bucket := credentials[key]
 		keyStats.Credentials = append(keyStats.Credentials, servicedto.UsageCredentialCount{
-			Source:    key.source,
-			AuthIndex: key.authIndex,
-			Success:   count.Success,
-			Failure:   count.Failure,
-			Tokens:    count.Tokens,
-			Cost:      count.Cost,
+			Source:          key.source,
+			AuthIndex:       key.authIndex,
+			Model:           key.model,
+			Success:         bucket.SuccessCount,
+			Failure:         bucket.FailureCount,
+			InputTokens:     bucket.InputTokens,
+			OutputTokens:    bucket.OutputTokens,
+			ReasoningTokens: bucket.ReasoningTokens,
+			CachedTokens:    bucket.CachedTokens,
+			Tokens:          bucket.TotalTokens,
 		})
 	}
-	return keyStats, buildUsageAggregateHealth(snapshot, filter, time.Now().UTC()), cacheInfo
+	return keyStats, buildUsageAggregateHealth(snapshot, time.Now().UTC()), cacheInfo
 }
 
 // UsageEventCacheInfo returns the current bounded event cache state.
@@ -671,14 +683,10 @@ func mergeUsageKeyCount(left, right servicedto.UsageKeyCount) servicedto.UsageKe
 	return left
 }
 
-func buildUsageAggregateHealth(snapshot StatisticsSnapshot, filter servicedto.UsageFilter, now time.Time) servicedto.UsageOverviewHealth {
-	windowStart, windowEnd := usageAggregateHealthBounds(snapshot, filter, now)
-	blockCount := usageEventHealthRows * usageEventHealthColumns
-	span := (windowEnd.Sub(windowStart) + time.Duration(blockCount) - 1) / time.Duration(blockCount)
-	if span <= 0 {
-		span = time.Second
-	}
-	health := buildUsageEventHealthBlocks(windowStart, windowStart.Add(time.Duration(blockCount)*span), span)
+func buildUsageAggregateHealth(snapshot StatisticsSnapshot, now time.Time) servicedto.UsageOverviewHealth {
+	windowEnd := now.UTC()
+	windowStart := windowEnd.Add(-usageEventHealthPresetWindow)
+	health := buildUsageEventHealthBlocks(windowStart, windowEnd, usageEventHealthDefaultSpan)
 	for _, apiStats := range snapshot.APIs {
 		if apiStats == nil {
 			continue
@@ -689,7 +697,7 @@ func buildUsageAggregateHealth(snapshot StatisticsSnapshot, filter servicedto.Us
 			}
 			for hourKey, bucket := range modelStats.Hourly {
 				hour, err := time.Parse(time.RFC3339, hourKey)
-				if err != nil || !memoryUsageHourInRange(hour, filter) {
+				if err != nil || hour.Before(windowStart) || !hour.Before(windowEnd) {
 					continue
 				}
 				updateUsageBucketHealth(&health, hour, bucket)
@@ -700,40 +708,6 @@ func buildUsageAggregateHealth(snapshot StatisticsSnapshot, filter servicedto.Us
 		health.SuccessRate = float64(health.TotalSuccess) / float64(total) * 100
 	}
 	return health
-}
-
-func usageAggregateHealthBounds(snapshot StatisticsSnapshot, filter servicedto.UsageFilter, now time.Time) (time.Time, time.Time) {
-	if filter.StartTime != nil && filter.EndTime != nil {
-		return filter.StartTime.UTC(), filter.EndTime.UTC()
-	}
-	var earliest time.Time
-	var latest time.Time
-	for _, apiStats := range snapshot.APIs {
-		if apiStats == nil {
-			continue
-		}
-		for _, modelStats := range apiStats.Models {
-			if modelStats == nil {
-				continue
-			}
-			for hourKey := range modelStats.Hourly {
-				hour, err := time.Parse(time.RFC3339, hourKey)
-				if err != nil {
-					continue
-				}
-				if earliest.IsZero() || hour.Before(earliest) {
-					earliest = hour
-				}
-				if latest.IsZero() || hour.After(latest) {
-					latest = hour
-				}
-			}
-		}
-	}
-	if earliest.IsZero() || latest.IsZero() {
-		return now.UTC().Add(-usageEventHealthPresetWindow), now.UTC()
-	}
-	return earliest.UTC(), latest.UTC().Add(time.Hour)
 }
 
 func buildUsageEventHealthBlocks(windowStart, windowEnd time.Time, span time.Duration) servicedto.UsageOverviewHealth {
@@ -1443,12 +1417,16 @@ func ReloadRequestStatistics(ctx context.Context, provider service.UsageProvider
 	for hour, buckets := range aggregate.CredentialHourly {
 		converted := make(map[usageCredentialKey]UsageBucketSnapshot, len(buckets))
 		for _, bucket := range buckets {
-			key := usageCredentialKey{source: bucket.Source, authIndex: bucket.AuthIndex}
+			key := usageCredentialKey{source: bucket.Source, authIndex: bucket.AuthIndex, model: bucket.Model}
 			converted[key] = UsageBucketSnapshot{
-				TotalRequests: bucket.SuccessCount + bucket.FailureCount,
-				SuccessCount:  bucket.SuccessCount,
-				FailureCount:  bucket.FailureCount,
-				TotalTokens:   bucket.TotalTokens,
+				TotalRequests:   bucket.SuccessCount + bucket.FailureCount,
+				SuccessCount:    bucket.SuccessCount,
+				FailureCount:    bucket.FailureCount,
+				InputTokens:     bucket.InputTokens,
+				OutputTokens:    bucket.OutputTokens,
+				ReasoningTokens: bucket.ReasoningTokens,
+				CachedTokens:    bucket.CachedTokens,
+				TotalTokens:     bucket.TotalTokens,
 			}
 		}
 		snapshot.CredentialHourly[hour] = converted

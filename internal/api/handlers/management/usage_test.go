@@ -103,8 +103,14 @@ func TestGetUsageStatisticsIncludesMemoryEventOverview(t *testing.T) {
 	if response.EventCache.RetainedCount != 1 || response.KeyStats.ByAuthIndex["auth-a"].Tokens != 25 {
 		t.Fatalf("unexpected memory event overview: %+v", response)
 	}
-	if response.ServiceHealth.TotalSuccess != 1 || len(response.ServiceHealth.BlockDetails) != 7*96 {
+	if len(response.KeyStats.Credentials) != 1 || response.KeyStats.Credentials[0].Model != "model-a" || response.KeyStats.Credentials[0].InputTokens != 15 {
+		t.Fatalf("unexpected compact credential tokens: %+v", response.KeyStats.Credentials)
+	}
+	if response.ServiceHealth.TotalSuccess != 1 || len(response.ServiceHealth.BlockDetails) != 7*96 || response.ServiceHealth.BucketSeconds != 15*60 {
 		t.Fatalf("unexpected memory service health: %+v", response.ServiceHealth)
+	}
+	if response.ServiceHealth.WindowEnd.Sub(response.ServiceHealth.WindowStart) != 7*24*time.Hour {
+		t.Fatalf("unexpected memory service health window: %+v", response.ServiceHealth)
 	}
 }
 

@@ -176,12 +176,17 @@ type UsageKeyCount struct {
 
 // UsageCredentialCount keeps the source associated with its auth index.
 type UsageCredentialCount struct {
-	Source    string  `json:"source"`
-	AuthIndex string  `json:"auth_index"`
-	Success   int64   `json:"success"`
-	Failure   int64   `json:"failure"`
-	Tokens    int64   `json:"tokens"`
-	Cost      float64 `json:"cost"`
+	Source          string  `json:"source"`
+	AuthIndex       string  `json:"auth_index"`
+	Model           string  `json:"model"`
+	Success         int64   `json:"success"`
+	Failure         int64   `json:"failure"`
+	InputTokens     int64   `json:"input_tokens"`
+	OutputTokens    int64   `json:"output_tokens"`
+	ReasoningTokens int64   `json:"reasoning_tokens"`
+	CachedTokens    int64   `json:"cached_tokens"`
+	Tokens          int64   `json:"tokens"`
+	Cost            float64 `json:"cost"`
 }
 
 // UsageKeyStats aggregates request outcomes by auth_index and source for the

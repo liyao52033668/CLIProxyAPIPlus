@@ -3,6 +3,7 @@ package usage
 import (
 	"context"
 	"fmt"
+	"math"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -190,6 +191,11 @@ func TestRestoreRequestStatisticsLoadsDatabaseBaseline(t *testing.T) {
 	if keyStats.BySource["source-a"].Success != 1 || keyStats.BySource["source-a"].Failure != 1 || len(keyStats.Credentials) != 2 {
 		t.Fatalf("unexpected restored credential stats: %+v", keyStats)
 	}
+	for _, credential := range keyStats.Credentials {
+		if credential.Model != "model-a" || credential.InputTokens <= 0 || credential.OutputTokens <= 0 {
+			t.Fatalf("missing restored credential token breakdown: %+v", credential)
+		}
+	}
 	if health.TotalSuccess != 1 || health.TotalFailure != 1 {
 		t.Fatalf("unexpected restored health: %+v", health)
 	}
@@ -346,6 +352,7 @@ func TestRequestStatisticsRejectsOversizedAndExpiredUsageEvents(t *testing.T) {
 func TestRequestStatisticsBuildsEventOverviewFromMemory(t *testing.T) {
 	stats := NewRequestStatistics()
 	now := time.Now().UTC()
+	stats.record("api-a", "model-a", "expired-source", "expired-auth", now.Add(-8*24*time.Hour), false, 7, 0, 0, 0, 7, 10)
 	stats.record("api-a", "model-a", "old-source", "old-auth", now.Add(-25*time.Hour), false, 5, 0, 0, 0, 5, 10)
 	stats.record("api-a", "model-a", "source-a", "auth-a", now.Add(-2*time.Hour), false, 10, 0, 0, 0, 10, 20)
 	stats.record("api-a", "model-a", "source-a", "auth-b", now.Add(-time.Hour), true, 20, 0, 0, 0, 20, 30)
@@ -369,17 +376,23 @@ func TestRequestStatisticsBuildsEventOverviewFromMemory(t *testing.T) {
 	if len(keyStats.ByAuthIndex) != 2 || len(keyStats.Credentials) != 2 {
 		t.Fatalf("unexpected credential key stats: %+v", keyStats)
 	}
-	if health.TotalSuccess != 1 || health.TotalFailure != 1 || health.SuccessRate != 50 {
+	if credential := keyStats.Credentials[0]; credential.Model != "model-a" || credential.InputTokens != 10 || credential.Tokens != 10 {
+		t.Fatalf("unexpected compact credential tokens: %+v", credential)
+	}
+	if health.TotalSuccess != 2 || health.TotalFailure != 1 || math.Abs(health.SuccessRate-200.0/3.0) > 1e-9 {
 		t.Fatalf("unexpected service health totals: %+v", health)
 	}
-	if len(health.BlockDetails) != usageEventHealthRows*usageEventHealthColumns {
-		t.Fatalf("unexpected service health blocks: %d", len(health.BlockDetails))
+	if len(health.BlockDetails) != usageEventHealthRows*usageEventHealthColumns || health.BucketSeconds != 15*60 {
+		t.Fatalf("unexpected service health grid: %+v", health)
+	}
+	if health.WindowEnd.Sub(health.WindowStart) != 7*24*time.Hour {
+		t.Fatalf("unexpected service health window: %+v", health)
 	}
 	populated := int64(0)
 	for _, block := range health.BlockDetails {
 		populated += block.Success + block.Failure
 	}
-	if populated != 2 || cacheInfo.RetainedCount != 3 {
+	if populated != 3 || cacheInfo.RetainedCount != 3 {
 		t.Fatalf("unexpected service health/cache coverage: populated=%d cache=%+v", populated, cacheInfo)
 	}
 }

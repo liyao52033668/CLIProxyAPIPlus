@@ -41,11 +41,16 @@ type UsageBucketSnapshot struct {
 }
 
 type UsageCredentialBucketSnapshot struct {
-	Source       string
-	AuthIndex    string
-	SuccessCount int64
-	FailureCount int64
-	TotalTokens  int64
+	Source          string
+	AuthIndex       string
+	Model           string
+	SuccessCount    int64
+	FailureCount    int64
+	InputTokens     int64
+	OutputTokens    int64
+	ReasoningTokens int64
+	CachedTokens    int64
+	TotalTokens     int64
 }
 
 // ModelSnapshot is one model in a usage statistics snapshot.
