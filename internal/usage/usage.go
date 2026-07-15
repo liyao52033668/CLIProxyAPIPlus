@@ -1,6 +1,9 @@
 package usage
 
 import (
+	"context"
+	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -10,6 +13,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/repository"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/repository/dto"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/service"
+	servicedto "github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/service/dto"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"gorm.io/gorm"
 )
 
@@ -74,25 +79,32 @@ type MergeResult struct {
 }
 
 type RequestStatistics struct {
-	mu   sync.RWMutex
-	apis map[string]*APISnapshot
+	mu             sync.RWMutex
+	apis           map[string]*APISnapshot
+	requestsByDay  map[string]int64
+	requestsByHour map[string]int64
+	tokensByDay    map[string]int64
+	tokensByHour   map[string]int64
 }
 
 var globalStats *RequestStatistics
 var once sync.Once
+var statisticsPluginOnce sync.Once
 
 func GetRequestStatistics() *RequestStatistics {
 	once.Do(func() {
-		globalStats = &RequestStatistics{
-			apis: make(map[string]*APISnapshot),
-		}
+		globalStats = NewRequestStatistics()
 	})
 	return globalStats
 }
 
 func NewRequestStatistics() *RequestStatistics {
 	return &RequestStatistics{
-		apis: make(map[string]*APISnapshot),
+		apis:           make(map[string]*APISnapshot),
+		requestsByDay:  make(map[string]int64),
+		requestsByHour: make(map[string]int64),
+		tokensByDay:    make(map[string]int64),
+		tokensByHour:   make(map[string]int64),
 	}
 }
 
@@ -106,6 +118,19 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 		RequestsByHour: make(map[string]int64),
 		TokensByDay:    make(map[string]int64),
 		TokensByHour:   make(map[string]int64),
+	}
+
+	for day, count := range s.requestsByDay {
+		snapshot.RequestsByDay[day] = count
+	}
+	for hour, count := range s.requestsByHour {
+		snapshot.RequestsByHour[hour] = count
+	}
+	for day, count := range s.tokensByDay {
+		snapshot.TokensByDay[day] = count
+	}
+	for hour, count := range s.tokensByHour {
+		snapshot.TokensByHour[hour] = count
 	}
 
 	for apiName, apiStats := range s.apis {
@@ -139,9 +164,60 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 	return snapshot
 }
 
+func (s *RequestStatistics) Record(apiName, modelName string, timestamp time.Time, failed bool, inputTokens, outputTokens, totalTokens int64) {
+	if s == nil {
+		return
+	}
+	apiName = normalizeDimension(apiName)
+	modelName = normalizeDimension(modelName)
+	if timestamp.IsZero() {
+		timestamp = time.Now()
+	}
+	if totalTokens == 0 {
+		totalTokens = inputTokens + outputTokens
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensureMaps()
+
+	apiStats := s.apis[apiName]
+	if apiStats == nil {
+		apiStats = &APISnapshot{DisplayName: apiName, Models: make(map[string]*ModelSnapshot)}
+		s.apis[apiName] = apiStats
+	}
+	modelStats := apiStats.Models[modelName]
+	if modelStats == nil {
+		modelStats = &ModelSnapshot{}
+		apiStats.Models[modelName] = modelStats
+	}
+
+	apiStats.TotalRequests++
+	apiStats.TotalTokens += totalTokens
+	modelStats.TotalRequests++
+	modelStats.TotalTokens += totalTokens
+	modelStats.InputTokens += inputTokens
+	modelStats.OutputTokens += outputTokens
+	if failed {
+		apiStats.FailureCount++
+		modelStats.FailureCount++
+	} else {
+		apiStats.SuccessCount++
+		modelStats.SuccessCount++
+	}
+
+	dayKey := timestamp.In(time.Local).Format("2006-01-02")
+	hourKey := timestamp.UTC().Format("2006-01-02T15:00:00Z")
+	s.requestsByDay[dayKey]++
+	s.requestsByHour[hourKey]++
+	s.tokensByDay[dayKey] += totalTokens
+	s.tokensByHour[hourKey] += totalTokens
+}
+
 func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResult {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.ensureMaps()
 
 	result := MergeResult{}
 
@@ -153,6 +229,9 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 			s.apis[apiName] = &APISnapshot{
 				Models: make(map[string]*ModelSnapshot),
 			}
+		}
+		if s.apis[apiName].Models == nil {
+			s.apis[apiName].Models = make(map[string]*ModelSnapshot)
 		}
 
 		s.apis[apiName].DisplayName = apiStats.DisplayName
@@ -180,8 +259,177 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 			s.apis[apiName].Models[modelName].OutputTokens += modelStats.OutputTokens
 		}
 	}
+	for day, count := range snapshot.RequestsByDay {
+		s.requestsByDay[day] += count
+	}
+	for hour, count := range snapshot.RequestsByHour {
+		s.requestsByHour[hour] += count
+	}
+	for day, count := range snapshot.TokensByDay {
+		s.tokensByDay[day] += count
+	}
+	for hour, count := range snapshot.TokensByHour {
+		s.tokensByHour[hour] += count
+	}
 
 	return result
+}
+
+func (s *RequestStatistics) ReplaceSnapshot(snapshot StatisticsSnapshot) {
+	if s == nil {
+		return
+	}
+	replacement := NewRequestStatistics()
+	replacement.MergeSnapshot(snapshot)
+
+	s.mu.Lock()
+	s.apis = replacement.apis
+	s.requestsByDay = replacement.requestsByDay
+	s.requestsByHour = replacement.requestsByHour
+	s.tokensByDay = replacement.tokensByDay
+	s.tokensByHour = replacement.tokensByHour
+	s.mu.Unlock()
+}
+
+func (s *RequestStatistics) HasData() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.apis) > 0
+}
+
+func (s *RequestStatistics) ensureMaps() {
+	if s.apis == nil {
+		s.apis = make(map[string]*APISnapshot)
+	}
+	if s.requestsByDay == nil {
+		s.requestsByDay = make(map[string]int64)
+	}
+	if s.requestsByHour == nil {
+		s.requestsByHour = make(map[string]int64)
+	}
+	if s.tokensByDay == nil {
+		s.tokensByDay = make(map[string]int64)
+	}
+	if s.tokensByHour == nil {
+		s.tokensByHour = make(map[string]int64)
+	}
+}
+
+func normalizeDimension(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "unknown"
+	}
+	return value
+}
+
+func RestoreRequestStatistics(ctx context.Context, db *gorm.DB, stats *RequestStatistics) error {
+	if stats == nil {
+		stats = GetRequestStatistics()
+	}
+	if stats.HasData() {
+		return nil
+	}
+	if db == nil {
+		return fmt.Errorf("restore request statistics: database is nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	provider := service.NewUsageService(db.WithContext(ctx))
+	aggregate, err := provider.GetUsageAggregateWithFilter(ctx, servicedto.UsageFilter{})
+	if err != nil {
+		return fmt.Errorf("restore request statistics aggregate: %w", err)
+	}
+	analysis, err := provider.GetUsageAnalysis(ctx, servicedto.UsageFilter{})
+	if err != nil {
+		return fmt.Errorf("restore request statistics analysis: %w", err)
+	}
+
+	snapshot := StatisticsSnapshot{
+		TotalRequests:  aggregate.TotalRequests,
+		SuccessCount:   aggregate.SuccessCount,
+		FailureCount:   aggregate.FailureCount,
+		TotalTokens:    aggregate.TotalTokens,
+		APIs:           make(map[string]*APISnapshot, len(aggregate.APIs)),
+		RequestsByDay:  aggregate.RequestsByDay,
+		RequestsByHour: aggregate.RequestsByHour,
+		TokensByDay:    aggregate.TokensByDay,
+		TokensByHour:   aggregate.TokensByHour,
+	}
+	for apiKey, apiStats := range aggregate.APIs {
+		models := make(map[string]*ModelSnapshot, len(apiStats.Models))
+		for modelName, modelStats := range apiStats.Models {
+			models[modelName] = &ModelSnapshot{
+				TotalRequests: modelStats.TotalRequests,
+				SuccessCount:  modelStats.SuccessCount,
+				FailureCount:  modelStats.FailureCount,
+				TotalTokens:   modelStats.TotalTokens,
+			}
+		}
+		snapshot.APIs[apiKey] = &APISnapshot{
+			DisplayName:   apiStats.DisplayName,
+			TotalRequests: apiStats.TotalRequests,
+			SuccessCount:  apiStats.SuccessCount,
+			FailureCount:  apiStats.FailureCount,
+			TotalTokens:   apiStats.TotalTokens,
+			Models:        models,
+		}
+	}
+	for _, apiStats := range analysis.APIs {
+		apiKey := normalizeDimension(apiStats.APIKey)
+		apiSnapshot := snapshot.APIs[apiKey]
+		if apiSnapshot == nil {
+			apiSnapshot = &APISnapshot{Models: make(map[string]*ModelSnapshot)}
+			snapshot.APIs[apiKey] = apiSnapshot
+		}
+		apiSnapshot.DisplayName = apiStats.DisplayName
+		if apiSnapshot.DisplayName == "" {
+			apiSnapshot.DisplayName = apiKey
+		}
+		for _, modelStats := range apiStats.Models {
+			modelName := normalizeDimension(modelStats.Model)
+			modelSnapshot := apiSnapshot.Models[modelName]
+			if modelSnapshot == nil {
+				modelSnapshot = &ModelSnapshot{
+					TotalRequests: modelStats.TotalRequests,
+					SuccessCount:  modelStats.SuccessCount,
+					FailureCount:  modelStats.FailureCount,
+					TotalTokens:   modelStats.TotalTokens,
+				}
+				apiSnapshot.Models[modelName] = modelSnapshot
+			}
+			modelSnapshot.InputTokens = modelStats.InputTokens
+			modelSnapshot.OutputTokens = modelStats.OutputTokens
+		}
+	}
+	stats.ReplaceSnapshot(snapshot)
+	return nil
+}
+
+type requestStatisticsPlugin struct {
+	stats *RequestStatistics
+}
+
+func (p *requestStatisticsPlugin) HandleUsage(_ context.Context, record coreusage.Record) {
+	if p == nil || p.stats == nil || !IsStatisticsEnabled() {
+		return
+	}
+	totalTokens := record.Detail.TotalTokens
+	if totalTokens == 0 {
+		totalTokens = record.Detail.InputTokens + record.Detail.OutputTokens + record.Detail.ReasoningTokens + record.Detail.CachedTokens
+	}
+	p.stats.Record(record.APIKey, record.Model, record.RequestedAt, record.Failed, record.Detail.InputTokens, record.Detail.OutputTokens, totalTokens)
+}
+
+func RegisterRequestStatisticsPlugin() {
+	statisticsPluginOnce.Do(func() {
+		coreusage.RegisterPlugin(&requestStatisticsPlugin{stats: GetRequestStatistics()})
+	})
 }
 
 type UsagePersister interface {

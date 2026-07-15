@@ -764,6 +764,10 @@ func main() {
 		}
 	} else if cfg.UsageStatisticsEnabled && usageDB != nil {
 		usage.SetStatisticsEnabled(cfg.UsageStatisticsEnabled)
+		if errRestore := usage.RestoreRequestStatistics(context.Background(), usageDB, usage.GetRequestStatistics()); errRestore != nil {
+			log.WithError(errRestore).Warn("failed to restore in-memory usage statistics from database")
+		}
+		usage.RegisterRequestStatisticsPlugin()
 		persister := usage.NewDBUsagePersister(usageDB)
 		usage.StartPersistence(persister, 0)
 		coreusage.SetDefaultManagerDB(usageDB)
