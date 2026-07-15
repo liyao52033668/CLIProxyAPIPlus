@@ -76,12 +76,14 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 			arr := tools.Array()
 			for i := range arr {
 				t := arr[i]
-				if t.Get("type").String() == "function" {
-					fn := t.Get("function")
-					if fn.Exists() {
-						if v := fn.Get("name"); v.Exists() {
-							names = append(names, v.String())
-						}
+				switch t.Get("type").String() {
+				case "function":
+					if v := t.Get("function.name"); v.Exists() {
+						names = append(names, v.String())
+					}
+				case "custom":
+					if v := t.Get("name"); v.Exists() {
+						names = append(names, v.String())
 					}
 				}
 			}
@@ -93,6 +95,14 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 
 	// Extract system instructions from first system message (string or text object)
 	messages := gjson.GetBytes(rawJSON, "messages")
+	type pendingToolCall struct {
+		callID       string
+		sourceCallID string
+		callType     string
+		consumed     bool
+	}
+	var pendingToolCalls []pendingToolCall
+	ambiguousToolCallIDs := map[string]struct{}{}
 	// if messages.IsArray() {
 	// 	arr := messages.Array()
 	// 	for i := 0; i < len(arr); i++ {
@@ -119,18 +129,46 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 
 			switch role {
 			case "tool":
-				// Handle tool response messages as top-level function_call_output objects
+				// Handle tool response messages as top-level tool call output objects.
 				toolCallID := m.Get("tool_call_id").String()
-				content := m.Get("content")
+				if _, ambiguous := ambiguousToolCallIDs[toolCallID]; toolCallID != "" && ambiguous {
+					continue
+				}
 
-				// Create function_call_output object
-				funcOutput := []byte(`{}`)
-				funcOutput, _ = sjson.SetBytes(funcOutput, "type", "function_call_output")
-				funcOutput, _ = sjson.SetBytes(funcOutput, "call_id", toolCallID)
-				funcOutput = setToolCallOutputContent(funcOutput, content)
-				out, _ = sjson.SetRawBytes(out, "input.-1", funcOutput)
+				pendingIndex := -1
+				for index := range pendingToolCalls {
+					pendingCall := &pendingToolCalls[index]
+					if pendingCall.consumed {
+						continue
+					}
+					if toolCallID == "" || pendingCall.sourceCallID == toolCallID || pendingCall.callID == toolCallID {
+						pendingIndex = index
+						break
+					}
+				}
+
+				if pendingIndex < 0 {
+					continue
+				}
+				pendingCall := &pendingToolCalls[pendingIndex]
+				pendingCall.consumed = true
+				toolCallID = pendingCall.callID
+				outputType := "function_call_output"
+				if pendingCall.callType == "custom" {
+					outputType = "custom_tool_call_output"
+				}
+
+				toolOutput := []byte(`{}`)
+				toolOutput, _ = sjson.SetBytes(toolOutput, "type", outputType)
+				toolOutput, _ = sjson.SetBytes(toolOutput, "call_id", toolCallID)
+				toolOutput = setToolCallOutputContent(toolOutput, m.Get("content"))
+				out, _ = sjson.SetRawBytes(out, "input.-1", toolOutput)
 
 			default:
+				// A new conversational message starts a new tool-call batch.
+				pendingToolCalls = nil
+				ambiguousToolCallIDs = map[string]struct{}{}
+
 				// Handle regular messages
 				msg := []byte(`{}`)
 				msg, _ = sjson.SetBytes(msg, "type", "message")
@@ -209,24 +247,78 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 					toolCalls := m.Get("tool_calls")
 					if toolCalls.Exists() && toolCalls.IsArray() {
 						toolCallsArr := toolCalls.Array()
+						callIDCounts := map[string]int{}
+						usedCallIDs := map[string]struct{}{}
+						for _, tc := range toolCallsArr {
+							toolCallType := tc.Get("type").String()
+							callID := tc.Get("id").String()
+							if (toolCallType == "function" || toolCallType == "custom") && callID != "" {
+								callIDCounts[callID]++
+								usedCallIDs[callID] = struct{}{}
+							}
+						}
+						for callID, count := range callIDCounts {
+							if count > 1 {
+								ambiguousToolCallIDs[callID] = struct{}{}
+							}
+						}
+
 						for j := range toolCallsArr {
 							tc := toolCallsArr[j]
-							if tc.Get("type").String() == "function" {
+							toolCallType := tc.Get("type").String()
+							if toolCallType != "function" && toolCallType != "custom" {
+								continue
+							}
+							sourceCallID := tc.Get("id").String()
+							if _, ambiguous := ambiguousToolCallIDs[sourceCallID]; sourceCallID != "" && ambiguous {
+								continue
+							}
+							callID := sourceCallID
+							if callID == "" {
+								baseCallID := "call_missing_" + strconv.Itoa(i) + "_" + strconv.Itoa(j)
+								callID = baseCallID
+								for suffix := 1; ; suffix++ {
+									if _, used := usedCallIDs[callID]; !used {
+										break
+									}
+									callID = baseCallID + "_" + strconv.Itoa(suffix)
+								}
+								usedCallIDs[callID] = struct{}{}
+							}
+							pendingToolCalls = append(pendingToolCalls, pendingToolCall{
+								callID:       callID,
+								sourceCallID: sourceCallID,
+								callType:     toolCallType,
+							})
+
+							switch toolCallType {
+							case "function":
 								// Create function_call as top-level object
 								funcCall := []byte(`{}`)
 								funcCall, _ = sjson.SetBytes(funcCall, "type", "function_call")
-								funcCall, _ = sjson.SetBytes(funcCall, "call_id", tc.Get("id").String())
-								{
-									name := tc.Get("function.name").String()
-									if short, ok := originalToolNameMap[name]; ok {
-										name = short
-									} else {
-										name = shortenNameIfNeeded(name)
-									}
-									funcCall, _ = sjson.SetBytes(funcCall, "name", name)
+								funcCall, _ = sjson.SetBytes(funcCall, "call_id", callID)
+								name := tc.Get("function.name").String()
+								if short, ok := originalToolNameMap[name]; ok {
+									name = short
+								} else {
+									name = shortenNameIfNeeded(name)
 								}
+								funcCall, _ = sjson.SetBytes(funcCall, "name", name)
 								funcCall, _ = sjson.SetBytes(funcCall, "arguments", tc.Get("function.arguments").String())
 								out, _ = sjson.SetRawBytes(out, "input.-1", funcCall)
+							case "custom":
+								customCall := []byte(`{}`)
+								customCall, _ = sjson.SetBytes(customCall, "type", "custom_tool_call")
+								customCall, _ = sjson.SetBytes(customCall, "call_id", callID)
+								name := tc.Get("custom.name").String()
+								if short, ok := originalToolNameMap[name]; ok {
+									name = short
+								} else {
+									name = shortenNameIfNeeded(name)
+								}
+								customCall, _ = sjson.SetBytes(customCall, "name", name)
+								customCall, _ = sjson.SetBytes(customCall, "input", tc.Get("custom.input").String())
+								out, _ = sjson.SetRawBytes(out, "input.-1", customCall)
 							}
 						}
 					}
@@ -288,6 +380,20 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 		for i := range arr {
 			t := arr[i]
 			toolType := t.Get("type").String()
+			if toolType == "custom" {
+				item := []byte(t.Raw)
+				if v := t.Get("name"); v.Exists() {
+					name := v.String()
+					if short, ok := originalToolNameMap[name]; ok {
+						name = short
+					} else {
+						name = shortenNameIfNeeded(name)
+					}
+					item, _ = sjson.SetBytes(item, "name", name)
+				}
+				out, _ = sjson.SetRawBytes(out, "tools.-1", item)
+				continue
+			}
 			// Pass through built-in tools (e.g. {"type":"web_search"}) directly for the Responses API.
 			// Only "function" needs structural conversion because Chat Completions nests details under "function".
 			if toolType != "" && toolType != "function" && t.IsObject() {
@@ -345,6 +451,17 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 				choice := []byte(`{}`)
 				choice, _ = sjson.SetBytes(choice, "type", "function")
 				if name != "" {
+					choice, _ = sjson.SetBytes(choice, "name", name)
+				}
+				out, _ = sjson.SetRawBytes(out, "tool_choice", choice)
+			} else if tcType == "custom" {
+				choice := []byte(tc.Raw)
+				if name := tc.Get("name").String(); name != "" {
+					if short, ok := originalToolNameMap[name]; ok {
+						name = short
+					} else {
+						name = shortenNameIfNeeded(name)
+					}
 					choice, _ = sjson.SetBytes(choice, "name", name)
 				}
 				out, _ = sjson.SetRawBytes(out, "tool_choice", choice)

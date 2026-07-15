@@ -186,6 +186,79 @@ func TestConvertCodexResponseToOpenAI_NonStreamForwardsCacheWriteTokens(t *testi
 	assertUsageMapping(t, out, 40, true)
 }
 
+func TestConvertCodexResponseToOpenAI_StreamCustomToolCall(t *testing.T) {
+	ctx := context.Background()
+	var param any
+	originalName := strings.Repeat("custom_tool_", 7) + "apply_patch"
+	shortName := buildShortNameMap([]string{originalName})[originalName]
+	originalRequest := []byte(`{"tools":[{"type":"custom","name":"` + originalName + `"}]}`)
+
+	added := []byte(`data: {"type":"response.output_item.added","item":{"type":"custom_tool_call","call_id":"call_custom","name":"` + shortName + `"}}`)
+	out := ConvertCodexResponseToOpenAI(ctx, "gpt-5.6-sol", originalRequest, nil, added, &param)
+	if len(out) != 1 {
+		t.Fatalf("expected custom tool announcement, got %d chunks", len(out))
+	}
+	if got := gjson.GetBytes(out[0], "choices.0.delta.tool_calls.0.type").String(); got != "custom" {
+		t.Fatalf("custom tool type = %q, want custom: %s", got, out[0])
+	}
+	if got := gjson.GetBytes(out[0], "choices.0.delta.tool_calls.0.custom.name").String(); got != originalName {
+		t.Fatalf("custom tool name = %q, want %q: %s", got, originalName, out[0])
+	}
+
+	out = ConvertCodexResponseToOpenAI(ctx, "gpt-5.6-sol", originalRequest, nil, []byte(`data: {"type":"response.custom_tool_call_input.delta","delta":"patch"}`), &param)
+	if len(out) != 1 || gjson.GetBytes(out[0], "choices.0.delta.tool_calls.0.custom.input").String() != "patch" {
+		t.Fatalf("expected custom input delta, got %q", out)
+	}
+
+	out = ConvertCodexResponseToOpenAI(ctx, "gpt-5.6-sol", originalRequest, nil, []byte(`data: {"type":"response.custom_tool_call_input.done","input":"patch"}`), &param)
+	if len(out) != 0 {
+		t.Fatalf("expected done event to be suppressed after delta, got %d chunks", len(out))
+	}
+	out = ConvertCodexResponseToOpenAI(ctx, "gpt-5.6-sol", originalRequest, nil, []byte(`data: {"type":"response.output_item.done","item":{"type":"custom_tool_call","call_id":"call_custom","name":"`+shortName+`","input":"patch"}}`), &param)
+	if len(out) != 0 {
+		t.Fatalf("expected announced custom item done to be suppressed, got %d chunks", len(out))
+	}
+
+	out = ConvertCodexResponseToOpenAI(ctx, "gpt-5.6-sol", originalRequest, nil, []byte(`data: {"type":"response.completed","response":{"usage":{}}}`), &param)
+	if len(out) != 1 || gjson.GetBytes(out[0], "choices.0.finish_reason").String() != "tool_calls" {
+		t.Fatalf("expected tool_calls finish reason, got %q", out)
+	}
+}
+
+func TestConvertCodexResponseToOpenAI_StreamCustomToolCallDoneFallback(t *testing.T) {
+	ctx := context.Background()
+	var param any
+	out := ConvertCodexResponseToOpenAI(ctx, "gpt-5.6-sol", nil, nil, []byte(`data: {"type":"response.output_item.done","item":{"type":"custom_tool_call","call_id":"call_custom","name":"apply_patch","input":"patch"}}`), &param)
+	if len(out) != 1 {
+		t.Fatalf("expected one fallback custom tool chunk, got %d", len(out))
+	}
+	if got := gjson.GetBytes(out[0], "choices.0.delta.tool_calls.0.custom.input").String(); got != "patch" {
+		t.Fatalf("custom fallback input = %q, want patch: %s", got, out[0])
+	}
+}
+
+func TestConvertCodexResponseToOpenAI_NonStreamCustomToolCall(t *testing.T) {
+	ctx := context.Background()
+	originalName := strings.Repeat("custom_tool_", 7) + "apply_patch"
+	shortName := buildShortNameMap([]string{originalName})[originalName]
+	originalRequest := []byte(`{"tools":[{"type":"custom","name":"` + originalName + `"}]}`)
+	raw := []byte(`{"type":"response.completed","response":{"id":"resp_custom","model":"gpt-5.6-sol","status":"completed","output":[{"type":"custom_tool_call","call_id":"call_custom","name":"` + shortName + `","input":"patch"}]}}`)
+
+	out := ConvertCodexResponseToOpenAINonStream(ctx, "gpt-5.6-sol", originalRequest, nil, raw, nil)
+	if got := gjson.GetBytes(out, "choices.0.message.tool_calls.0.type").String(); got != "custom" {
+		t.Fatalf("custom tool type = %q, want custom: %s", got, out)
+	}
+	if got := gjson.GetBytes(out, "choices.0.message.tool_calls.0.custom.name").String(); got != originalName {
+		t.Fatalf("custom tool name = %q, want %q: %s", got, originalName, out)
+	}
+	if got := gjson.GetBytes(out, "choices.0.message.tool_calls.0.custom.input").String(); got != "patch" {
+		t.Fatalf("custom tool input = %q, want patch: %s", got, out)
+	}
+	if got := gjson.GetBytes(out, "choices.0.finish_reason").String(); got != "tool_calls" {
+		t.Fatalf("finish reason = %q, want tool_calls: %s", got, out)
+	}
+}
+
 func assertUsageMapping(t *testing.T, payload []byte, wantCachedCreation int64, expectCachedCreation bool) {
 	t.Helper()
 
