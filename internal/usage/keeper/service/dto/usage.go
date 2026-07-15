@@ -33,12 +33,28 @@ type UsageImportResult struct {
 
 // UsageEventsPage is the service-layer usage event list result.
 type UsageEventsPage struct {
-	Events     []UsageEventRecord `json:"events"`
-	Models     []string           `json:"models"`
-	TotalCount int64              `json:"total_count"`
-	Page       int                `json:"page"`
-	PageSize   int                `json:"page_size"`
-	TotalPages int                `json:"total_pages"`
+	Events     []UsageEventRecord   `json:"events"`
+	Models     []string             `json:"models"`
+	TotalCount int64                `json:"total_count"`
+	Page       int                  `json:"page"`
+	PageSize   int                  `json:"page_size"`
+	TotalPages int                  `json:"total_pages"`
+	Cache      *UsageEventCacheInfo `json:"cache,omitempty"`
+}
+
+// UsageEventCacheInfo describes the bounded in-memory event window.
+type UsageEventCacheInfo struct {
+	RetainedCount         int        `json:"retained_count"`
+	MaxEvents             int        `json:"max_events"`
+	EstimatedBytes        int64      `json:"estimated_bytes"`
+	MaxBytes              int64      `json:"max_bytes"`
+	MaxAgeSeconds         int64      `json:"max_age_seconds"`
+	MaxEventBytes         int64      `json:"max_event_bytes"`
+	OldestTimestamp       *time.Time `json:"oldest_timestamp,omitempty"`
+	NewestTimestamp       *time.Time `json:"newest_timestamp,omitempty"`
+	HasOlderEvents        bool       `json:"has_older_events"`
+	EvictedTotal          int64      `json:"evicted_total"`
+	OversizedDroppedTotal int64      `json:"oversized_dropped_total"`
 }
 
 // UsageEventFilterOptions is the service-layer event filter result.
@@ -130,24 +146,24 @@ type UsageOverviewSeries struct {
 
 // UsageOverviewHealthBlock is one service-layer health time block.
 type UsageOverviewHealthBlock struct {
-	StartTime time.Time
-	EndTime   time.Time
-	Success   int64
-	Failure   int64
-	Rate      float64
+	StartTime time.Time `json:"start_time"`
+	EndTime   time.Time `json:"end_time"`
+	Success   int64     `json:"success"`
+	Failure   int64     `json:"failure"`
+	Rate      float64   `json:"rate"`
 }
 
 // UsageOverviewHealth is the service-layer health aggregate.
 type UsageOverviewHealth struct {
-	TotalSuccess  int64
-	TotalFailure  int64
-	SuccessRate   float64
-	Rows          int
-	Columns       int
-	BucketSeconds int64
-	WindowStart   time.Time
-	WindowEnd     time.Time
-	BlockDetails  []UsageOverviewHealthBlock
+	TotalSuccess  int64                      `json:"total_success"`
+	TotalFailure  int64                      `json:"total_failure"`
+	SuccessRate   float64                    `json:"success_rate"`
+	Rows          int                        `json:"rows"`
+	Columns       int                        `json:"columns"`
+	BucketSeconds int64                      `json:"bucket_seconds"`
+	WindowStart   time.Time                  `json:"window_start"`
+	WindowEnd     time.Time                  `json:"window_end"`
+	BlockDetails  []UsageOverviewHealthBlock `json:"block_details"`
 }
 
 // UsageKeyCount is a compact request-outcome counter for one key.

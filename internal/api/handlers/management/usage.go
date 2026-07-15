@@ -1,6 +1,7 @@
 package management
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	repodto "github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/repository/dto"
 	keeperservice "github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/service"
 	dto "github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/service/dto"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/sirupsen/logrus"
 )
 
@@ -55,13 +57,25 @@ func (h *Handler) GetUsageStatistics(c *gin.Context) {
 		c.AbortWithStatus(http.StatusNotFound)
 		return
 	}
+	filter, errFilter := buildUsageFilterFromRequest(c)
+	if errFilter != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errFilter.Error()})
+		return
+	}
 	var snapshot usage.StatisticsSnapshot
+	var eventCache dto.UsageEventCacheInfo
+	var keyStats dto.UsageKeyStats
+	var serviceHealth dto.UsageOverviewHealth
 	if h != nil && h.usageStats != nil {
 		snapshot = h.usageStats.Snapshot()
+		keyStats, serviceHealth, eventCache = h.usageStats.UsageEventOverview(filter)
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"usage":           snapshot,
 		"failed_requests": snapshot.FailureCount,
+		"event_cache":     eventCache,
+		"key_stats":       keyStats,
+		"service_health":  serviceHealth,
 	})
 }
 
@@ -113,8 +127,27 @@ func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 		return
 	}
 
-	result, err := h.usageService.ImportUsageSnapshotStream(c.Request.Context(), c.Request.Body)
+	requestContext := c.Request.Context()
+	operationContext := context.WithoutCancel(requestContext)
+	var result *dto.UsageImportResult
+	importCommitted := false
+	err := coreusage.DefaultManager().WithDispatchPaused(requestContext, func() error {
+		var errImport error
+		result, errImport = h.usageService.ImportUsageSnapshotStream(operationContext, c.Request.Body)
+		if errImport != nil {
+			return errImport
+		}
+		importCommitted = true
+		if errReload := usage.ReloadRequestStatistics(operationContext, h.usageService, h.usageStats); errReload != nil {
+			return fmt.Errorf("refresh in-memory usage after committed import: %w", errReload)
+		}
+		return nil
+	})
 	if err != nil {
+		if importCommitted {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
 		switch {
 		case errors.Is(err, keeperservice.ErrInvalidUsageImportJSON):
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json"})
@@ -195,8 +228,23 @@ func (h *Handler) GetDBUsageOverview(c *gin.Context) {
 	c.JSON(http.StatusOK, overview)
 }
 
-// GetDBUsageEvents returns paginated usage events from database.
+// GetDBUsageEvents returns paginated usage events from memory.
 func (h *Handler) GetDBUsageEvents(c *gin.Context) {
+	if h == nil || h.usageStats == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "usage statistics not available"})
+		return
+	}
+
+	filter, errFilter := buildUsageFilterFromRequest(c)
+	if errFilter != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errFilter.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, h.usageStats.ListUsageEvents(filter))
+}
+
+// GetDBUsageEventHistory returns paginated usage events from database storage.
+func (h *Handler) GetDBUsageEventHistory(c *gin.Context) {
 	if h == nil || h.usageService == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "usage service not available"})
 		return
@@ -212,7 +260,6 @@ func (h *Handler) GetDBUsageEvents(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-
 	c.JSON(http.StatusOK, page)
 }
 
@@ -237,10 +284,10 @@ func (h *Handler) GetDBUsageAnalysis(c *gin.Context) {
 	c.JSON(http.StatusOK, analysis)
 }
 
-// GetDBUsageEventFilterOptions returns available filter options for usage events.
+// GetDBUsageEventFilterOptions returns available in-memory filter options for usage events.
 func (h *Handler) GetDBUsageEventFilterOptions(c *gin.Context) {
-	if h == nil || h.usageService == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "usage service not available"})
+	if h == nil || h.usageStats == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "usage statistics not available"})
 		return
 	}
 
@@ -249,13 +296,7 @@ func (h *Handler) GetDBUsageEventFilterOptions(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errFilter.Error()})
 		return
 	}
-	options, err := h.usageService.ListUsageEventFilterOptions(c.Request.Context(), filter)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, options)
+	c.JSON(http.StatusOK, h.usageStats.ListUsageEventFilterOptions(filter))
 }
 
 func parseUsageQueueCount(raw string) (int, error) {

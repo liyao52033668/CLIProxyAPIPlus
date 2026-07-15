@@ -2,6 +2,7 @@ package usage
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -172,8 +173,10 @@ type Plugin interface {
 }
 
 type queueItem struct {
-	ctx    context.Context
-	record Record
+	ctx      context.Context
+	record   Record
+	callback func() error
+	done     chan error
 }
 
 // Manager maintains a queue of usage records and delivers them to registered plugins.
@@ -298,6 +301,31 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
 	m.cond.Signal()
 }
 
+// WithDispatchPaused flushes persisted usage before running callback between queued records.
+func (m *Manager) WithDispatchPaused(ctx context.Context, callback func() error) error {
+	if m == nil {
+		return fmt.Errorf("usage manager is nil")
+	}
+	if callback == nil {
+		return fmt.Errorf("usage callback is nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	m.Start(context.Background())
+	done := make(chan error, 1)
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return fmt.Errorf("usage manager is closed")
+	}
+	m.queue = append(m.queue, queueItem{ctx: ctx, callback: callback, done: done})
+	m.mu.Unlock()
+	m.cond.Signal()
+
+	return <-done
+}
+
 func (m *Manager) run(ctx context.Context) {
 	for {
 		m.mu.Lock()
@@ -320,6 +348,22 @@ func (m *Manager) dispatch(item queueItem) {
 	plugins := make([]Plugin, len(m.plugins))
 	copy(plugins, m.plugins)
 	m.pluginsMu.RUnlock()
+	if item.callback != nil {
+		for _, plugin := range plugins {
+			if database, ok := plugin.(*databasePlugin); ok {
+				if err := database.flush(); err != nil {
+					item.done <- fmt.Errorf("flush usage database: %w", err)
+					return
+				}
+			}
+		}
+		if err := item.ctx.Err(); err != nil {
+			item.done <- err
+			return
+		}
+		item.done <- item.callback()
+		return
+	}
 	if len(plugins) == 0 {
 		return
 	}
@@ -350,11 +394,12 @@ const (
 type databasePlugin struct {
 	db *gorm.DB
 
-	mu     sync.Mutex
-	buffer []entities.UsageEvent
-	once   sync.Once
-	stop   chan struct{}
-	done   chan struct{}
+	flushMu sync.Mutex
+	mu      sync.Mutex
+	buffer  []entities.UsageEvent
+	once    sync.Once
+	stop    chan struct{}
+	done    chan struct{}
 }
 
 func newDatabasePlugin(db *gorm.DB) *databasePlugin {
@@ -401,7 +446,9 @@ func (p *databasePlugin) HandleUsage(ctx context.Context, record Record) {
 	shouldFlush := len(p.buffer) >= usageDBFlushMaxBatch
 	p.mu.Unlock()
 	if shouldFlush {
-		p.flush()
+		if err := p.flush(); err != nil {
+			log.Errorf("usage: batch insert failed: %v", err)
+		}
 	}
 }
 
@@ -413,31 +460,44 @@ func (p *databasePlugin) startFlusher() {
 		for {
 			select {
 			case <-ticker.C:
-				p.flush()
+				if err := p.flush(); err != nil {
+					log.Errorf("usage: periodic batch insert failed: %v", err)
+				}
 			case <-p.stop:
-				p.flush()
+				if err := p.flush(); err != nil {
+					log.Errorf("usage: final batch insert failed: %v", err)
+				}
 				return
 			}
 		}
 	}()
 }
 
-func (p *databasePlugin) flush() {
+func (p *databasePlugin) flush() error {
 	if p == nil || p.db == nil {
-		return
+		return nil
 	}
+	p.flushMu.Lock()
+	defer p.flushMu.Unlock()
 	p.mu.Lock()
 	if len(p.buffer) == 0 {
 		p.mu.Unlock()
-		return
+		return nil
 	}
 	batch := p.buffer
 	p.buffer = nil
 	p.mu.Unlock()
 
 	if _, _, err := repository.InsertUsageEvents(p.db, batch); err != nil {
-		log.Errorf("usage: batch insert failed (%d events): %v", len(batch), err)
+		p.mu.Lock()
+		retryBuffer := make([]entities.UsageEvent, 0, len(batch)+len(p.buffer))
+		retryBuffer = append(retryBuffer, batch...)
+		retryBuffer = append(retryBuffer, p.buffer...)
+		p.buffer = retryBuffer
+		p.mu.Unlock()
+		return fmt.Errorf("insert %d usage events: %w", len(batch), err)
 	}
+	return nil
 }
 
 // Close flushes remaining buffered events. Safe to call multiple times.

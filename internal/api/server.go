@@ -846,6 +846,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/usage/db", s.mgmt.GetDBUsageStatistics)
 		mgmt.GET("/usage/db/overview", s.mgmt.GetDBUsageOverview)
 		mgmt.GET("/usage/db/events", s.mgmt.GetDBUsageEvents)
+		mgmt.GET("/usage/db/events/history", s.mgmt.GetDBUsageEventHistory)
 		mgmt.GET("/usage/db/analysis", s.mgmt.GetDBUsageAnalysis)
 		mgmt.GET("/usage/db/filter-options", s.mgmt.GetDBUsageEventFilterOptions)
 		mgmt.GET("/pricing", s.mgmt.ListPricing)

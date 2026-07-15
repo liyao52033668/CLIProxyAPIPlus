@@ -15,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
+	memoryusage "github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
 	usageconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/entities"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/repository"
@@ -44,9 +45,50 @@ func openManagementUsageTestDatabase(t *testing.T) *gorm.DB {
 
 func newManagementUsageHandler(t *testing.T, db *gorm.DB) *Handler {
 	t.Helper()
+	stats := memoryusage.NewRequestStatistics()
+	if err := memoryusage.RestoreRequestStatistics(context.Background(), db, stats); err != nil {
+		t.Fatalf("restore request statistics: %v", err)
+	}
 	h := &Handler{cfg: &config.Config{}}
 	h.SetUsageService(keeperservice.NewUsageService(db))
+	h.SetUsageStatistics(stats)
 	return h
+}
+
+func TestGetUsageStatisticsIncludesMemoryEventOverview(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	stats := memoryusage.NewRequestStatistics()
+	stats.ReplaceEvents([]servicedto.UsageEventRecord{
+		{
+			Timestamp:   time.Now().UTC().Add(-time.Hour),
+			Source:      "source-a",
+			AuthIndex:   "auth-a",
+			TotalTokens: 25,
+		},
+	})
+	h := &Handler{cfg: &config.Config{}}
+	h.SetUsageStatistics(stats)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage?range=24h", nil)
+	h.GetUsageStatistics(ctx)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("usage status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	var response struct {
+		EventCache    servicedto.UsageEventCacheInfo `json:"event_cache"`
+		KeyStats      servicedto.UsageKeyStats       `json:"key_stats"`
+		ServiceHealth servicedto.UsageOverviewHealth `json:"service_health"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("unmarshal usage response: %v", err)
+	}
+	if response.EventCache.RetainedCount != 1 || response.KeyStats.ByAuthIndex["auth-a"].Tokens != 25 {
+		t.Fatalf("unexpected memory event overview: %+v", response)
+	}
+	if response.ServiceHealth.TotalSuccess != 1 || len(response.ServiceHealth.BlockDetails) != 7*96 {
+		t.Fatalf("unexpected memory service health: %+v", response.ServiceHealth)
+	}
 }
 
 type failingExportUsageProvider struct {
@@ -284,6 +326,10 @@ func TestDBUsageRangeKeepsOverviewEventsAndKeyStatsInSync(t *testing.T) {
 		t.Fatal("old auth-b event must not be included in 4h key stats")
 	}
 
+	if err := db.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&entities.UsageEvent{}).Error; err != nil {
+		t.Fatalf("delete database events after memory restore: %v", err)
+	}
+
 	eventsRecorder := httptest.NewRecorder()
 	eventsContext, _ := gin.CreateTestContext(eventsRecorder)
 	eventsContext.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage/db/events?range=4h&page=1&page_size=20", nil)
@@ -299,12 +345,60 @@ func TestDBUsageRangeKeepsOverviewEventsAndKeyStatsInSync(t *testing.T) {
 	if eventsPage.TotalCount != 2 || len(eventsPage.Events) != 2 || eventsPage.PageSize != 20 {
 		t.Fatalf("events page = count:%d rows:%d page_size:%d, want 2/2/20", eventsPage.TotalCount, len(eventsPage.Events), eventsPage.PageSize)
 	}
+
+	optionsRecorder := httptest.NewRecorder()
+	optionsContext, _ := gin.CreateTestContext(optionsRecorder)
+	optionsContext.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage/db/filter-options?range=4h", nil)
+	h.GetDBUsageEventFilterOptions(optionsContext)
+	if optionsRecorder.Code != http.StatusOK {
+		t.Fatalf("filter options status = %d, want %d; body=%s", optionsRecorder.Code, http.StatusOK, optionsRecorder.Body.String())
+	}
+	var options servicedto.UsageEventFilterOptions
+	if err := json.Unmarshal(optionsRecorder.Body.Bytes(), &options); err != nil {
+		t.Fatalf("unmarshal filter options: %v", err)
+	}
+	if len(options.Models) != 1 || options.Models[0] != "model-a" {
+		t.Fatalf("filter options models = %v, want [model-a]", options.Models)
+	}
+}
+
+func TestGetDBUsageEventHistoryReadsDatabase(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openManagementUsageTestDatabase(t)
+	if _, _, err := repository.InsertUsageEvents(db, []entities.UsageEvent{{
+		EventKey:    "history-event",
+		APIGroupKey: "provider-a",
+		Model:       "model-history",
+		Timestamp:   time.Now().UTC().Add(-time.Hour),
+		TotalTokens: 10,
+	}}); err != nil {
+		t.Fatalf("insert history event: %v", err)
+	}
+
+	h := newManagementUsageHandler(t, db)
+	h.usageStats.ReplaceEvents(nil)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage/db/events/history?range=24h&page=1&page_size=20", nil)
+	h.GetDBUsageEventHistory(ctx)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("history status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+
+	var page servicedto.UsageEventsPage
+	if err := json.Unmarshal(recorder.Body.Bytes(), &page); err != nil {
+		t.Fatalf("unmarshal history events: %v", err)
+	}
+	if page.TotalCount != 1 || len(page.Events) != 1 || page.Events[0].Model != "model-history" || page.Cache != nil {
+		t.Fatalf("unexpected database history page: %+v", page)
+	}
 }
 
 func TestImportUsageStatisticsImportsIntoDatabase(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db := openManagementUsageTestDatabase(t)
 	h := newManagementUsageHandler(t, db)
+	requestedAt := time.Now().UTC().Add(-time.Minute)
 
 	payload := usageImportPayload{
 		Version: 2,
@@ -317,7 +411,7 @@ func TestImportUsageStatisticsImportsIntoDatabase(t *testing.T) {
 							SuccessCount:  1,
 							TotalTokens:   18,
 							Details: []repodto.RequestDetail{{
-								Timestamp: time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC),
+								Timestamp: requestedAt,
 								LatencyMS: 321,
 								Source:    "source-a",
 								AuthIndex: "2",
@@ -370,6 +464,14 @@ func TestImportUsageStatisticsImportsIntoDatabase(t *testing.T) {
 	}
 	if snapshot.TotalRequests != 1 {
 		t.Fatalf("database total_requests = %d, want 1", snapshot.TotalRequests)
+	}
+	memorySnapshot := h.usageStats.Snapshot()
+	if memorySnapshot.TotalRequests != 1 || memorySnapshot.TotalTokens != 18 {
+		t.Fatalf("memory snapshot was not refreshed after import: %+v", memorySnapshot)
+	}
+	memoryEvents := h.usageStats.ListUsageEvents(servicedto.UsageFilter{Page: 1, PageSize: 20})
+	if memoryEvents.TotalCount != 1 || len(memoryEvents.Events) != 1 || !memoryEvents.Events[0].Timestamp.Equal(requestedAt) {
+		t.Fatalf("memory events were not refreshed after import: %+v", memoryEvents)
 	}
 }
 
