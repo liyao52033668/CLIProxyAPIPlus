@@ -226,6 +226,38 @@ func TestBuildUsageOverviewWithFilterComputesSummaryAndSeries(t *testing.T) {
 	}
 }
 
+func TestUpdateUsageOverviewHealthBlockDistributesHourlyAggregate(t *testing.T) {
+	bucketStart := time.Date(2026, 7, 14, 20, 0, 0, 0, time.UTC)
+	blocks := make([]dto.UsageOverviewHealthBlockRecord, 4)
+	for index := range blocks {
+		startTime := bucketStart.Add(time.Duration(index) * 15 * time.Minute)
+		blocks[index] = dto.UsageOverviewHealthBlockRecord{
+			StartTime: startTime,
+			EndTime:   startTime.Add(15 * time.Minute),
+			Rate:      -1,
+		}
+	}
+
+	updateUsageOverviewHealthBlockWithAggregate(blocks, entities.UsageHourlyAggregate{
+		BucketStart:  bucketStart,
+		RequestCount: 439,
+		SuccessCount: 249,
+		FailureCount: 190,
+	})
+
+	var totalSuccess, totalFailure int64
+	for _, block := range blocks {
+		totalSuccess += block.Success
+		totalFailure += block.Failure
+		if block.Success+block.Failure == 0 || block.Success+block.Failure == 439 {
+			t.Fatalf("expected distributed 15-minute health counts, got %+v", blocks)
+		}
+	}
+	if totalSuccess != 249 || totalFailure != 190 {
+		t.Fatalf("expected aggregate totals to be preserved, got success=%d failure=%d", totalSuccess, totalFailure)
+	}
+}
+
 func TestBuildUsageOverviewFromEventsBuildsSnapshotAndOverviewInOnePass(t *testing.T) {
 	events := []entities.UsageEvent{
 		{

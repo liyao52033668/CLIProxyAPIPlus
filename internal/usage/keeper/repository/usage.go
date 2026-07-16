@@ -1354,7 +1354,74 @@ func updateUsageOverviewHealthBlock(blocks []dto.UsageOverviewHealthBlockRecord,
 }
 
 func updateUsageOverviewHealthBlockWithAggregate(blocks []dto.UsageOverviewHealthBlockRecord, aggregate entities.UsageHourlyAggregate) {
-	updateUsageOverviewHealthBlockCounts(blocks, aggregate.BucketStart, aggregate.SuccessCount, aggregate.FailureCount)
+	bucketStart := aggregate.BucketStart.UTC()
+	bucketEnd := bucketStart.Add(time.Hour)
+	firstEventAt := aggregate.FirstEventAt.UTC()
+	if aggregate.RequestCount == 1 && !firstEventAt.Before(bucketStart) && firstEventAt.Before(bucketEnd) {
+		updateUsageOverviewHealthBlockCounts(blocks, firstEventAt, aggregate.SuccessCount, aggregate.FailureCount)
+		return
+	}
+	// Hourly archives cannot identify a quarter-hour, so spread their counts across the covered hour.
+	distributeUsageOverviewHealthBlockCounts(blocks, bucketStart, bucketEnd, aggregate.SuccessCount, aggregate.FailureCount)
+}
+
+func distributeUsageOverviewHealthBlockCounts(blocks []dto.UsageOverviewHealthBlockRecord, startTime, endTime time.Time, success, failure int64) {
+	if len(blocks) == 0 || !endTime.After(startTime) || success+failure <= 0 {
+		return
+	}
+	windowStart := blocks[0].StartTime
+	windowEnd := blocks[len(blocks)-1].EndTime
+	overlapStart := startTime
+	if overlapStart.Before(windowStart) {
+		overlapStart = windowStart
+	}
+	overlapEnd := endTime
+	if overlapEnd.After(windowEnd) {
+		overlapEnd = windowEnd
+	}
+	if !overlapEnd.After(overlapStart) {
+		return
+	}
+
+	span := blocks[0].EndTime.Sub(windowStart)
+	if span <= 0 {
+		return
+	}
+	firstIndex := int(overlapStart.Sub(windowStart) / span)
+	if firstIndex < 0 {
+		firstIndex = 0
+	}
+	duration := endTime.Sub(startTime)
+	for index := firstIndex; index < len(blocks); index++ {
+		block := &blocks[index]
+		if !block.StartTime.Before(overlapEnd) {
+			break
+		}
+		blockStart := block.StartTime
+		if blockStart.Before(overlapStart) {
+			blockStart = overlapStart
+		}
+		blockEnd := block.EndTime
+		if blockEnd.After(overlapEnd) {
+			blockEnd = overlapEnd
+		}
+		if !blockEnd.After(blockStart) {
+			continue
+		}
+		successShare := proportionalUsageCount(success, blockEnd.Sub(startTime), duration) - proportionalUsageCount(success, blockStart.Sub(startTime), duration)
+		failureShare := proportionalUsageCount(failure, blockEnd.Sub(startTime), duration) - proportionalUsageCount(failure, blockStart.Sub(startTime), duration)
+		addUsageOverviewHealthBlockCounts(block, successShare, failureShare)
+	}
+}
+
+func proportionalUsageCount(total int64, elapsed, duration time.Duration) int64 {
+	if total <= 0 || elapsed <= 0 || duration <= 0 {
+		return 0
+	}
+	if elapsed >= duration {
+		return total
+	}
+	return int64(float64(total) * float64(elapsed) / float64(duration))
 }
 
 func updateUsageOverviewHealthBlockCounts(blocks []dto.UsageOverviewHealthBlockRecord, eventTime time.Time, success, failure int64) {
@@ -1379,10 +1446,15 @@ func updateUsageOverviewHealthBlockCounts(blocks []dto.UsageOverviewHealthBlockR
 	if timestamp.Before(block.StartTime) || !timestamp.Before(block.EndTime) {
 		return
 	}
+	addUsageOverviewHealthBlockCounts(block, success, failure)
+}
+
+func addUsageOverviewHealthBlockCounts(block *dto.UsageOverviewHealthBlockRecord, success, failure int64) {
+	if block == nil || success+failure <= 0 {
+		return
+	}
 	block.Success += success
 	block.Failure += failure
 	total := block.Success + block.Failure
-	if total > 0 {
-		block.Rate = float64(block.Success) / float64(total)
-	}
+	block.Rate = float64(block.Success) / float64(total)
 }
