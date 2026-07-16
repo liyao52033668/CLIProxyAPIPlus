@@ -31,7 +31,7 @@ const (
 	usageEventHealthDefaultSpan  = 15 * time.Minute
 	usageEventHealthPresetWindow = 7 * 24 * time.Hour
 	recentUsageRateWindow        = 30 * time.Minute
-	recentUsageMinuteRetention   = 2 * time.Hour
+	recentUsageMinuteRetention   = usageEventHealthPresetWindow
 )
 
 var statisticsEnabled = true
@@ -684,25 +684,15 @@ func mergeUsageKeyCount(left, right servicedto.UsageKeyCount) servicedto.UsageKe
 }
 
 func buildUsageAggregateHealth(snapshot StatisticsSnapshot, now time.Time) servicedto.UsageOverviewHealth {
-	windowEnd := now.UTC()
+	windowEnd := now.UTC().Truncate(usageEventHealthDefaultSpan).Add(usageEventHealthDefaultSpan)
 	windowStart := windowEnd.Add(-usageEventHealthPresetWindow)
 	health := buildUsageEventHealthBlocks(windowStart, windowEnd, usageEventHealthDefaultSpan)
-	for _, apiStats := range snapshot.APIs {
-		if apiStats == nil {
+	for minuteKey, bucket := range snapshot.MinuteBuckets {
+		minute, err := time.Parse(time.RFC3339, minuteKey)
+		if err != nil {
 			continue
 		}
-		for _, modelStats := range apiStats.Models {
-			if modelStats == nil {
-				continue
-			}
-			for hourKey, bucket := range modelStats.Hourly {
-				hour, err := time.Parse(time.RFC3339, hourKey)
-				if err != nil || hour.Before(windowStart) || !hour.Before(windowEnd) {
-					continue
-				}
-				updateUsageBucketHealth(&health, hour, bucket)
-			}
-		}
+		updateUsageBucketHealth(&health, minute, bucket)
 	}
 	if total := health.TotalSuccess + health.TotalFailure; total > 0 {
 		health.SuccessRate = float64(health.TotalSuccess) / float64(total) * 100
@@ -731,18 +721,15 @@ func buildUsageEventHealthBlocks(windowStart, windowEnd time.Time, span time.Dur
 }
 
 func updateUsageBucketHealth(health *servicedto.UsageOverviewHealth, timestamp time.Time, bucket UsageBucketSnapshot) {
-	if health == nil {
-		return
-	}
-	health.TotalSuccess += bucket.SuccessCount
-	health.TotalFailure += bucket.FailureCount
-	if len(health.BlockDetails) == 0 {
+	if health == nil || len(health.BlockDetails) == 0 {
 		return
 	}
 	timestamp = timestamp.UTC()
 	if timestamp.Before(health.WindowStart) || !timestamp.Before(health.WindowEnd) {
 		return
 	}
+	health.TotalSuccess += bucket.SuccessCount
+	health.TotalFailure += bucket.FailureCount
 	span := health.BlockDetails[0].EndTime.Sub(health.BlockDetails[0].StartTime)
 	if span <= 0 {
 		return

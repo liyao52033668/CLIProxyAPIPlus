@@ -16,6 +16,12 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 ```
 - Common flags: `--config <path>`, `--tui`, `--standalone`, `--local-model`, `--no-browser`, `--oauth-callback-port <port>`
 
+## Development Server Process Policy (Mandatory)
+- 不该用 `nohup` 把开发服务藏在后台。
+- Do not use `nohup`, `disown`, or similar daemonization to hide development services.
+- Run development services in a visible foreground terminal so the user can stop them with `Ctrl+C`.
+- If background execution is explicitly authorized, report the PID, log path, and exact stop command immediately.
+
 ## Config
 - Default config: `config.yaml` (template: `config.example.yaml`)
 - `.env` is auto-loaded from the working directory

@@ -201,6 +201,72 @@ func TestRestoreRequestStatisticsLoadsDatabaseBaseline(t *testing.T) {
 	}
 }
 
+func TestRestoreRequestStatisticsBuildsQuarterHourHealthFromMinuteBuckets(t *testing.T) {
+	db, err := repository.OpenDatabase(usageconfig.Config{SQLitePath: filepath.Join(t.TempDir(), "usage.db")})
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("get sql database: %v", err)
+	}
+	t.Cleanup(func() {
+		if errClose := sqlDB.Close(); errClose != nil {
+			t.Fatalf("close database: %v", errClose)
+		}
+	})
+
+	bucketStart := time.Now().UTC().Add(-48 * time.Hour).Truncate(time.Hour)
+	successCounts := []int{62, 62, 62, 63}
+	failureCounts := []int{47, 48, 47, 48}
+	events := make([]entities.UsageEvent, 0, 439)
+	for quarter := range successCounts {
+		timestamp := bucketStart.Add(time.Duration(quarter)*15*time.Minute + time.Minute)
+		for i := 0; i < successCounts[quarter]; i++ {
+			events = append(events, entities.UsageEvent{
+				EventKey:  fmt.Sprintf("quarter-%d-success-%d", quarter, i),
+				Timestamp: timestamp,
+			})
+		}
+		for i := 0; i < failureCounts[quarter]; i++ {
+			events = append(events, entities.UsageEvent{
+				EventKey:  fmt.Sprintf("quarter-%d-failure-%d", quarter, i),
+				Timestamp: timestamp,
+				Failed:    true,
+			})
+		}
+	}
+	if inserted, _, errInsert := repository.InsertUsageEvents(db, events); errInsert != nil || inserted != len(events) {
+		t.Fatalf("insert usage events: inserted=%d err=%v", inserted, errInsert)
+	}
+
+	stats := NewRequestStatistics()
+	if err = RestoreRequestStatistics(context.Background(), db, stats); err != nil {
+		t.Fatalf("restore request statistics: %v", err)
+	}
+	_, health, _ := stats.UsageEventOverview(servicedto.UsageFilter{})
+	if health.TotalSuccess != 249 || health.TotalFailure != 190 {
+		t.Fatalf("unexpected restored health totals: %+v", health)
+	}
+	if health.WindowStart.Minute()%15 != 0 || health.WindowStart.Second() != 0 || health.WindowStart.Nanosecond() != 0 {
+		t.Fatalf("health window is not quarter-hour aligned: %s", health.WindowStart)
+	}
+	populated := 0
+	for _, block := range health.BlockDetails {
+		total := block.Success + block.Failure
+		if total == 0 {
+			continue
+		}
+		populated++
+		if total == int64(len(events)) {
+			t.Fatalf("hourly counts collapsed into one health block: %+v", block)
+		}
+	}
+	if populated != 4 {
+		t.Fatalf("expected four populated quarter-hour blocks, got %d", populated)
+	}
+}
+
 func TestRestoreRequestStatisticsBuildsRatesBeyondEventCacheLimit(t *testing.T) {
 	db, err := repository.OpenDatabase(usageconfig.Config{SQLitePath: filepath.Join(t.TempDir(), "usage.db")})
 	if err != nil {
