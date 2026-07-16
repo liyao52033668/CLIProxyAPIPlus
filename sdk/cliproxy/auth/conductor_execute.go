@@ -567,21 +567,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				if errCtx := execCtx.Err(); errCtx != nil {
 					return cliproxyexecutor.Response{}, errCtx
 				}
-				result.Error = &Error{}
-				if authErr, ok := errors.AsType[*Error](errExec); ok && authErr != nil {
-					result.Error.Code = authErr.Code
-					result.Error.Message = authErr.Message
-					result.Error.Retryable = authErr.Retryable
-					result.Error.HTTPStatus = authErr.HTTPStatus
-				} else {
-					result.Error.Message = errExec.Error()
-					if se, ok := errors.AsType[cliproxyexecutor.StatusError](errExec); ok && se != nil {
-						result.Error.HTTPStatus = se.StatusCode()
-					}
-				}
-				if result.Error.Message == "" {
-					result.Error.Message = "unknown error"
-				}
+				result.Error = newErrorFromExecution(errExec)
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}

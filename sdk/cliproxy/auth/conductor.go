@@ -119,6 +119,9 @@ func newErrorFromExecution(err error) *Error {
 	if e.Message == "" {
 		e.Message = "unknown error"
 	}
+	if isRequestScopedError(err) || isRequestInvalidError(err) {
+		e.Code = requestScopedErrorCode
+	}
 	return e
 }
 

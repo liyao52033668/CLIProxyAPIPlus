@@ -236,6 +236,10 @@ func (s *GitTokenStore) EnsureRepository() error {
 			}
 		}
 	}
+	if err := disableGitCommitSigning(repoDir); err != nil {
+		s.dirLock.Unlock()
+		return err
+	}
 	if err := os.MkdirAll(s.baseDir, 0o700); err != nil {
 		s.dirLock.Unlock()
 		return fmt.Errorf("git token store: create auth dir: %w", err)
@@ -252,6 +256,22 @@ func (s *GitTokenStore) EnsureRepository() error {
 		if err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func disableGitCommitSigning(repoDir string) error {
+	repo, errOpen := git.PlainOpen(repoDir)
+	if errOpen != nil {
+		return fmt.Errorf("git token store: open repository config: %w", errOpen)
+	}
+	cfg, errConfig := repo.Config()
+	if errConfig != nil {
+		return fmt.Errorf("git token store: get repository config: %w", errConfig)
+	}
+	cfg.Commit.GpgSign = config.OptBoolFalse
+	if errSetConfig := repo.SetConfig(cfg); errSetConfig != nil {
+		return fmt.Errorf("git token store: disable commit signing: %w", errSetConfig)
 	}
 	return nil
 }

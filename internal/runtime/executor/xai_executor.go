@@ -486,6 +486,13 @@ func xaiBuildSSEFrame(eventName string, data []byte) []byte {
 }
 
 func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, endpointPath string) (resp cliproxyexecutor.Response, err error) {
+	model := strings.TrimSpace(gjson.GetBytes(req.Payload, "model").String())
+	if model == "" {
+		model = strings.TrimSpace(req.Model)
+	}
+	reporter := helps.NewExecutorUsageReporter(ctx, e, model, auth)
+	defer reporter.TrackFailure(ctx, &err)
+
 	token, _ := xaiCreds(auth)
 	baseURL := xaiOfficialOrExplicitBaseURL(auth)
 	logXAIResolvedBaseURL(ctx, baseURL)
@@ -517,6 +524,7 @@ func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth
 		return resp, errDo
 	}
 
+	reporter.EnsurePublished(ctx)
 	return cliproxyexecutor.Response{Payload: data, Headers: respHeaders}, nil
 }
 
@@ -2069,12 +2077,54 @@ func restoreXAINamespaceToolCallAtPath(data []byte, path string, refs map[string
 	return updated
 }
 
-// xaiFunctionParametersNeedSimplification reports whether a function tool is
-// the Codex Desktop automation tool known to hang xAI Responses streaming.
+// xaiFunctionParametersNeedSimplification reports whether a function schema
+// contains a root union shape that xAI cannot safely process.
 func xaiFunctionParametersNeedSimplification(tool gjson.Result, namespaceName string) bool {
-	return strings.EqualFold(strings.TrimSpace(tool.Get("type").String()), xaiFunctionToolType) &&
-		strings.EqualFold(strings.TrimSpace(namespaceName), xaiCodexAppNamespaceName) &&
-		strings.EqualFold(strings.TrimSpace(tool.Get("name").String()), xaiAutomationUpdateToolName)
+	toolType := strings.TrimSpace(tool.Get("type").String())
+	isFunction := strings.EqualFold(toolType, xaiFunctionToolType)
+	isNormalizedCustom := strings.EqualFold(toolType, xaiCustomToolType)
+	if !isFunction && !isNormalizedCustom {
+		return false
+	}
+
+	toolName := strings.TrimSpace(tool.Get("name").String())
+	qualifiedAutomationName := xaiCodexAppNamespaceName + "__" + xaiAutomationUpdateToolName
+	if isFunction && (strings.EqualFold(toolName, qualifiedAutomationName) ||
+		(strings.EqualFold(strings.TrimSpace(namespaceName), xaiCodexAppNamespaceName) &&
+			strings.EqualFold(toolName, xaiAutomationUpdateToolName))) {
+		return true
+	}
+
+	parameters := tool.Get("parameters")
+	for _, unionName := range []string{"anyOf", "oneOf"} {
+		union := parameters.Get(unionName)
+		if !union.IsArray() {
+			continue
+		}
+		for _, branch := range union.Array() {
+			branchType := branch.Get("type")
+			if branchType.Type == gjson.String {
+				if !strings.EqualFold(strings.TrimSpace(branchType.String()), "object") {
+					return true
+				}
+				continue
+			}
+			if !branchType.IsArray() {
+				return true
+			}
+			allowedTypes := branchType.Array()
+			if len(allowedTypes) == 0 {
+				return true
+			}
+			for _, allowedType := range allowedTypes {
+				if allowedType.Type != gjson.String ||
+					!strings.EqualFold(strings.TrimSpace(allowedType.String()), "object") {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func xaiStatusErr(code int, body []byte) statusErr {

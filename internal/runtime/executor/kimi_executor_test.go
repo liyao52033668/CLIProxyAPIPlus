@@ -1,10 +1,31 @@
 package executor
 
 import (
+	"net/http"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
 	"github.com/tidwall/gjson"
 )
+
+func TestApplyKimiHeadersUsesBuildVersion(t *testing.T) {
+	req, errRequest := http.NewRequest(http.MethodPost, "https://api.kimi.com/coding/v1/chat/completions", nil)
+	if errRequest != nil {
+		t.Fatalf("new request: %v", errRequest)
+	}
+
+	applyKimiHeaders(req, "test-token", false)
+
+	if got, want := req.Header.Get("User-Agent"), "CLIProxyAPI/"+buildinfo.Version; got != want {
+		t.Fatalf("User-Agent = %q, want %q", got, want)
+	}
+	if got := req.Header.Get("X-Msh-Platform"); got != "CLIProxyAPI" {
+		t.Fatalf("X-Msh-Platform = %q, want CLIProxyAPI", got)
+	}
+	if got := req.Header.Get("X-Msh-Version"); got != buildinfo.Version {
+		t.Fatalf("X-Msh-Version = %q, want %q", got, buildinfo.Version)
+	}
+}
 
 func TestNormalizeKimiToolMessageLinks_UsesCallIDFallback(t *testing.T) {
 	body := []byte(`{

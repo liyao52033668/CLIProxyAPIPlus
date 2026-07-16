@@ -1,6 +1,8 @@
 // Package auth provides authentication management, scheduling, and session handling for CLIProxyAPI.
 package auth
 
+const requestScopedErrorCode = "request_scoped"
+
 // Error describes an authentication related failure in a provider agnostic format.
 type Error struct {
 	// Code is a short machine readable identifier.
@@ -30,4 +32,10 @@ func (e *Error) StatusCode() int {
 		return 0
 	}
 	return e.HTTPStatus
+}
+
+// IsRequestScoped reports whether the failure is tied to the current request
+// rather than the selected credential.
+func (e *Error) IsRequestScoped() bool {
+	return e != nil && e.Code == requestScopedErrorCode
 }

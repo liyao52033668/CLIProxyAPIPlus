@@ -9,6 +9,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
 func (m *Manager) normalizeProviders(providers []string) []string {
@@ -226,7 +227,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		} else {
 			if result.Model != "" {
-				if !isRequestScopedNotFoundResultError(result.Error) {
+				if !isRequestScopedResultError(result.Error) {
 					disableCooling := quotaCooldownDisabledForAuth(auth)
 					state := ensureModelState(auth, result.Model)
 					state.Unavailable = true
@@ -547,6 +548,14 @@ func statusCodeFromError(err error) int {
 	return 0
 }
 
+func isRequestScopedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var requestErr cliproxyexecutor.RequestScopedError
+	return errors.As(err, &requestErr) && requestErr != nil && requestErr.IsRequestScoped()
+}
+
 func isUnauthorizedError(err error) bool {
 	if err == nil {
 		return false
@@ -670,6 +679,10 @@ func isRequestScopedNotFoundResultError(err *Error) bool {
 	return isRequestScopedNotFoundMessage(err.Message)
 }
 
+func isRequestScopedResultError(err *Error) bool {
+	return err != nil && (err.IsRequestScoped() || isRequestScopedNotFoundResultError(err))
+}
+
 // isRequestInvalidError returns true if the error represents a client request
 // error that should not be retried. Specifically, it treats 400 responses with
 // "invalid_request_error", request-scoped 404 item misses caused by `store=false`,
@@ -680,6 +693,9 @@ func isRequestInvalidError(err error) bool {
 	if err == nil {
 		return false
 	}
+	if isRequestScopedError(err) {
+		return true
+	}
 	if isModelSupportError(err) {
 		return false
 	}
@@ -688,6 +704,7 @@ func isRequestInvalidError(err error) bool {
 	case http.StatusBadRequest:
 		msg := err.Error()
 		return strings.Contains(msg, "invalid_request_error") ||
+			strings.Contains(msg, "bad_request_error") ||
 			strings.Contains(msg, "INVALID_ARGUMENT") ||
 			strings.Contains(msg, "FAILED_PRECONDITION")
 	case http.StatusNotFound:
@@ -707,7 +724,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	if auth == nil {
 		return
 	}
-	if isRequestScopedNotFoundResultError(resultErr) {
+	if isRequestScopedResultError(resultErr) {
 		return
 	}
 	disableCooling := quotaCooldownDisabledForAuth(auth)

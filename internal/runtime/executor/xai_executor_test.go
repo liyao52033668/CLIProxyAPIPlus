@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -21,6 +22,7 @@ import (
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -32,6 +34,41 @@ func testContextWithAPIKey(apiKey string) context.Context {
 	ginCtx, _ := gin.CreateTestContext(rec)
 	ginCtx.Set("userApiKey", apiKey)
 	return context.WithValue(context.Background(), "gin", ginCtx)
+}
+
+type captureXAIUsagePlugin struct {
+	model   string
+	records chan usage.Record
+}
+
+func (p *captureXAIUsagePlugin) HandleUsage(_ context.Context, record usage.Record) {
+	if p == nil || record.Provider != "xai" || record.Model != p.model {
+		return
+	}
+	select {
+	case p.records <- record:
+	default:
+	}
+}
+
+func waitForXAIUsageRecord(t *testing.T, records <-chan usage.Record) usage.Record {
+	t.Helper()
+	select {
+	case record := <-records:
+		return record
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for xAI usage record")
+		return usage.Record{}
+	}
+}
+
+func assertNoAdditionalXAIUsageRecord(t *testing.T, records <-chan usage.Record) {
+	t.Helper()
+	select {
+	case record := <-records:
+		t.Fatalf("received additional xAI usage record: %+v", record)
+	case <-time.After(100 * time.Millisecond):
+	}
 }
 
 func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
@@ -2229,9 +2266,11 @@ func TestXAIExecutorExecuteImagesUsesImagesEndpoint(t *testing.T) {
 		},
 		Metadata: map[string]any{"access_token": "xai-token"},
 	}
+	usageRecords := make(chan usage.Record, 2)
+	usage.RegisterPlugin(&captureXAIUsagePlugin{model: "grok-imagine-image", records: usageRecords})
 
 	resp, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
-		Model:   "grok-imagine-image",
+		Model:   "fallback-image-model",
 		Payload: []byte(`{"model":"grok-imagine-image","prompt":"draw"}`),
 	}, cliproxyexecutor.Options{
 		SourceFormat: sdktranslator.FromString("openai-image"),
@@ -2258,6 +2297,11 @@ func TestXAIExecutorExecuteImagesUsesImagesEndpoint(t *testing.T) {
 	if gjson.GetBytes(resp.Payload, "data.0.b64_json").String() != "AA==" {
 		t.Fatalf("payload = %s", string(resp.Payload))
 	}
+	usageRecord := waitForXAIUsageRecord(t, usageRecords)
+	if usageRecord.Failed {
+		t.Fatalf("usage record failed = true, want false: %+v", usageRecord)
+	}
+	assertNoAdditionalXAIUsageRecord(t, usageRecords)
 }
 
 func TestXAIExecutorExecuteImagesUsesEditsEndpoint(t *testing.T) {
@@ -2292,6 +2336,84 @@ func TestXAIExecutorExecuteImagesUsesEditsEndpoint(t *testing.T) {
 	if gotPath != "/images/edits" {
 		t.Fatalf("path = %q, want /images/edits", gotPath)
 	}
+}
+
+func TestXAIExecutorExecuteImagesUsageFallsBackToRequestModel(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"created":123,"data":[{"b64_json":"AA=="}]}`))
+	}))
+	defer server.Close()
+
+	model := "grok-imagine-image-fallback"
+	usageRecords := make(chan usage.Record, 2)
+	usage.RegisterPlugin(&captureXAIUsagePlugin{model: model, records: usageRecords})
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata:   map[string]any{"access_token": "xai-token"},
+	}
+
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   model,
+		Payload: []byte(`{"prompt":"draw"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-image"),
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestPathMetadataKey: "/v1/images/generations",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	usageRecord := waitForXAIUsageRecord(t, usageRecords)
+	if usageRecord.Failed {
+		t.Fatalf("usage record failed = true, want false: %+v", usageRecord)
+	}
+	assertNoAdditionalXAIUsageRecord(t, usageRecords)
+}
+
+func TestXAIExecutorExecuteImagesPublishesFailureUsage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"message":"rate limited"}}`))
+	}))
+	defer server.Close()
+
+	model := "grok-imagine-image-failure"
+	usageRecords := make(chan usage.Record, 2)
+	usage.RegisterPlugin(&captureXAIUsagePlugin{model: model, records: usageRecords})
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata:   map[string]any{"access_token": "xai-token"},
+	}
+
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   model,
+		Payload: []byte(`{"model":"grok-imagine-image-failure","prompt":"draw"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-image"),
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestPathMetadataKey: "/v1/images/generations",
+		},
+	})
+	if err == nil {
+		t.Fatal("Execute() error = nil, want upstream failure")
+	}
+
+	usageRecord := waitForXAIUsageRecord(t, usageRecords)
+	if !usageRecord.Failed {
+		t.Fatalf("usage record failed = false, want true: %+v", usageRecord)
+	}
+	if usageRecord.Fail.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("usage failure status = %d, want %d", usageRecord.Fail.StatusCode, http.StatusTooManyRequests)
+	}
+	assertNoAdditionalXAIUsageRecord(t, usageRecords)
 }
 
 func TestXAIExecutorExecuteVideosCreate(t *testing.T) {
@@ -2678,19 +2800,87 @@ func TestNormalizeXAITools_PreservesUnrelatedSchemas(t *testing.T) {
 }
 
 func TestXAIFunctionParametersNeedSimplification(t *testing.T) {
-	auto := gjson.Parse(`{"type":"function","name":"automation_update","parameters":{"type":"object"}}`)
-	if !xaiFunctionParametersNeedSimplification(auto, "codex_app") {
-		t.Fatal("codex_app automation_update should need simplification")
+	tests := []struct {
+		name      string
+		tool      string
+		namespace string
+		want      bool
+	}{
+		{
+			name:      "codex app automation update",
+			tool:      `{"type":"function","name":"automation_update","parameters":{"type":"object"}}`,
+			namespace: "codex_app",
+			want:      true,
+		},
+		{
+			name: "flattened codex app automation update",
+			tool: `{"type":"function","name":"codex_app__automation_update","parameters":{"type":"object"}}`,
+			want: true,
+		},
+		{
+			name:      "automation update in another namespace",
+			tool:      `{"type":"function","name":"automation_update","parameters":{"type":"object"}}`,
+			namespace: "calendar",
+		},
+		{
+			name: "root oneOf contains string",
+			tool: `{"type":"function","name":"lookup","parameters":{"oneOf":[{"type":"object"},{"type":"string"}]}}`,
+			want: true,
+		},
+		{
+			name: "root anyOf contains untyped branch",
+			tool: `{"type":"function","name":"lookup","parameters":{"anyOf":[{"type":"object"},{"properties":{"value":{"type":"string"}}}]}}`,
+			want: true,
+		},
+		{
+			name: "root union type array contains non-object",
+			tool: `{"type":"function","name":"lookup","parameters":{"oneOf":[{"type":["object","null"]}]}}`,
+			want: true,
+		},
+		{
+			name: "root union contains objects only",
+			tool: `{"type":"function","name":"lookup","parameters":{"oneOf":[{"type":"object"},{"type":["object"]}]}}`,
+		},
+		{
+			name: "nested union is preserved",
+			tool: `{"type":"function","name":"lookup","parameters":{"type":"object","properties":{"value":{"oneOf":[{"type":"string"},{"type":"number"}]}}}}`,
+		},
+		{
+			name: "custom tool root union",
+			tool: `{"type":"custom","name":"lookup","parameters":{"anyOf":[{"type":"object"},{"type":"string"}]}}`,
+			want: true,
+		},
+		{
+			name: "non-function tool",
+			tool: `{"type":"web_search","parameters":{"oneOf":[{"type":"string"}]}}`,
+		},
 	}
-	if xaiFunctionParametersNeedSimplification(auto, "calendar") {
-		t.Fatal("calendar automation_update should not need simplification")
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := xaiFunctionParametersNeedSimplification(gjson.Parse(tt.tool), tt.namespace); got != tt.want {
+				t.Fatalf("xaiFunctionParametersNeedSimplification() = %v, want %v", got, tt.want)
+			}
+		})
 	}
-	if xaiFunctionParametersNeedSimplification(auto, "") {
-		t.Fatal("top-level automation_update should not need simplification")
+}
+
+func TestNormalizeXAIToolsSimplifiesUnsafeRootUnion(t *testing.T) {
+	body := []byte(`{"tools":[{"type":"custom","name":"lookup","strict":true,"parameters":{"oneOf":[{"type":"object"},{"type":"string"}]}}]}`)
+	out := normalizeXAITools(body)
+
+	tool := gjson.GetBytes(out, "tools.0")
+	if got := tool.Get("type").String(); got != "function" {
+		t.Fatalf("tool type = %q, want function; body=%s", got, string(out))
 	}
-	custom := gjson.Parse(`{"type":"custom","name":"automation_update","parameters":{"type":"object"}}`)
-	if xaiFunctionParametersNeedSimplification(custom, "codex_app") {
-		t.Fatal("custom automation_update should not need simplification before custom conversion")
+	if got := tool.Get("parameters.type").String(); got != "object" {
+		t.Fatalf("parameters.type = %q, want object; body=%s", got, string(out))
+	}
+	if tool.Get("parameters.oneOf").Exists() {
+		t.Fatalf("unsafe root union was preserved: %s", string(out))
+	}
+	if tool.Get("strict").Type != gjson.False {
+		t.Fatalf("strict was not disabled: %s", string(out))
 	}
 }
 

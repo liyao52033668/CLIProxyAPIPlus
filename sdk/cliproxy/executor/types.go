@@ -105,6 +105,14 @@ type StatusError interface {
 	StatusCode() int
 }
 
+// RequestScopedError identifies a failure tied to the current request rather
+// than the selected credential. Auth managers should not retry these errors
+// across credentials or change credential availability because of them.
+type RequestScopedError interface {
+	error
+	IsRequestScoped() bool
+}
+
 // ResponseFormatOrSource returns the response target format for an execution.
 func ResponseFormatOrSource(opts Options) sdktranslator.Format {
 	if opts.ResponseFormat != "" {

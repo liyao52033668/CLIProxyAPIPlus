@@ -45,6 +45,55 @@ func TestEnsureRepositoryUsesRemoteDefaultBranchWhenBranchNotConfigured(t *testi
 	assertRemoteHeadBranch(t, remoteDir, "trunk")
 }
 
+func TestEnsureRepositoryDisablesCommitSigning(t *testing.T) {
+	root := t.TempDir()
+	remoteDir := setupGitRemoteRepository(t, root, "trunk",
+		testBranchSpec{name: "trunk", contents: "remote default branch\n"},
+	)
+
+	workspaceDir := filepath.Join(root, "workspace")
+	store := NewGitTokenStore(remoteDir, "", "", "")
+	store.SetBaseDir(filepath.Join(workspaceDir, "auths"))
+
+	if err := store.EnsureRepository(); err != nil {
+		t.Fatalf("EnsureRepository: %v", err)
+	}
+	assertGitCommitSigningDisabled(t, workspaceDir)
+
+	repo, errOpen := git.PlainOpen(workspaceDir)
+	if errOpen != nil {
+		t.Fatalf("open repository: %v", errOpen)
+	}
+	cfg, errConfig := repo.Config()
+	if errConfig != nil {
+		t.Fatalf("get repository config: %v", errConfig)
+	}
+	cfg.Commit.GpgSign = gitconfig.OptBoolTrue
+	if errSetConfig := repo.SetConfig(cfg); errSetConfig != nil {
+		t.Fatalf("enable repository commit signing: %v", errSetConfig)
+	}
+
+	if err := store.EnsureRepository(); err != nil {
+		t.Fatalf("EnsureRepository second call: %v", err)
+	}
+	assertGitCommitSigningDisabled(t, workspaceDir)
+}
+
+func assertGitCommitSigningDisabled(t *testing.T, repoDir string) {
+	t.Helper()
+	repo, errOpen := git.PlainOpen(repoDir)
+	if errOpen != nil {
+		t.Fatalf("open repository: %v", errOpen)
+	}
+	cfg, errConfig := repo.Config()
+	if errConfig != nil {
+		t.Fatalf("get repository config: %v", errConfig)
+	}
+	if cfg.Commit.GpgSign != gitconfig.OptBoolFalse {
+		t.Fatalf("commit.gpgSign = %v, want false", cfg.Commit.GpgSign)
+	}
+}
+
 func TestEnsureRepositoryUsesConfiguredBranchWhenExplicitlySet(t *testing.T) {
 	root := t.TempDir()
 	remoteDir := setupGitRemoteRepository(t, root, "trunk",

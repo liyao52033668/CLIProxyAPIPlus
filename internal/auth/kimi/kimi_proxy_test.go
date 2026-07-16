@@ -4,8 +4,21 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
+
+func TestDeviceFlowClientCommonHeadersUseBuildVersion(t *testing.T) {
+	client := &DeviceFlowClient{deviceID: "device-1"}
+	headers := client.commonHeaders()
+
+	if got := headers["X-Msh-Platform"]; got != "CLIProxyAPI" {
+		t.Fatalf("X-Msh-Platform = %q, want CLIProxyAPI", got)
+	}
+	if got := headers["X-Msh-Version"]; got != buildinfo.Version {
+		t.Fatalf("X-Msh-Version = %q, want %q", got, buildinfo.Version)
+	}
+}
 
 func TestNewDeviceFlowClientWithDeviceIDAndProxyURL_OverrideDirectDisablesProxy(t *testing.T) {
 	cfg := &config.Config{SDKConfig: config.SDKConfig{ProxyURL: "http://proxy.example.com:8080"}}
