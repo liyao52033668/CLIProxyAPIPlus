@@ -26,17 +26,19 @@ const (
 	ActionDisable Action = "disable"
 	ActionEnable  Action = "enable"
 	ActionReauth  Action = "reauth"
+	ActionFailed  Action = "failed"
 )
 
 type InspectionSettings struct {
-	TargetType                   string             `json:"targetType"`
-	Workers                      int                `json:"workers"`
-	TimeoutSeconds               int                `json:"timeoutSeconds"`
-	Retries                      int                `json:"retries"`
-	SampleSize                   int                `json:"sampleSize"`
-	FiveHourUsedPercentThreshold int                `json:"fiveHourUsedPercentThreshold"`
-	WeeklyUsedPercentThreshold   int                `json:"weeklyUsedPercentThreshold"`
-	Schedule                     InspectionSchedule `json:"schedule"`
+	TargetType                   string                    `json:"targetType"`
+	Workers                      int                       `json:"workers"`
+	TimeoutSeconds               int                       `json:"timeoutSeconds"`
+	Retries                      int                       `json:"retries"`
+	SampleSize                   int                       `json:"sampleSize"`
+	FiveHourUsedPercentThreshold int                       `json:"fiveHourUsedPercentThreshold"`
+	WeeklyUsedPercentThreshold   int                       `json:"weeklyUsedPercentThreshold"`
+	StatusCodeActions            map[string]map[int]Action `json:"statusCodeActions,omitempty"`
+	Schedule                     InspectionSchedule        `json:"schedule"`
 }
 
 type inspectionSettingsAlias InspectionSettings
@@ -75,6 +77,7 @@ type InspectionSummary struct {
 	DisableCount     int `json:"disableCount"`
 	EnableCount      int `json:"enableCount"`
 	ReauthCount      int `json:"reauthCount"`
+	FailedCount      int `json:"failedCount"`
 	DisabledCount    int `json:"disabledCount"`
 	EnabledCount     int `json:"enabledCount"`
 	AutoDeletedCount int `json:"autoDeletedCount"`

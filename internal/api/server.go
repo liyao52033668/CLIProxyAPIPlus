@@ -2034,6 +2034,15 @@ func (a *codexInspectionServiceAdapter) UpdateSettings(ctx context.Context, sett
 	if err != nil {
 		return codexinspection.LatestSnapshot{}, err
 	}
+	settings.TargetType = strings.ToLower(strings.TrimSpace(settings.TargetType))
+	if settings.TargetType == "" {
+		settings.TargetType = codexinspection.DefaultSettings().TargetType
+	}
+	if !strings.EqualFold(snapshot.Settings.TargetType, settings.TargetType) {
+		snapshot.Results = []codexinspection.InspectionResultItem{}
+		snapshot.ActionLogs = []codexinspection.InspectionActionLog{}
+		snapshot.Run.Summary = codexinspection.InspectionSummary{}
+	}
 	snapshot.Settings = settings
 	if settings.Schedule.Enabled && settings.Schedule.IntervalMinutes > 0 {
 		snapshot.Run.NextTriggerAtMS = time.Now().UnixMilli() + int64(time.Duration(settings.Schedule.IntervalMinutes)*time.Minute/time.Millisecond)
@@ -2061,15 +2070,16 @@ func newCodexInspectionGatewayAdapter(manager *auth.Manager) *codexInspectionGat
 	return &codexInspectionGatewayAdapter{manager: manager}
 }
 
-func (g *codexInspectionGatewayAdapter) ListCodexAuthFiles(context.Context) ([]codexinspection.AuthFileRecord, error) {
+func (g *codexInspectionGatewayAdapter) ListAuthFiles(_ context.Context, provider string) ([]codexinspection.AuthFileRecord, error) {
 	if g == nil || g.manager == nil {
 		return []codexinspection.AuthFileRecord{}, nil
 	}
 
+	provider = strings.TrimSpace(provider)
 	auths := g.manager.List()
 	records := make([]codexinspection.AuthFileRecord, 0, len(auths))
 	for _, item := range auths {
-		if item == nil || !strings.EqualFold(strings.TrimSpace(item.Provider), "codex") {
+		if item == nil || !strings.EqualFold(strings.TrimSpace(item.Provider), provider) {
 			continue
 		}
 		name := strings.TrimSpace(item.FileName)
@@ -2088,6 +2098,7 @@ func (g *codexInspectionGatewayAdapter) ListCodexAuthFiles(context.Context) ([]c
 			account = accountType
 		}
 		records = append(records, codexinspection.AuthFileRecord{
+			AuthID:      item.ID,
 			FileName:    name,
 			DisplayName: displayName,
 			Provider:    item.Provider,
@@ -2107,7 +2118,7 @@ func (g *codexInspectionGatewayAdapter) SetDisabled(ctx context.Context, name st
 	target.Disabled = disabled
 	if disabled {
 		target.Status = auth.StatusDisabled
-		target.StatusMessage = "disabled via codex inspection"
+		target.StatusMessage = "disabled via provider inspection"
 	} else {
 		target.Status = auth.StatusActive
 		target.StatusMessage = ""

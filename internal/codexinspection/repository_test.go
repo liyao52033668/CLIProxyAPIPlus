@@ -23,6 +23,9 @@ func TestFileSnapshotRepositorySaveAndLoadRoundTrip(t *testing.T) {
 			SampleSize:                   5,
 			FiveHourUsedPercentThreshold: 90,
 			WeeklyUsedPercentThreshold:   95,
+			StatusCodeActions: map[string]map[int]Action{
+				"claude": {401: ActionReauth, 429: ActionDisable},
+			},
 			Schedule: InspectionSchedule{
 				Enabled:         true,
 				Mode:            "interval",
@@ -94,6 +97,9 @@ func TestFileSnapshotRepositorySaveAndLoadRoundTrip(t *testing.T) {
 	}
 	if loaded.Settings.WeeklyUsedPercentThreshold != 95 {
 		t.Fatalf("Load().Settings.WeeklyUsedPercentThreshold = %d, want 95", loaded.Settings.WeeklyUsedPercentThreshold)
+	}
+	if loaded.Settings.StatusCodeActions["claude"][401] != ActionReauth || loaded.Settings.StatusCodeActions["claude"][429] != ActionDisable {
+		t.Fatalf("Load().Settings.StatusCodeActions = %+v, want claude mappings", loaded.Settings.StatusCodeActions)
 	}
 	if loaded.Settings.Schedule.Mode != "interval" {
 		t.Fatalf("Load().Settings.Schedule.Mode = %q, want %q", loaded.Settings.Schedule.Mode, "interval")

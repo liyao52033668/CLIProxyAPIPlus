@@ -3,6 +3,7 @@ package codexinspection
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -10,6 +11,7 @@ var ErrRunAlreadyActive = errors.New("codex inspection run is already active")
 var ErrDeleteConfirmationRequired = errors.New("codex inspection delete confirmation is required")
 
 type AuthFileRecord struct {
+	AuthID      string
 	FileName    string
 	DisplayName string
 	Provider    string
@@ -24,18 +26,19 @@ type StatusPatch struct {
 }
 
 type AuthFileGateway interface {
-	ListCodexAuthFiles(ctx context.Context) ([]AuthFileRecord, error)
+	ListAuthFiles(ctx context.Context, provider string) ([]AuthFileRecord, error)
 	SetDisabled(ctx context.Context, name string, disabled bool) error
 	DeleteFiles(ctx context.Context, names []string) error
 }
 
 type Prober interface {
-	ProbeCodexAccounts(ctx context.Context, files []AuthFileRecord, settings InspectionSettings) ([]InspectionResultItem, error)
+	ProbeAccounts(ctx context.Context, files []AuthFileRecord, settings InspectionSettings) ([]InspectionResultItem, error)
 }
 
 type RunRequest struct {
 	TriggerType TriggerType
-	FileNames   []string
+	Provider    string   `json:"provider,omitempty"`
+	FileNames   []string `json:"fileNames,omitempty"`
 }
 
 type ExecuteActionsRequest struct {
@@ -94,6 +97,19 @@ func (s *Service) Run(ctx context.Context, req RunRequest) (snapshot LatestSnaps
 		return LatestSnapshot{}, err
 	}
 
+	provider := normalizeProvider(req.Provider)
+	if provider == "" {
+		provider = normalizeProvider(snapshot.Settings.TargetType)
+	}
+	if provider == "" {
+		provider = DefaultSettings().TargetType
+	}
+	if !strings.EqualFold(snapshot.Settings.TargetType, provider) {
+		snapshot.Results = []InspectionResultItem{}
+		snapshot.ActionLogs = []InspectionActionLog{}
+	}
+	snapshot.Settings.TargetType = provider
+
 	startedAtMS := nowMillis()
 	nextTriggerAtMS := int64(0)
 	if snapshot.Settings.Schedule.Enabled && snapshot.Settings.Schedule.IntervalMinutes > 0 {
@@ -109,7 +125,7 @@ func (s *Service) Run(ctx context.Context, req RunRequest) (snapshot LatestSnaps
 		return LatestSnapshot{}, err
 	}
 
-	files, err := s.gateway.ListCodexAuthFiles(ctx)
+	files, err := s.gateway.ListAuthFiles(ctx, provider)
 	if err != nil {
 		return LatestSnapshot{}, err
 	}
@@ -118,7 +134,7 @@ func (s *Service) Run(ctx context.Context, req RunRequest) (snapshot LatestSnaps
 		snapshot.Results = filterResultsByCurrentFiles(snapshot.Results, files)
 	}
 
-	results, probeErr := s.prober.ProbeCodexAccounts(ctx, probeFiles, snapshot.Settings)
+	results, probeErr := s.prober.ProbeAccounts(ctx, probeFiles, snapshot.Settings)
 	if probeErr != nil {
 		if len(req.FileNames) == 0 {
 			snapshot.Results = results
@@ -199,7 +215,7 @@ func (s *Service) ExecuteActions(ctx context.Context, req ExecuteActionsRequest)
 			callErr = s.gateway.SetDisabled(ctx, fileName, false)
 		case ActionDelete:
 			callErr = s.gateway.DeleteFiles(ctx, []string{fileName})
-		case ActionKeep, ActionReauth:
+		case ActionKeep, ActionReauth, ActionFailed:
 		}
 
 		if callErr != nil {
@@ -234,7 +250,11 @@ func (s *Service) reconcileSnapshot(ctx context.Context, snapshot LatestSnapshot
 		return snapshot, nil
 	}
 
-	files, err := s.gateway.ListCodexAuthFiles(ctx)
+	provider := normalizeProvider(snapshot.Settings.TargetType)
+	if provider == "" {
+		provider = DefaultSettings().TargetType
+	}
+	files, err := s.gateway.ListAuthFiles(ctx, provider)
 	if err != nil {
 		return LatestSnapshot{}, err
 	}
@@ -458,6 +478,10 @@ func (s *Service) lock() {
 
 func (s *Service) unlock() {
 	<-s.mu
+}
+
+func normalizeProvider(provider string) string {
+	return strings.ToLower(strings.TrimSpace(provider))
 }
 
 func nowMillis() int64 {

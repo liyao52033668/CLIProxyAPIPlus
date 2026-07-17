@@ -256,6 +256,110 @@ func TestQoderEnsureSession_ReusesCachedIDESessionAcrossAuthClones(t *testing.T)
 	}
 }
 
+func TestQoderExecutorProbeAuthCallsUpstream(t *testing.T) {
+	const authID = "qoder-probe-auth"
+	ClearQoderRuntimeState(authID)
+	t.Cleanup(func() { ClearQoderRuntimeState(authID) })
+
+	requestCount := 0
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", qoderRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requestCount++
+		if req.Method != http.MethodGet || req.URL.String() != qoder.ChatBase+qoder.ModelListPath+"?Encode=1" {
+			t.Fatalf("probe request = %s %s, want Qoder model list", req.Method, req.URL.String())
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"chat":[]}`)),
+			Request:    req,
+		}, nil
+	}))
+	auth := &cliproxyauth.Auth{
+		ID: authID,
+		Metadata: map[string]any{
+			"access_token":         "oauth-token",
+			"security_oauth_token": "session-token",
+			"refresh_token":        "refresh-token",
+			"user_type":            "personal_standard",
+			"machine_id":           "machine-id",
+			"machine_token":        "machine-token",
+			"machine_type":         "machine-type",
+			"uid":                  "user-1",
+		},
+	}
+
+	if err := NewQoderExecutor(&config.Config{}).ProbeAuth(ctx, auth); err != nil {
+		t.Fatalf("ProbeAuth() error = %v", err)
+	}
+	if requestCount != 1 {
+		t.Fatalf("probe request count = %d, want 1", requestCount)
+	}
+}
+
+func TestQoderEnsureSessionPersistsPATMachineIdentity(t *testing.T) {
+	const authID = "qoder-pat-machine-migration"
+	ClearQoderRuntimeState(authID)
+	t.Cleanup(func() { ClearQoderRuntimeState(authID) })
+
+	legacyMachineID := qoder.GenerateMachineID("cliproxy", "00:00:00:00:00:00", "server", "x86_64")
+	manager := cliproxyauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &cliproxyauth.Auth{
+		ID:       authID,
+		Provider: "qoder",
+		Metadata: map[string]any{
+			"personal_access_token": "pat-token",
+			"access_token":          "pat-token",
+			"machine_id":            legacyMachineID,
+			"security_oauth_token":  "stale-session",
+			"refresh_token":         "stale-refresh",
+			"user_type":             "personal_standard",
+			"machine_token":         "stale-machine-token",
+			"machine_type":          "stale-machine-type",
+		},
+	}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	requestCount := 0
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", qoderRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requestCount++
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"id":"u1","securityOauthToken":"session-token","refreshToken":"refresh-token","userType":"personal_standard"}`)),
+			Request:    req,
+		}, nil
+	}))
+	executor := NewQoderExecutor(&config.Config{})
+	executor.SetAuthMetadataUpdater(func(ctx context.Context, id string, updates map[string]any, deletes []string) error {
+		_, err := manager.MergeMetadata(ctx, id, updates, deletes)
+		return err
+	})
+
+	firstAuth, _ := manager.GetByID(authID)
+	if _, err := executor.ensureSession(ctx, firstAuth); err != nil {
+		t.Fatalf("first ensureSession() error = %v", err)
+	}
+	persisted, _ := manager.GetByID(authID)
+	wantMachineID := qoder.GeneratePATMachineID("pat-token")
+	if got, _ := persisted.Metadata["machine_id"].(string); got != wantMachineID {
+		t.Fatalf("persisted machine_id = %q, want %q", got, wantMachineID)
+	}
+	for _, key := range []string{"security_oauth_token", "refresh_token", "user_type", "machine_token", "machine_type"} {
+		if _, ok := persisted.Metadata[key]; ok {
+			t.Fatalf("persisted metadata still contains %q", key)
+		}
+	}
+
+	secondAuth, _ := manager.GetByID(authID)
+	if _, err := executor.ensureSession(ctx, secondAuth); err != nil {
+		t.Fatalf("second ensureSession() error = %v", err)
+	}
+	if requestCount != 1 {
+		t.Fatalf("job token exchange count = %d, want 1", requestCount)
+	}
+}
+
 func TestFetchQoderModelCatalog_UsesStaleCatalogAfterRefreshFailure(t *testing.T) {
 	const authID = "qoder-stale-model-catalog"
 	ClearQoderRuntimeState(authID)
@@ -416,6 +520,141 @@ func TestFetchQoderModels_UsesCosySignature(t *testing.T) {
 	}, &config.Config{})
 	if len(models) != 1 {
 		t.Fatalf("len(models) = %d, want %d", len(models), 1)
+	}
+}
+
+func TestQoderNormalizePATMachineIdentity_IsolatesLegacyMachineID(t *testing.T) {
+	legacyMachineID := qoder.GenerateMachineID("cliproxy", "00:00:00:00:00:00", "server", "x86_64")
+	stale := qoderCredentials{
+		personalAccessToken: "qdr_pat_token_a",
+		sessionAccessToken:  "stale-session-token",
+		refreshToken:        "stale-refresh-token",
+		userType:            "personal_standard",
+		machineID:           legacyMachineID,
+		machineToken:        "stale-machine-token",
+		machineType:         "stale-machine-type",
+	}
+
+	normalized, changed := qoderNormalizePATMachineIdentity(stale)
+	if !changed {
+		t.Fatal("expected legacy PAT machine identity to be migrated")
+	}
+	if normalized.machineID != qoder.GeneratePATMachineID(stale.personalAccessToken) {
+		t.Fatalf("machineID = %q, want PAT-isolated machine id", normalized.machineID)
+	}
+	if normalized.machineID == legacyMachineID {
+		t.Fatal("expected PAT machine id to differ from legacy shared machine id")
+	}
+	if normalized.sessionAccessToken != "" || normalized.refreshToken != "" || normalized.machineToken != "" || normalized.machineType != "" {
+		t.Fatal("expected session fields to be cleared during machine identity migration")
+	}
+
+	other, otherChanged := qoderNormalizePATMachineIdentity(qoderCredentials{
+		personalAccessToken: "qdr_pat_token_b",
+		machineID:           legacyMachineID,
+	})
+	if !otherChanged {
+		t.Fatal("expected second legacy PAT machine identity to be migrated")
+	}
+	if normalized.machineID == other.machineID {
+		t.Fatal("expected different PATs to use different machine ids")
+	}
+}
+
+func TestFetchQoderModels_RefreshesExpiredPATSession(t *testing.T) {
+	const personalAccessToken = "qdr_pat_token"
+	auth := &cliproxyauth.Auth{
+		ID:       "qoder-pat-expired-session.json",
+		Provider: "qoder",
+		Metadata: map[string]any{
+			"auth_method":           "pat",
+			"access_token":          personalAccessToken,
+			"personal_access_token": personalAccessToken,
+			"security_oauth_token":  "stale-session-token",
+			"refresh_token":         "stale-refresh-token",
+			"user_type":             "personal_standard",
+			"uid":                   "u1",
+			"machine_id":            qoder.GeneratePATMachineID(personalAccessToken),
+			"machine_token":         "stale-machine-token",
+			"machine_type":          "stale-machine-type",
+		},
+	}
+	ClearQoderRuntimeState(auth.ID)
+	t.Cleanup(func() { ClearQoderRuntimeState(auth.ID) })
+
+	requestCount := 0
+	refreshedMachineToken := ""
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", qoderRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requestCount++
+		switch requestCount {
+		case 1:
+			if req.Method != http.MethodGet {
+				t.Fatalf("first request method = %q, want %q", req.Method, http.MethodGet)
+			}
+			if got := req.Header.Get("Cosy-Machinetoken"); got != "stale-machine-token" {
+				t.Fatalf("first Cosy-Machinetoken = %q, want stale session token", got)
+			}
+			return &http.Response{
+				StatusCode: http.StatusForbidden,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"code":"105","message":"Login expired"}`)),
+				Request:    req,
+			}, nil
+		case 2:
+			if req.Method != http.MethodPost {
+				t.Fatalf("exchange method = %q, want %q", req.Method, http.MethodPost)
+			}
+			encodedBody, err := io.ReadAll(req.Body)
+			if err != nil {
+				t.Fatalf("ReadAll(exchange body) error = %v", err)
+			}
+			outer := gjson.ParseBytes(decodeQoderBodyForTest(t, string(encodedBody)))
+			inner := gjson.Parse(outer.Get("payload").String())
+			if got := inner.Get("personalToken").String(); got != personalAccessToken {
+				t.Fatalf("personalToken = %q, want PAT source token", got)
+			}
+			if got := inner.Get("securityOauthToken").String(); got != "" {
+				t.Fatalf("securityOauthToken = %q, want empty for PAT refresh", got)
+			}
+			if got := req.Header.Get("Cosy-Machineid"); got != qoder.GeneratePATMachineID(personalAccessToken) {
+				t.Fatalf("Cosy-Machineid = %q, want PAT-isolated machine id", got)
+			}
+			refreshedMachineToken = req.Header.Get("Cosy-Machinetoken")
+			if refreshedMachineToken == "" || refreshedMachineToken == "stale-machine-token" {
+				t.Fatalf("Cosy-Machinetoken = %q, want refreshed machine token", refreshedMachineToken)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"id":"u1","name":"Qoder User","securityOauthToken":"fresh-session-token","refreshToken":"fresh-refresh-token","userType":"personal_standard"}`)),
+				Request:    req,
+			}, nil
+		case 3:
+			if req.Method != http.MethodGet {
+				t.Fatalf("retry request method = %q, want %q", req.Method, http.MethodGet)
+			}
+			if got := req.Header.Get("Cosy-Machinetoken"); got != refreshedMachineToken {
+				t.Fatalf("retry Cosy-Machinetoken = %q, want %q", got, refreshedMachineToken)
+			}
+			encodedResponse := customBase64Encode([]byte(`{"chat":[{"key":"qwen3.7-max","display_name":"Qwen3.7-Max"}]}`))
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(encodedResponse)),
+				Request:    req,
+			}, nil
+		default:
+			t.Fatalf("unexpected request %d: %s %s", requestCount, req.Method, req.URL.String())
+			return nil, nil
+		}
+	}))
+
+	models := FetchQoderModels(ctx, auth, &config.Config{})
+	if len(models) != 1 {
+		t.Fatalf("len(models) = %d, want %d", len(models), 1)
+	}
+	if requestCount != 3 {
+		t.Fatalf("requestCount = %d, want %d", requestCount, 3)
 	}
 }
 

@@ -69,6 +69,34 @@ func TestService_RunStoresLatestSnapshot(t *testing.T) {
 	}
 }
 
+func TestService_RunSelectsProviderAndClearsPreviousResults(t *testing.T) {
+	repo := &fakeRepository{snapshot: LatestSnapshot{
+		Settings: DefaultSettings(),
+		Results:  []InspectionResultItem{{FileName: "codex.json", Provider: "codex"}},
+	}}
+	gateway := &fakeGateway{files: []AuthFileRecord{{FileName: "claude.json", Provider: "claude"}}}
+	prober := &fakeProber{results: []InspectionResultItem{{FileName: "claude.json", Provider: "claude", Action: ActionKeep}}}
+	service := NewService(repo, gateway, prober)
+
+	snapshot, err := service.Run(context.Background(), RunRequest{
+		TriggerType: TriggerTypeManual,
+		Provider:    " Claude ",
+		FileNames:   []string{"claude.json"},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if gateway.receivedProvider != "claude" {
+		t.Fatalf("gateway provider = %q, want claude", gateway.receivedProvider)
+	}
+	if snapshot.Settings.TargetType != "claude" {
+		t.Fatalf("TargetType = %q, want claude", snapshot.Settings.TargetType)
+	}
+	if len(snapshot.Results) != 1 || snapshot.Results[0].Provider != "claude" {
+		t.Fatalf("Results = %+v, want only claude result", snapshot.Results)
+	}
+}
+
 func TestService_RunRejectsConcurrentRun(t *testing.T) {
 	service := NewService(&fakeRepository{snapshot: DefaultSnapshot()}, &fakeGateway{}, &fakeProber{})
 	service.active = true
@@ -469,6 +497,12 @@ func TestService_RunScheduledAutoAppliesSuggestedActions(t *testing.T) {
 				Action:       ActionKeep,
 				ActionReason: "no issue detected",
 			},
+			{
+				FileName:     "failed.json",
+				DisplayName:  "Failed",
+				Action:       ActionFailed,
+				ActionReason: "refresh failed",
+			},
 		},
 	}
 	service := NewService(repo, gateway, prober)
@@ -489,8 +523,8 @@ func TestService_RunScheduledAutoAppliesSuggestedActions(t *testing.T) {
 	if gateway.setDisabledCalls[1] != (setDisabledCall{name: "recovered.json", disabled: false}) {
 		t.Fatalf("setDisabledCalls[1] = %+v, want recovered enable", gateway.setDisabledCalls[1])
 	}
-	if len(snapshot.Results) != 3 {
-		t.Fatalf("len(snapshot.Results) = %d, want 3", len(snapshot.Results))
+	if len(snapshot.Results) != 4 {
+		t.Fatalf("len(snapshot.Results) = %d, want 4", len(snapshot.Results))
 	}
 	if snapshot.Results[0].FileName != "five-hour-low.json" || !snapshot.Results[0].Disabled || snapshot.Results[0].Action != ActionKeep {
 		t.Fatalf("snapshot.Results[0] = %+v, want disabled keep", snapshot.Results[0])
@@ -500,6 +534,12 @@ func TestService_RunScheduledAutoAppliesSuggestedActions(t *testing.T) {
 	}
 	if snapshot.Results[2].FileName != "healthy.json" {
 		t.Fatalf("snapshot.Results[2].FileName = %q, want healthy.json", snapshot.Results[2].FileName)
+	}
+	if snapshot.Results[3].FileName != "failed.json" || snapshot.Results[3].Action != ActionFailed {
+		t.Fatalf("snapshot.Results[3] = %+v, want failed result", snapshot.Results[3])
+	}
+	if snapshot.Run.Summary.FailedCount != 1 {
+		t.Fatalf("FailedCount = %d, want 1", snapshot.Run.Summary.FailedCount)
 	}
 	if snapshot.Run.Summary.AutoDeletedCount != 2 {
 		t.Fatalf("AutoDeletedCount = %d, want 2", snapshot.Run.Summary.AutoDeletedCount)
@@ -815,7 +855,7 @@ func TestService_RunScheduledKeepsUnauthorizedResultWhenAutoDeleteFails(t *testi
 }
 
 func TestDefaultProberMapsAuthFilesToKeepResults(t *testing.T) {
-	results, err := (DefaultProber{}).ProbeCodexAccounts(context.Background(), []AuthFileRecord{
+	results, err := (DefaultProber{}).ProbeAccounts(context.Background(), []AuthFileRecord{
 		{
 			FileName:    "codex-alpha.json",
 			DisplayName: "Codex Alpha",
@@ -826,7 +866,7 @@ func TestDefaultProberMapsAuthFilesToKeepResults(t *testing.T) {
 		},
 	}, DefaultSettings())
 	if err != nil {
-		t.Fatalf("ProbeCodexAccounts() error = %v", err)
+		t.Fatalf("ProbeAccounts() error = %v", err)
 	}
 	if len(results) != 1 {
 		t.Fatalf("len(results) = %d, want 1", len(results))
@@ -869,14 +909,15 @@ func TestBuildSummaryCountsResults(t *testing.T) {
 		{Action: ActionDisable, Disabled: true},
 		{Action: ActionEnable, Disabled: false},
 		{Action: ActionReauth, Disabled: false},
+		{Action: ActionFailed, Disabled: false},
 		{Action: ActionKeep, Disabled: false},
-	}, 6)
+	}, 7)
 
-	if summary.TotalFiles != 6 {
-		t.Fatalf("summary.TotalFiles = %d, want 6", summary.TotalFiles)
+	if summary.TotalFiles != 7 {
+		t.Fatalf("summary.TotalFiles = %d, want 7", summary.TotalFiles)
 	}
-	if summary.SampledCount != 6 {
-		t.Fatalf("summary.SampledCount = %d, want 6", summary.SampledCount)
+	if summary.SampledCount != 7 {
+		t.Fatalf("summary.SampledCount = %d, want 7", summary.SampledCount)
 	}
 	if summary.KeepCount != 2 {
 		t.Fatalf("summary.KeepCount = %d, want 2", summary.KeepCount)
@@ -893,11 +934,14 @@ func TestBuildSummaryCountsResults(t *testing.T) {
 	if summary.ReauthCount != 1 {
 		t.Fatalf("summary.ReauthCount = %d, want 1", summary.ReauthCount)
 	}
+	if summary.FailedCount != 1 {
+		t.Fatalf("summary.FailedCount = %d, want 1", summary.FailedCount)
+	}
 	if summary.DisabledCount != 2 {
 		t.Fatalf("summary.DisabledCount = %d, want 2", summary.DisabledCount)
 	}
-	if summary.EnabledCount != 4 {
-		t.Fatalf("summary.EnabledCount = %d, want 4", summary.EnabledCount)
+	if summary.EnabledCount != 5 {
+		t.Fatalf("summary.EnabledCount = %d, want 5", summary.EnabledCount)
 	}
 }
 
@@ -940,13 +984,15 @@ type setDisabledCall struct {
 type fakeGateway struct {
 	files             []AuthFileRecord
 	listErr           error
+	receivedProvider  string
 	setDisabledCalls  []setDisabledCall
 	setDisabledErrors map[string]error
 	deleteCalls       [][]string
 	deleteErrors      map[string]error
 }
 
-func (g *fakeGateway) ListCodexAuthFiles(context.Context) ([]AuthFileRecord, error) {
+func (g *fakeGateway) ListAuthFiles(_ context.Context, provider string) ([]AuthFileRecord, error) {
+	g.receivedProvider = provider
 	return g.files, g.listErr
 }
 
@@ -980,7 +1026,7 @@ type fakeProber struct {
 	received      InspectionSettings
 }
 
-func (p *fakeProber) ProbeCodexAccounts(_ context.Context, files []AuthFileRecord, settings InspectionSettings) ([]InspectionResultItem, error) {
+func (p *fakeProber) ProbeAccounts(_ context.Context, files []AuthFileRecord, settings InspectionSettings) ([]InspectionResultItem, error) {
 	p.receivedFiles = append([]AuthFileRecord(nil), files...)
 	p.received = settings
 	return p.results, p.probeErr

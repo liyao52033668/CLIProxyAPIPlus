@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	qoderauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/qoder"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
@@ -83,8 +84,8 @@ func TestRequestQoderPATToken_SavesAuthRecord(t *testing.T) {
 	if got := saved.Metadata["uid"]; got != "user-42" {
 		t.Fatalf("uid = %#v, want user-42", got)
 	}
-	if got := saved.Metadata["machine_id"]; got == "" {
-		t.Fatal("expected machine_id to be set")
+	if got := saved.Metadata["machine_id"]; got != qoderauth.GeneratePATMachineID("qdr_pat_token") {
+		t.Fatalf("machine_id = %#v, want PAT-isolated machine id", got)
 	}
 }
 

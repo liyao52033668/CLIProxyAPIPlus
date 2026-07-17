@@ -51,6 +51,13 @@ func (e *refreshHTTPError) Retryable() bool {
 	return e != nil && e.retryable
 }
 
+func (e *refreshHTTPError) StatusCode() int {
+	if e == nil {
+		return 0
+	}
+	return e.status
+}
+
 func resetClaudeRefreshState() {
 	claudeRefreshMu.Lock()
 	defer claudeRefreshMu.Unlock()

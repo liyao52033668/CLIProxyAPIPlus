@@ -3,10 +3,12 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/cpa/dto/apicall"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/quota"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 )
@@ -33,7 +36,7 @@ func newCodexInspectionProber(cfg *config.Config, manager *coreauth.Manager) cod
 	return &codexInspectionProber{cfg: cfg, manager: manager}
 }
 
-func (p *codexInspectionProber) ProbeCodexAccounts(ctx context.Context, files []codexinspection.AuthFileRecord, settings codexinspection.InspectionSettings) ([]codexinspection.InspectionResultItem, error) {
+func (p *codexInspectionProber) ProbeAccounts(ctx context.Context, files []codexinspection.AuthFileRecord, settings codexinspection.InspectionSettings) ([]codexinspection.InspectionResultItem, error) {
 	if len(files) == 0 {
 		return []codexinspection.InspectionResultItem{}, nil
 	}
@@ -84,6 +87,10 @@ func (p *codexInspectionProber) inspectFile(ctx context.Context, file codexinspe
 		Executable:   true,
 	}
 
+	if !strings.EqualFold(strings.TrimSpace(file.Provider), "codex") {
+		return p.inspectProviderAuth(ctx, file, settings, result)
+	}
+
 	if strings.TrimSpace(file.AuthIndex) == "" {
 		result.Error = "auth index missing"
 		result.ActionReason = "auth index missing"
@@ -112,9 +119,16 @@ func (p *codexInspectionProber) inspectFile(ctx context.Context, file codexinspe
 		return result
 	}
 
+	if response.StatusCode >= http.StatusBadRequest {
+		result.Error = codexInspectionErrorText(response)
+		if action, ok := inspectionActionForStatusCode(settings, file.Provider, response.StatusCode); ok {
+			result.Action = action
+			result.ActionReason = fmt.Sprintf("%d response", response.StatusCode)
+			return result
+		}
+	}
 	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusPaymentRequired {
 		result.Action = codexinspection.ActionDelete
-		result.Error = codexInspectionErrorText(response)
 		if response.StatusCode == http.StatusUnauthorized {
 			result.ActionReason = "401 response"
 		} else {
@@ -146,6 +160,161 @@ func (p *codexInspectionProber) inspectFile(ctx context.Context, file codexinspe
 	}
 	result.Action, result.ActionReason = codexInspectionActionForUsage(file.Disabled, fiveHourUsedPercent, weeklyUsedPercent, settings)
 	return result
+}
+
+func (p *codexInspectionProber) inspectProviderAuth(ctx context.Context, file codexinspection.AuthFileRecord, settings codexinspection.InspectionSettings, result codexinspection.InspectionResultItem) codexinspection.InspectionResultItem {
+	auth, err := p.authForFile(file)
+	if err != nil {
+		result.Error = err.Error()
+		result.Action = codexinspection.ActionFailed
+		result.ActionReason = err.Error()
+		return result
+	}
+
+	executor, ok := p.manager.Executor(auth.Provider)
+	if !ok {
+		result.Error = fmt.Sprintf("provider executor not found: %s", auth.Provider)
+		result.Action = codexinspection.ActionFailed
+		result.ActionReason = result.Error
+		return result
+	}
+
+	timeout := defaultCodexInspectionTimeout
+	if settings.TimeoutSeconds > 0 {
+		timeout = time.Duration(settings.TimeoutSeconds) * time.Second
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	if prober, okProbe := executor.(coreauth.AuthProber); okProbe {
+		if probeErr := prober.ProbeAuth(probeCtx, auth.Clone()); probeErr != nil {
+			return inspectionProviderErrorResult(result, settings, file.Provider, probeErr)
+		}
+		return result
+	}
+
+	refreshed, refreshErr := executor.Refresh(probeCtx, auth.Clone())
+	if refreshErr != nil {
+		return inspectionProviderErrorResult(result, settings, file.Provider, refreshErr)
+	}
+	updates, deletes := inspectionMetadataChanges(auth, refreshed)
+	if len(updates) == 0 && len(deletes) == 0 {
+		result.Error = "provider inspection unsupported: refresh did not validate credentials"
+		result.Action = codexinspection.ActionFailed
+		result.ActionReason = result.Error
+		return result
+	}
+	if _, err = p.manager.MergeMetadata(ctx, auth.ID, updates, deletes); err != nil {
+		result.Error = fmt.Sprintf("persist refreshed auth: %v", err)
+		result.Action = codexinspection.ActionFailed
+		result.ActionReason = result.Error
+	}
+	return result
+}
+
+func inspectionProviderErrorResult(result codexinspection.InspectionResultItem, settings codexinspection.InspectionSettings, provider string, probeErr error) codexinspection.InspectionResultItem {
+	result.StatusCode = inspectionStatusCode(probeErr)
+	result.Error = probeErr.Error()
+	result.ActionReason = result.Error
+	if action, ok := inspectionActionForStatusCode(settings, provider, result.StatusCode); ok {
+		result.Action = action
+		result.ActionReason = fmt.Sprintf("%d response", result.StatusCode)
+		return result
+	}
+	if inspectionNeedsReauth(probeErr, result.StatusCode) {
+		result.Action = codexinspection.ActionReauth
+		if result.StatusCode > 0 {
+			result.ActionReason = fmt.Sprintf("%d response", result.StatusCode)
+		}
+	} else {
+		result.Action = codexinspection.ActionFailed
+	}
+	return result
+}
+
+func inspectionMetadataChanges(original, refreshed *coreauth.Auth) (map[string]any, []string) {
+	if refreshed == nil {
+		return nil, nil
+	}
+	updates := make(map[string]any)
+	for key, value := range refreshed.Metadata {
+		originalValue, ok := original.Metadata[key]
+		if !ok || !reflect.DeepEqual(originalValue, value) {
+			updates[key] = value
+		}
+	}
+	deletes := make([]string, 0)
+	for key := range original.Metadata {
+		if _, ok := refreshed.Metadata[key]; !ok {
+			deletes = append(deletes, key)
+		}
+	}
+	return updates, deletes
+}
+
+func (p *codexInspectionProber) authForFile(file codexinspection.AuthFileRecord) (*coreauth.Auth, error) {
+	if p == nil || p.manager == nil {
+		return nil, fmt.Errorf("auth manager unavailable")
+	}
+	if authID := strings.TrimSpace(file.AuthID); authID != "" {
+		if auth, ok := p.manager.GetByID(authID); ok {
+			return auth, nil
+		}
+	}
+	return p.authByIndex(file.AuthIndex)
+}
+
+func inspectionStatusCode(err error) int {
+	if err == nil {
+		return 0
+	}
+	var statusErr cliproxyexecutor.StatusError
+	if errors.As(err, &statusErr) {
+		return statusErr.StatusCode()
+	}
+	return 0
+}
+
+func inspectionActionForStatusCode(settings codexinspection.InspectionSettings, provider string, statusCode int) (codexinspection.Action, bool) {
+	if statusCode < http.StatusBadRequest || statusCode > 599 {
+		return "", false
+	}
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	actions := settings.StatusCodeActions[provider]
+	if actions == nil {
+		for configuredProvider, configuredActions := range settings.StatusCodeActions {
+			if strings.EqualFold(strings.TrimSpace(configuredProvider), provider) {
+				actions = configuredActions
+				break
+			}
+		}
+	}
+	action, ok := actions[statusCode]
+	if !ok {
+		return "", false
+	}
+	switch action {
+	case codexinspection.ActionKeep, codexinspection.ActionDelete, codexinspection.ActionDisable, codexinspection.ActionEnable, codexinspection.ActionReauth, codexinspection.ActionFailed:
+		return action, true
+	default:
+		return "", false
+	}
+}
+
+func inspectionNeedsReauth(err error, statusCode int) bool {
+	if statusCode == http.StatusUnauthorized || statusCode == http.StatusPaymentRequired || statusCode == http.StatusForbidden {
+		return true
+	}
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{"unauthorized", "invalid_grant", "invalid token", "token expired", "refresh token missing"} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *codexInspectionProber) callCodexUsage(ctx context.Context, file codexinspection.AuthFileRecord, settings codexinspection.InspectionSettings, template quota.APICallConfig) (*apicall.Response, error) {

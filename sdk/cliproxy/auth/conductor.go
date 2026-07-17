@@ -34,6 +34,11 @@ type ProviderExecutor interface {
 	HttpRequest(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error)
 }
 
+// AuthProber performs a read-only upstream credential check.
+type AuthProber interface {
+	ProbeAuth(ctx context.Context, auth *Auth) error
+}
+
 // ExecutionSessionCloser allows executors to release per-session runtime resources.
 type ExecutionSessionCloser interface {
 	CloseExecutionSession(sessionID string)

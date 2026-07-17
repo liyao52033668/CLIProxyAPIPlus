@@ -111,6 +111,39 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	return auth.Clone(), nil
 }
 
+// MergeMetadata atomically updates selected metadata fields without replacing concurrent auth state.
+func (m *Manager) MergeMetadata(ctx context.Context, id string, updates map[string]any, deletes []string) (*Auth, error) {
+	if m == nil || strings.TrimSpace(id) == "" {
+		return nil, nil
+	}
+	m.mu.Lock()
+	existing := m.auths[id]
+	if existing == nil {
+		m.mu.Unlock()
+		return nil, nil
+	}
+	updated := existing.Clone()
+	if updated.Metadata == nil {
+		updated.Metadata = make(map[string]any)
+	}
+	maps.Copy(updated.Metadata, updates)
+	for _, key := range deletes {
+		delete(updated.Metadata, key)
+	}
+	updated.EnsureIndex()
+	updatedClone := updated.Clone()
+	m.auths[id] = updatedClone
+	m.mu.Unlock()
+	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	if m.scheduler != nil {
+		m.scheduler.upsertAuth(updatedClone)
+	}
+	m.queueRefreshReschedule(id)
+	_ = m.persist(ctx, updated)
+	m.hook.OnAuthUpdated(ctx, updated.Clone())
+	return updated.Clone(), nil
+}
+
 // Remove deletes an auth entry and clears its scheduler and auto-refresh state.
 func (m *Manager) Remove(ctx context.Context, id string) {
 	if m == nil {

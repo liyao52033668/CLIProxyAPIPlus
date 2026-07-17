@@ -64,7 +64,7 @@ func (h *Handler) RequestQoderPATToken(c *gin.Context) {
 		tokenHash := sha256.Sum256([]byte(pat))
 		uid = hex.EncodeToString(tokenHash[:16])
 	}
-	machineID := qoderauth.GenerateMachineID("cliproxy", "00:00:00:00:00:00", "server", "x86_64")
+	machineID := qoderauth.GeneratePATMachineID(pat)
 	metadata := map[string]any{
 		"type":                  "qoder",
 		"auth_method":           "pat",

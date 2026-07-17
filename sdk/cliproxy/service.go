@@ -516,7 +516,12 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 	case "bt":
 		s.coreManager.RegisterExecutor(executor.NewBTExecutor(s.cfg))
 	case "qoder":
-		s.coreManager.RegisterExecutor(executor.NewQoderExecutor(s.cfg))
+		qoderExecutor := executor.NewQoderExecutor(s.cfg)
+		qoderExecutor.SetAuthMetadataUpdater(func(ctx context.Context, id string, updates map[string]any, deletes []string) error {
+			_, err := s.coreManager.MergeMetadata(ctx, id, updates, deletes)
+			return err
+		})
+		s.coreManager.RegisterExecutor(qoderExecutor)
 	default:
 		providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
 		if providerKey == "" {

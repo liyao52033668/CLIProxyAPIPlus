@@ -237,6 +237,11 @@ func fetchQoderModelArray(ctx context.Context, auth *cliproxyauth.Auth, cfg *con
 			return gjson.Result{}, false
 		}
 		if resp.StatusCode != http.StatusOK {
+			if attempt == 0 && qoderIsLoginExpiredResponse(resp.StatusCode, body) {
+				log.Info("qoder: model list session expired, refreshing session")
+				qoderClearSession(auth)
+				continue
+			}
 			bodyText := strings.TrimSpace(string(body))
 			if len(bodyText) > 1024 {
 				bodyText = bodyText[:1024] + "..."
@@ -245,10 +250,6 @@ func fetchQoderModelArray(ctx context.Context, auth *cliproxyauth.Auth, cfg *con
 				log.Warnf("qoder: model list API returned status %d", resp.StatusCode)
 			} else {
 				log.Warnf("qoder: model list API returned status %d: %s", resp.StatusCode, bodyText)
-			}
-			if attempt == 0 && qoderIsLoginExpiredResponse(resp.StatusCode, body) {
-				qoderClearSession(auth)
-				continue
 			}
 			if attempt == 0 && qoderIsRetryableHTTPStatus(resp.StatusCode) {
 				log.Warnf("qoder: retrying model list after status %d", resp.StatusCode)

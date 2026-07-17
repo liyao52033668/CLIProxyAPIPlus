@@ -103,7 +103,7 @@ func TestRunCodexInspectionForwardsFileNames(t *testing.T) {
 	h := &Handler{}
 	h.SetCodexInspectionService(stub)
 
-	body := bytes.NewBufferString(`{"fileNames":["alpha.json","beta.json"]}`)
+	body := bytes.NewBufferString(`{"provider":"claude","fileNames":["alpha.json","beta.json"]}`)
 	rec := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(rec)
 	ctx.Request = httptest.NewRequest(http.MethodPost, "/v0/management/codex-inspection/run", body)
@@ -116,6 +116,9 @@ func TestRunCodexInspectionForwardsFileNames(t *testing.T) {
 	}
 	if stub.lastRunRequest.TriggerType != codexsvc.TriggerTypeManual {
 		t.Fatalf("TriggerType = %q, want %q", stub.lastRunRequest.TriggerType, codexsvc.TriggerTypeManual)
+	}
+	if stub.lastRunRequest.Provider != "claude" {
+		t.Fatalf("Provider = %q, want claude", stub.lastRunRequest.Provider)
 	}
 	want := []string{"alpha.json", "beta.json"}
 	if len(stub.lastRunRequest.FileNames) != len(want) {

@@ -17,6 +17,13 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
 
+func TestRefreshHTTPErrorStatusCode(t *testing.T) {
+	err := &refreshHTTPError{status: http.StatusUnauthorized}
+	if got := err.StatusCode(); got != http.StatusUnauthorized {
+		t.Fatalf("StatusCode() = %d, want %d", got, http.StatusUnauthorized)
+	}
+}
+
 func TestRefreshTokensWithRetry_429BlocksImmediateReplay(t *testing.T) {
 	resetClaudeRefreshState()
 	defer resetClaudeRefreshState()

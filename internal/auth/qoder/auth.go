@@ -210,6 +210,15 @@ func GenerateMachineID(hostname, macAddr, system, machine string) string {
 	return strings.Join(parts, "-")
 }
 
+// GeneratePATMachineID creates a stable machine identifier isolated per PAT.
+func GeneratePATMachineID(personalAccessToken string) string {
+	personalAccessToken = strings.TrimSpace(personalAccessToken)
+	if decoded, err := url.QueryUnescape(personalAccessToken); err == nil {
+		personalAccessToken = decoded
+	}
+	return GenerateMachineID("cliproxy-pat", personalAccessToken, "server", "x86_64")
+}
+
 // PollResponse represents the response from the poll endpoint.
 type PollResponse struct {
 	Token  string `json:"token"`

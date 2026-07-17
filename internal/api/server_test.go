@@ -450,6 +450,43 @@ func TestCodexInspectionUpdateSettingsReloadsWorker(t *testing.T) {
 	}
 }
 
+func TestCodexInspectionUpdateSettingsClearsResultsWhenProviderChanges(t *testing.T) {
+	repo := codexinspection.NewFileSnapshotRepository(filepath.Join(t.TempDir(), "codex-inspection-latest.json"))
+	initial := codexinspection.DefaultSnapshot()
+	initial.Results = []codexinspection.InspectionResultItem{{
+		FileName: "codex.json",
+		Provider: "codex",
+		Action:   codexinspection.ActionKeep,
+	}}
+	initial.ActionLogs = []codexinspection.InspectionActionLog{{
+		FileName: "codex.json",
+		Action:   codexinspection.ActionDisable,
+	}}
+	initial.Run.Summary = codexinspection.InspectionSummary{TotalFiles: 1, SampledCount: 1, KeepCount: 1}
+	if err := repo.Save(context.Background(), initial); err != nil {
+		t.Fatalf("Save initial snapshot: %v", err)
+	}
+
+	service := codexinspection.NewService(repo, newCodexInspectionGatewayAdapter(nil), &codexinspection.DefaultProber{})
+	adapter := newCodexInspectionServiceAdapter(repo, service, nil)
+	settings := codexinspection.DefaultSettings()
+	settings.TargetType = " Claude "
+
+	snapshot, err := adapter.UpdateSettings(context.Background(), settings)
+	if err != nil {
+		t.Fatalf("UpdateSettings: %v", err)
+	}
+	if snapshot.Settings.TargetType != "claude" {
+		t.Fatalf("TargetType = %q, want claude", snapshot.Settings.TargetType)
+	}
+	if len(snapshot.Results) != 0 || len(snapshot.ActionLogs) != 0 {
+		t.Fatalf("results/logs not cleared: results=%d logs=%d", len(snapshot.Results), len(snapshot.ActionLogs))
+	}
+	if snapshot.Run.Summary != (codexinspection.InspectionSummary{}) {
+		t.Fatalf("summary = %+v, want empty", snapshot.Run.Summary)
+	}
+}
+
 func TestCodexInspectionUpdateSettingsDoesNotReloadWorkerWhenSaveFails(t *testing.T) {
 	repo := &failingSnapshotRepository{}
 	service := codexinspection.NewService(repo, newCodexInspectionGatewayAdapter(nil), &codexinspection.DefaultProber{})
@@ -523,7 +560,7 @@ func (r *memorySnapshotRepository) Save(_ context.Context, snapshot codexinspect
 	return nil
 }
 
-func (g *stubCodexInspectionGateway) ListCodexAuthFiles(context.Context) ([]codexinspection.AuthFileRecord, error) {
+func (g *stubCodexInspectionGateway) ListAuthFiles(context.Context, string) ([]codexinspection.AuthFileRecord, error) {
 	return g.files, nil
 }
 

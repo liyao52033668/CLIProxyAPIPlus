@@ -185,12 +185,17 @@ func customBase64Encode(data []byte) string {
 
 // QoderExecutor handles request execution against the Qoder upstream API.
 type QoderExecutor struct {
-	cfg *config.Config
+	cfg                *config.Config
+	updateAuthMetadata func(context.Context, string, map[string]any, []string) error
 }
 
 // NewQoderExecutor creates a new Qoder executor.
 func NewQoderExecutor(cfg *config.Config) *QoderExecutor {
 	return &QoderExecutor{cfg: cfg}
+}
+
+func (e *QoderExecutor) SetAuthMetadataUpdater(updater func(context.Context, string, map[string]any, []string) error) {
+	e.updateAuthMetadata = updater
 }
 
 // Identifier returns the executor identifier.
@@ -513,6 +518,35 @@ func (e *QoderExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	}
 	// Qoder tokens (access_token from the PKCE login) are long-lived
 	return auth, nil
+}
+
+func (e *QoderExecutor) ProbeAuth(ctx context.Context, auth *cliproxyauth.Auth) error {
+	if auth == nil {
+		return fmt.Errorf("qoder executor: auth is nil")
+	}
+	if _, err := e.ensureSession(ctx, auth); err != nil {
+		return err
+	}
+	req, err := buildQoderCosyHTTPRequest(ctx, auth, http.MethodGet, qoder.ChatBase+qoder.ModelListPath+"?Encode=1", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Cosy-Clienttype", "5")
+	resp, err := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 15*time.Second).Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Errorf("qoder executor: close probe response body error: %v", errClose)
+		}
+	}()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+		return statusErr{code: resp.StatusCode, msg: strings.TrimSpace(string(body))}
+	}
+	return nil
 }
 
 // CountTokens returns an unsupported error since Qoder does not expose a token counting endpoint.
@@ -1151,7 +1185,7 @@ func buildQoderCosyHTTPRequest(ctx context.Context, auth *cliproxyauth.Auth, met
 
 // buildCosyRequest creates an HTTP request with COSY authentication headers.
 func (e *QoderExecutor) buildCosyRequest(ctx context.Context, auth *cliproxyauth.Auth, reqURL string, body []byte, stream bool, modelKey string, contract qoderModelContract) (*http.Request, error) {
-	if _, err := qoderEnsureSession(ctx, auth, e.cfg); err != nil {
+	if _, err := e.ensureSession(ctx, auth); err != nil {
 		return nil, err
 	}
 	httpReq, errReq := buildQoderCosyHTTPRequest(ctx, auth, http.MethodPost, reqURL, body)
@@ -1316,11 +1350,29 @@ func hasOpenAIStyleUsageTokenFields(usageNode gjson.Result) bool {
 		usageNode.Get("output_tokens_details.reasoning_tokens").Exists()
 }
 
+func (e *QoderExecutor) ensureSession(ctx context.Context, auth *cliproxyauth.Auth) (qoderCredentials, error) {
+	return qoderEnsureSessionWithUpdater(ctx, auth, e.cfg, e.updateAuthMetadata)
+}
+
 func qoderEnsureSession(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config) (qoderCredentials, error) {
-	creds := qoderCreds(auth)
+	return qoderEnsureSessionWithUpdater(ctx, auth, cfg, nil)
+}
+
+func qoderEnsureSessionWithUpdater(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config, updateAuthMetadata func(context.Context, string, map[string]any, []string) error) (qoderCredentials, error) {
+	creds, machineIDChanged := qoderNormalizePATMachineIdentity(qoderCreds(auth))
+	if machineIDChanged && updateAuthMetadata != nil && auth != nil && strings.TrimSpace(auth.ID) != "" {
+		updates := map[string]any{"machine_id": creds.machineID}
+		deletes := []string{"security_oauth_token", "refresh_token", "user_type", "machine_token", "machine_type"}
+		if err := updateAuthMetadata(ctx, auth.ID, updates, deletes); err != nil {
+			return creds, fmt.Errorf("qoder executor: persist PAT machine identity: %w", err)
+		}
+	}
 	if cached, ok := sharedQoderSessionCache.load(auth, creds); ok {
 		qoderStoreSession(auth, cached)
 		return cached, nil
+	}
+	if machineIDChanged {
+		sharedQoderSessionCache.clear(auth.ID)
 	}
 	if creds.sessionAccessToken != "" && creds.machineToken != "" && creds.machineType != "" {
 		if creds.userType == "" {
@@ -1420,6 +1472,27 @@ func qoderEnsureSession(ctx context.Context, auth *cliproxyauth.Auth, cfg *confi
 	qoderStoreSession(auth, creds)
 	sharedQoderSessionCache.store(auth, creds)
 	return creds, nil
+}
+
+func qoderNormalizePATMachineIdentity(creds qoderCredentials) (qoderCredentials, bool) {
+	if creds.personalAccessToken == "" {
+		return creds, false
+	}
+	legacyMachineID := qoder.GenerateMachineID("cliproxy", "00:00:00:00:00:00", "server", "x86_64")
+	if creds.machineID != "" && creds.machineID != legacyMachineID {
+		return creds, false
+	}
+	machineID := qoder.GeneratePATMachineID(creds.personalAccessToken)
+	if machineID == "" || machineID == creds.machineID {
+		return creds, false
+	}
+	creds.machineID = machineID
+	creds.sessionAccessToken = ""
+	creds.refreshToken = ""
+	creds.userType = ""
+	creds.machineToken = ""
+	creds.machineType = ""
+	return creds, true
 }
 
 func qoderStoreSession(auth *cliproxyauth.Auth, creds qoderCredentials) {

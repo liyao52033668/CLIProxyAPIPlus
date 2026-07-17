@@ -4,7 +4,7 @@ import "context"
 
 type DefaultProber struct{}
 
-func (DefaultProber) ProbeCodexAccounts(_ context.Context, files []AuthFileRecord, _ InspectionSettings) ([]InspectionResultItem, error) {
+func (DefaultProber) ProbeAccounts(_ context.Context, files []AuthFileRecord, _ InspectionSettings) ([]InspectionResultItem, error) {
 	results := make([]InspectionResultItem, 0, len(files))
 	for _, file := range files {
 		results = append(results, InspectionResultItem{
@@ -40,6 +40,8 @@ func buildSummary(results []InspectionResultItem, totalFiles int) InspectionSumm
 			summary.EnableCount++
 		case ActionReauth:
 			summary.ReauthCount++
+		case ActionFailed:
+			summary.FailedCount++
 		}
 
 		if result.Disabled {
