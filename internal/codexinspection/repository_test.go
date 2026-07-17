@@ -26,17 +26,25 @@ func TestFileSnapshotRepositorySaveAndLoadRoundTrip(t *testing.T) {
 			StatusCodeActions: map[string]map[int]Action{
 				"claude": {401: ActionReauth, 429: ActionDisable},
 			},
-			Schedule: InspectionSchedule{
-				Enabled:         true,
-				Mode:            "interval",
-				IntervalMinutes: 30,
+			Schedules: map[string]InspectionSchedule{
+				"server": {
+					Enabled:         true,
+					Mode:            "interval",
+					IntervalMinutes: 30,
+				},
+				"claude": {
+					Enabled:         false,
+					Mode:            "interval",
+					IntervalMinutes: 90,
+				},
 			},
 		},
 		Run: InspectionRunState{
-			Status:       RunStatusCompleted,
-			TriggerType:  TriggerTypeScheduled,
-			StartedAtMS:  1717831200000,
-			FinishedAtMS: 1717831500000,
+			Status:                    RunStatusCompleted,
+			TriggerType:               TriggerTypeScheduled,
+			StartedAtMS:               1717831200000,
+			FinishedAtMS:              1717831500000,
+			NextTriggerAtMSByProvider: map[string]int64{"server": 1717833300000},
 			Summary: InspectionSummary{
 				TotalFiles:       12,
 				SampledCount:     5,
@@ -101,8 +109,11 @@ func TestFileSnapshotRepositorySaveAndLoadRoundTrip(t *testing.T) {
 	if loaded.Settings.StatusCodeActions["claude"][401] != ActionReauth || loaded.Settings.StatusCodeActions["claude"][429] != ActionDisable {
 		t.Fatalf("Load().Settings.StatusCodeActions = %+v, want claude mappings", loaded.Settings.StatusCodeActions)
 	}
-	if loaded.Settings.Schedule.Mode != "interval" {
-		t.Fatalf("Load().Settings.Schedule.Mode = %q, want %q", loaded.Settings.Schedule.Mode, "interval")
+	if loaded.Settings.ScheduleFor("server").IntervalMinutes != 30 || loaded.Settings.ScheduleFor("claude").IntervalMinutes != 90 {
+		t.Fatalf("Load().Settings.Schedules = %+v, want independent server and claude schedules", loaded.Settings.Schedules)
+	}
+	if loaded.Run.NextTriggerAtMSByProvider["server"] != 1717833300000 {
+		t.Fatalf("Load().Run.NextTriggerAtMSByProvider = %+v, want server trigger", loaded.Run.NextTriggerAtMSByProvider)
 	}
 	if loaded.Run.TriggerType != TriggerTypeScheduled {
 		t.Fatalf("Load().Run.TriggerType = %q, want %q", loaded.Run.TriggerType, TriggerTypeScheduled)
@@ -204,8 +215,8 @@ func TestFileSnapshotRepositoryLoadBackfillsDefaultSettingsWhenTargetTypeMissing
 	if loaded.Settings.TimeoutSeconds != defaults.TimeoutSeconds {
 		t.Fatalf("Load().Settings.TimeoutSeconds = %d, want %d", loaded.Settings.TimeoutSeconds, defaults.TimeoutSeconds)
 	}
-	if loaded.Settings.Schedule.Mode != defaults.Schedule.Mode {
-		t.Fatalf("Load().Settings.Schedule.Mode = %q, want %q", loaded.Settings.Schedule.Mode, defaults.Schedule.Mode)
+	if loaded.Settings.ScheduleFor("codex") != defaults.ScheduleFor("codex") {
+		t.Fatalf("Load().Settings codex schedule = %+v, want %+v", loaded.Settings.ScheduleFor("codex"), defaults.ScheduleFor("codex"))
 	}
 	if loaded.Run.Status != RunStatusRunning {
 		t.Fatalf("Load().Run.Status = %q, want %q", loaded.Run.Status, RunStatusRunning)
@@ -241,7 +252,8 @@ func TestFileSnapshotRepositoryLoadMapsLegacyThresholdToBothWindows(t *testing.T
     }
   },
   "run": {
-    "status": "idle"
+    "status": "idle",
+    "nextTriggerAtMs": 1717833300000
   },
   "results": [],
   "actionLogs": []
@@ -262,6 +274,12 @@ func TestFileSnapshotRepositoryLoadMapsLegacyThresholdToBothWindows(t *testing.T
 	}
 	if loaded.Settings.WeeklyUsedPercentThreshold != 91 {
 		t.Fatalf("Load().Settings.WeeklyUsedPercentThreshold = %d, want 91", loaded.Settings.WeeklyUsedPercentThreshold)
+	}
+	if loaded.Settings.ScheduleFor("codex").IntervalMinutes != 60 {
+		t.Fatalf("Load().Settings codex schedule = %+v, want legacy interval 60", loaded.Settings.ScheduleFor("codex"))
+	}
+	if loaded.Run.NextTriggerAtMSByProvider["codex"] != 1717833300000 {
+		t.Fatalf("Load().Run.NextTriggerAtMSByProvider = %+v, want migrated codex trigger", loaded.Run.NextTriggerAtMSByProvider)
 	}
 }
 

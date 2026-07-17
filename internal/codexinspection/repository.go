@@ -52,6 +52,19 @@ func (r *FileSnapshotRepository) Load(ctx context.Context) (LatestSnapshot, erro
 	}
 
 	snapshot.Settings = applyDefaultSettings(snapshot.Settings)
+	if snapshot.Run.legacyNextTriggerAtMS > 0 {
+		provider := normalizeProvider(snapshot.Settings.TargetType)
+		if provider == "" {
+			provider = DefaultSettings().TargetType
+		}
+		if snapshot.Run.NextTriggerAtMSByProvider == nil {
+			snapshot.Run.NextTriggerAtMSByProvider = make(map[string]int64)
+		}
+		if _, exists := snapshot.Run.NextTriggerAtMSByProvider[provider]; !exists {
+			snapshot.Run.NextTriggerAtMSByProvider[provider] = snapshot.Run.legacyNextTriggerAtMS
+		}
+		snapshot.Run.legacyNextTriggerAtMS = 0
+	}
 	if snapshot.Results == nil {
 		snapshot.Results = []InspectionResultItem{}
 	}

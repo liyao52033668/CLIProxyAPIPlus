@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"mime"
 	"net"
 	"net/http"
@@ -326,7 +327,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	codexWorker := codexinspection.NewWorker(codexBaseService)
 	codexService := newCodexInspectionServiceAdapter(codexRepo, codexBaseService, codexWorker)
 	if snapshot, errLoad := codexService.GetSnapshot(); errLoad == nil {
-		codexWorker.Reload(snapshot.Settings)
+		codexWorker.Reload(snapshot.Settings, snapshot.Run.NextTriggerAtMSByProvider)
 	}
 	codexWorkerCtx, codexWorkerCancel := context.WithCancel(context.Background())
 	s.codexWorkerCancel = codexWorkerCancel
@@ -2043,17 +2044,37 @@ func (a *codexInspectionServiceAdapter) UpdateSettings(ctx context.Context, sett
 		snapshot.ActionLogs = []codexinspection.InspectionActionLog{}
 		snapshot.Run.Summary = codexinspection.InspectionSummary{}
 	}
-	snapshot.Settings = settings
-	if settings.Schedule.Enabled && settings.Schedule.IntervalMinutes > 0 {
-		snapshot.Run.NextTriggerAtMS = time.Now().UnixMilli() + int64(time.Duration(settings.Schedule.IntervalMinutes)*time.Minute/time.Millisecond)
-	} else {
-		snapshot.Run.NextTriggerAtMS = 0
+	mergedSchedules := maps.Clone(snapshot.Settings.Schedules)
+	if mergedSchedules == nil {
+		mergedSchedules = make(map[string]codexinspection.InspectionSchedule)
 	}
+	for provider, schedule := range settings.Schedules {
+		provider = strings.ToLower(strings.TrimSpace(provider))
+		if provider != "" {
+			mergedSchedules[provider] = schedule
+		}
+	}
+	settings.Schedules = mergedSchedules
+	nextTriggers := maps.Clone(snapshot.Run.NextTriggerAtMSByProvider)
+	if nextTriggers == nil {
+		nextTriggers = make(map[string]int64)
+	}
+	previousSchedule := snapshot.Settings.ScheduleFor(settings.TargetType)
+	nextSchedule := settings.ScheduleFor(settings.TargetType)
+	if nextSchedule.Enabled && nextSchedule.IntervalMinutes > 0 {
+		if previousSchedule != nextSchedule || nextTriggers[settings.TargetType] <= 0 {
+			nextTriggers[settings.TargetType] = time.Now().UnixMilli() + int64(time.Duration(nextSchedule.IntervalMinutes)*time.Minute/time.Millisecond)
+		}
+	} else {
+		delete(nextTriggers, settings.TargetType)
+	}
+	snapshot.Settings = settings
+	snapshot.Run.NextTriggerAtMSByProvider = nextTriggers
 	if err := a.repo.Save(ctx, snapshot); err != nil {
 		return codexinspection.LatestSnapshot{}, err
 	}
 	if a.worker != nil {
-		a.worker.Reload(settings)
+		a.worker.Reload(settings, nextTriggers)
 	}
 	return snapshot, nil
 }

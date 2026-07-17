@@ -3,6 +3,7 @@ package codexinspection
 import (
 	"context"
 	"errors"
+	"maps"
 	"strings"
 	"time"
 )
@@ -111,15 +112,18 @@ func (s *Service) Run(ctx context.Context, req RunRequest) (snapshot LatestSnaps
 	snapshot.Settings.TargetType = provider
 
 	startedAtMS := nowMillis()
-	nextTriggerAtMS := int64(0)
-	if snapshot.Settings.Schedule.Enabled && snapshot.Settings.Schedule.IntervalMinutes > 0 {
-		nextTriggerAtMS = snapshot.Run.NextTriggerAtMS
+	nextTriggers := maps.Clone(snapshot.Run.NextTriggerAtMSByProvider)
+	if nextTriggers == nil {
+		nextTriggers = make(map[string]int64)
+	}
+	if schedule := snapshot.Settings.ScheduleFor(provider); !schedule.Enabled || schedule.IntervalMinutes <= 0 {
+		delete(nextTriggers, provider)
 	}
 	snapshot.Run = InspectionRunState{
-		Status:          RunStatusRunning,
-		TriggerType:     req.TriggerType,
-		StartedAtMS:     startedAtMS,
-		NextTriggerAtMS: nextTriggerAtMS,
+		Status:                    RunStatusRunning,
+		TriggerType:               req.TriggerType,
+		StartedAtMS:               startedAtMS,
+		NextTriggerAtMSByProvider: nextTriggers,
 	}
 	if err := s.repo.Save(ctx, snapshot); err != nil {
 		return LatestSnapshot{}, err
@@ -145,6 +149,7 @@ func (s *Service) Run(ctx context.Context, req RunRequest) (snapshot LatestSnaps
 		snapshot.Run.FinishedAtMS = nowMillis()
 		snapshot.Run.Error = probeErr.Error()
 		snapshot.Run.Summary = buildSummary(snapshot.Results, len(files))
+		updateProviderNextTrigger(&snapshot, provider, req.TriggerType)
 		if saveErr := s.repo.Save(ctx, snapshot); saveErr != nil {
 			return LatestSnapshot{}, saveErr
 		}
@@ -168,13 +173,7 @@ func (s *Service) Run(ctx context.Context, req RunRequest) (snapshot LatestSnaps
 	snapshot.Run.Error = ""
 	snapshot.Run.Summary = buildSummary(snapshot.Results, len(files))
 	snapshot.Run.Summary.AutoDeletedCount = autoDeletedCount
-	if snapshot.Settings.Schedule.Enabled && snapshot.Settings.Schedule.IntervalMinutes > 0 {
-		if req.TriggerType == TriggerTypeScheduled {
-			snapshot.Run.NextTriggerAtMS = nowMillis() + int64(time.Duration(snapshot.Settings.Schedule.IntervalMinutes)*time.Minute/time.Millisecond)
-		}
-	} else {
-		snapshot.Run.NextTriggerAtMS = 0
-	}
+	updateProviderNextTrigger(&snapshot, provider, req.TriggerType)
 	if err := s.repo.Save(ctx, snapshot); err != nil {
 		return LatestSnapshot{}, err
 	}
@@ -478,6 +477,24 @@ func (s *Service) lock() {
 
 func (s *Service) unlock() {
 	<-s.mu
+}
+
+func updateProviderNextTrigger(snapshot *LatestSnapshot, provider string, triggerType TriggerType) {
+	if snapshot == nil {
+		return
+	}
+	provider = normalizeProvider(provider)
+	if snapshot.Run.NextTriggerAtMSByProvider == nil {
+		snapshot.Run.NextTriggerAtMSByProvider = make(map[string]int64)
+	}
+	schedule := snapshot.Settings.ScheduleFor(provider)
+	if !schedule.Enabled || schedule.IntervalMinutes <= 0 {
+		delete(snapshot.Run.NextTriggerAtMSByProvider, provider)
+		return
+	}
+	if triggerType == TriggerTypeScheduled {
+		snapshot.Run.NextTriggerAtMSByProvider[provider] = nowMillis() + int64(time.Duration(schedule.IntervalMinutes)*time.Minute/time.Millisecond)
+	}
 }
 
 func normalizeProvider(provider string) string {

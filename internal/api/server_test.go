@@ -427,8 +427,11 @@ func TestCodexInspectionUpdateSettingsReloadsWorker(t *testing.T) {
 	adapter := newCodexInspectionServiceAdapter(repo, service, worker)
 
 	settings := codexinspection.DefaultSettings()
-	settings.Schedule.Enabled = true
-	settings.Schedule.IntervalMinutes = 7
+	settings.SetSchedule("codex", codexinspection.InspectionSchedule{
+		Enabled:         true,
+		Mode:            "interval",
+		IntervalMinutes: 7,
+	})
 
 	snapshot, err := adapter.UpdateSettings(context.Background(), settings)
 	if err != nil {
@@ -437,16 +440,61 @@ func TestCodexInspectionUpdateSettingsReloadsWorker(t *testing.T) {
 	if !worker.Enabled() {
 		t.Fatal("worker.Enabled() = false, want true")
 	}
-	if !snapshot.Settings.Schedule.Enabled || snapshot.Settings.Schedule.IntervalMinutes != 7 {
-		t.Fatalf("snapshot settings = %+v, want enabled interval 7", snapshot.Settings.Schedule)
+	if schedule := snapshot.Settings.ScheduleFor("codex"); !schedule.Enabled || schedule.IntervalMinutes != 7 {
+		t.Fatalf("snapshot codex schedule = %+v, want enabled interval 7", schedule)
+	}
+	if snapshot.Run.NextTriggerAtMSByProvider["codex"] <= 0 {
+		t.Fatalf("snapshot next triggers = %+v, want codex trigger", snapshot.Run.NextTriggerAtMSByProvider)
 	}
 
 	loaded, err := repo.Load(context.Background())
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if !loaded.Settings.Schedule.Enabled || loaded.Settings.Schedule.IntervalMinutes != 7 {
-		t.Fatalf("persisted settings = %+v, want enabled interval 7", loaded.Settings.Schedule)
+	if schedule := loaded.Settings.ScheduleFor("codex"); !schedule.Enabled || schedule.IntervalMinutes != 7 {
+		t.Fatalf("persisted codex schedule = %+v, want enabled interval 7", schedule)
+	}
+}
+
+func TestCodexInspectionUpdateSettingsKeepsProviderSchedulesIndependent(t *testing.T) {
+	repo := codexinspection.NewFileSnapshotRepository(filepath.Join(t.TempDir(), "codex-inspection-latest.json"))
+	service := codexinspection.NewService(repo, newCodexInspectionGatewayAdapter(nil), &codexinspection.DefaultProber{})
+	worker := codexinspection.NewWorker(service)
+	adapter := newCodexInspectionServiceAdapter(repo, service, worker)
+
+	settings := codexinspection.DefaultSettings()
+	settings.TargetType = "xai"
+	settings.SetSchedule("xai", codexinspection.InspectionSchedule{Enabled: true, Mode: "interval", IntervalMinutes: 5})
+	xaiSnapshot, err := adapter.UpdateSettings(context.Background(), settings)
+	if err != nil {
+		t.Fatalf("UpdateSettings(xai): %v", err)
+	}
+	if xaiSnapshot.Settings.ScheduleFor("codex").Enabled {
+		t.Fatal("codex schedule enabled after enabling xai")
+	}
+	xaiTrigger := xaiSnapshot.Run.NextTriggerAtMSByProvider["xai"]
+	if xaiTrigger <= 0 {
+		t.Fatalf("xai next trigger = %d, want > 0", xaiTrigger)
+	}
+
+	settings = xaiSnapshot.Settings
+	settings.TargetType = "codex"
+	settings.SetSchedule("codex", codexinspection.InspectionSchedule{Enabled: true, Mode: "interval", IntervalMinutes: 12})
+	codexSnapshot, err := adapter.UpdateSettings(context.Background(), settings)
+	if err != nil {
+		t.Fatalf("UpdateSettings(codex): %v", err)
+	}
+	if schedule := codexSnapshot.Settings.ScheduleFor("xai"); !schedule.Enabled || schedule.IntervalMinutes != 5 {
+		t.Fatalf("xai schedule = %+v, want enabled interval 5", schedule)
+	}
+	if schedule := codexSnapshot.Settings.ScheduleFor("codex"); !schedule.Enabled || schedule.IntervalMinutes != 12 {
+		t.Fatalf("codex schedule = %+v, want enabled interval 12", schedule)
+	}
+	if codexSnapshot.Run.NextTriggerAtMSByProvider["xai"] != xaiTrigger {
+		t.Fatalf("xai next trigger changed from %d to %d", xaiTrigger, codexSnapshot.Run.NextTriggerAtMSByProvider["xai"])
+	}
+	if codexSnapshot.Run.NextTriggerAtMSByProvider["codex"] <= 0 {
+		t.Fatalf("codex next trigger = %d, want > 0", codexSnapshot.Run.NextTriggerAtMSByProvider["codex"])
 	}
 }
 
@@ -494,8 +542,11 @@ func TestCodexInspectionUpdateSettingsDoesNotReloadWorkerWhenSaveFails(t *testin
 	adapter := newCodexInspectionServiceAdapter(repo, service, worker)
 
 	settings := codexinspection.DefaultSettings()
-	settings.Schedule.Enabled = true
-	settings.Schedule.IntervalMinutes = 7
+	settings.SetSchedule("codex", codexinspection.InspectionSchedule{
+		Enabled:         true,
+		Mode:            "interval",
+		IntervalMinutes: 7,
+	})
 
 	if _, err := adapter.UpdateSettings(context.Background(), settings); err == nil {
 		t.Fatal("UpdateSettings error = nil, want save failure")

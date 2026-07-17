@@ -30,15 +30,15 @@ const (
 )
 
 type InspectionSettings struct {
-	TargetType                   string                    `json:"targetType"`
-	Workers                      int                       `json:"workers"`
-	TimeoutSeconds               int                       `json:"timeoutSeconds"`
-	Retries                      int                       `json:"retries"`
-	SampleSize                   int                       `json:"sampleSize"`
-	FiveHourUsedPercentThreshold int                       `json:"fiveHourUsedPercentThreshold"`
-	WeeklyUsedPercentThreshold   int                       `json:"weeklyUsedPercentThreshold"`
-	StatusCodeActions            map[string]map[int]Action `json:"statusCodeActions,omitempty"`
-	Schedule                     InspectionSchedule        `json:"schedule"`
+	TargetType                   string                        `json:"targetType"`
+	Workers                      int                           `json:"workers"`
+	TimeoutSeconds               int                           `json:"timeoutSeconds"`
+	Retries                      int                           `json:"retries"`
+	SampleSize                   int                           `json:"sampleSize"`
+	FiveHourUsedPercentThreshold int                           `json:"fiveHourUsedPercentThreshold"`
+	WeeklyUsedPercentThreshold   int                           `json:"weeklyUsedPercentThreshold"`
+	StatusCodeActions            map[string]map[int]Action     `json:"statusCodeActions,omitempty"`
+	Schedules                    map[string]InspectionSchedule `json:"schedules,omitempty"`
 }
 
 type inspectionSettingsAlias InspectionSettings
@@ -46,7 +46,8 @@ type inspectionSettingsAlias InspectionSettings
 func (s *InspectionSettings) UnmarshalJSON(data []byte) error {
 	aux := struct {
 		inspectionSettingsAlias
-		UsedPercentThreshold *int `json:"usedPercentThreshold"`
+		UsedPercentThreshold *int                `json:"usedPercentThreshold"`
+		Schedule             *InspectionSchedule `json:"schedule"`
 	}{}
 	if err := json.Unmarshal(data, &aux); err != nil {
 		return err
@@ -60,6 +61,16 @@ func (s *InspectionSettings) UnmarshalJSON(data []byte) error {
 			s.WeeklyUsedPercentThreshold = *aux.UsedPercentThreshold
 		}
 	}
+	s.Schedules = normalizeSchedules(s.Schedules)
+	if aux.Schedule != nil {
+		provider := normalizeProvider(s.TargetType)
+		if provider == "" {
+			provider = DefaultSettings().TargetType
+		}
+		if _, exists := s.Schedules[provider]; !exists {
+			s.SetSchedule(provider, *aux.Schedule)
+		}
+	}
 	return nil
 }
 
@@ -67,6 +78,78 @@ type InspectionSchedule struct {
 	Enabled         bool   `json:"enabled"`
 	Mode            string `json:"mode"`
 	IntervalMinutes int    `json:"intervalMinutes"`
+}
+
+func DefaultSchedule() InspectionSchedule {
+	return InspectionSchedule{
+		Enabled:         false,
+		Mode:            "interval",
+		IntervalMinutes: 60,
+	}
+}
+
+func (s InspectionSettings) ScheduleFor(provider string) InspectionSchedule {
+	provider = normalizeProvider(provider)
+	if schedule, ok := s.Schedules[provider]; ok {
+		if schedule.Mode == "" {
+			schedule.Mode = DefaultSchedule().Mode
+		}
+		return schedule
+	}
+	return DefaultSchedule()
+}
+
+func (s *InspectionSettings) SetSchedule(provider string, schedule InspectionSchedule) {
+	provider = normalizeProvider(provider)
+	if provider == "" {
+		return
+	}
+	if schedule.Mode == "" {
+		schedule.Mode = DefaultSchedule().Mode
+	}
+	if s.Schedules == nil {
+		s.Schedules = make(map[string]InspectionSchedule)
+	}
+	s.Schedules[provider] = schedule
+}
+
+func normalizeSchedules(schedules map[string]InspectionSchedule) map[string]InspectionSchedule {
+	if len(schedules) == 0 {
+		return nil
+	}
+	normalized := make(map[string]InspectionSchedule, len(schedules))
+	for provider, schedule := range schedules {
+		provider = normalizeProvider(provider)
+		if provider == "" {
+			continue
+		}
+		if schedule.Mode == "" {
+			schedule.Mode = DefaultSchedule().Mode
+		}
+		normalized[provider] = schedule
+	}
+	if len(normalized) == 0 {
+		return nil
+	}
+	return normalized
+}
+
+func normalizeNextTriggers(nextTriggers map[string]int64) map[string]int64 {
+	if len(nextTriggers) == 0 {
+		return nil
+	}
+	normalized := make(map[string]int64, len(nextTriggers))
+	for provider, nextTriggerAtMS := range nextTriggers {
+		provider = normalizeProvider(provider)
+		if provider == "" || nextTriggerAtMS <= 0 {
+			continue
+		}
+		normalized[provider] = nextTriggerAtMS
+	}
+	if len(normalized) == 0 {
+		return nil
+	}
+	return normalized
 }
 
 type InspectionSummary struct {
@@ -84,13 +167,30 @@ type InspectionSummary struct {
 }
 
 type InspectionRunState struct {
-	Status          RunStatus         `json:"status"`
-	TriggerType     TriggerType       `json:"triggerType"`
-	StartedAtMS     int64             `json:"startedAtMs"`
-	FinishedAtMS    int64             `json:"finishedAtMs"`
-	NextTriggerAtMS int64             `json:"nextTriggerAtMs,omitempty"`
-	Summary         InspectionSummary `json:"summary"`
-	Error           string            `json:"error,omitempty"`
+	Status                    RunStatus         `json:"status"`
+	TriggerType               TriggerType       `json:"triggerType"`
+	StartedAtMS               int64             `json:"startedAtMs"`
+	FinishedAtMS              int64             `json:"finishedAtMs"`
+	NextTriggerAtMSByProvider map[string]int64  `json:"nextTriggerAtMsByProvider,omitempty"`
+	Summary                   InspectionSummary `json:"summary"`
+	Error                     string            `json:"error,omitempty"`
+	legacyNextTriggerAtMS     int64
+}
+
+type inspectionRunStateAlias InspectionRunState
+
+func (s *InspectionRunState) UnmarshalJSON(data []byte) error {
+	aux := struct {
+		inspectionRunStateAlias
+		NextTriggerAtMS int64 `json:"nextTriggerAtMs"`
+	}{}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	*s = InspectionRunState(aux.inspectionRunStateAlias)
+	s.NextTriggerAtMSByProvider = normalizeNextTriggers(s.NextTriggerAtMSByProvider)
+	s.legacyNextTriggerAtMS = aux.NextTriggerAtMS
+	return nil
 }
 
 type InspectionResultItem struct {
@@ -135,10 +235,8 @@ func DefaultSettings() InspectionSettings {
 		SampleSize:                   0,
 		FiveHourUsedPercentThreshold: 85,
 		WeeklyUsedPercentThreshold:   85,
-		Schedule: InspectionSchedule{
-			Enabled:         false,
-			Mode:            "interval",
-			IntervalMinutes: 60,
+		Schedules: map[string]InspectionSchedule{
+			"codex": DefaultSchedule(),
 		},
 	}
 }
@@ -153,8 +251,10 @@ func DefaultSnapshot() LatestSnapshot {
 }
 
 func applyDefaultSettings(settings InspectionSettings) InspectionSettings {
-	if settings.TargetType != "" {
-		return settings
+	if settings.TargetType == "" {
+		return DefaultSettings()
 	}
-	return DefaultSettings()
+	settings.TargetType = normalizeProvider(settings.TargetType)
+	settings.Schedules = normalizeSchedules(settings.Schedules)
+	return settings
 }
