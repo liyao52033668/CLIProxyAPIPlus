@@ -2,12 +2,14 @@ package executor
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
@@ -20,16 +22,136 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-var sharedQoderModelContractCache = newQoderModelContractCache()
+const qoderModelCatalogTTL = time.Hour
+
+var (
+	sharedQoderModelContractCache = newQoderModelContractCache()
+	sharedQoderModelCatalogCache  = newQoderModelCatalogCache()
+)
 
 type QoderModelCatalog struct {
 	Models    []*registry.ModelInfo
 	Contracts map[string]QoderModelContract
 }
 
+type qoderModelCatalogCacheEntry struct {
+	catalog   QoderModelCatalog
+	fetchedAt time.Time
+	source    [sha256.Size]byte
+}
+
+type qoderModelCatalogCache struct {
+	mu       sync.RWMutex
+	catalogs map[string]qoderModelCatalogCacheEntry
+}
+
+func newQoderModelCatalogCache() *qoderModelCatalogCache {
+	return &qoderModelCatalogCache{catalogs: make(map[string]qoderModelCatalogCacheEntry)}
+}
+
+func (c *qoderModelCatalogCache) loadFresh(auth *cliproxyauth.Auth, ttl time.Duration) (QoderModelCatalog, bool) {
+	entry, ok := c.loadEntry(auth)
+	if !ok || time.Since(entry.fetchedAt) >= ttl {
+		return QoderModelCatalog{}, false
+	}
+	return cloneQoderModelCatalog(entry.catalog), true
+}
+
+func (c *qoderModelCatalogCache) load(auth *cliproxyauth.Auth) (QoderModelCatalog, bool) {
+	entry, ok := c.loadEntry(auth)
+	if !ok {
+		return QoderModelCatalog{}, false
+	}
+	return cloneQoderModelCatalog(entry.catalog), true
+}
+
+func (c *qoderModelCatalogCache) loadEntry(auth *cliproxyauth.Auth) (qoderModelCatalogCacheEntry, bool) {
+	key := qoderSessionCacheKey(auth)
+	if key == "" {
+		return qoderModelCatalogCacheEntry{}, false
+	}
+	c.mu.RLock()
+	entry, ok := c.catalogs[key]
+	c.mu.RUnlock()
+	if !ok || entry.source != qoderModelCatalogSource(auth) {
+		return qoderModelCatalogCacheEntry{}, false
+	}
+	return entry, true
+}
+
+func (c *qoderModelCatalogCache) store(auth *cliproxyauth.Auth, catalog QoderModelCatalog) {
+	key := qoderSessionCacheKey(auth)
+	if key == "" || len(catalog.Models) == 0 {
+		return
+	}
+	c.mu.Lock()
+	c.catalogs[key] = qoderModelCatalogCacheEntry{
+		catalog:   cloneQoderModelCatalog(catalog),
+		fetchedAt: time.Now(),
+		source:    qoderModelCatalogSource(auth),
+	}
+	c.mu.Unlock()
+}
+
+func qoderModelCatalogSource(auth *cliproxyauth.Auth) [sha256.Size]byte {
+	creds := qoderCreds(auth)
+	return sha256.Sum256([]byte(creds.accessToken + "\x00" + creds.personalAccessToken))
+}
+
+func (c *qoderModelCatalogCache) clear(authID string) {
+	key := normalizeQoderModelContractCacheKey(authID)
+	if key == "" {
+		return
+	}
+	c.mu.Lock()
+	delete(c.catalogs, key)
+	c.mu.Unlock()
+}
+
+func cloneQoderModelCatalog(catalog QoderModelCatalog) QoderModelCatalog {
+	cloned := QoderModelCatalog{
+		Models:    make([]*registry.ModelInfo, 0, len(catalog.Models)),
+		Contracts: make(map[string]QoderModelContract, len(catalog.Contracts)),
+	}
+	for _, model := range catalog.Models {
+		if model == nil {
+			continue
+		}
+		modelClone := *model
+		cloned.Models = append(cloned.Models, &modelClone)
+	}
+	for modelKey, contract := range catalog.Contracts {
+		cloned.Contracts[modelKey] = contract
+	}
+	return cloned
+}
+
+func QoderModelCatalogRefreshDue(auth *cliproxyauth.Auth) bool {
+	_, ok := sharedQoderModelCatalogCache.loadFresh(auth, qoderModelCatalogTTL)
+	return !ok
+}
+
+func ClearQoderModelCatalog(authID string) {
+	sharedQoderModelCatalogCache.clear(authID)
+}
+
+func ClearQoderRuntimeState(authID string) {
+	ClearQoderModelContracts(authID)
+	ClearQoderModelCatalog(authID)
+	sharedQoderSessionCache.clear(authID)
+}
+
 func FetchQoderModelCatalog(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config) QoderModelCatalog {
+	if catalog, ok := sharedQoderModelCatalogCache.loadFresh(auth, qoderModelCatalogTTL); ok {
+		return catalog
+	}
+
 	modelsResult, ok := fetchQoderModelArray(ctx, auth, cfg)
 	if !ok {
+		if catalog, cached := sharedQoderModelCatalogCache.load(auth); cached {
+			log.Warnf("qoder: using cached model catalog with %d models after refresh failure", len(catalog.Models))
+			return catalog
+		}
 		return QoderModelCatalog{}
 	}
 
@@ -37,8 +159,12 @@ func FetchQoderModelCatalog(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 	log.Infof("qoder: fetched %d models from model list API", len(catalog.Models))
 	if len(catalog.Models) == 0 {
 		log.Warn("qoder: no models parsed from model list API")
+		if cached, exists := sharedQoderModelCatalogCache.load(auth); exists {
+			return cached
+		}
 		return QoderModelCatalog{}
 	}
+	sharedQoderModelCatalogCache.store(auth, catalog)
 	return catalog
 }
 
@@ -90,10 +216,14 @@ func fetchQoderModelArray(ctx context.Context, auth *cliproxyauth.Auth, cfg *con
 
 		resp, err := httpClient.Do(req)
 		if err != nil {
+			if attempt == 0 && qoderIsRetryableError(err) {
+				log.Warnf("qoder: retrying model list after transient error: %v", err)
+				continue
+			}
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				log.Warnf("qoder: fetch models canceled: %v", err)
 			} else {
-				log.Warnf("qoder: using static models (model list fetch failed: %v)", err)
+				log.Warnf("qoder: using cached or static models (model list fetch failed: %v)", err)
 			}
 			return gjson.Result{}, false
 		}
@@ -118,6 +248,10 @@ func fetchQoderModelArray(ctx context.Context, auth *cliproxyauth.Auth, cfg *con
 			}
 			if attempt == 0 && qoderIsLoginExpiredResponse(resp.StatusCode, body) {
 				qoderClearSession(auth)
+				continue
+			}
+			if attempt == 0 && qoderIsRetryableHTTPStatus(resp.StatusCode) {
+				log.Warnf("qoder: retrying model list after status %d", resp.StatusCode)
 				continue
 			}
 			return gjson.Result{}, false

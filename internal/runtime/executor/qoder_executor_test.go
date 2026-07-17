@@ -206,6 +206,116 @@ func TestFetchQoderModels_UsesDynamicModelList(t *testing.T) {
 	}
 }
 
+func TestQoderEnsureSession_ReusesCachedIDESessionAcrossAuthClones(t *testing.T) {
+	const authID = "qoder-ide-session-cache"
+	ClearQoderRuntimeState(authID)
+	t.Cleanup(func() { ClearQoderRuntimeState(authID) })
+
+	requestCount := 0
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", qoderRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requestCount++
+		if req.URL.String() != qoder.CenterBase+"/algo/api/v3/user/jobToken?Encode=1" {
+			t.Fatalf("request url = %q, want job token exchange", req.URL.String())
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"id":"u1","securityOauthToken":"session-token","refreshToken":"refresh-token","userType":"personal_standard"}`)),
+			Request:    req,
+		}, nil
+	}))
+
+	newAuth := func() *cliproxyauth.Auth {
+		return &cliproxyauth.Auth{
+			ID: authID,
+			Metadata: map[string]any{
+				"access_token": "ide-oauth-token",
+				"machine_id":   "ide-machine-id",
+				"uid":          "u1",
+			},
+		}
+	}
+
+	firstSession, err := qoderEnsureSession(ctx, newAuth(), &config.Config{})
+	if err != nil {
+		t.Fatalf("first qoderEnsureSession() error = %v", err)
+	}
+	secondAuth := newAuth()
+	secondSession, err := qoderEnsureSession(ctx, secondAuth, &config.Config{})
+	if err != nil {
+		t.Fatalf("second qoderEnsureSession() error = %v", err)
+	}
+	if requestCount != 1 {
+		t.Fatalf("job token exchange count = %d, want 1", requestCount)
+	}
+	if secondSession.sessionAccessToken != firstSession.sessionAccessToken {
+		t.Fatalf("cached session token = %q, want %q", secondSession.sessionAccessToken, firstSession.sessionAccessToken)
+	}
+	if got, _ := secondAuth.Metadata["security_oauth_token"].(string); got != "session-token" {
+		t.Fatalf("second auth session token = %q, want %q", got, "session-token")
+	}
+}
+
+func TestFetchQoderModelCatalog_UsesStaleCatalogAfterRefreshFailure(t *testing.T) {
+	const authID = "qoder-stale-model-catalog"
+	ClearQoderRuntimeState(authID)
+	t.Cleanup(func() { ClearQoderRuntimeState(authID) })
+
+	requestCount := 0
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", qoderRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requestCount++
+		if requestCount == 1 {
+			encodedResponse := customBase64Encode([]byte(`{"chat":[{"key":"qoder-dynamic","display_name":"Qoder Dynamic","source":"quota_free"}]}`))
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(encodedResponse)),
+				Request:    req,
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusServiceUnavailable,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"error":"temporary failure"}`)),
+			Request:    req,
+		}, nil
+	}))
+	auth := &cliproxyauth.Auth{
+		ID: authID,
+		Metadata: map[string]any{
+			"access_token":         "ide-oauth-token",
+			"security_oauth_token": "session-token",
+			"machine_id":           "ide-machine-id",
+			"machine_token":        "ide-machine-token",
+			"machine_type":         "ide-machine-type",
+			"uid":                  "u1",
+		},
+	}
+
+	firstCatalog := FetchQoderModelCatalog(ctx, auth, &config.Config{})
+	if len(firstCatalog.Models) != 1 || firstCatalog.Models[0].ID != "qoder-dynamic" {
+		t.Fatalf("first catalog = %#v, want qoder-dynamic", firstCatalog.Models)
+	}
+
+	key := qoderSessionCacheKey(auth)
+	sharedQoderModelCatalogCache.mu.Lock()
+	entry := sharedQoderModelCatalogCache.catalogs[key]
+	entry.fetchedAt = time.Now().Add(-2 * qoderModelCatalogTTL)
+	sharedQoderModelCatalogCache.catalogs[key] = entry
+	sharedQoderModelCatalogCache.mu.Unlock()
+
+	staleCatalog := FetchQoderModelCatalog(ctx, auth, &config.Config{})
+	if len(staleCatalog.Models) != 1 || staleCatalog.Models[0].ID != "qoder-dynamic" {
+		t.Fatalf("stale catalog = %#v, want qoder-dynamic", staleCatalog.Models)
+	}
+	if contract := staleCatalog.Contracts["qoder-dynamic"]; contract.Source != "quota_free" {
+		t.Fatalf("stale contract source = %q, want %q", contract.Source, "quota_free")
+	}
+	if requestCount != 3 {
+		t.Fatalf("model list request count = %d, want 3", requestCount)
+	}
+}
+
 func TestFetchQoderModels_FallsBackToStaticModelsOnAPIError(t *testing.T) {
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", qoderRoundTripFunc(func(req *http.Request) (*http.Response, error) {
 		return &http.Response{

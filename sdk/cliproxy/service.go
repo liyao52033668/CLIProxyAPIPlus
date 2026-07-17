@@ -33,6 +33,8 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+const qoderModelRefreshCheckInterval = 15 * time.Minute
+
 // Service wraps the proxy server lifecycle so external programs can embed the CLI proxy.
 // It manages the complete lifecycle including authentication, file watching, HTTP server,
 // and integration with various AI service providers.
@@ -376,7 +378,7 @@ func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
 	if s.coreManager == nil {
 		return
 	}
-	executor.ClearQoderModelContracts(id)
+	executor.ClearQoderRuntimeState(id)
 	GlobalModelRegistry().UnregisterClient(id)
 	if existing, ok := s.coreManager.GetByID(id); ok && existing != nil {
 		existing.Disabled = true
@@ -1045,6 +1047,7 @@ func (s *Service) Run(ctx context.Context) error {
 	if s.coreManager != nil && !homeEnabled {
 		interval := 15 * time.Minute
 		s.coreManager.StartAutoRefresh(context.Background(), interval)
+		go s.runQoderModelRefresh(ctx)
 		log.Infof("core auth auto-refresh started (interval=%s)", interval)
 	}
 
@@ -1200,7 +1203,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		provider = "openai-compatibility"
 	}
 	if provider != "qoder" {
-		executor.ClearQoderModelContracts(a.ID)
+		executor.ClearQoderRuntimeState(a.ID)
 	}
 	excluded := s.oauthExcludedModels(provider, authKind)
 	// The synthesizer pre-merges per-account and global exclusions into the "excluded_models" attribute.
@@ -1338,9 +1341,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		}
 		models = applyExcludedModels(models, excluded)
 	case "qoder":
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		catalog := fetchQoderCatalog(ctx, a, s.cfg)
+		catalog := fetchQoderCatalog(context.Background(), a, s.cfg)
 		if len(catalog.Models) > 0 {
 			executor.StoreQoderModelContracts(a.ID, catalog.Contracts)
 			models = catalog.Models
@@ -1440,7 +1441,7 @@ func (s *Service) clearQoderContractsForAuth(a *coreauth.Auth) {
 	if !strings.EqualFold(strings.TrimSpace(a.Provider), "qoder") {
 		return
 	}
-	executor.ClearQoderModelContracts(a.ID)
+	executor.ClearQoderRuntimeState(a.ID)
 }
 
 // refreshModelRegistrationForAuth re-applies the latest model registration for
@@ -1491,6 +1492,35 @@ func (s *Service) latestAuthForModelRegistration(authID string) (*coreauth.Auth,
 		return nil, false
 	}
 	return auth, true
+}
+
+func (s *Service) runQoderModelRefresh(ctx context.Context) {
+	ticker := time.NewTicker(qoderModelRefreshCheckInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.refreshQoderModelRegistrations()
+		}
+	}
+}
+
+func (s *Service) refreshQoderModelRegistrations() {
+	if s == nil || s.coreManager == nil {
+		return
+	}
+	for _, item := range s.coreManager.List() {
+		if item == nil || item.ID == "" || item.Disabled || !strings.EqualFold(strings.TrimSpace(item.Provider), "qoder") {
+			continue
+		}
+		auth, ok := s.coreManager.GetByID(item.ID)
+		if !ok || auth == nil || auth.Disabled || !executor.QoderModelCatalogRefreshDue(auth) {
+			continue
+		}
+		s.refreshModelRegistrationForAuth(auth)
+	}
 }
 
 // RefreshAllModelRegistrations re-registers models for all auths to apply any changes

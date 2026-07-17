@@ -28,7 +28,8 @@ func defaultQoderAliases() []OAuthModelAlias {
 		{Name: "dmodel", Alias: "deepseek-v4-pro"},
 		{Name: "dfmodel", Alias: "deepseek-v4-flash"},
 		{Name: "gm51model", Alias: "glm-5.2"},
-		{Name: "kmodel", Alias: "kimi-k2.7"},
+		{Name: "kmodel_latest", Alias: "kimi-k3"},
+		{Name: "kmodel", Alias: "kimi-k2.7-code"},
 		{Name: "mmodel", Alias: "minimax-m3"},
 	}
 }

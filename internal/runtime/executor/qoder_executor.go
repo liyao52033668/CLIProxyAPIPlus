@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -56,6 +57,8 @@ var qoderRetryableHTTPStatus = map[int]bool{
 	http.StatusServiceUnavailable: true,
 	http.StatusGatewayTimeout:     true,
 }
+
+var sharedQoderSessionCache = newQoderSessionCache()
 
 type qoderRetryConfig struct {
 	MaxRetries      int
@@ -1315,10 +1318,15 @@ func hasOpenAIStyleUsageTokenFields(usageNode gjson.Result) bool {
 
 func qoderEnsureSession(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config) (qoderCredentials, error) {
 	creds := qoderCreds(auth)
+	if cached, ok := sharedQoderSessionCache.load(auth, creds); ok {
+		qoderStoreSession(auth, cached)
+		return cached, nil
+	}
 	if creds.sessionAccessToken != "" && creds.machineToken != "" && creds.machineType != "" {
 		if creds.userType == "" {
 			creds.userType = "personal_standard"
 		}
+		sharedQoderSessionCache.store(auth, creds)
 		return creds, nil
 	}
 	if creds.personalAccessToken == "" && creds.accessToken == "" {
@@ -1410,6 +1418,7 @@ func qoderEnsureSession(ctx context.Context, auth *cliproxyauth.Auth, cfg *confi
 		creds.userType = "personal_standard"
 	}
 	qoderStoreSession(auth, creds)
+	sharedQoderSessionCache.store(auth, creds)
 	return creds, nil
 }
 
@@ -1438,7 +1447,11 @@ func qoderStoreSession(auth *cliproxyauth.Auth, creds qoderCredentials) {
 }
 
 func qoderClearSession(auth *cliproxyauth.Auth) {
-	if auth == nil || auth.Metadata == nil {
+	if auth == nil {
+		return
+	}
+	sharedQoderSessionCache.clear(auth.ID)
+	if auth.Metadata == nil {
 		return
 	}
 	delete(auth.Metadata, "security_oauth_token")
@@ -1452,11 +1465,15 @@ func qoderIsLoginExpiredResponse(statusCode int, body []byte) bool {
 	if statusCode != http.StatusForbidden {
 		return false
 	}
-	root := gjson.ParseBytes(body)
+	root := qoderParseMaybeEncodedJSON(body)
 	if strings.TrimSpace(root.Get("code").String()) == "105" {
 		return true
 	}
-	return strings.Contains(strings.ToLower(string(body)), "login expired")
+	message := strings.TrimSpace(root.Get("message").String())
+	if message == "" {
+		message = string(body)
+	}
+	return strings.Contains(strings.ToLower(message), "login expired")
 }
 
 // qoderCredentials holds the extracted credentials for Qoder auth.
@@ -1472,6 +1489,59 @@ type qoderCredentials struct {
 	machineID           string
 	machineToken        string
 	machineType         string
+}
+
+type qoderSessionCache struct {
+	mu       sync.RWMutex
+	sessions map[string]qoderCredentials
+}
+
+func newQoderSessionCache() *qoderSessionCache {
+	return &qoderSessionCache{sessions: make(map[string]qoderCredentials)}
+}
+
+func (c *qoderSessionCache) load(auth *cliproxyauth.Auth, source qoderCredentials) (qoderCredentials, bool) {
+	key := qoderSessionCacheKey(auth)
+	if key == "" {
+		return qoderCredentials{}, false
+	}
+	c.mu.RLock()
+	cached, ok := c.sessions[key]
+	c.mu.RUnlock()
+	if !ok || cached.accessToken != source.accessToken || cached.personalAccessToken != source.personalAccessToken {
+		return qoderCredentials{}, false
+	}
+	if source.machineID != "" && cached.machineID != source.machineID {
+		return qoderCredentials{}, false
+	}
+	return cached, true
+}
+
+func (c *qoderSessionCache) store(auth *cliproxyauth.Auth, creds qoderCredentials) {
+	key := qoderSessionCacheKey(auth)
+	if key == "" || creds.sessionAccessToken == "" || creds.machineToken == "" || creds.machineType == "" {
+		return
+	}
+	c.mu.Lock()
+	c.sessions[key] = creds
+	c.mu.Unlock()
+}
+
+func (c *qoderSessionCache) clear(authID string) {
+	key := normalizeQoderModelContractCacheKey(authID)
+	if key == "" {
+		return
+	}
+	c.mu.Lock()
+	delete(c.sessions, key)
+	c.mu.Unlock()
+}
+
+func qoderSessionCacheKey(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	return normalizeQoderModelContractCacheKey(auth.ID)
 }
 
 // qoderCreds extracts credentials from the auth record.

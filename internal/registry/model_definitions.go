@@ -461,7 +461,7 @@ func GetQoderModels() []*ModelInfo {
 			Thinking:    &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
 		},
 		{
-			ID:          "kmodel",
+			ID:          "kmodel_latest",
 			Object:      "model",
 			Created:     now,
 			OwnedBy:     "qoder",
