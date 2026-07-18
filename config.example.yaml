@@ -434,6 +434,9 @@ nonstream-keepalive-interval: 0
 # you select the protocol surface, but inference backend selection can still follow the resolved
 # model/alias. For strict backend pinning, use unique aliases/prefixes or avoid overlapping names.
 # You can repeat the same name with different aliases to expose multiple client model names.
+# Optional per-entry fields:
+#   fork: true                  # keep the upstream model and also expose the alias as a separate client-visible model
+#   display-name: "Model Name" # override the human-readable name shown in model catalogs
 # oauth-model-alias:
 #  antigravity:
 #    - name: "rev19-uic3-1p"
@@ -442,6 +445,7 @@ nonstream-keepalive-interval: 0
 #      alias: "gemini-3-pro-image-preview"
 #    - name: "gemini-3-pro-high"
 #      alias: "gemini-3-pro-preview"
+#      display-name: "Antigravity Gemini 3 Pro" # optional catalog display name
 #    - name: "gemini-3-flash"
 #      alias: "gemini-3-flash-preview"
 #    - name: "claude-sonnet-4-5"
@@ -454,6 +458,7 @@ nonstream-keepalive-interval: 0
 #     - name: "gemini-2.5-pro"          # original model name under this channel
 #       alias: "g2.5p"                  # client-visible alias
 #       fork: true                      # when true, keep original and also add the alias as an extra model (default: false)
+#       display-name: "Gemini 2.5 Pro"  # optional catalog display name
 #   vertex:
 #     - name: "gemini-2.5-pro"
 #       alias: "g2.5p"

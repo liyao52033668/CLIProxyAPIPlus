@@ -2,8 +2,94 @@ package registry
 
 import (
 	"slices"
+	"strings"
 	"testing"
 )
+
+func TestGeminiVertexModelsUseProductionReleaseIDs(t *testing.T) {
+	releaseIDs := []string{
+		"gemini-3-pro",
+		"gemini-3-flash",
+		"gemini-3.1-pro",
+		"gemini-3.1-flash-image",
+		"gemini-3.1-flash-lite",
+		"gemini-3-pro-image",
+	}
+	found := make(map[string]bool, len(releaseIDs))
+	for _, model := range GetGeminiVertexModels() {
+		if model == nil {
+			continue
+		}
+		if strings.HasSuffix(model.ID, "-preview") && strings.HasPrefix(model.ID, "gemini-3") {
+			t.Fatalf("Vertex model ID = %q still uses preview suffix", model.ID)
+		}
+		for _, releaseID := range releaseIDs {
+			if model.ID == releaseID {
+				found[releaseID] = true
+			}
+		}
+	}
+	for _, releaseID := range releaseIDs {
+		if !found[releaseID] {
+			t.Fatalf("Vertex models do not contain %q", releaseID)
+		}
+	}
+}
+
+func TestGetKimiModelsIncludesK3FinalEntry(t *testing.T) {
+	models := GetKimiModels()
+	model := findModelInfo(models, "kimi-k3")
+	if model == nil {
+		t.Fatal("expected kimi-k3 in GetKimiModels()")
+	}
+	if model.Type != "kimi" {
+		t.Fatalf("type = %q, want kimi", model.Type)
+	}
+	if model.ContextLength != 262144 {
+		t.Fatalf("context_length = %d, want 262144", model.ContextLength)
+	}
+	if model.MaxCompletionTokens != 65536 {
+		t.Fatalf("max_completion_tokens = %d, want 65536", model.MaxCompletionTokens)
+	}
+	if model.Thinking == nil {
+		t.Fatal("thinking support is nil")
+	}
+	if model.Thinking.ZeroAllowed {
+		t.Fatal("zero_allowed = true, want false")
+	}
+	if model.Thinking.DynamicAllowed {
+		t.Fatal("dynamic_allowed = true, want false/absent")
+	}
+	if model.Thinking.Min != 0 || model.Thinking.Max != 0 {
+		t.Fatalf("min/max = %d/%d, want 0/0 for level-only Kimi model", model.Thinking.Min, model.Thinking.Max)
+	}
+	wantLevels := []string{"low", "high", "max"}
+	if !slices.Equal(model.Thinking.Levels, wantLevels) {
+		t.Fatalf("levels = %v, want %v", model.Thinking.Levels, wantLevels)
+	}
+	if findModelInfo(models, "kimi-k3[1m]") != nil {
+		t.Fatal("kimi-k3[1m] should not exist in final Kimi registry")
+	}
+}
+
+func TestGetKimiModelsThinkingIsLevelOnly(t *testing.T) {
+	models := GetKimiModels()
+	for _, id := range []string{"kimi-k2-thinking", "kimi-k2.5", "kimi-k2.6", "kimi-k2.7-code", "kimi-k2.7-code-highspeed"} {
+		model := findModelInfo(models, id)
+		if model == nil {
+			t.Fatalf("expected model %q", id)
+		}
+		if model.Thinking == nil {
+			t.Fatalf("%s thinking is nil", id)
+		}
+		if model.Thinking.Min != 0 || model.Thinking.Max != 0 || model.Thinking.DynamicAllowed {
+			t.Fatalf("%s thinking = %#v, want level-only without min/max/dynamic_allowed", id, model.Thinking)
+		}
+		if !slices.Equal(model.Thinking.Levels, []string{"low", "high"}) {
+			t.Fatalf("%s levels = %v, want [low high]", id, model.Thinking.Levels)
+		}
+	}
+}
 
 func TestGitHubCopilotClaudeModelsSupportMessages(t *testing.T) {
 	models := GetGitHubCopilotModels()

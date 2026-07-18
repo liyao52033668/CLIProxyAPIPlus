@@ -83,6 +83,9 @@ func summarizeOAuthModelAliasList(list []config.OAuthModelAlias) OAuthModelAlias
 		if alias.Fork {
 			key += "|fork"
 		}
+		if displayName := strings.TrimSpace(alias.DisplayName); displayName != "" {
+			key += "|display-name=" + displayName
+		}
 		if _, exists := seen[key]; exists {
 			continue
 		}
