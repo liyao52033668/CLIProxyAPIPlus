@@ -62,6 +62,18 @@ import (
 
 const oauthCallbackSuccessHTML = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Authentication successful</title><script>setTimeout(function(){window.close();},3000);</script></head><body style="display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f5f5f5"><div style="text-align:center;padding:40px;background:white;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,0.1)"><h1>✅ Authentication successful!</h1><p>You can close this tab.</p><p style="color:#666;font-size:14px">This tab will close automatically in 3 seconds.</p></div></body></html>`
 
+var corsExposedResponseHeaders = []string{
+	logging.CPATraceIDHeader,
+	"X-CPA-VERSION",
+	"X-CPA-COMMIT",
+	"X-CPA-BUILD-DATE",
+	"X-CPA-SUPPORT-PLUGIN",
+	"X-CPA-HOME-VERSION",
+	"X-CPA-HOME-BUILD-DATE",
+}
+
+var corsExposedResponseHeadersJoined = strings.Join(corsExposedResponseHeaders, ", ")
+
 type serverOptionConfig struct {
 	extraMiddleware      []gin.HandlerFunc
 	engineConfigurator   func(*gin.Engine)
@@ -245,6 +257,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	// Add middleware
 	engine.Use(logging.GinLogrusLogger())
 	engine.Use(logging.GinLogrusRecovery())
+	engine.Use(logging.CPATraceIDMiddleware())
 	for _, mw := range optionState.extraMiddleware {
 		engine.Use(mw)
 	}
@@ -722,6 +735,7 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 		c.JSON(status, gin.H{"error": errSelect.Error()})
 		return
 	}
+	logging.SetGinCPATraceID(c, selected.EnsureIndex())
 
 	headers := make(http.Header)
 	headers.Set("Content-Type", "application/json")
@@ -1698,6 +1712,7 @@ func (s *Server) corsMiddleware() gin.HandlerFunc {
 		c.Header("Access-Control-Allow-Origin", "*")
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		c.Header("Access-Control-Allow-Headers", "*")
+		c.Header("Access-Control-Expose-Headers", corsExposedResponseHeadersJoined)
 
 		if c.Request.Method == http.MethodOptions {
 			c.AbortWithStatus(http.StatusNoContent)

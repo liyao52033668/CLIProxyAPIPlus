@@ -910,7 +910,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 		}
 		creditsOpts := ensureRequestedModelMetadata(opts, routeModel)
 		creditsCtx = contextWithRequestedModelAlias(creditsCtx, creditsOpts, routeModel)
-		publishSelectedAuthMetadata(creditsOpts.Metadata, c.auth.ID)
+		publishSelectedAuthMetadata(creditsOpts.Metadata, c.auth)
 		models := m.executionModelCandidates(c.auth, routeModel)
 		if len(models) == 0 {
 			continue
@@ -952,7 +952,7 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 			creditsCtx = context.WithValue(creditsCtx, "cliproxy.roundtripper", rt)
 		}
 		creditsOpts := ensureRequestedModelMetadata(opts, routeModel)
-		publishSelectedAuthMetadata(creditsOpts.Metadata, c.auth.ID)
+		publishSelectedAuthMetadata(creditsOpts.Metadata, c.auth)
 		models := m.executionModelCandidates(c.auth, routeModel)
 		if len(models) == 0 {
 			continue

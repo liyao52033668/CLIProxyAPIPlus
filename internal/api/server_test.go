@@ -232,6 +232,14 @@ func TestCodexAlphaSearchForwardsAndSanitizesRequest(t *testing.T) {
 			if got := executor.request.Header.Get("Session_id"); got != "session-123" {
 				t.Fatalf("Session_id = %q", got)
 			}
+			traceID := rr.Header().Get(internallogging.CPATraceIDHeader)
+			parts := strings.Split(traceID, "-")
+			if len(parts) != 3 || parts[1] != credential.Index || len(parts[2]) != 8 {
+				t.Fatalf("trace ID = %q, want timestamp-%s-requestID", traceID, credential.Index)
+			}
+			if _, errParse := time.Parse("20060102150405", parts[0]); errParse != nil {
+				t.Fatalf("trace timestamp = %q: %v", parts[0], errParse)
+			}
 		})
 	}
 }

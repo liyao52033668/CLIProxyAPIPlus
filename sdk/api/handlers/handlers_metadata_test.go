@@ -2,8 +2,12 @@ package handlers
 
 import (
 	context0 "context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
@@ -18,6 +22,39 @@ func TestRequestExecutionMetadataIncludesExecutionSessionWithoutIdempotencyKey(t
 	if _, ok := meta[idempotencyKeyMetadataKey]; ok {
 		t.Fatalf("unexpected idempotency key in metadata: %v", meta[idempotencyKeyMetadataKey])
 	}
+}
+
+func TestRequestExecutionMetadataTraceCallbackWebsocketDetection(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Run("skips websocket upgrade", func(t *testing.T) {
+		ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ginCtx.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+		ginCtx.Request.Header.Set("Connection", "Upgrade")
+		ginCtx.Request.Header.Set("Upgrade", "websocket")
+		logging.SetGinRequestID(ginCtx, "1234abcd")
+		ctx := context0.WithValue(context0.Background(), "gin", ginCtx)
+
+		meta := requestExecutionMetadata(ctx)
+
+		if _, exists := meta[coreexecutor.SelectedAuthIndexCallbackMetadataKey]; exists {
+			t.Fatal("unexpected selected auth index callback for websocket upgrade")
+		}
+	})
+
+	t.Run("keeps callback for incomplete upgrade headers", func(t *testing.T) {
+		ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+		ginCtx.Request.Header.Set("Upgrade", "websocket")
+		logging.SetGinRequestID(ginCtx, "1234abcd")
+		ctx := context0.WithValue(context0.Background(), "gin", ginCtx)
+
+		meta := requestExecutionMetadata(ctx)
+
+		if _, exists := meta[coreexecutor.SelectedAuthIndexCallbackMetadataKey]; !exists {
+			t.Fatal("missing selected auth index callback for ordinary HTTP request")
+		}
+	})
 }
 
 func TestSetServiceTierMetadataDefaultsToAuto(t *testing.T) {

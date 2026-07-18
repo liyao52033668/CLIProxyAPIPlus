@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
@@ -202,8 +203,10 @@ func requestExecutionMetadata(ctx context0.Context) map[string]any {
 	// Only include it if the client explicitly provides it.
 	key := ""
 	requestPath := ""
+	var ginCtx *gin.Context
 	if ctx != nil {
-		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+		if requestGinCtx, ok := ctx.Value("gin").(*gin.Context); ok && requestGinCtx != nil && requestGinCtx.Request != nil {
+			ginCtx = requestGinCtx
 			key = strings.TrimSpace(ginCtx.GetHeader("Idempotency-Key"))
 			requestPath = strings.TrimSpace(ginCtx.FullPath())
 			if requestPath == "" && ginCtx.Request.URL != nil {
@@ -224,6 +227,11 @@ func requestExecutionMetadata(ctx context0.Context) map[string]any {
 	}
 	if selectedCallback := selectedAuthIDCallbackFromContext(ctx); selectedCallback != nil {
 		meta[coreexecutor.SelectedAuthCallbackMetadataKey] = selectedCallback
+	}
+	if ginCtx != nil && !websocket.IsWebSocketUpgrade(ginCtx.Request) {
+		if traceCallback := logging.GinCPATraceIDCallback(ginCtx); traceCallback != nil {
+			meta[coreexecutor.SelectedAuthIndexCallbackMetadataKey] = traceCallback
+		}
 	}
 	if executionSessionID := executionSessionIDFromContext(ctx); executionSessionID != "" {
 		meta[coreexecutor.ExecutionSessionMetadataKey] = executionSessionID
@@ -1001,7 +1009,7 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 	}
 	if msg != nil && msg.Addon != nil && PassthroughHeadersEnabled(h.Cfg) {
 		for key, values := range msg.Addon {
-			if len(values) == 0 {
+			if len(values) == 0 || IsCPAReservedResponseHeader(key) {
 				continue
 			}
 			c.Writer.Header().Del(key)
