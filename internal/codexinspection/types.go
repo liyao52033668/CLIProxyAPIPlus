@@ -29,6 +29,11 @@ const (
 	ActionFailed  Action = "failed"
 )
 
+const (
+	XAIProbeSucceededReason         = "xAI probe succeeded"
+	XAIProbeSucceededDisabledReason = "xAI probe succeeded; account remains disabled"
+)
+
 type InspectionSettings struct {
 	TargetType                   string                        `json:"targetType"`
 	Workers                      int                           `json:"workers"`
@@ -220,10 +225,11 @@ type InspectionActionLog struct {
 }
 
 type LatestSnapshot struct {
-	Settings   InspectionSettings     `json:"settings"`
-	Run        InspectionRunState     `json:"run"`
-	Results    []InspectionResultItem `json:"results"`
-	ActionLogs []InspectionActionLog  `json:"actionLogs"`
+	Settings          InspectionSettings         `json:"settings"`
+	Run               InspectionRunState         `json:"run"`
+	Results           []InspectionResultItem     `json:"results"`
+	ActionLogs        []InspectionActionLog      `json:"actionLogs"`
+	AutoDisabledFiles map[string]map[string]bool `json:"autoDisabledFiles,omitempty"`
 }
 
 func DefaultSettings() InspectionSettings {

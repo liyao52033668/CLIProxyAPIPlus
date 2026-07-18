@@ -83,6 +83,9 @@ func TestFileSnapshotRepositorySaveAndLoadRoundTrip(t *testing.T) {
 				ExecutedAtMS: 1717831560000,
 			},
 		},
+		AutoDisabledFiles: map[string]map[string]bool{
+			"xai": {"auths/grok-01.json": true},
+		},
 	}
 
 	if err := repo.Save(ctx, snapshot); err != nil {
@@ -144,6 +147,9 @@ func TestFileSnapshotRepositorySaveAndLoadRoundTrip(t *testing.T) {
 	}
 	if !loaded.ActionLogs[0].Success {
 		t.Fatal("Load().ActionLogs[0].Success = false, want true")
+	}
+	if !loaded.AutoDisabledFiles["xai"]["auths/grok-01.json"] {
+		t.Fatal("Load().AutoDisabledFiles[xai][auths/grok-01.json] = false, want true")
 	}
 }
 

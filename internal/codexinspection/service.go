@@ -133,12 +133,14 @@ func (s *Service) Run(ctx context.Context, req RunRequest) (snapshot LatestSnaps
 	if err != nil {
 		return LatestSnapshot{}, err
 	}
+	reconcileAutoDisabledFiles(&snapshot, provider, files)
 	probeFiles := filterAuthFilesByName(files, req.FileNames)
 	if len(req.FileNames) > 0 {
 		snapshot.Results = filterResultsByCurrentFiles(snapshot.Results, files)
 	}
 
 	results, probeErr := s.prober.ProbeAccounts(ctx, probeFiles, snapshot.Settings)
+	results = applyAutoRecoveryActions(results, snapshot.AutoDisabledFiles)
 	if probeErr != nil {
 		if len(req.FileNames) == 0 {
 			snapshot.Results = results
@@ -159,7 +161,7 @@ func (s *Service) Run(ctx context.Context, req RunRequest) (snapshot LatestSnaps
 	autoActionLogs := []InspectionActionLog{}
 	autoDeletedCount := 0
 	if req.TriggerType == TriggerTypeScheduled {
-		results, autoActionLogs, autoDeletedCount = s.autoApplyScheduledActions(ctx, results)
+		results, autoActionLogs, autoDeletedCount = s.autoApplyScheduledActions(ctx, provider, results, &snapshot)
 	}
 
 	if len(req.FileNames) == 0 {
@@ -192,8 +194,10 @@ func (s *Service) ExecuteActions(ctx context.Context, req ExecuteActionsRequest)
 	}
 
 	displayNames := map[string]string{}
+	providers := map[string]string{}
 	for _, item := range snapshot.Results {
 		displayNames[item.FileName] = item.DisplayName
+		providers[item.FileName] = normalizeProvider(item.Provider)
 	}
 
 	logs := make([]InspectionActionLog, 0, len(req.FileNames))
@@ -221,13 +225,20 @@ func (s *Service) ExecuteActions(ctx context.Context, req ExecuteActionsRequest)
 			log.Success = false
 			log.Error = callErr.Error()
 		} else {
+			provider := providers[fileName]
+			if provider == "" {
+				provider = normalizeProvider(snapshot.Settings.TargetType)
+			}
 			switch req.Action {
 			case ActionDisable:
 				updateResultDisabled(snapshot.Results, fileName, true)
+				setAutoDisabledFile(&snapshot, provider, fileName, false)
 			case ActionEnable:
 				updateResultDisabled(snapshot.Results, fileName, false)
+				setAutoDisabledFile(&snapshot, provider, fileName, false)
 			case ActionDelete:
 				snapshot.Results = deleteResultByFileName(snapshot.Results, fileName)
+				setAutoDisabledFile(&snapshot, provider, fileName, false)
 			}
 		}
 		logs = append(logs, log)
@@ -263,7 +274,7 @@ func (s *Service) reconcileSnapshot(ctx context.Context, snapshot LatestSnapshot
 		current[file.FileName] = file
 	}
 
-	changed := false
+	changed := reconcileAutoDisabledFiles(&snapshot, provider, files)
 	results := make([]InspectionResultItem, 0, len(snapshot.Results))
 	for _, result := range snapshot.Results {
 		file, ok := current[result.FileName]
@@ -304,12 +315,16 @@ func (s *Service) reconcileSnapshot(ctx context.Context, snapshot LatestSnapshot
 	return snapshot, nil
 }
 
-func (s *Service) autoApplyScheduledActions(ctx context.Context, results []InspectionResultItem) ([]InspectionResultItem, []InspectionActionLog, int) {
+func (s *Service) autoApplyScheduledActions(ctx context.Context, provider string, results []InspectionResultItem, snapshot *LatestSnapshot) ([]InspectionResultItem, []InspectionActionLog, int) {
 	nextResults := make([]InspectionResultItem, 0, len(results))
 	logs := make([]InspectionActionLog, 0)
 	autoDeletedCount := 0
 
 	for _, result := range results {
+		resultProvider := normalizeProvider(result.Provider)
+		if resultProvider == "" {
+			resultProvider = normalizeProvider(provider)
+		}
 		switch result.Action {
 		case ActionDelete:
 			log := InspectionActionLog{
@@ -325,6 +340,7 @@ func (s *Service) autoApplyScheduledActions(ctx context.Context, results []Inspe
 				nextResults = append(nextResults, result)
 			} else {
 				autoDeletedCount++
+				setAutoDisabledFile(snapshot, resultProvider, result.FileName, false)
 			}
 			logs = append(logs, log)
 		case ActionDisable:
@@ -341,6 +357,9 @@ func (s *Service) autoApplyScheduledActions(ctx context.Context, results []Inspe
 				nextResults = append(nextResults, result)
 			} else {
 				result.Disabled = true
+				if resultProvider == "xai" {
+					setAutoDisabledFile(snapshot, resultProvider, result.FileName, true)
+				}
 				nextResults = append(nextResults, resolveActionState(result))
 			}
 			logs = append(logs, log)
@@ -358,6 +377,7 @@ func (s *Service) autoApplyScheduledActions(ctx context.Context, results []Inspe
 				nextResults = append(nextResults, result)
 			} else {
 				result.Disabled = false
+				setAutoDisabledFile(snapshot, resultProvider, result.FileName, false)
 				nextResults = append(nextResults, resolveActionState(result))
 			}
 			logs = append(logs, log)
@@ -367,6 +387,79 @@ func (s *Service) autoApplyScheduledActions(ctx context.Context, results []Inspe
 	}
 
 	return nextResults, logs, autoDeletedCount
+}
+
+func applyAutoRecoveryActions(results []InspectionResultItem, autoDisabledFiles map[string]map[string]bool) []InspectionResultItem {
+	xaiFiles := autoDisabledFiles["xai"]
+	if len(xaiFiles) == 0 {
+		return results
+	}
+	for i := range results {
+		result := &results[i]
+		if normalizeProvider(result.Provider) != "xai" || !result.Disabled || result.Action != ActionKeep || result.Error != "" {
+			continue
+		}
+		if result.ActionReason != XAIProbeSucceededDisabledReason || !xaiFiles[result.FileName] {
+			continue
+		}
+		result.Action = ActionEnable
+		result.ActionReason = XAIProbeSucceededReason
+		result.Executable = true
+	}
+	return results
+}
+
+func reconcileAutoDisabledFiles(snapshot *LatestSnapshot, provider string, files []AuthFileRecord) bool {
+	if snapshot == nil {
+		return false
+	}
+	provider = normalizeProvider(provider)
+	markedFiles := snapshot.AutoDisabledFiles[provider]
+	if len(markedFiles) == 0 {
+		return false
+	}
+
+	current := make(map[string]bool, len(files))
+	for _, file := range files {
+		current[file.FileName] = file.Disabled
+	}
+	changed := false
+	for fileName := range markedFiles {
+		if !current[fileName] {
+			delete(markedFiles, fileName)
+			changed = true
+		}
+	}
+	if len(markedFiles) == 0 {
+		delete(snapshot.AutoDisabledFiles, provider)
+	}
+	return changed
+}
+
+func setAutoDisabledFile(snapshot *LatestSnapshot, provider string, fileName string, autoDisabled bool) {
+	if snapshot == nil {
+		return
+	}
+	provider = normalizeProvider(provider)
+	fileName = strings.TrimSpace(fileName)
+	if provider == "" || fileName == "" {
+		return
+	}
+	if !autoDisabled {
+		markedFiles := snapshot.AutoDisabledFiles[provider]
+		delete(markedFiles, fileName)
+		if len(markedFiles) == 0 {
+			delete(snapshot.AutoDisabledFiles, provider)
+		}
+		return
+	}
+	if snapshot.AutoDisabledFiles == nil {
+		snapshot.AutoDisabledFiles = make(map[string]map[string]bool)
+	}
+	if snapshot.AutoDisabledFiles[provider] == nil {
+		snapshot.AutoDisabledFiles[provider] = make(map[string]bool)
+	}
+	snapshot.AutoDisabledFiles[provider][fileName] = true
 }
 
 func resolveActionState(result InspectionResultItem) InspectionResultItem {

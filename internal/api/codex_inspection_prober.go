@@ -194,9 +194,9 @@ func (p *codexInspectionProber) inspectProviderAuth(ctx context.Context, file co
 			return inspectionProviderErrorResult(result, settings, file.Provider, probeErr)
 		}
 		if strings.EqualFold(strings.TrimSpace(file.Provider), "xai") {
-			result.ActionReason = "xAI probe succeeded"
+			result.ActionReason = codexinspection.XAIProbeSucceededReason
 			if result.Disabled {
-				result.ActionReason = "xAI probe succeeded; account remains disabled"
+				result.ActionReason = codexinspection.XAIProbeSucceededDisabledReason
 				result.Executable = false
 			}
 		}

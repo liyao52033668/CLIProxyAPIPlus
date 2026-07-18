@@ -258,6 +258,38 @@ func TestService_ExecuteActionsCallsGatewayAndKeepsGoingOnItemFailure(t *testing
 	}
 }
 
+func TestService_ExecuteActionsClearsXAIAutoDisabledState(t *testing.T) {
+	settings := DefaultSettings()
+	settings.TargetType = "xai"
+	repo := &fakeRepository{snapshot: LatestSnapshot{
+		Settings: settings,
+		Results: []InspectionResultItem{{
+			FileName: "grok.json",
+			Provider: "xai",
+			Disabled: true,
+			Action:   ActionKeep,
+		}},
+		AutoDisabledFiles: map[string]map[string]bool{
+			"xai": {"grok.json": true},
+		},
+	}}
+	service := NewService(repo, &fakeGateway{}, &fakeProber{})
+
+	result, err := service.ExecuteActions(context.Background(), ExecuteActionsRequest{
+		Action:    ActionDisable,
+		FileNames: []string{"grok.json"},
+	})
+	if err != nil {
+		t.Fatalf("ExecuteActions(disable) error = %v", err)
+	}
+	if result.Snapshot.AutoDisabledFiles["xai"]["grok.json"] {
+		t.Fatal("AutoDisabledFiles[xai][grok.json] = true, want false after manual action")
+	}
+	if !result.Snapshot.Results[0].Disabled {
+		t.Fatal("Results[0].Disabled = false, want true")
+	}
+}
+
 func TestService_ExecuteActionsDeletesSuccessfulItemsAndPreservesFailures(t *testing.T) {
 	repo := &fakeRepository{snapshot: LatestSnapshot{Results: []InspectionResultItem{{FileName: "alpha.json", DisplayName: "Alpha", Disabled: false}, {FileName: "beta.json", DisplayName: "Beta", Disabled: false}, {FileName: "gamma.json", DisplayName: "Gamma", Disabled: false}}}}
 	gateway := &fakeGateway{
@@ -428,6 +460,36 @@ func TestService_GetSnapshotReconcilesMissingAuthFiles(t *testing.T) {
 	}
 }
 
+func TestService_GetSnapshotClearsXAIAutoDisabledStateAfterExternalEnable(t *testing.T) {
+	settings := DefaultSettings()
+	settings.TargetType = "xai"
+	repo := &fakeRepository{snapshot: LatestSnapshot{
+		Settings: settings,
+		Results: []InspectionResultItem{{
+			FileName: "grok.json",
+			Provider: "xai",
+			Disabled: true,
+			Action:   ActionKeep,
+		}},
+		AutoDisabledFiles: map[string]map[string]bool{
+			"xai": {"grok.json": true},
+		},
+	}}
+	gateway := &fakeGateway{files: []AuthFileRecord{{FileName: "grok.json", Provider: "xai", Disabled: false}}}
+	service := NewService(repo, gateway, &fakeProber{})
+
+	snapshot, err := service.GetSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("GetSnapshot() error = %v", err)
+	}
+	if snapshot.AutoDisabledFiles["xai"]["grok.json"] {
+		t.Fatal("AutoDisabledFiles[xai][grok.json] = true, want false")
+	}
+	if snapshot.Results[0].Disabled {
+		t.Fatal("Results[0].Disabled = true, want false")
+	}
+}
+
 func TestService_GetSnapshotClearsResolvedDisableRecommendation(t *testing.T) {
 	repo := &fakeRepository{snapshot: LatestSnapshot{
 		Run: InspectionRunState{Summary: InspectionSummary{TotalFiles: 1, SampledCount: 1, DisableCount: 1, EnabledCount: 1}},
@@ -551,6 +613,181 @@ func TestService_RunScheduledAutoAppliesSuggestedActions(t *testing.T) {
 		if !log.Success {
 			t.Fatalf("ActionLog = %+v, want success", log)
 		}
+	}
+}
+
+func TestService_RunScheduledRestoresAutomaticallyDisabledXAIAccount(t *testing.T) {
+	settings := DefaultSettings()
+	settings.TargetType = "xai"
+	repo := &fakeRepository{snapshot: LatestSnapshot{Settings: settings}}
+	gateway := &fakeGateway{files: []AuthFileRecord{{
+		FileName:    "grok.json",
+		DisplayName: "Grok",
+		Provider:    "xai",
+		Disabled:    false,
+	}}}
+	prober := &fakeProber{results: []InspectionResultItem{{
+		FileName:     "grok.json",
+		DisplayName:  "Grok",
+		Provider:     "xai",
+		Action:       ActionDisable,
+		ActionReason: "xAI free usage exhausted",
+		Executable:   true,
+	}}}
+	service := NewService(repo, gateway, prober)
+
+	first, err := service.Run(context.Background(), RunRequest{TriggerType: TriggerTypeScheduled})
+	if err != nil {
+		t.Fatalf("first Run(scheduled) error = %v", err)
+	}
+	if !first.AutoDisabledFiles["xai"]["grok.json"] {
+		t.Fatal("first AutoDisabledFiles[xai][grok.json] = false, want true")
+	}
+	if len(first.Results) != 1 || !first.Results[0].Disabled {
+		t.Fatalf("first Results = %+v, want disabled Grok account", first.Results)
+	}
+
+	gateway.files[0].Disabled = true
+	prober.results = []InspectionResultItem{{
+		FileName:     "grok.json",
+		DisplayName:  "Grok",
+		Provider:     "xai",
+		Disabled:     true,
+		Action:       ActionKeep,
+		ActionReason: "xAI probe succeeded; account remains disabled",
+		Executable:   false,
+	}}
+	second, err := service.Run(context.Background(), RunRequest{TriggerType: TriggerTypeScheduled})
+	if err != nil {
+		t.Fatalf("second Run(scheduled) error = %v", err)
+	}
+	if len(gateway.setDisabledCalls) != 2 {
+		t.Fatalf("len(setDisabledCalls) = %d, want 2", len(gateway.setDisabledCalls))
+	}
+	if gateway.setDisabledCalls[1] != (setDisabledCall{name: "grok.json", disabled: false}) {
+		t.Fatalf("setDisabledCalls[1] = %+v, want Grok enable", gateway.setDisabledCalls[1])
+	}
+	if len(second.Results) != 1 || second.Results[0].Disabled || second.Results[0].Action != ActionKeep {
+		t.Fatalf("second Results = %+v, want enabled keep", second.Results)
+	}
+	if second.AutoDisabledFiles["xai"]["grok.json"] {
+		t.Fatal("second AutoDisabledFiles[xai][grok.json] = true, want false")
+	}
+}
+
+func TestService_RunScheduledKeepsManuallyDisabledXAIAccount(t *testing.T) {
+	settings := DefaultSettings()
+	settings.TargetType = "xai"
+	repo := &fakeRepository{snapshot: LatestSnapshot{Settings: settings}}
+	gateway := &fakeGateway{files: []AuthFileRecord{{FileName: "grok.json", Provider: "xai", Disabled: true}}}
+	prober := &fakeProber{results: []InspectionResultItem{{
+		FileName:     "grok.json",
+		Provider:     "xai",
+		Disabled:     true,
+		Action:       ActionKeep,
+		ActionReason: "xAI probe succeeded; account remains disabled",
+	}}}
+	service := NewService(repo, gateway, prober)
+
+	snapshot, err := service.Run(context.Background(), RunRequest{TriggerType: TriggerTypeScheduled})
+	if err != nil {
+		t.Fatalf("Run(scheduled) error = %v", err)
+	}
+	if len(gateway.setDisabledCalls) != 0 {
+		t.Fatalf("len(setDisabledCalls) = %d, want 0", len(gateway.setDisabledCalls))
+	}
+	if len(snapshot.Results) != 1 || !snapshot.Results[0].Disabled || snapshot.Results[0].Action != ActionKeep {
+		t.Fatalf("Results = %+v, want manually disabled keep", snapshot.Results)
+	}
+}
+
+func TestService_RunScheduledPreservesXAIRecoveryWhenEnableFails(t *testing.T) {
+	settings := DefaultSettings()
+	settings.TargetType = "xai"
+	repo := &fakeRepository{snapshot: LatestSnapshot{
+		Settings: settings,
+		AutoDisabledFiles: map[string]map[string]bool{
+			"xai": {"grok.json": true},
+		},
+	}}
+	gateway := &fakeGateway{
+		files:             []AuthFileRecord{{FileName: "grok.json", Provider: "xai", Disabled: true}},
+		setDisabledErrors: map[string]error{"grok.json": errors.New("enable failed")},
+	}
+	prober := &fakeProber{results: []InspectionResultItem{{
+		FileName:     "grok.json",
+		Provider:     "xai",
+		Disabled:     true,
+		Action:       ActionKeep,
+		ActionReason: "xAI probe succeeded; account remains disabled",
+	}}}
+	service := NewService(repo, gateway, prober)
+
+	snapshot, err := service.Run(context.Background(), RunRequest{TriggerType: TriggerTypeScheduled})
+	if err != nil {
+		t.Fatalf("Run(scheduled) error = %v", err)
+	}
+	if len(snapshot.Results) != 1 || snapshot.Results[0].Action != ActionEnable || !snapshot.Results[0].Disabled {
+		t.Fatalf("Results = %+v, want retryable enable action", snapshot.Results)
+	}
+	if !snapshot.AutoDisabledFiles["xai"]["grok.json"] {
+		t.Fatal("AutoDisabledFiles[xai][grok.json] = false, want true")
+	}
+	if len(snapshot.ActionLogs) != 1 || snapshot.ActionLogs[0].Success {
+		t.Fatalf("ActionLogs = %+v, want failed enable log", snapshot.ActionLogs)
+	}
+}
+
+func TestService_RunScheduledRequiresSuccessfulXAIProbeForRecovery(t *testing.T) {
+	settings := DefaultSettings()
+	settings.TargetType = "xai"
+	repo := &fakeRepository{snapshot: LatestSnapshot{
+		Settings: settings,
+		AutoDisabledFiles: map[string]map[string]bool{
+			"xai": {"grok.json": true},
+		},
+	}}
+	gateway := &fakeGateway{files: []AuthFileRecord{{FileName: "grok.json", Provider: "xai", Disabled: true}}}
+	prober := &fakeProber{results: []InspectionResultItem{{
+		FileName:     "grok.json",
+		Provider:     "xai",
+		Disabled:     true,
+		Action:       ActionKeep,
+		ActionReason: "no issue detected",
+	}}}
+	service := NewService(repo, gateway, prober)
+
+	snapshot, err := service.Run(context.Background(), RunRequest{TriggerType: TriggerTypeScheduled})
+	if err != nil {
+		t.Fatalf("Run(scheduled) error = %v", err)
+	}
+	if len(gateway.setDisabledCalls) != 0 {
+		t.Fatalf("len(setDisabledCalls) = %d, want 0", len(gateway.setDisabledCalls))
+	}
+	if !snapshot.AutoDisabledFiles["xai"]["grok.json"] {
+		t.Fatal("AutoDisabledFiles[xai][grok.json] = false, want true")
+	}
+}
+
+func TestService_RunProviderSwitchPreservesXAIAutoDisabledState(t *testing.T) {
+	settings := DefaultSettings()
+	settings.TargetType = "codex"
+	repo := &fakeRepository{snapshot: LatestSnapshot{
+		Settings: settings,
+		AutoDisabledFiles: map[string]map[string]bool{
+			"xai": {"grok.json": true},
+		},
+	}}
+	gateway := &fakeGateway{files: []AuthFileRecord{{FileName: "claude.json", Provider: "claude"}}}
+	prober := &fakeProber{results: []InspectionResultItem{{FileName: "claude.json", Provider: "claude", Action: ActionKeep}}}
+	service := NewService(repo, gateway, prober)
+
+	snapshot, err := service.Run(context.Background(), RunRequest{TriggerType: TriggerTypeManual, Provider: "claude"})
+	if err != nil {
+		t.Fatalf("Run(provider switch) error = %v", err)
+	}
+	if !snapshot.AutoDisabledFiles["xai"]["grok.json"] {
+		t.Fatal("AutoDisabledFiles[xai][grok.json] = false, want preserved true")
 	}
 }
 
