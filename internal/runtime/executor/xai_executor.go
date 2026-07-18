@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"sort"
@@ -52,6 +53,11 @@ const (
 	xaiVideosEditsPath            = "/videos/edits"
 	xaiVideosExtensionsPath       = "/videos/extensions"
 	xaiVideosPath                 = "/videos"
+	xaiResponsesPath              = "/responses"
+	xaiChatCompletionsPath        = "/chat/completions"
+	xaiInspectionProbeModel       = "grok-4.5"
+	xaiInspectionProbeBodyLimit   = 64 << 10
+	xaiInspectionRetryBackoff     = 350 * time.Millisecond
 	xaiIdempotencyKeyMetaKey      = "idempotency_key"
 	xaiComposerModelPrefix        = "grok-composer-"
 	xaiCodexAppNamespaceName      = "codex_app"
@@ -771,6 +777,112 @@ func (e *XAIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, 
 	usageJSON := fmt.Sprintf(`{"response":{"usage":{"input_tokens":%d,"output_tokens":0,"total_tokens":%d}}}`, count, count)
 	translated := sdktranslator.TranslateTokenCount(ctx, prepared.to, prepared.responseFormat, int64(count), []byte(usageJSON))
 	return cliproxyexecutor.Response{Payload: translated}, nil
+}
+
+// ProbeAuth verifies xAI OAuth chat access without relying on token refresh.
+func (e *XAIExecutor) ProbeAuth(ctx context.Context, auth *cliproxyauth.Auth) error {
+	if auth == nil {
+		return fmt.Errorf("xai executor: auth is nil")
+	}
+	if xaiUsingAPI(auth) {
+		return fmt.Errorf("xai executor: API key auth inspection unsupported")
+	}
+
+	primaryBody := []byte(fmt.Sprintf(`{"model":%q,"input":"ping","stream":false}`, xaiInspectionProbeModel))
+	primary, err := e.probeAuthRequest(ctx, auth, xaiResponsesPath, primaryBody)
+	if err != nil {
+		return err
+	}
+	if primary.statusCode >= http.StatusOK && primary.statusCode < http.StatusMultipleChoices {
+		return nil
+	}
+
+	if primary.statusCode == http.StatusTooManyRequests && !xaiFreeUsageExhausted(primary.body) {
+		if errWait := waitXAIInspectionRetry(ctx); errWait != nil {
+			return errWait
+		}
+		if retry, errRetry := e.probeAuthRequest(ctx, auth, xaiResponsesPath, primaryBody); errRetry == nil {
+			primary = retry
+		}
+		if primary.statusCode >= http.StatusOK && primary.statusCode < http.StatusMultipleChoices {
+			return nil
+		}
+	}
+
+	if xaiInspectionProbeDefinitive(primary.statusCode, primary.body) {
+		return xaiStatusErr(primary.statusCode, primary.body)
+	}
+
+	fallbackBody := []byte(fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"ping"}],"stream":false}`, xaiInspectionProbeModel))
+	fallback, errFallback := e.probeAuthRequest(ctx, auth, xaiChatCompletionsPath, fallbackBody)
+	if errFallback != nil {
+		return xaiStatusErr(primary.statusCode, primary.body)
+	}
+	if fallback.statusCode >= http.StatusOK && fallback.statusCode < http.StatusMultipleChoices {
+		return nil
+	}
+	return xaiStatusErr(fallback.statusCode, fallback.body)
+}
+
+type xaiAuthProbeResponse struct {
+	statusCode int
+	body       []byte
+}
+
+func (e *XAIExecutor) probeAuthRequest(ctx context.Context, auth *cliproxyauth.Auth, path string, body []byte) (xaiAuthProbeResponse, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, helps.JoinBaseURL(xaiChatBaseURL(auth), path), bytes.NewReader(body))
+	if err != nil {
+		return xaiAuthProbeResponse{}, fmt.Errorf("xai executor: build auth probe request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := e.HttpRequest(ctx, auth, req)
+	if err != nil {
+		return xaiAuthProbeResponse{}, fmt.Errorf("xai executor: auth probe request: %w", err)
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Errorf("xai executor: close auth probe response body error: %v", errClose)
+		}
+	}()
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, xaiInspectionProbeBodyLimit))
+	if err != nil {
+		return xaiAuthProbeResponse{}, fmt.Errorf("xai executor: read auth probe response: %w", err)
+	}
+	return xaiAuthProbeResponse{statusCode: resp.StatusCode, body: responseBody}, nil
+}
+
+func waitXAIInspectionRetry(ctx context.Context) error {
+	timer := time.NewTimer(xaiInspectionRetryBackoff)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func xaiInspectionProbeDefinitive(statusCode int, body []byte) bool {
+	if statusCode == http.StatusUnauthorized || xaiFreeUsageExhausted(body) {
+		return true
+	}
+	message := strings.ToLower(string(body))
+	for _, marker := range []string{
+		"personal-team-blocked:spending-limit",
+		"spending-limit",
+		"access to the chat endpoint is denied",
+		"chat endpoint is denied",
+		"no active grok subscription",
+		"subscription required",
+		"permission-denied",
+		"not entitled",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // Refresh refreshes xAI OAuth credentials using the stored refresh token.
@@ -2283,27 +2395,32 @@ func xaiFunctionParametersNeedSimplification(tool gjson.Result, namespaceName st
 
 func xaiStatusErr(code int, body []byte) statusErr {
 	err := statusErr{code: code, msg: string(body)}
-	if code != http.StatusTooManyRequests || len(body) == 0 {
-		return err
-	}
-	codeStr := strings.ToLower(gjson.GetBytes(body, "code").String())
-	if codeStr == "" {
-		codeStr = strings.ToLower(gjson.GetBytes(body, "error.code").String())
-	}
-	msg := strings.ToLower(gjson.GetBytes(body, "error").String())
-	if msg == "" {
-		msg = strings.ToLower(gjson.GetBytes(body, "error.message").String())
-	}
-	if msg == "" {
-		msg = strings.ToLower(string(body))
-	}
-	if strings.Contains(codeStr, "free-usage-exhausted") ||
-		strings.Contains(msg, "free-usage-exhausted") ||
-		strings.Contains(msg, "included free usage") {
+	if code == http.StatusTooManyRequests && xaiFreeUsageExhausted(body) {
 		d := xaiFreeUsageExhaustedCooldown
 		err.retryAfter = &d
 	}
 	return err
+}
+
+func xaiFreeUsageExhausted(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	code := strings.ToLower(gjson.GetBytes(body, "code").String())
+	if code == "" {
+		code = strings.ToLower(gjson.GetBytes(body, "error.code").String())
+	}
+	message := strings.ToLower(gjson.GetBytes(body, "error").String())
+	if message == "" {
+		message = strings.ToLower(gjson.GetBytes(body, "error.message").String())
+	}
+	if message == "" {
+		message = strings.ToLower(string(body))
+	}
+	return strings.Contains(code, "free-usage-exhausted") ||
+		strings.Contains(message, "free-usage-exhausted") ||
+		strings.Contains(message, "used all the included free usage") ||
+		strings.Contains(message, "included free usage has been exhausted")
 }
 
 func sanitizeXAIInputEncryptedContent(body []byte) []byte {

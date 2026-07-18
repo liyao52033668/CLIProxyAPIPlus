@@ -188,7 +188,17 @@ func (p *codexInspectionProber) inspectProviderAuth(ctx context.Context, file co
 
 	if prober, okProbe := executor.(coreauth.AuthProber); okProbe {
 		if probeErr := prober.ProbeAuth(probeCtx, auth.Clone()); probeErr != nil {
+			if strings.EqualFold(strings.TrimSpace(file.Provider), "xai") {
+				return inspectionXAIProbeErrorResult(result, settings, file.Provider, probeErr)
+			}
 			return inspectionProviderErrorResult(result, settings, file.Provider, probeErr)
+		}
+		if strings.EqualFold(strings.TrimSpace(file.Provider), "xai") {
+			result.ActionReason = "xAI probe succeeded"
+			if result.Disabled {
+				result.ActionReason = "xAI probe succeeded; account remains disabled"
+				result.Executable = false
+			}
 		}
 		return result
 	}
@@ -230,6 +240,115 @@ func inspectionProviderErrorResult(result codexinspection.InspectionResultItem, 
 		result.Action = codexinspection.ActionFailed
 	}
 	return result
+}
+
+func inspectionXAIProbeErrorResult(result codexinspection.InspectionResultItem, settings codexinspection.InspectionSettings, provider string, probeErr error) codexinspection.InspectionResultItem {
+	result.StatusCode = inspectionStatusCode(probeErr)
+	result.Error = probeErr.Error()
+	result.ActionReason = result.Error
+	if action, ok := inspectionActionForStatusCode(settings, provider, result.StatusCode); ok {
+		result.Action = action
+		result.ActionReason = fmt.Sprintf("%d response", result.StatusCode)
+		return result
+	}
+
+	message := strings.ToLower(probeErr.Error())
+	switch {
+	case inspectionXAIFreeUsageExhausted(message):
+		result.Action = codexinspection.ActionDisable
+		result.ActionReason = "xAI free usage exhausted"
+	case inspectionXAISpendingLimitReached(message):
+		result.Action = codexinspection.ActionDisable
+		result.ActionReason = "xAI spending limit reached"
+	case result.StatusCode == http.StatusUnauthorized || inspectionXAIAuthInvalid(message):
+		result.Action = codexinspection.ActionReauth
+		result.ActionReason = "xAI authentication invalid"
+	case inspectionXAIEntitlementDenied(message):
+		result.Action = codexinspection.ActionDisable
+		result.ActionReason = "xAI chat entitlement denied"
+	case result.StatusCode == http.StatusTooManyRequests:
+		result.Action = codexinspection.ActionFailed
+		result.ActionReason = "xAI temporarily rate limited"
+	case result.StatusCode == http.StatusNotFound:
+		result.Action = codexinspection.ActionFailed
+		result.ActionReason = "xAI probe model unavailable"
+	case result.StatusCode == http.StatusPaymentRequired || result.StatusCode == http.StatusForbidden:
+		result.Action = codexinspection.ActionFailed
+		result.ActionReason = fmt.Sprintf("xAI permission or quota status requires review (HTTP %d)", result.StatusCode)
+	default:
+		result.Action = codexinspection.ActionFailed
+		result.ActionReason = "xAI probe failed"
+	}
+	if result.Disabled && result.Action == codexinspection.ActionDisable {
+		result.Action = codexinspection.ActionKeep
+		result.ActionReason += "; account already disabled"
+		result.Executable = false
+	}
+	return result
+}
+
+func inspectionXAIFreeUsageExhausted(message string) bool {
+	return strings.Contains(message, "free-usage-exhausted") ||
+		strings.Contains(message, "used all the included free usage") ||
+		strings.Contains(message, "included free usage has been exhausted")
+}
+
+func inspectionXAISpendingLimitReached(message string) bool {
+	for _, marker := range []string{
+		"personal-team-blocked:spending-limit",
+		"spending-limit",
+		"run out of credits",
+		"used all available credits",
+		"monthly spending limit",
+		"purchase more credits",
+		"add credits",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func inspectionXAIAuthInvalid(message string) bool {
+	for _, marker := range []string{
+		"invalid_grant",
+		"invalid_refresh_token",
+		"token_invalidated",
+		"token_revoked",
+		"refresh_token_reused",
+		"bad-credentials",
+		"invalid or expired credentials",
+		"authentication token has been invalidated",
+		"token has been invalidated",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func inspectionXAIEntitlementDenied(message string) bool {
+	for _, marker := range []string{
+		"permission-denied",
+		"chat endpoint is denied",
+		"access to the chat endpoint is denied",
+		"need a grok subscription",
+		"no active grok subscription",
+		"do not have an active grok subscription",
+		"not authorized for xai api access",
+		"not entitled",
+		"subscription required",
+		"deactivated",
+		"suspended",
+		"banned",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func inspectionMetadataChanges(original, refreshed *coreauth.Auth) (map[string]any, []string) {

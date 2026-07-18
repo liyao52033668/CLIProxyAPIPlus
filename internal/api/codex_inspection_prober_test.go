@@ -388,6 +388,131 @@ func TestProviderInspectionStatusCodeActionOverridesDefault(t *testing.T) {
 	}
 }
 
+func TestXAIProviderInspectionClassifiesProbeResults(t *testing.T) {
+	tests := []struct {
+		name           string
+		probeErr       error
+		disabled       bool
+		settings       func(codexinspection.InspectionSettings) codexinspection.InspectionSettings
+		wantAction     codexinspection.Action
+		wantReason     string
+		wantStatusCode int
+		wantExecutable bool
+	}{
+		{
+			name:           "unauthorized requires reauthentication",
+			probeErr:       inspectionTestStatusError{code: http.StatusUnauthorized},
+			wantAction:     codexinspection.ActionReauth,
+			wantReason:     "xAI authentication invalid",
+			wantStatusCode: http.StatusUnauthorized,
+			wantExecutable: true,
+		},
+		{
+			name:           "free usage exhaustion disables",
+			probeErr:       inspectionTestStatusError{code: http.StatusTooManyRequests, message: `subscription:free-usage-exhausted`},
+			wantAction:     codexinspection.ActionDisable,
+			wantReason:     "xAI free usage exhausted",
+			wantStatusCode: http.StatusTooManyRequests,
+			wantExecutable: true,
+		},
+		{
+			name:           "bare rate limit stays failed",
+			probeErr:       inspectionTestStatusError{code: http.StatusTooManyRequests, message: "temporary rate limit"},
+			wantAction:     codexinspection.ActionFailed,
+			wantReason:     "xAI temporarily rate limited",
+			wantStatusCode: http.StatusTooManyRequests,
+			wantExecutable: true,
+		},
+		{
+			name:           "bare forbidden stays failed",
+			probeErr:       inspectionTestStatusError{code: http.StatusForbidden, message: "forbidden"},
+			wantAction:     codexinspection.ActionFailed,
+			wantReason:     "xAI permission or quota status requires review (HTTP 403)",
+			wantStatusCode: http.StatusForbidden,
+			wantExecutable: true,
+		},
+		{
+			name:           "explicit entitlement denial disables",
+			probeErr:       inspectionTestStatusError{code: http.StatusForbidden, message: "access to the chat endpoint is denied"},
+			wantAction:     codexinspection.ActionDisable,
+			wantReason:     "xAI chat entitlement denied",
+			wantStatusCode: http.StatusForbidden,
+			wantExecutable: true,
+		},
+		{
+			name:           "disabled exhausted account stays disabled",
+			probeErr:       inspectionTestStatusError{code: http.StatusTooManyRequests, message: "included free usage has been exhausted"},
+			disabled:       true,
+			wantAction:     codexinspection.ActionKeep,
+			wantReason:     "xAI free usage exhausted; account already disabled",
+			wantStatusCode: http.StatusTooManyRequests,
+			wantExecutable: false,
+		},
+		{
+			name:     "configured status action takes priority",
+			probeErr: inspectionTestStatusError{code: http.StatusForbidden, message: "forbidden"},
+			settings: func(settings codexinspection.InspectionSettings) codexinspection.InspectionSettings {
+				settings.StatusCodeActions = map[string]map[int]codexinspection.Action{
+					"xai": {http.StatusForbidden: codexinspection.ActionDelete},
+				}
+				return settings
+			},
+			wantAction:     codexinspection.ActionDelete,
+			wantReason:     "403 response",
+			wantStatusCode: http.StatusForbidden,
+			wantExecutable: true,
+		},
+		{
+			name:           "healthy disabled account is not enabled",
+			disabled:       true,
+			wantAction:     codexinspection.ActionKeep,
+			wantReason:     "xAI probe succeeded; account remains disabled",
+			wantExecutable: false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manager := coreauth.NewManager(nil, nil, nil)
+			executor := &inspectionProbeExecutor{
+				inspectionRefreshExecutor: &inspectionRefreshExecutor{provider: "xai"},
+				probe: func(context.Context, *coreauth.Auth) error {
+					return test.probeErr
+				},
+			}
+			manager.RegisterExecutor(executor)
+			if _, err := manager.Register(context.Background(), &coreauth.Auth{
+				ID:       "xai-auth",
+				Provider: "xai",
+				Disabled: test.disabled,
+				Metadata: map[string]any{"access_token": "token"},
+			}); err != nil {
+				t.Fatalf("Register: %v", err)
+			}
+
+			settings := codexinspection.DefaultSettings()
+			if test.settings != nil {
+				settings = test.settings(settings)
+			}
+			result := (&codexInspectionProber{manager: manager}).inspectProviderAuth(
+				context.Background(),
+				codexinspection.AuthFileRecord{AuthID: "xai-auth", FileName: "xai.json", Provider: "xai", Disabled: test.disabled},
+				settings,
+				codexinspection.InspectionResultItem{
+					Action:       codexinspection.ActionKeep,
+					ActionReason: "no issue detected",
+					Disabled:     test.disabled,
+					Executable:   true,
+				},
+			)
+
+			if result.Action != test.wantAction || result.ActionReason != test.wantReason || result.StatusCode != test.wantStatusCode || result.Executable != test.wantExecutable {
+				t.Fatalf("result = %+v, want action=%q reason=%q status=%d executable=%v", result, test.wantAction, test.wantReason, test.wantStatusCode, test.wantExecutable)
+			}
+		})
+	}
+}
+
 func TestInspectionNeedsReauth(t *testing.T) {
 	unauthorized := inspectionTestStatusError{code: 401}
 	if status := inspectionStatusCode(unauthorized); status != 401 {
@@ -430,6 +555,15 @@ func (e *inspectionRefreshExecutor) CountTokens(context.Context, *coreauth.Auth,
 
 func (e *inspectionRefreshExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
 	return nil, nil
+}
+
+type inspectionProbeExecutor struct {
+	*inspectionRefreshExecutor
+	probe func(context.Context, *coreauth.Auth) error
+}
+
+func (e *inspectionProbeExecutor) ProbeAuth(ctx context.Context, auth *coreauth.Auth) error {
+	return e.probe(ctx, auth)
 }
 
 type inspectionTestStatusError struct {

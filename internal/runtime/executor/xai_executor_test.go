@@ -4569,6 +4569,145 @@ func TestXAIExecutorPrepareRequestChatProxyHeaders(t *testing.T) {
 	})
 }
 
+func TestXAIExecutorProbeAuth(t *testing.T) {
+	newAuth := func(baseURL string) *cliproxyauth.Auth {
+		return &cliproxyauth.Auth{
+			Provider: "xai",
+			Attributes: map[string]string{
+				"auth_kind":     "oauth",
+				"base_url":      baseURL,
+				xaiUsingAPIAttr: "false",
+			},
+			Metadata: map[string]any{"access_token": "xai-token"},
+		}
+	}
+
+	t.Run("responses success", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != xaiResponsesPath {
+				t.Fatalf("path = %q, want %q", r.URL.Path, xaiResponsesPath)
+			}
+			if got := r.Header.Get("Authorization"); got != "Bearer xai-token" {
+				t.Fatalf("Authorization = %q, want Bearer xai-token", got)
+			}
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("ReadAll() error = %v", err)
+			}
+			if got := gjson.GetBytes(body, "model").String(); got != xaiInspectionProbeModel {
+				t.Fatalf("model = %q, want %q", got, xaiInspectionProbeModel)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"resp_probe"}`))
+		}))
+		defer server.Close()
+
+		if err := NewXAIExecutor(&config.Config{}).ProbeAuth(context.Background(), newAuth(server.URL)); err != nil {
+			t.Fatalf("ProbeAuth() error = %v", err)
+		}
+	})
+
+	t.Run("ambiguous primary uses chat completions fallback", func(t *testing.T) {
+		paths := make(chan string, 2)
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			paths <- r.URL.Path
+			if r.URL.Path == xaiResponsesPath {
+				http.Error(w, `{"error":{"message":"model unavailable"}}`, http.StatusNotFound)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"chat_probe"}`))
+		}))
+		defer server.Close()
+
+		if err := NewXAIExecutor(&config.Config{}).ProbeAuth(context.Background(), newAuth(server.URL)); err != nil {
+			t.Fatalf("ProbeAuth() error = %v", err)
+		}
+		if got := <-paths; got != xaiResponsesPath {
+			t.Fatalf("first path = %q, want %q", got, xaiResponsesPath)
+		}
+		if got := <-paths; got != xaiChatCompletionsPath {
+			t.Fatalf("second path = %q, want %q", got, xaiChatCompletionsPath)
+		}
+	})
+
+	t.Run("free usage exhaustion skips retry and fallback", func(t *testing.T) {
+		paths := make(chan string, 2)
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			paths <- r.URL.Path
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"code":"subscription:free-usage-exhausted","error":"included free usage has been exhausted"}`))
+		}))
+		defer server.Close()
+
+		err := NewXAIExecutor(&config.Config{}).ProbeAuth(context.Background(), newAuth(server.URL))
+		var statusError statusErr
+		if !errors.As(err, &statusError) {
+			t.Fatalf("ProbeAuth() error = %T %v, want statusErr", err, err)
+		}
+		if statusError.StatusCode() != http.StatusTooManyRequests || statusError.RetryAfter() == nil {
+			t.Fatalf("status error = %+v, want 429 with retry-after", statusError)
+		}
+		if got := len(paths); got != 1 {
+			t.Fatalf("request count = %d, want 1", got)
+		}
+	})
+
+	t.Run("bare rate limit retries then falls back", func(t *testing.T) {
+		paths := make(chan string, 3)
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			paths <- r.URL.Path
+			if r.URL.Path == xaiResponsesPath {
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = w.Write([]byte(`{"error":"temporary rate limit"}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"id":"chat_probe"}`))
+		}))
+		defer server.Close()
+
+		if err := NewXAIExecutor(&config.Config{}).ProbeAuth(context.Background(), newAuth(server.URL)); err != nil {
+			t.Fatalf("ProbeAuth() error = %v", err)
+		}
+		want := []string{xaiResponsesPath, xaiResponsesPath, xaiChatCompletionsPath}
+		for _, wantPath := range want {
+			if got := <-paths; got != wantPath {
+				t.Fatalf("path = %q, want %q", got, wantPath)
+			}
+		}
+	})
+
+	t.Run("official API key is not probed", func(t *testing.T) {
+		requests := make(chan struct{}, 1)
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requests <- struct{}{}
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer server.Close()
+
+		auth := newAuth(server.URL)
+		auth.Attributes[xaiUsingAPIAttr] = "true"
+		err := NewXAIExecutor(&config.Config{}).ProbeAuth(context.Background(), auth)
+		if err == nil || !strings.Contains(err.Error(), "API key auth inspection unsupported") {
+			t.Fatalf("ProbeAuth() error = %v, want unsupported API key error", err)
+		}
+		if got := len(requests); got != 0 {
+			t.Fatalf("request count = %d, want 0", got)
+		}
+	})
+
+	t.Run("auto executor forwards probe", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"id":"resp_probe"}`))
+		}))
+		defer server.Close()
+
+		if err := NewXAIAutoExecutor(&config.Config{}).ProbeAuth(context.Background(), newAuth(server.URL)); err != nil {
+			t.Fatalf("ProbeAuth() error = %v", err)
+		}
+	})
+}
+
 func TestXAIExecutorExecuteChatUsesProxyHeadersOnlyForChatProxy(t *testing.T) {
 	var gotTokenAuth string
 	var gotClientVersion string
