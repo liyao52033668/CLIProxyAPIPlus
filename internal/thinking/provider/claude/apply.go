@@ -85,6 +85,22 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 
 	switch config.Mode {
 	case thinking.ModeNone:
+		if supportsAdaptive && config.Level != "" && config.Level != thinking.LevelNone {
+			result, _ := sjson.SetBytes(body, "thinking.type", "adaptive")
+			result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
+			result, _ = sjson.SetBytes(result, "output_config.effort", string(config.Level))
+			return result, nil
+		}
+		if config.Budget > 0 {
+			result, _ := sjson.SetBytes(body, "thinking.type", "enabled")
+			result, _ = sjson.SetBytes(result, "thinking.budget_tokens", config.Budget)
+			result, _ = sjson.DeleteBytes(result, "output_config.effort")
+			if oc := gjson.GetBytes(result, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
+				result, _ = sjson.DeleteBytes(result, "output_config")
+			}
+			result = a.normalizeClaudeBudget(result, config.Budget, modelInfo)
+			return result, nil
+		}
 		result, _ := sjson.SetBytes(body, "thinking.type", "disabled")
 		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
 		result, _ = sjson.DeleteBytes(result, "output_config.effort")

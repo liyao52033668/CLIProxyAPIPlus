@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"testing"
+	"time"
 )
 
 func validCodexReasoningReplayEncryptedContentForTest(seed byte) string {
@@ -69,5 +70,42 @@ func TestCodexReasoningReplayCacheBatchEvictsWhenFull(t *testing.T) {
 	codexReasoningReplayMu.Unlock()
 	if gotLen >= CodexReasoningReplayCacheMaxEntries {
 		t.Fatalf("cache entries = %d, want batch eviction below max %d", gotLen, CodexReasoningReplayCacheMaxEntries)
+	}
+}
+
+func TestCodexReasoningReplayCacheEvictsOldestEntryOverTotalByteBudget(t *testing.T) {
+	ClearCodexReasoningReplayCache()
+	t.Cleanup(ClearCodexReasoningReplayCache)
+
+	oldKey := codexReasoningReplayCacheKey("gpt-5.4", "old-session")
+	codexReasoningReplayMu.Lock()
+	codexReasoningReplayEntries[oldKey] = codexReasoningReplayEntry{
+		Timestamp: time.Now().Add(-time.Minute),
+		Bytes:     CodexReasoningReplayCacheMaxTotalBytes,
+		Version:   1,
+	}
+	codexReasoningReplayTotalBytes = CodexReasoningReplayCacheMaxTotalBytes
+	codexReasoningReplayVersion = 1
+	codexReasoningReplayMu.Unlock()
+
+	encryptedContent := validCodexReasoningReplayEncryptedContentForTest(10)
+	item := []byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"` + encryptedContent + `"}`)
+	if !CacheCodexReasoningReplayItem("gpt-5.4", "new-session", item) {
+		t.Fatal("cache insert failed")
+	}
+
+	codexReasoningReplayMu.Lock()
+	_, oldExists := codexReasoningReplayEntries[oldKey]
+	newEntry, newExists := codexReasoningReplayEntries[codexReasoningReplayCacheKey("gpt-5.4", "new-session")]
+	totalBytes := codexReasoningReplayTotalBytes
+	codexReasoningReplayMu.Unlock()
+	if oldExists {
+		t.Fatal("oldest entry was not evicted over total byte budget")
+	}
+	if !newExists {
+		t.Fatal("newest entry was evicted instead of oldest entry")
+	}
+	if totalBytes != int64(newEntry.Bytes) || totalBytes > CodexReasoningReplayCacheMaxTotalBytes {
+		t.Fatalf("total bytes = %d, new entry bytes = %d", totalBytes, newEntry.Bytes)
 	}
 }

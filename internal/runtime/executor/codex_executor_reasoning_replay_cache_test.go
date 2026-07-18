@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,7 +15,9 @@ import (
 	"github.com/gin-gonic/gin"
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -129,7 +132,10 @@ func TestCodexExecutorReasoningReplayCacheSharesSameSessionAcrossClientKeys(t *t
 	}
 	cacheCodexReasoningReplayFromCompleted(firstScope, []byte(`{"response":{"output":[{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+encryptedContent+`"}]}}`))
 
-	secondBody, secondScope := applyCodexReasoningReplayCache(codexReplaySessionOnlyContext("client-key-b"), from, req, opts, body)
+	secondBody, secondScope, err := applyCodexReasoningReplayCache(codexReplaySessionOnlyContext("client-key-b"), from, req, opts, body)
+	if err != nil {
+		t.Fatalf("apply replay cache: %v", err)
+	}
 	if secondScope != firstScope {
 		t.Fatalf("replay scope should ignore client API key for the same session: first=%#v second=%#v", firstScope, secondScope)
 	}
@@ -154,8 +160,8 @@ func TestCodexExecutorReasoningReplaySessionKeyUsesClaudeCodeJSONSessionID(t *te
 	body := []byte(`{"model":"gpt-5.4","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"next"}]}]}`)
 
 	got := codexReasoningReplaySessionKey(context.Background(), from, req, cliproxyexecutor.Options{SourceFormat: from}, body)
-	if got != "claude:session-json-1" {
-		t.Fatalf("codexReasoningReplaySessionKey() = %q, want claude:session-json-1", got)
+	if got != "claude:session-json-1:agent:main" {
+		t.Fatalf("codexReasoningReplaySessionKey() = %q, want claude:session-json-1:agent:main", got)
 	}
 }
 
@@ -367,7 +373,7 @@ func TestCodexExecutorReasoningReplayCacheDoesNotDuplicateClaudeClientReasoning(
 
 	cachedEncryptedContent := validCodexReasoningEncryptedContentForTestSeed(5)
 	clientEncryptedContent := validCodexReasoningEncryptedContentForTestSeed(6)
-	internalcache.CacheCodexReasoningReplayItem("gpt-5.4", "claude:session-2", []byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+cachedEncryptedContent+`"}`))
+	internalcache.CacheCodexReasoningReplayItem("gpt-5.4", "claude:session-2:agent:main", []byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+cachedEncryptedContent+`"}`))
 
 	var gotBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -418,7 +424,7 @@ func TestCodexExecutorReasoningReplayCacheInsertsReasoningBeforeAssistantOutputI
 	t.Cleanup(internalcache.ClearCodexReasoningReplayCache)
 
 	cachedEncryptedContent := validCodexReasoningEncryptedContentForTestSeed(7)
-	internalcache.CacheCodexReasoningReplayItem("gpt-5.4", "claude:session-history", []byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+cachedEncryptedContent+`"}`))
+	internalcache.CacheCodexReasoningReplayItem("gpt-5.4", "claude:session-history:agent:main", []byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+cachedEncryptedContent+`"}`))
 
 	var gotBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -546,7 +552,7 @@ func TestCodexExecutorReasoningReplayCacheClearsOnNonStreamResponseFailedInvalid
 	t.Cleanup(internalcache.ClearCodexReasoningReplayCache)
 
 	cachedEncryptedContent := validCodexReasoningEncryptedContentForTestSeed(9)
-	internalcache.CacheCodexReasoningReplayItem("gpt-5.4", "claude:session-invalid-nonstream", []byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+cachedEncryptedContent+`"}`))
+	internalcache.CacheCodexReasoningReplayItem("gpt-5.4", "claude:session-invalid-nonstream:agent:main", []byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+cachedEncryptedContent+`"}`))
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.ReadAll(r.Body)
@@ -572,7 +578,7 @@ func TestCodexExecutorReasoningReplayCacheClearsOnNonStreamResponseFailedInvalid
 	if err == nil {
 		t.Fatal("expected invalid signature error")
 	}
-	if _, ok := internalcache.GetCodexReasoningReplayItem("gpt-5.4", "claude:session-invalid-nonstream"); ok {
+	if _, ok := internalcache.GetCodexReasoningReplayItem("gpt-5.4", "claude:session-invalid-nonstream:agent:main"); ok {
 		t.Fatal("invalid signature response.failed should clear cached replay item")
 	}
 }
@@ -582,7 +588,7 @@ func TestCodexExecutorReasoningReplayCacheClearsOnStreamResponseFailedInvalidSig
 	t.Cleanup(internalcache.ClearCodexReasoningReplayCache)
 
 	cachedEncryptedContent := validCodexReasoningEncryptedContentForTestSeed(10)
-	internalcache.CacheCodexReasoningReplayItem("gpt-5.4", "claude:session-invalid-stream", []byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+cachedEncryptedContent+`"}`))
+	internalcache.CacheCodexReasoningReplayItem("gpt-5.4", "claude:session-invalid-stream:agent:main", []byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+cachedEncryptedContent+`"}`))
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.ReadAll(r.Body)
@@ -618,7 +624,7 @@ func TestCodexExecutorReasoningReplayCacheClearsOnStreamResponseFailedInvalidSig
 	if !gotChunkErr {
 		t.Fatal("expected stream chunk error for invalid signature response.failed")
 	}
-	if _, ok := internalcache.GetCodexReasoningReplayItem("gpt-5.4", "claude:session-invalid-stream"); ok {
+	if _, ok := internalcache.GetCodexReasoningReplayItem("gpt-5.4", "claude:session-invalid-stream:agent:main"); ok {
 		t.Fatal("invalid signature response.failed should clear cached replay item")
 	}
 }
@@ -717,7 +723,7 @@ func TestCodexExecutorReasoningReplayCacheDropsFunctionCallWithoutMatchingOutput
 	encryptedContent := validCodexReasoningEncryptedContentForTestSeed(14)
 	scope := codexReasoningReplayScope{
 		modelName:  "gpt-5.4",
-		sessionKey: "claude:session-dropped-tool",
+		sessionKey: "claude:session-dropped-tool:agent:main",
 	}
 	cacheCodexReasoningReplayFromCompleted(scope, []byte(`{"response":{"output":[`+
 		`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+encryptedContent+`"},`+
@@ -734,15 +740,18 @@ func TestCodexExecutorReasoningReplayCacheDropsFunctionCallWithoutMatchingOutput
 		}`),
 	}
 
-	updated, replayScope := applyCodexReasoningReplayCache(
+	updated, replayScope, err := applyCodexReasoningReplayCache(
 		context.Background(),
 		sdktranslator.FromString("claude"),
 		req,
 		cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")},
 		body,
 	)
-	if replayScope != scope {
-		t.Fatalf("replay scope = %#v, want %#v", replayScope, scope)
+	if err != nil {
+		t.Fatalf("apply replay cache: %v", err)
+	}
+	if replayScope.modelName != scope.modelName || replayScope.sessionKey != scope.sessionKey {
+		t.Fatalf("replay scope = %#v, want model/session %#v", replayScope, scope)
 	}
 	if got := gjson.GetBytes(updated, "input.0.type").String(); got != "reasoning" {
 		t.Fatalf("input.0.type = %q, want reasoning; body=%s", got, string(updated))
@@ -931,5 +940,111 @@ func TestClaudeToolResultOutputsByCallIDWrapsPlainTextAndNonContentJSON(t *testi
 	}
 	if got := gjson.GetBytes(output, "output.1.text").String(); got != `[{"name":"not-content"}]` {
 		t.Fatalf("output.1.text = %q, want original JSON string; output=%s", got, string(output))
+	}
+}
+
+func TestCodexExecutorReasoningReplaySessionKeyIsolatesClaudeCodeAgents(t *testing.T) {
+	from := sdktranslator.FromString("claude")
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","metadata":{"user_id":"{\"session_id\":\"session-agents\"}"},"messages":[{"role":"user","content":[{"type":"text","text":"next"}]}]}`),
+	}
+	body := []byte(`{"model":"gpt-5.4","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"next"}]}]}`)
+
+	rootHeaders := http.Header{}
+	rootHeaders.Set(helps.ClaudeCodeSessionHeader, "session-agents")
+	childHeaders := rootHeaders.Clone()
+	childHeaders.Set(helps.ClaudeCodeAgentHeader, "agent-a")
+
+	rootKey := codexReasoningReplaySessionKey(context.Background(), from, req, cliproxyexecutor.Options{SourceFormat: from, Headers: rootHeaders}, body)
+	childKey := codexReasoningReplaySessionKey(context.Background(), from, req, cliproxyexecutor.Options{SourceFormat: from, Headers: childHeaders}, body)
+	if rootKey != "claude:session-agents:agent:main" {
+		t.Fatalf("root key = %q", rootKey)
+	}
+	if childKey != "claude:session-agents:agent:agent-a" {
+		t.Fatalf("child key = %q", childKey)
+	}
+	if rootKey == childKey {
+		t.Fatalf("agent keys were not isolated")
+	}
+}
+
+func TestInsertCodexReasoningReplayTurnsKeepsTurnAnchors(t *testing.T) {
+	firstReasoning := validCodexReasoningEncryptedContentForTestSeed(21)
+	secondReasoning := validCodexReasoningEncryptedContentForTestSeed(22)
+	body := []byte(`{"input":[` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"first"}]},` +
+		`{"type":"function_call_output","call_id":"call_first","output":"one"},` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"second"}]},` +
+		`{"type":"function_call_output","call_id":"call_second","output":"two"},` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"third"}]}` +
+		`]}`)
+	replayItems := [][]byte{
+		[]byte(`{"type":"cpa_codex_replay_turn","id":"turn-first","call_ids":["call_first"]}`),
+		[]byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"` + firstReasoning + `"}`),
+		[]byte(`{"type":"function_call","call_id":"call_first","name":"first_tool","arguments":"{}"}`),
+		[]byte(`{"type":"cpa_codex_replay_turn","id":"turn-second","call_ids":["call_second"]}`),
+		[]byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"` + secondReasoning + `"}`),
+		[]byte(`{"type":"function_call","call_id":"call_second","name":"second_tool","arguments":"{}"}`),
+	}
+
+	updated, inserted := insertCodexReasoningReplayTurns(body, replayItems)
+	if !inserted {
+		t.Fatal("expected replay turns to be inserted")
+	}
+	wantTypes := []string{"message", "reasoning", "function_call", "function_call_output", "message", "reasoning", "function_call", "function_call_output", "message"}
+	items := gjson.GetBytes(updated, "input").Array()
+	if len(items) != len(wantTypes) {
+		t.Fatalf("input length = %d, want %d; body=%s", len(items), len(wantTypes), updated)
+	}
+	for index, wantType := range wantTypes {
+		if got := items[index].Get("type").String(); got != wantType {
+			t.Fatalf("input.%d.type = %q, want %q; body=%s", index, got, wantType, updated)
+		}
+	}
+	if got := items[2].Get("call_id").String(); got != "call_first" {
+		t.Fatalf("first replay call_id = %q", got)
+	}
+	if got := items[6].Get("call_id").String(); got != "call_second" {
+		t.Fatalf("second replay call_id = %q", got)
+	}
+}
+
+func TestFilterReplayItemsMatchesSanitizedClaudeToolResultCallID(t *testing.T) {
+	rawCallID := "call/with spaces:and-invalid-characters"
+	visibleCallID := util.SanitizeClaudeToolID(rawCallID)
+	if visibleCallID == rawCallID {
+		t.Fatalf("invalid test setup: sanitized call ID did not change: %q", rawCallID)
+	}
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"` + visibleCallID + `","content":"ok"}]}]}`)
+	outputs := claudeToolResultOutputsByCallID(payload)
+	replayItems := filterReplayItemsForClaudeOutputs([][]byte{
+		[]byte(`{"type":"function_call","call_id":"` + rawCallID + `","name":"lookup","arguments":"{}"}`),
+	}, outputs)
+	if len(replayItems) != 1 {
+		t.Fatalf("replay item count = %d, want 1", len(replayItems))
+	}
+	if got := gjson.GetBytes(replayItems[0], "call_id").String(); got != visibleCallID {
+		t.Fatalf("replay call_id = %q, want %q", got, visibleCallID)
+	}
+}
+
+func TestApplyCodexReasoningReplayCacheSurfacesReadError(t *testing.T) {
+	previous := getCodexReasoningReplayItemsRequired
+	getCodexReasoningReplayItemsRequired = func(context.Context, string, string) ([][]byte, bool, error) {
+		return nil, false, errors.New("home kv unavailable")
+	}
+	t.Cleanup(func() { getCodexReasoningReplayItemsRequired = previous })
+
+	from := sdktranslator.FromString("claude")
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","metadata":{"user_id":"{\"session_id\":\"session-read-error\"}"},"messages":[{"role":"user","content":"next"}]}`),
+	}
+	body := []byte(`{"model":"gpt-5.4","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"next"}]}]}`)
+
+	_, _, err := applyCodexReasoningReplayCache(context.Background(), from, req, cliproxyexecutor.Options{SourceFormat: from}, body)
+	if err == nil || !strings.Contains(err.Error(), "home kv unavailable") {
+		t.Fatalf("apply replay cache error = %v, want home kv error", err)
 	}
 }

@@ -34,6 +34,9 @@ type thinkingTestCase struct {
 	expectValue     string
 	expectField2    string
 	expectValue2    string
+	expectField3    string
+	expectValue3    string
+	expectAbsent    []string
 	includeThoughts string
 	expectErr       bool
 }
@@ -2969,6 +2972,211 @@ func TestThinkingE2EClaudeAdaptive_Body(t *testing.T) {
 	runThinkingTests(t, cases)
 }
 
+// TestThinkingE2EProviderTargets covers provider-specific targets that are not part of the main matrix.
+func TestThinkingE2EProviderTargets(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	uid := fmt.Sprintf("thinking-e2e-provider-targets-%d", time.Now().UnixNano())
+
+	reg.RegisterClient(uid, "test", getTestModels())
+	defer reg.UnregisterClient(uid)
+
+	cases := []thinkingTestCase{
+		// Kimi target: emit the native thinking object and accept reasoning_effort only as legacy input.
+		{
+			name:         "K1",
+			from:         "openai",
+			to:           "kimi",
+			model:        "kimi-toggle-thinking-model(high)",
+			inputJSON:    `{"model":"kimi-toggle-thinking-model(high)","messages":[{"role":"user","content":"hi"}]}`,
+			expectField:  "thinking.type",
+			expectValue:  "enabled",
+			expectField2: "thinking.effort",
+			expectValue2: "high",
+			expectAbsent: []string{"reasoning_effort"},
+		},
+		{
+			name:         "K2",
+			from:         "openai",
+			to:           "kimi",
+			model:        "kimi-toggle-thinking-model(none)",
+			inputJSON:    `{"model":"kimi-toggle-thinking-model(none)","messages":[{"role":"user","content":"hi"}]}`,
+			expectField:  "thinking.type",
+			expectValue:  "disabled",
+			expectAbsent: []string{"thinking.effort", "reasoning_effort"},
+		},
+		{
+			name:         "K3",
+			from:         "gemini",
+			to:           "kimi",
+			model:        "kimi-toggle-thinking-model(32768)",
+			inputJSON:    `{"model":"kimi-toggle-thinking-model(32768)","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+			expectField:  "thinking.type",
+			expectValue:  "enabled",
+			expectField2: "thinking.effort",
+			expectValue2: "high",
+			expectAbsent: []string{"reasoning_effort"},
+		},
+		{
+			name:         "K4",
+			from:         "openai",
+			to:           "kimi",
+			model:        "kimi-toggle-thinking-model(auto)",
+			inputJSON:    `{"model":"kimi-toggle-thinking-model(auto)","messages":[{"role":"user","content":"hi"}]}`,
+			expectField:  "thinking.type",
+			expectValue:  "enabled",
+			expectField2: "thinking.effort",
+			expectValue2: "medium",
+			expectAbsent: []string{"reasoning_effort"},
+		},
+		{
+			name:         "K5",
+			from:         "openai",
+			to:           "kimi",
+			model:        "kimi-tiered-thinking-model(none)",
+			inputJSON:    `{"model":"kimi-tiered-thinking-model(none)","messages":[{"role":"user","content":"hi"}]}`,
+			expectField:  "thinking.type",
+			expectValue:  "enabled",
+			expectField2: "thinking.effort",
+			expectValue2: "low",
+			expectAbsent: []string{"reasoning_effort"},
+		},
+		{
+			name:         "K6",
+			from:         "openai",
+			to:           "kimi",
+			model:        "kimi-toggle-thinking-model",
+			inputJSON:    `{"model":"kimi-toggle-thinking-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"high"}`,
+			expectField:  "thinking.type",
+			expectValue:  "enabled",
+			expectField2: "thinking.effort",
+			expectValue2: "high",
+			expectAbsent: []string{"reasoning_effort"},
+		},
+		{
+			name:         "K7",
+			from:         "openai-response",
+			to:           "kimi",
+			model:        "kimi-toggle-thinking-model",
+			inputJSON:    `{"model":"kimi-toggle-thinking-model","input":[{"role":"user","content":"hi"}],"reasoning":{"effort":"none"}}`,
+			expectField:  "thinking.type",
+			expectValue:  "disabled",
+			expectAbsent: []string{"thinking.effort", "reasoning_effort"},
+		},
+		{
+			name:         "K8",
+			from:         "gemini",
+			to:           "kimi",
+			model:        "kimi-toggle-thinking-model",
+			inputJSON:    `{"model":"kimi-toggle-thinking-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":32768}}}`,
+			expectField:  "thinking.type",
+			expectValue:  "enabled",
+			expectField2: "thinking.effort",
+			expectValue2: "high",
+			expectAbsent: []string{"reasoning_effort"},
+		},
+		{
+			name:         "K9",
+			from:         "gemini",
+			to:           "kimi",
+			model:        "kimi-toggle-thinking-model",
+			inputJSON:    `{"model":"kimi-toggle-thinking-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":8192}}}`,
+			expectField:  "thinking.type",
+			expectValue:  "enabled",
+			expectField2: "thinking.effort",
+			expectValue2: "medium",
+			expectAbsent: []string{"reasoning_effort"},
+		},
+		{
+			name:         "K10",
+			from:         "claude",
+			to:           "kimi",
+			model:        "kimi-toggle-thinking-model",
+			inputJSON:    `{"model":"kimi-toggle-thinking-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":0}}`,
+			expectField:  "thinking.type",
+			expectValue:  "disabled",
+			expectAbsent: []string{"thinking.effort", "reasoning_effort"},
+		},
+		{
+			name:         "K11",
+			from:         "claude",
+			to:           "kimi",
+			model:        "kimi-tiered-thinking-model",
+			inputJSON:    `{"model":"kimi-tiered-thinking-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":0}}`,
+			expectField:  "thinking.type",
+			expectValue:  "enabled",
+			expectField2: "thinking.effort",
+			expectValue2: "low",
+			expectAbsent: []string{"reasoning_effort"},
+		},
+		{
+			name:         "K12",
+			from:         "openai",
+			to:           "kimi",
+			model:        "kimi-toggle-thinking-model",
+			inputJSON:    `{"model":"kimi-toggle-thinking-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"high","thinking":{"keep":"all"}}`,
+			expectField:  "thinking.type",
+			expectValue:  "enabled",
+			expectField2: "thinking.effort",
+			expectValue2: "high",
+			expectField3: "thinking.keep",
+			expectValue3: "all",
+			expectAbsent: []string{"reasoning_effort"},
+		},
+		{
+			name:         "K13",
+			from:         "openai",
+			to:           "kimi",
+			model:        "kimi-toggle-thinking-model",
+			inputJSON:    `{"model":"kimi-toggle-thinking-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","effort":"high","keep":"all"}}`,
+			expectField:  "thinking.type",
+			expectValue:  "enabled",
+			expectField2: "thinking.effort",
+			expectValue2: "high",
+			expectField3: "thinking.keep",
+			expectValue3: "all",
+			expectAbsent: []string{"reasoning_effort"},
+		},
+		{
+			name:         "K14",
+			from:         "openai",
+			to:           "kimi",
+			model:        "kimi-toggle-thinking-model",
+			inputJSON:    `{"model":"kimi-toggle-thinking-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","keep":"all"}}`,
+			expectField:  "thinking.type",
+			expectValue:  "enabled",
+			expectField2: "thinking.keep",
+			expectValue2: "all",
+			expectAbsent: []string{"thinking.effort", "reasoning_effort"},
+		},
+		{
+			name:         "K15",
+			from:         "openai",
+			to:           "kimi",
+			model:        "kimi-toggle-thinking-model",
+			inputJSON:    `{"model":"kimi-toggle-thinking-model","messages":[{"role":"user","content":"hi"}],"thinking":{"effort":"high"},"reasoning_effort":"low"}`,
+			expectField:  "thinking.type",
+			expectValue:  "enabled",
+			expectField2: "thinking.effort",
+			expectValue2: "high",
+			expectAbsent: []string{"reasoning_effort"},
+		},
+		{
+			name:         "K16",
+			from:         "openai",
+			to:           "kimi",
+			model:        "kimi-toggle-thinking-model",
+			inputJSON:    `{"model":"kimi-toggle-thinking-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"auto"}`,
+			expectField:  "thinking.type",
+			expectValue:  "enabled",
+			expectField2: "thinking.effort",
+			expectValue2: "medium",
+			expectAbsent: []string{"reasoning_effort"},
+		},
+	}
+
+	runThinkingTests(t, cases)
+}
+
 // getTestModels returns the shared model definitions for E2E tests.
 func getTestModels() []*registry.ModelInfo {
 	return []*registry.ModelInfo{
@@ -3048,6 +3256,24 @@ func getTestModels() []*registry.ModelInfo {
 			Type:        "gemini-cli",
 			DisplayName: "Antigravity Budget Model",
 			Thinking:    &registry.ThinkingSupport{Min: 128, Max: 20000, ZeroAllowed: true, DynamicAllowed: true},
+		},
+		{
+			ID:          "kimi-toggle-thinking-model",
+			Object:      "model",
+			Created:     1700000000,
+			OwnedBy:     "moonshot",
+			Type:        "kimi",
+			DisplayName: "Kimi Toggle Thinking Model",
+			Thinking:    &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}, ZeroAllowed: true, DynamicAllowed: false},
+		},
+		{
+			ID:          "kimi-tiered-thinking-model",
+			Object:      "model",
+			Created:     1700000000,
+			OwnedBy:     "moonshot",
+			Type:        "kimi",
+			DisplayName: "Kimi Tiered Thinking Model",
+			Thinking:    &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}, ZeroAllowed: false, DynamicAllowed: false},
 		},
 		{
 			ID:          "no-thinking-model",
@@ -3144,11 +3370,13 @@ func runThinkingTests(t *testing.T, cases []thinkingTestCase) {
 
 			translateTo := tc.to
 			applyTo := tc.to
-			if tc.to == "iflow" {
+			switch applyTo {
+			case "kimi":
+				translateTo = "openai"
+			case "iflow":
 				translateTo = "openai"
 				applyTo = "iflow"
-			}
-			if tc.to == "github-copilot" {
+			case "github-copilot":
 				if tc.from == "openai-response" {
 					translateTo = "codex"
 					applyTo = "codex"
@@ -3181,6 +3409,12 @@ func runThinkingTests(t *testing.T, cases []thinkingTestCase) {
 				t.Fatalf("unexpected error: %v, body=%s", err, string(body))
 			}
 
+			for _, fieldPath := range tc.expectAbsent {
+				if gjson.GetBytes(body, fieldPath).Exists() {
+					t.Fatalf("expected field %s to be absent, body=%s", fieldPath, string(body))
+				}
+			}
+
 			if tc.expectField == "" {
 				var hasThinking bool
 				switch tc.to {
@@ -3196,6 +3430,8 @@ func runThinkingTests(t *testing.T, cases []thinkingTestCase) {
 					hasThinking = gjson.GetBytes(body, "reasoning_effort").Exists()
 				case "codex":
 					hasThinking = gjson.GetBytes(body, "reasoning.effort").Exists() || gjson.GetBytes(body, "reasoning").Exists()
+				case "kimi":
+					hasThinking = gjson.GetBytes(body, "thinking").Exists() || gjson.GetBytes(body, "reasoning_effort").Exists()
 				}
 				if hasThinking {
 					t.Fatalf("expected no thinking field but found one, body=%s", string(body))
@@ -3220,6 +3456,9 @@ func runThinkingTests(t *testing.T, cases []thinkingTestCase) {
 			assertField(tc.expectField, tc.expectValue)
 			if tc.expectField2 != "" {
 				assertField(tc.expectField2, tc.expectValue2)
+			}
+			if tc.expectField3 != "" {
+				assertField(tc.expectField3, tc.expectValue3)
 			}
 
 			if tc.includeThoughts != "" && (tc.to == "gemini" || tc.to == "gemini-cli" || tc.to == "antigravity") {

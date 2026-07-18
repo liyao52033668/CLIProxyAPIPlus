@@ -53,9 +53,17 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 		return &config, nil
 	}
 
-	// User-defined or compatibility models may use one provider's wire format while
-	// belonging to another model family. In that case, keep budget compatibility
-	// clamping while preserving strict validation for explicit levels.
+	// allowClampUnsupported determines whether to clamp unsupported levels instead of returning an error.
+	// This applies when crossing provider families (e.g., openai→gemini, claude→gemini) and the target
+	// model supports discrete levels. Same-family conversions require strict validation.
+	//
+	// modelFamilyMismatch covers providers that reuse another protocol on the wire
+	// (e.g. Kimi serving Claude-compatible /v1/messages). In that path fromFormat and
+	// toFormat both look like "claude", but the model itself is not Claude-family, so
+	// unsupported levels such as "max" should clamp to the nearest supported level
+	// (typically "high") instead of failing validation.
+	toCapability := detectModelCapability(modelInfo)
+	toHasLevelSupport := toCapability == CapabilityLevelOnly || toCapability == CapabilityHybrid
 	modelFamilyMismatch := false
 	if modelInfo != nil {
 		modelType := strings.ToLower(strings.TrimSpace(modelInfo.Type))
@@ -66,6 +74,8 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 			}
 		}
 	}
+	allowClampUnsupported := toHasLevelSupport && (!isSameProviderFamily(fromFormat, toFormat) || modelFamilyMismatch)
+
 	// strictBudget determines whether to enforce strict budget range validation.
 	// This applies when: (1) config comes from request body (not suffix), (2) source format is known,
 	// and (3) source and target are in the same provider family. Cross-family or suffix-based configs
@@ -121,10 +131,12 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 
 	if len(support.Levels) > 0 && config.Mode == ModeLevel {
 		if !isLevelSupported(string(config.Level), support.Levels) {
-			if !isSameProviderFamily(fromFormat, toFormat) {
+			if allowClampUnsupported {
 				config.Level = clampLevel(config.Level, modelInfo, toFormat)
 			}
 			if !isLevelSupported(string(config.Level), support.Levels) {
+				// User explicitly specified an unsupported level - return error
+				// (budget-derived levels may be clamped based on source format)
 				validLevels := normalizeLevels(support.Levels)
 				message := fmt.Sprintf("level %q not supported, valid levels: %s", strings.ToLower(string(config.Level)), strings.Join(validLevels, ", "))
 				return nil, NewThinkingError(ErrLevelNotSupported, message)
@@ -145,11 +157,18 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 	// Convert ModeAuto to mid-range if dynamic not allowed
 	if config.Mode == ModeAuto && !support.DynamicAllowed {
 		config = convertAutoToMidRange(config, support, toFormat, model)
+		// The canonical mid-range level may not be present in a model's discrete
+		// level subset (for example, Levels=[low, high]). Clamp the generated
+		// fallback just like a budget-derived level so providers never receive an
+		// unsupported value.
+		if config.Mode == ModeLevel && len(support.Levels) > 0 && !isLevelSupported(string(config.Level), support.Levels) {
+			config.Level = clampLevel(config.Level, modelInfo, toFormat)
+		}
 	}
 
-	if config.Mode == ModeNone && toFormat == "claude" {
-		// Claude supports explicit disable via thinking.type="disabled".
-		// Keep Budget=0 so applier can omit budget_tokens.
+	if config.Mode == ModeNone && toFormat == "claude" && (support.ZeroAllowed || isLevelSupported(string(LevelNone), support.Levels)) {
+		// Claude supports explicit disable via thinking.type="disabled" when the
+		// selected model allows zero thinking.
 		config.Budget = 0
 		config.Level = ""
 	} else {
@@ -158,9 +177,12 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 			config.Budget = clampBudget(config.Budget, modelInfo, toFormat)
 		}
 
-		// ModeNone with clamped Budget > 0: set Level to lowest for Level-only/Hybrid models
-		// This ensures Apply layer doesn't need to access support.Levels
-		if config.Mode == ModeNone && config.Budget > 0 && len(support.Levels) > 0 {
+		// ModeNone for a model that cannot be disabled falls back to the lowest
+		// supported level. Budget-capable models reach this path with Budget > 0;
+		// level-only models need the capability flags checked explicitly because
+		// their Min/Max range is zero.
+		cannotDisableLevelModel := !support.ZeroAllowed && !isLevelSupported(string(LevelNone), support.Levels)
+		if config.Mode == ModeNone && len(support.Levels) > 0 && (config.Budget > 0 || cannotDisableLevelModel) {
 			config.Level = ThinkingLevel(support.Levels[0])
 		}
 	}

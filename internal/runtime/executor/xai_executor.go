@@ -225,7 +225,10 @@ func (e *XAIExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.Aut
 
 func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*xaiPreparedRequest, []byte, http.Header, error) {
 	token, _ := xaiCreds(auth)
-	baseURL := xaiChatBaseURL(auth)
+	// Compact must not use xaiChatBaseURL: CLI chat-proxy returns 404 for
+	// /responses/compact and a 404 cools down the whole xAI auth pool.
+	// Local Plus keeps xaiOfficialOrExplicitBaseURL semantics for empty/default/proxy.
+	baseURL := xaiCompactBaseURL(auth)
 	logXAIResolvedBaseURL(ctx, baseURL)
 
 	prepared, err := e.prepareResponsesRequestTo(ctx, req, opts, false, sdktranslator.FormatOpenAIResponse)
@@ -242,7 +245,9 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 	requestURL := helps.JoinBaseURL(baseURL, "/responses/compact")
 	headers := make(http.Header)
 	tmpReq := &http.Request{Header: headers}
-	applyXAIChatHeaders(tmpReq, auth, token, false, prepared.sessionID)
+	// Official API / custom compact endpoints use standard API headers, not CLI
+	// chat-proxy identity headers (which applyXAIChatHeaders may still attach for OAuth chat).
+	applyXAIHeaders(tmpReq, auth, token, false, prepared.sessionID)
 	headers = tmpReq.Header
 	e.recordXAIRequest(ctx, auth, requestURL, headers.Clone(), prepared.body)
 
@@ -500,12 +505,13 @@ func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth
 		endpointPath = xaiDefaultImageEndpointPath
 	}
 
+	payload := normalizeXAIImageRefs(req.Payload)
 	url := helps.JoinBaseURL(baseURL, endpointPath)
 	headers := make(http.Header)
 	tmpReq := &http.Request{Header: headers}
 	applyXAIHeaders(tmpReq, auth, token, false, "")
 	headers = tmpReq.Header
-	e.recordXAIRequest(ctx, auth, url, headers.Clone(), req.Payload)
+	e.recordXAIRequest(ctx, auth, url, headers.Clone(), payload)
 
 	_, data, respHeaders, errDo := helps.DoJSON(ctx, e.cfg, helps.UpstreamRequest{
 		Provider:       e.Identifier(),
@@ -513,7 +519,7 @@ func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth
 		Method:         http.MethodPost,
 		URL:            url,
 		Headers:        headers,
-		Body:           req.Payload,
+		Body:           payload,
 		SkipRequestLog: true,
 	})
 	if errDo != nil {
@@ -533,6 +539,7 @@ func (e *XAIExecutor) executeVideos(ctx context.Context, auth *cliproxyauth.Auth
 	baseURL := xaiOfficialOrExplicitBaseURL(auth)
 	logXAIResolvedBaseURL(ctx, baseURL)
 
+	payload := normalizeXAIImageRefs(req.Payload)
 	method := http.MethodPost
 	endpointPath := xaiVideosGenerationsPath
 
@@ -540,7 +547,7 @@ func (e *XAIExecutor) executeVideos(ctx context.Context, auth *cliproxyauth.Auth
 	case xaiVideosGenerationsPath, xaiVideosEditsPath, xaiVideosExtensionsPath:
 		endpointPath = path
 	default:
-		if requestID := strings.TrimSpace(gjson.GetBytes(req.Payload, "request_id").String()); requestID != "" {
+		if requestID := strings.TrimSpace(gjson.GetBytes(payload, "request_id").String()); requestID != "" {
 			method = http.MethodGet
 			endpointPath = xaiVideosPath + "/" + url.PathEscape(requestID)
 		}
@@ -559,11 +566,11 @@ func (e *XAIExecutor) executeVideos(ctx context.Context, auth *cliproxyauth.Auth
 		}
 	}
 	headers = tmpReq.Header
-	e.recordXAIRequest(ctx, auth, requestURL, headers.Clone(), req.Payload)
+	e.recordXAIRequest(ctx, auth, requestURL, headers.Clone(), payload)
 
 	var reqBody []byte
 	if method == http.MethodPost {
-		reqBody = req.Payload
+		reqBody = payload
 	}
 	_, data, respHeaders, errDo := helps.DoJSON(ctx, e.cfg, helps.UpstreamRequest{
 		Provider:       e.Identifier(),
@@ -916,6 +923,7 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	body = sanitizeXAIInputEncryptedContent(body)
 	body = normalizeCodexInstructions(body)
 	body = sanitizeXAIResponsesBody(body, baseModel)
+	body = normalizeXAIImageRefs(body)
 	if errValidate := validateXAIToolOutputsHavePriorCalls(body, hasPreviousResponseID); errValidate != nil {
 		return nil, errValidate
 	}
@@ -991,8 +999,9 @@ func xaiUsingAPI(auth *cliproxyauth.Auth) bool {
 // is false (including its OAuth default), empty or official default base_url is
 // rewritten to the CLI chat-proxy endpoint; an explicit non-default base_url is
 // still honored.
-// Websocket transport intentionally does not use this helper: cli-chat-proxy only
-// accepts HTTP POST and returns 405 for websocket upgrades.
+// Websocket and compact transports intentionally do not use this helper:
+// cli-chat-proxy only accepts HTTP POST chat and does not implement
+// /responses/compact (404) or websocket upgrades (405).
 func xaiChatBaseURL(auth *cliproxyauth.Auth) string {
 	_, baseURL := xaiCreds(auth)
 	if xaiUsingAPI(auth) {
@@ -1028,6 +1037,15 @@ func xaiOfficialOrExplicitBaseURL(auth *cliproxyauth.Auth) string {
 		return xaiauth.DefaultAPIBaseURL
 	}
 	return baseURL
+}
+
+// xaiCompactBaseURL returns the base URL for xAI /responses/compact requests.
+// Compact must stay on the official API (or an explicit non-CLI-proxy base_url).
+// Reusing xaiChatBaseURL would pin OAuth traffic to cli-chat-proxy, which returns
+// 404 for /responses/compact and then cools down the auth pool as not_found.
+// Local Plus also rewrites the official default base via xaiOfficialOrExplicitBaseURL.
+func xaiCompactBaseURL(auth *cliproxyauth.Auth) string {
+	return xaiOfficialOrExplicitBaseURL(auth)
 }
 
 // xaiBaseURLSource classifies a resolved xAI base URL for logging.
@@ -1168,6 +1186,94 @@ func xaiImageEndpointPath(opts cliproxyexecutor.Options) string {
 		return xaiImagesGenerationsPath
 	}
 	return xaiDefaultImageEndpointPath
+}
+
+// normalizeXAIImageRefs rewrites OpenAI-style image object fields to the xAI
+// image API shape before the payload is sent upstream:
+//
+//	{"image":{"image_url":"https://..."}} → {"image":{"url":"https://..."}}
+//
+// Applies to image / images / reference_images anywhere in the JSON tree,
+// including nested objects and array items. Does not rewrite chat content
+// parts shaped as {"type":"image_url","image_url":{...}}.
+// Uses encoding/json (not gjson path strings) so keys containing dots, backslashes,
+// or empty strings are handled correctly.
+func normalizeXAIImageRefs(body []byte) []byte {
+	if !gjson.ValidBytes(body) {
+		return body
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	var payload any
+	if errDecode := decoder.Decode(&payload); errDecode != nil {
+		return body
+	}
+
+	if !normalizeXAIImageRefsValue(payload) {
+		return body
+	}
+	normalized, errMarshal := json.Marshal(payload)
+	if errMarshal != nil {
+		return body
+	}
+	return normalized
+}
+
+func normalizeXAIImageRefsValue(value any) bool {
+	changed := false
+	switch node := value.(type) {
+	case map[string]any:
+		for key, child := range node {
+			switch key {
+			case "image":
+				changed = normalizeXAIImageRef(child) || changed
+			case "images", "reference_images":
+				if refs, ok := child.([]any); ok {
+					for _, ref := range refs {
+						changed = normalizeXAIImageRef(ref) || changed
+					}
+				}
+			}
+			changed = normalizeXAIImageRefsValue(child) || changed
+		}
+	case []any:
+		for _, child := range node {
+			changed = normalizeXAIImageRefsValue(child) || changed
+		}
+	}
+	return changed
+}
+
+func normalizeXAIImageRef(value any) bool {
+	ref, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+
+	originalURL, _ := ref["url"].(string)
+	url := strings.TrimSpace(originalURL)
+	imageURL, hasImageURL := ref["image_url"]
+	if url == "" {
+		switch imageURL := imageURL.(type) {
+		case string:
+			url = strings.TrimSpace(imageURL)
+		case map[string]any:
+			url, _ = imageURL["url"].(string)
+			url = strings.TrimSpace(url)
+		}
+	}
+	if url == "" {
+		return false
+	}
+	if url == originalURL && !hasImageURL {
+		return false
+	}
+
+	// Always emit the xAI field name and drop the OpenAI alias.
+	ref["url"] = url
+	delete(ref, "image_url")
+	return true
 }
 
 func xaiIsVideoRequest(opts cliproxyexecutor.Options) bool {
@@ -1544,11 +1650,25 @@ func normalizeXAITool(tool gjson.Result, namespaceName string) ([]byte, bool, bo
 	if toolType == xaiToolSearchType || toolType == xaiImageGenerationToolType {
 		return nil, true, true
 	}
+	if toolType == xaiCustomToolType && tool.Get("name").String() == "apply_patch" {
+		return nil, true, true
+	}
+
 	raw := []byte(tool.Raw)
-	if toolType == xaiCustomToolType {
-		if tool.Get("name").String() == "apply_patch" {
-			return nil, true, true
+	schemaTool := tool
+	if toolType == xaiFunctionToolType || toolType == xaiCustomToolType {
+		updatedTool, schemaChanged, ok := normalizeXAIObjectRootUnionBranchTypes(raw)
+		if !ok {
+			return nil, false, false
 		}
+		raw = updatedTool
+		if schemaChanged {
+			schemaTool = gjson.ParseBytes(raw)
+			changed = true
+			log.Debugf("xai: added object types to root union branches for tool %s.%s", namespaceName, tool.Get("name").String())
+		}
+	}
+	if toolType == xaiCustomToolType {
 		updatedTool, errSet := sjson.SetBytes(raw, "type", xaiFunctionToolType)
 		if errSet != nil {
 			return nil, false, false
@@ -1565,7 +1685,7 @@ func normalizeXAITool(tool gjson.Result, namespaceName string) ([]byte, bool, bo
 		raw = updatedTool
 		changed = true
 	}
-	if toolType == xaiFunctionToolType && !tool.Get("parameters").Exists() {
+	if toolType == xaiFunctionToolType && !schemaTool.Get("parameters").Exists() {
 		updatedTool, errSet := sjson.SetRawBytes(raw, "parameters", []byte(`{"type":"object","properties":{}}`))
 		if errSet != nil {
 			return nil, false, false
@@ -1573,13 +1693,13 @@ func normalizeXAITool(tool gjson.Result, namespaceName string) ([]byte, bool, bo
 		raw = updatedTool
 		changed = true
 	}
-	if toolType == xaiFunctionToolType && xaiFunctionParametersNeedSimplification(tool, namespaceName) {
+	if toolType == xaiFunctionToolType && xaiFunctionParametersNeedSimplification(schemaTool, namespaceName) {
 		updatedTool, errSet := sjson.SetRawBytes(raw, "parameters", []byte(xaiSafeFunctionParameters))
 		if errSet != nil {
 			return nil, false, false
 		}
 		raw = updatedTool
-		if strict := tool.Get("strict"); strict.Exists() && strict.Bool() {
+		if strict := schemaTool.Get("strict"); strict.Exists() && strict.Bool() {
 			updatedTool, errSet = sjson.SetBytes(raw, "strict", false)
 			if errSet != nil {
 				return nil, false, false
@@ -2077,6 +2197,57 @@ func restoreXAINamespaceToolCallAtPath(data []byte, path string, refs map[string
 	return updated
 }
 
+// normalizeXAIObjectRootUnionBranchTypes makes untyped root union branches
+// explicitly object-only when the parameter root already permits only objects.
+// This preserves the original schema semantics while satisfying xAI validation.
+func normalizeXAIObjectRootUnionBranchTypes(tool []byte) ([]byte, bool, bool) {
+	parameters := gjson.GetBytes(tool, "parameters")
+	rootType := parameters.Get("type")
+	if rootType.Type != gjson.String || rootType.String() != "object" {
+		return tool, false, true
+	}
+
+	original := tool
+	changed := false
+	for _, unionName := range []string{"anyOf", "oneOf"} {
+		union := parameters.Get(unionName)
+		if !union.IsArray() {
+			continue
+		}
+		for index, branch := range union.Array() {
+			if !branch.IsObject() || branch.Get("type").Exists() {
+				continue
+			}
+			updated, errSet := sjson.SetBytes(tool, fmt.Sprintf("parameters.%s.%d.type", unionName, index), "object")
+			if errSet != nil {
+				return original, false, false
+			}
+			tool = updated
+			changed = true
+		}
+	}
+	return tool, changed, true
+}
+
+func xaiSchemaTypeIsObjectOnly(schemaType gjson.Result) bool {
+	if schemaType.Type == gjson.String {
+		return strings.EqualFold(strings.TrimSpace(schemaType.String()), "object")
+	}
+	if !schemaType.IsArray() {
+		return false
+	}
+	types := schemaType.Array()
+	if len(types) == 0 {
+		return false
+	}
+	for _, schemaTypeItem := range types {
+		if schemaTypeItem.Type != gjson.String || !strings.EqualFold(strings.TrimSpace(schemaTypeItem.String()), "object") {
+			return false
+		}
+	}
+	return true
+}
+
 // xaiFunctionParametersNeedSimplification reports whether a function schema
 // contains a root union shape that xAI cannot safely process.
 func xaiFunctionParametersNeedSimplification(tool gjson.Result, namespaceName string) bool {
@@ -2102,25 +2273,8 @@ func xaiFunctionParametersNeedSimplification(tool gjson.Result, namespaceName st
 			continue
 		}
 		for _, branch := range union.Array() {
-			branchType := branch.Get("type")
-			if branchType.Type == gjson.String {
-				if !strings.EqualFold(strings.TrimSpace(branchType.String()), "object") {
-					return true
-				}
-				continue
-			}
-			if !branchType.IsArray() {
+			if !xaiSchemaTypeIsObjectOnly(branch.Get("type")) {
 				return true
-			}
-			allowedTypes := branchType.Array()
-			if len(allowedTypes) == 0 {
-				return true
-			}
-			for _, allowedType := range allowedTypes {
-				if allowedType.Type != gjson.String ||
-					!strings.EqualFold(strings.TrimSpace(allowedType.String()), "object") {
-					return true
-				}
 			}
 		}
 	}
