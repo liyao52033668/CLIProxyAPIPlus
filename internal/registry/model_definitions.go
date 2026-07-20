@@ -411,6 +411,16 @@ func GetQoderModels() []*ModelInfo {
 			Description: "Qoder Lite tier model",
 		},
 		{
+			ID:          "qmodel_preview",
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     "qoder",
+			Type:        "qoder",
+			DisplayName: "Qwen3.8-Max-Preview",
+			Description: "Qwen 3.8 Max Preview via Qoder",
+			Thinking:    &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
+		},
+		{
 			ID:          "qmodel_latest",
 			Object:      "model",
 			Created:     now,
