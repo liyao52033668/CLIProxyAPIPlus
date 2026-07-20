@@ -58,7 +58,7 @@ func (h *Handler) RunCodexInspection(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, snapshot)
+	c.JSON(http.StatusAccepted, snapshot)
 }
 
 func (h *Handler) UpdateCodexInspectionSettings(c *gin.Context) {

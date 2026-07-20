@@ -39,7 +39,7 @@ func TestGetCodexInspectionSnapshotReturnsOK(t *testing.T) {
 	}
 }
 
-func TestRunCodexInspectionWithoutBodyReturnsOK(t *testing.T) {
+func TestRunCodexInspectionWithoutBodyReturnsAccepted(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	stub := &stubCodexInspectionService{
@@ -54,8 +54,8 @@ func TestRunCodexInspectionWithoutBodyReturnsOK(t *testing.T) {
 
 	h.RunCodexInspection(ctx)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
 	if stub.lastRunRequest.TriggerType != codexsvc.TriggerTypeManual {
 		t.Fatalf("TriggerType = %q, want %q", stub.lastRunRequest.TriggerType, codexsvc.TriggerTypeManual)
@@ -111,8 +111,8 @@ func TestRunCodexInspectionForwardsFileNames(t *testing.T) {
 
 	h.RunCodexInspection(ctx)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
 	if stub.lastRunRequest.TriggerType != codexsvc.TriggerTypeManual {
 		t.Fatalf("TriggerType = %q, want %q", stub.lastRunRequest.TriggerType, codexsvc.TriggerTypeManual)
@@ -148,8 +148,8 @@ func TestRunCodexInspectionIgnoresTriggerTypeFromBody(t *testing.T) {
 
 	h.RunCodexInspection(ctx)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
 	if stub.lastRunRequest.TriggerType != codexsvc.TriggerTypeManual {
 		t.Fatalf("TriggerType = %q, want %q", stub.lastRunRequest.TriggerType, codexsvc.TriggerTypeManual)
@@ -177,8 +177,8 @@ func TestRunCodexInspectionWithUnknownContentLengthForwardsFileNames(t *testing.
 
 	h.RunCodexInspection(ctx)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
 	if stub.lastRunRequest.TriggerType != codexsvc.TriggerTypeManual {
 		t.Fatalf("TriggerType = %q, want %q", stub.lastRunRequest.TriggerType, codexsvc.TriggerTypeManual)
