@@ -73,18 +73,30 @@ func GetProviderName(modelName string) []string {
 //   - modelName: The model name to check (should be "auto")
 //
 // Returns:
-//   - string: The resolved model name, or the original if not "auto" or resolution fails
+//   - string: The resolved model name, or an empty string if resolution fails
 //   - bool: True if this was an auto resolution (modelName was "auto"), false otherwise
 func ResolveAutoModel(modelName string) (string, bool) {
 	if modelName != "auto" {
 		return modelName, false
 	}
 
-	// Use empty string as handler type to get any available model
-	firstModel, err := registry.GetGlobalRegistry().GetFirstAvailableModel("")
+	modelRegistry := registry.GetGlobalRegistry()
+	excluded := map[string]struct{}{"auto": {}}
+	for _, model := range modelRegistry.GetAvailableModels("") {
+		modelID, _ := model["id"].(string)
+		baseModelID := modelID
+		if separator := strings.LastIndex(baseModelID, "/"); separator >= 0 {
+			baseModelID = baseModelID[separator+1:]
+		}
+		if strings.EqualFold(strings.TrimSpace(baseModelID), "auto") {
+			excluded[modelID] = struct{}{}
+		}
+	}
+
+	firstModel, err := modelRegistry.GetFirstAvailableModelExcluding("", excluded)
 	if err != nil {
-		log.Warnf("Failed to resolve 'auto' model: %v, falling back to original model name", err)
-		return modelName, true
+		log.Warnf("Failed to resolve 'auto' model: %v", err)
+		return "", true
 	}
 
 	log.Infof("Resolved 'auto' model to: %s", firstModel)

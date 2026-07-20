@@ -226,13 +226,38 @@ func (c *CopilotAuth) MakeAuthenticatedRequest(ctx context.Context, method, url 
 
 // CopilotModelEntry represents a single model entry returned by the Copilot /models API.
 type CopilotModelEntry struct {
-	ID           string         `json:"id"`
-	Object       string         `json:"object"`
-	Created      int64          `json:"created"`
-	OwnedBy      string         `json:"owned_by"`
-	Name         string         `json:"name,omitempty"`
-	Version      string         `json:"version,omitempty"`
-	Capabilities map[string]any `json:"capabilities,omitempty"`
+	ID                 string              `json:"id"`
+	Object             string              `json:"object"`
+	Created            int64               `json:"created"`
+	OwnedBy            string              `json:"owned_by"`
+	Name               string              `json:"name,omitempty"`
+	Version            string              `json:"version,omitempty"`
+	ModelPickerEnabled *bool               `json:"model_picker_enabled,omitempty"`
+	Policy             *CopilotModelPolicy `json:"policy,omitempty"`
+	SupportedEndpoints []string            `json:"supported_endpoints,omitempty"`
+	Capabilities       map[string]any      `json:"capabilities,omitempty"`
+}
+
+// CopilotModelPolicy describes whether an account may use a model.
+type CopilotModelPolicy struct {
+	State string `json:"state,omitempty"`
+}
+
+// Selectable reports whether a model should be exposed to clients.
+func (e *CopilotModelEntry) Selectable() bool {
+	if e == nil || strings.TrimSpace(e.ID) == "" {
+		return false
+	}
+	if e.Policy != nil && strings.EqualFold(strings.TrimSpace(e.Policy.State), "disabled") {
+		return false
+	}
+	if modelType, ok := e.Capabilities["type"].(string); ok {
+		modelType = strings.TrimSpace(modelType)
+		if modelType != "" && !strings.EqualFold(modelType, "chat") {
+			return false
+		}
+	}
+	return true
 }
 
 // CopilotModelLimits holds the token limits returned by the Copilot /models API

@@ -91,6 +91,22 @@ func TestGetKimiModelsThinkingIsLevelOnly(t *testing.T) {
 	}
 }
 
+func TestGitHubCopilotTiersIncludeAuto(t *testing.T) {
+	t.Parallel()
+
+	tiers := map[string][]*ModelInfo{
+		"free":     GetGitHubCopilotFreeModels(),
+		"pro":      GetGitHubCopilotProModels(),
+		"pro-plus": GetGitHubCopilotProPlusModels(),
+		"max":      GetGitHubCopilotMaxModels(),
+	}
+	for tier, models := range tiers {
+		if findModelInfo(models, "auto") == nil {
+			t.Errorf("GitHub Copilot %s models do not contain auto", tier)
+		}
+	}
+}
+
 func TestGitHubCopilotClaudeModelsSupportMessages(t *testing.T) {
 	models := GetGitHubCopilotModels()
 	required := map[string]bool{

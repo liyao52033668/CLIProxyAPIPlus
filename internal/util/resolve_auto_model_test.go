@@ -1,6 +1,7 @@
 package util
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -36,6 +37,7 @@ func TestResolveAutoModelWithRegistry(t *testing.T) {
 	r := registry.GetGlobalRegistry()
 
 	r.RegisterClient("test-client-auto", "openai", []*registry.ModelInfo{
+		{ID: "auto", DisplayName: "Auto"},
 		{ID: "test-model-1", DisplayName: "Test Model 1"},
 		{ID: "test-model-2", DisplayName: "Test Model 2"},
 	})
@@ -58,10 +60,28 @@ func TestResolveAutoModelWithRegistry(t *testing.T) {
 	r.UnregisterClient("test-client-auto")
 }
 
+func TestResolveAutoModelExcludesPrefixedAuto(t *testing.T) {
+	r := registry.GetGlobalRegistry()
+	clientID := "test-client-prefixed-auto"
+	r.RegisterClient(clientID, "openai", []*registry.ModelInfo{
+		{ID: "gh/auto", DisplayName: "Auto"},
+		{ID: "gh/test-model", DisplayName: "Test Model"},
+	})
+	defer r.UnregisterClient(clientID)
+
+	resolved, isAuto := ResolveAutoModel("auto")
+	if !isAuto {
+		t.Error("expected isAuto=true for 'auto' model")
+	}
+	if strings.EqualFold(resolved, "auto") || strings.HasSuffix(strings.ToLower(resolved), "/auto") {
+		t.Errorf("expected a concrete model, got %q", resolved)
+	}
+}
+
 func TestResolveAutoModelFallback(t *testing.T) {
 	resolved, isAuto := ResolveAutoModel("auto")
-	if resolved != "auto" {
-		t.Errorf("expected 'auto' fallback when no models available, got %q", resolved)
+	if resolved != "" {
+		t.Errorf("expected empty fallback when no models available, got %q", resolved)
 	}
 	if !isAuto {
 		t.Error("expected isAuto=true even for fallback")

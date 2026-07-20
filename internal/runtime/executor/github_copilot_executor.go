@@ -28,6 +28,7 @@ import (
 const (
 	githubCopilotBaseURL       = "https://api.githubcopilot.com"
 	githubCopilotChatPath      = "/chat/completions"
+	githubCopilotMessagesPath  = "/messages"
 	githubCopilotResponsesPath = "/responses"
 	githubCopilotAuthType      = "github-copilot"
 	githubCopilotTokenCacheTTL = 25 * time.Minute
@@ -435,7 +436,13 @@ func (e *GitHubCopilotExecutor) nativeGateway(
 
 func githubCopilotUsesAnthropicGateway(model string) bool {
 	baseModel := strings.ToLower(thinking.ParseSuffix(model).ModelName)
-	return strings.HasPrefix(baseModel, "claude-")
+	if !strings.HasPrefix(baseModel, "claude-") {
+		return false
+	}
+	if info := resolveGitHubCopilotEndpointInfo(baseModel); info != nil {
+		return containsEndpoint(info.SupportedEndpoints, githubCopilotMessagesPath)
+	}
+	return true
 }
 
 func buildCopilotAnthropicGatewayAuth(auth *cliproxyauth.Auth, apiToken, baseURL string, body []byte) *cliproxyauth.Auth {
@@ -784,13 +791,20 @@ func useGitHubCopilotResponsesEndpoint(sourceFormat sdktranslator.Format, model 
 		return true
 	}
 	baseModel := strings.ToLower(thinking.ParseSuffix(model).ModelName)
-	if info := registry.GetGlobalRegistry().GetModelInfo(baseModel, githubCopilotAuthType); info != nil {
-		return len(info.SupportedEndpoints) > 0 && !containsEndpoint(info.SupportedEndpoints, githubCopilotChatPath) && containsEndpoint(info.SupportedEndpoints, githubCopilotResponsesPath)
-	}
-	if info := lookupGitHubCopilotStaticModelInfo(baseModel); info != nil {
-		return len(info.SupportedEndpoints) > 0 && !containsEndpoint(info.SupportedEndpoints, githubCopilotChatPath) && containsEndpoint(info.SupportedEndpoints, githubCopilotResponsesPath)
+	if info := resolveGitHubCopilotEndpointInfo(baseModel); info != nil {
+		return !containsEndpoint(info.SupportedEndpoints, githubCopilotChatPath) && containsEndpoint(info.SupportedEndpoints, githubCopilotResponsesPath)
 	}
 	return strings.Contains(baseModel, "codex")
+}
+
+func resolveGitHubCopilotEndpointInfo(model string) *registry.ModelInfo {
+	if info := registry.GetGlobalRegistry().GetModelInfo(model, githubCopilotAuthType); info != nil && len(info.SupportedEndpoints) > 0 {
+		return info
+	}
+	if info := lookupGitHubCopilotStaticModelInfo(model); info != nil && len(info.SupportedEndpoints) > 0 {
+		return info
+	}
+	return nil
 }
 
 func lookupGitHubCopilotStaticModelInfo(model string) *registry.ModelInfo {
@@ -1572,7 +1586,7 @@ func getGitHubCopilotModelsByTier(tier string) []*registry.ModelInfo {
 
 // FetchGitHubCopilotModels dynamically fetches available models from the GitHub Copilot API.
 // It exchanges the GitHub access token stored in auth.Metadata for a Copilot API token,
-// then queries the /models endpoint. Falls back to the static registry on any failure.
+// then queries the /models endpoint. Falls back to the static registry when the request fails.
 // The tier parameter filters models to the specified plan tier (free/pro/pro+/max).
 func FetchGitHubCopilotModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config, tier string) []*registry.ModelInfo {
 	if auth == nil {
@@ -1595,8 +1609,8 @@ func FetchGitHubCopilotModels(ctx context.Context, auth *cliproxyauth.Auth, cfg 
 	}
 
 	if len(entries) == 0 {
-		log.Debug("github-copilot: API returned no models, using static models")
-		return getGitHubCopilotModelsByTier(tier)
+		log.Warn("github-copilot: API returned no models")
+		return nil
 	}
 
 	// Get all models across all tiers (to identify high-tier exclusive models)
@@ -1623,14 +1637,16 @@ func FetchGitHubCopilotModels(ctx context.Context, auth *cliproxyauth.Auth, cfg 
 	}
 
 	now := time.Now().Unix()
-	models := make([]*registry.ModelInfo, 0, len(entries))
-	seen := make(map[string]struct{}, len(entries))
+	models := make([]*registry.ModelInfo, 0, len(entries)+1)
+	seen := make(map[string]struct{}, len(entries)+1)
 	for _, entry := range entries {
-		if entry.ID == "" {
+		if !entry.Selectable() {
+			log.Debugf("github-copilot: skipping unavailable model %q", entry.ID)
 			continue
 		}
 
-		entryID := strings.ToLower(entry.ID)
+		entry.ID = strings.ToLower(strings.TrimSpace(entry.ID))
+		entryID := entry.ID
 
 		// Blacklist filter: only exclude models that are explicitly in static definitions
 		// AND not available for this tier. Models not in static definitions pass through.
@@ -1646,11 +1662,12 @@ func FetchGitHubCopilotModels(ctx context.Context, auth *cliproxyauth.Auth, cfg 
 		seen[entryID] = struct{}{}
 
 		m := &registry.ModelInfo{
-			ID:      entry.ID,
-			Object:  "model",
-			Created: now,
-			OwnedBy: "github-copilot",
-			Type:    "github-copilot",
+			ID:                 entry.ID,
+			Object:             "model",
+			Created:            now,
+			OwnedBy:            "github-copilot",
+			Type:               "github-copilot",
+			SupportedEndpoints: slices.Clone(entry.SupportedEndpoints),
 		}
 
 		if entry.Created > 0 {
@@ -1677,7 +1694,9 @@ func FetchGitHubCopilotModels(ctx context.Context, auth *cliproxyauth.Auth, cfg 
 			m.Description = static.Description
 			m.ContextLength = static.ContextLength
 			m.MaxCompletionTokens = static.MaxCompletionTokens
-			m.SupportedEndpoints = static.SupportedEndpoints
+			if len(m.SupportedEndpoints) == 0 {
+				m.SupportedEndpoints = slices.Clone(static.SupportedEndpoints)
+			}
 			m.Thinking = static.Thinking
 		} else {
 			// Use defaults for models not in static definitions
@@ -1704,10 +1723,18 @@ func FetchGitHubCopilotModels(ctx context.Context, auth *cliproxyauth.Auth, cfg 
 		models = append(models, m)
 	}
 
-	// If no models passed the whitelist filter, fall back to static models
 	if len(models) == 0 {
-		log.Warnf("github-copilot: no dynamic models matched static whitelist for tier %q, using static models", tier)
-		return getGitHubCopilotModelsByTier(tier)
+		log.Warnf("github-copilot: API returned no selectable chat models for tier %q", tier)
+		return nil
+	}
+
+	if _, exists := seen["auto"]; !exists {
+		for _, model := range allowedModels {
+			if model != nil && strings.EqualFold(model.ID, "auto") {
+				models = append([]*registry.ModelInfo{model}, models...)
+				break
+			}
+		}
 	}
 
 	log.Infof("github-copilot: fetched %d models from API (filtered by tier %q)", len(models), tier)

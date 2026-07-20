@@ -211,3 +211,30 @@ func TestGitHubUserInfo_Struct(t *testing.T) {
 		t.Error("GitHubUserInfo fields should not be empty")
 	}
 }
+
+func TestCopilotModelEntrySelectable(t *testing.T) {
+	t.Parallel()
+
+	enabled := true
+	disabled := false
+	tests := []struct {
+		name  string
+		entry CopilotModelEntry
+		want  bool
+	}{
+		{name: "picker enabled", entry: CopilotModelEntry{ID: "gpt-5-mini", ModelPickerEnabled: &enabled, Capabilities: map[string]any{"type": "chat"}}, want: true},
+		{name: "picker disabled", entry: CopilotModelEntry{ID: "gpt-5.4", ModelPickerEnabled: &disabled, Capabilities: map[string]any{"type": "chat"}}, want: true},
+		{name: "policy disabled", entry: CopilotModelEntry{ID: "claude-opus-4.8", Policy: &CopilotModelPolicy{State: "disabled"}}, want: false},
+		{name: "non chat", entry: CopilotModelEntry{ID: "embedding-model", Capabilities: map[string]any{"type": "embeddings"}}, want: false},
+		{name: "legacy shape", entry: CopilotModelEntry{ID: "legacy-model"}, want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tt.entry.Selectable(); got != tt.want {
+				t.Fatalf("Selectable() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

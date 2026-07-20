@@ -115,10 +115,38 @@ func TestUseGitHubCopilotResponsesEndpoint_DynamicRegistryWinsOverStatic(t *test
 	}
 }
 
+func TestUseGitHubCopilotResponsesEndpoint_EmptyDynamicEndpointsFallBackToStatic(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	clientID := "github-copilot-empty-endpoints-test"
+	reg.RegisterClient(clientID, "github-copilot", []*registry.ModelInfo{{ID: "gpt-5.4"}})
+	defer reg.UnregisterClient(clientID)
+
+	if !useGitHubCopilotResponsesEndpoint(sdktranslator.FromString("openai"), "gpt-5.4") {
+		t.Fatal("expected empty dynamic endpoints to fall back to static /responses support")
+	}
+}
+
 func TestUseGitHubCopilotResponsesEndpoint_DefaultChat(t *testing.T) {
 	t.Parallel()
 	if useGitHubCopilotResponsesEndpoint(sdktranslator.FromString("openai"), "claude-3-5-sonnet") {
 		t.Fatal("expected default openai source with non-codex model to use /chat/completions")
+	}
+}
+
+func TestGitHubCopilotUsesAnthropicGateway_DynamicEndpoints(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	clientID := "github-copilot-anthropic-endpoint-test"
+	reg.RegisterClient(clientID, "github-copilot", []*registry.ModelInfo{
+		{ID: "claude-chat-only-test", SupportedEndpoints: []string{"/chat/completions"}},
+		{ID: "claude-messages-test", SupportedEndpoints: []string{"/chat/completions", "/messages"}},
+	})
+	defer reg.UnregisterClient(clientID)
+
+	if githubCopilotUsesAnthropicGateway("claude-chat-only-test") {
+		t.Fatal("chat-only Claude model should not use the Anthropic gateway")
+	}
+	if !githubCopilotUsesAnthropicGateway("claude-messages-test") {
+		t.Fatal("Claude model with /messages support should use the Anthropic gateway")
 	}
 }
 
