@@ -97,6 +97,103 @@ func TestWorker_ReloadWakesWaitingLoop(t *testing.T) {
 	}
 }
 
+func TestRunInspectionPrefersCompletionRunner(t *testing.T) {
+	runner := &completionRecordingRunner{}
+	completed := false
+	if _, err := runInspection(runner, context.Background(), RunRequest{Provider: "xai"}, func(LatestSnapshot) {
+		completed = true
+	}); err != nil {
+		t.Fatalf("runInspection() error = %v", err)
+	}
+	if runner.startCalls != 1 || runner.runCalls != 0 {
+		t.Fatalf("calls = start:%d run:%d, want start:1 run:0", runner.startCalls, runner.runCalls)
+	}
+	if !completed {
+		t.Fatal("completion callback was not called")
+	}
+}
+
+func TestWorkerReloadsScheduleFromCompletedRun(t *testing.T) {
+	runner := &controlledCompletionRunner{
+		started: make(chan struct{}, 1),
+		finish:  make(chan LatestSnapshot, 1),
+	}
+	worker := NewWorker(runner)
+	settings := DefaultSettings()
+	settings.SetSchedule("codex", InspectionSchedule{Enabled: true, Mode: "interval", IntervalMinutes: 5})
+	worker.Reload(settings, map[string]int64{"codex": time.Now().Add(-time.Second).UnixMilli()})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	worker.Start(ctx)
+
+	select {
+	case <-runner.started:
+	case <-time.After(time.Second):
+		t.Fatal("scheduled run did not start")
+	}
+	worker.mutex.Lock()
+	worker.nextTriggerAtMSByProvider["codex"] = time.Now().Add(-time.Second).UnixMilli()
+	worker.mutex.Unlock()
+	if due := worker.takeDueProviders(); len(due) != 0 {
+		t.Fatalf("due providers while running = %v, want none", due)
+	}
+
+	finalNext := time.Now().Add(10 * time.Minute).UnixMilli()
+	finished := DefaultSnapshot()
+	finished.Settings = settings
+	finished.Run.NextTriggerAtMSByProvider = map[string]int64{"codex": finalNext}
+	runner.finish <- finished
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		worker.mutex.Lock()
+		next := worker.nextTriggerAtMSByProvider["codex"]
+		_, running := worker.runningProviders["codex"]
+		worker.mutex.Unlock()
+		if next == finalNext && !running {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("worker state = next:%d running:%v, want next:%d running:false", next, running, finalNext)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+type controlledCompletionRunner struct {
+	started chan struct{}
+	finish  chan LatestSnapshot
+}
+
+func (r *controlledCompletionRunner) StartRunWithCompletion(_ context.Context, _ RunRequest, onFinish func(LatestSnapshot)) (LatestSnapshot, error) {
+	r.started <- struct{}{}
+	go func() {
+		onFinish(<-r.finish)
+	}()
+	return DefaultSnapshot(), nil
+}
+
+func (r *controlledCompletionRunner) Run(context.Context, RunRequest) (LatestSnapshot, error) {
+	return DefaultSnapshot(), nil
+}
+
+type completionRecordingRunner struct {
+	startCalls int
+	runCalls   int
+}
+
+func (r *completionRecordingRunner) StartRunWithCompletion(_ context.Context, _ RunRequest, onFinish func(LatestSnapshot)) (LatestSnapshot, error) {
+	r.startCalls++
+	snapshot := DefaultSnapshot()
+	onFinish(snapshot)
+	return snapshot, nil
+}
+
+func (r *completionRecordingRunner) Run(context.Context, RunRequest) (LatestSnapshot, error) {
+	r.runCalls++
+	return DefaultSnapshot(), nil
+}
+
 type recordingRunner struct {
 	requests   []RunRequest
 	runStarted chan context.Context

@@ -12,20 +12,41 @@ type Runner interface {
 	Run(ctx context.Context, req RunRequest) (LatestSnapshot, error)
 }
 
+type CompletionRunner interface {
+	StartRunWithCompletion(ctx context.Context, req RunRequest, onFinish func(LatestSnapshot)) (LatestSnapshot, error)
+}
+
 type Worker struct {
 	runner                    Runner
 	mutex                     sync.Mutex
 	settings                  InspectionSettings
 	nextTriggerAtMSByProvider map[string]int64
+	runningProviders          map[string]struct{}
 	enabled                   bool
 	reloadCh                  chan struct{}
 }
 
 func NewWorker(runner Runner) *Worker {
 	return &Worker{
-		runner:   runner,
-		reloadCh: make(chan struct{}, 1),
+		runner:           runner,
+		runningProviders: make(map[string]struct{}),
+		reloadCh:         make(chan struct{}, 1),
 	}
+}
+
+func runInspection(runner Runner, ctx context.Context, req RunRequest, onFinish func(LatestSnapshot)) (LatestSnapshot, error) {
+	if completionRunner, ok := runner.(CompletionRunner); ok {
+		snapshot, err := completionRunner.StartRunWithCompletion(ctx, req, onFinish)
+		if err != nil && onFinish != nil {
+			onFinish(snapshot)
+		}
+		return snapshot, err
+	}
+	snapshot, err := runner.Run(ctx, req)
+	if onFinish != nil {
+		onFinish(snapshot)
+	}
+	return snapshot, err
 }
 
 func (w *Worker) Enabled() bool {
@@ -44,7 +65,7 @@ func (w *Worker) TriggerNowForTest(ctx context.Context) {
 		return
 	}
 	for _, provider := range w.enabledProviders() {
-		_, _ = w.runner.Run(ctx, RunRequest{TriggerType: TriggerTypeScheduled, Provider: provider})
+		_, _ = runInspection(w.runner, ctx, RunRequest{TriggerType: TriggerTypeScheduled, Provider: provider}, nil)
 	}
 }
 
@@ -69,17 +90,30 @@ func (w *Worker) loop(ctx context.Context) {
 
 		for _, provider := range w.takeDueProviders() {
 			if w.runner == nil {
+				w.finishProviderRun(provider, LatestSnapshot{})
 				continue
 			}
-			snapshot, _ := w.runner.Run(ctx, RunRequest{
+			_, _ = runInspection(w.runner, ctx, RunRequest{
 				TriggerType: TriggerTypeScheduled,
 				Provider:    provider,
+			}, func(snapshot LatestSnapshot) {
+				w.finishProviderRun(provider, snapshot)
 			})
-			if snapshot.Settings.TargetType != "" {
-				w.load(snapshot.Settings, snapshot.Run.NextTriggerAtMSByProvider)
-			}
 		}
 	}
+}
+
+func (w *Worker) finishProviderRun(provider string, snapshot LatestSnapshot) {
+	provider = normalizeProvider(provider)
+	w.mutex.Lock()
+	delete(w.runningProviders, provider)
+	w.mutex.Unlock()
+
+	if snapshot.Settings.TargetType != "" {
+		w.Reload(snapshot.Settings, snapshot.Run.NextTriggerAtMSByProvider)
+		return
+	}
+	w.notifyReload()
 }
 
 func (w *Worker) load(settings InspectionSettings, nextTriggerAtMSByProvider map[string]int64) {
@@ -138,6 +172,9 @@ func (w *Worker) nextWait(idleWait time.Duration) (time.Duration, <-chan struct{
 		nowMS := time.Now().UnixMilli()
 		var earliestMS int64
 		for provider, nextTriggerAtMS := range w.nextTriggerAtMSByProvider {
+			if _, running := w.runningProviders[provider]; running {
+				continue
+			}
 			schedule := w.settings.ScheduleFor(provider)
 			if !schedule.Enabled || schedule.IntervalMinutes <= 0 {
 				continue
@@ -163,11 +200,15 @@ func (w *Worker) takeDueProviders() []string {
 	nowMS := time.Now().UnixMilli()
 	providers := make([]string, 0)
 	for provider, nextTriggerAtMS := range w.nextTriggerAtMSByProvider {
+		if _, running := w.runningProviders[provider]; running {
+			continue
+		}
 		schedule := w.settings.ScheduleFor(provider)
 		if !schedule.Enabled || schedule.IntervalMinutes <= 0 || nextTriggerAtMS > nowMS {
 			continue
 		}
 		providers = append(providers, provider)
+		w.runningProviders[provider] = struct{}{}
 		w.nextTriggerAtMSByProvider[provider] = nowMS + intervalMilliseconds(schedule.IntervalMinutes)
 	}
 	sort.Strings(providers)
