@@ -196,8 +196,7 @@ func (p *codexInspectionProber) inspectProviderAuth(ctx context.Context, file co
 		if strings.EqualFold(strings.TrimSpace(file.Provider), "xai") {
 			result.ActionReason = codexinspection.XAIProbeSucceededReason
 			if result.Disabled {
-				result.ActionReason = codexinspection.XAIProbeSucceededDisabledReason
-				result.Executable = false
+				result.Action = codexinspection.ActionEnable
 			}
 		}
 		return result

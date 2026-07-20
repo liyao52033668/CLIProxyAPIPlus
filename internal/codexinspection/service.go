@@ -140,7 +140,7 @@ func (s *Service) Run(ctx context.Context, req RunRequest) (snapshot LatestSnaps
 	}
 
 	results, probeErr := s.prober.ProbeAccounts(ctx, probeFiles, snapshot.Settings)
-	results = applyAutoRecoveryActions(results, snapshot.AutoDisabledFiles)
+	results = applyXAIRecoveryActions(results)
 	if probeErr != nil {
 		if len(req.FileNames) == 0 {
 			snapshot.Results = results
@@ -162,6 +162,8 @@ func (s *Service) Run(ctx context.Context, req RunRequest) (snapshot LatestSnaps
 	autoDeletedCount := 0
 	if req.TriggerType == TriggerTypeScheduled {
 		results, autoActionLogs, autoDeletedCount = s.autoApplyScheduledActions(ctx, provider, results, &snapshot)
+	} else {
+		results, autoActionLogs = s.autoApplyXAIRecoveryActions(ctx, provider, results, &snapshot)
 	}
 
 	if len(req.FileNames) == 0 {
@@ -364,22 +366,8 @@ func (s *Service) autoApplyScheduledActions(ctx context.Context, provider string
 			}
 			logs = append(logs, log)
 		case ActionEnable:
-			log := InspectionActionLog{
-				Action:       ActionEnable,
-				FileName:     result.FileName,
-				DisplayName:  result.DisplayName,
-				Success:      true,
-				ExecutedAtMS: nowMillis(),
-			}
-			if err := s.gateway.SetDisabled(ctx, result.FileName, false); err != nil {
-				log.Success = false
-				log.Error = err.Error()
-				nextResults = append(nextResults, result)
-			} else {
-				result.Disabled = false
-				setAutoDisabledFile(snapshot, resultProvider, result.FileName, false)
-				nextResults = append(nextResults, resolveActionState(result))
-			}
+			result, log := s.applyEnableAction(ctx, resultProvider, result, snapshot)
+			nextResults = append(nextResults, result)
 			logs = append(logs, log)
 		default:
 			nextResults = append(nextResults, result)
@@ -389,17 +377,49 @@ func (s *Service) autoApplyScheduledActions(ctx context.Context, provider string
 	return nextResults, logs, autoDeletedCount
 }
 
-func applyAutoRecoveryActions(results []InspectionResultItem, autoDisabledFiles map[string]map[string]bool) []InspectionResultItem {
-	xaiFiles := autoDisabledFiles["xai"]
-	if len(xaiFiles) == 0 {
-		return results
+func (s *Service) autoApplyXAIRecoveryActions(ctx context.Context, provider string, results []InspectionResultItem, snapshot *LatestSnapshot) ([]InspectionResultItem, []InspectionActionLog) {
+	logs := make([]InspectionActionLog, 0)
+	for i := range results {
+		result := results[i]
+		resultProvider := normalizeProvider(result.Provider)
+		if resultProvider == "" {
+			resultProvider = normalizeProvider(provider)
+		}
+		if resultProvider != "xai" || !result.Disabled || result.Action != ActionEnable || result.Error != "" || result.ActionReason != XAIProbeSucceededReason {
+			continue
+		}
+		updatedResult, resultLog := s.applyEnableAction(ctx, resultProvider, result, snapshot)
+		results[i] = updatedResult
+		logs = append(logs, resultLog)
 	}
+	return results, logs
+}
+
+func (s *Service) applyEnableAction(ctx context.Context, provider string, result InspectionResultItem, snapshot *LatestSnapshot) (InspectionResultItem, InspectionActionLog) {
+	log := InspectionActionLog{
+		Action:       ActionEnable,
+		FileName:     result.FileName,
+		DisplayName:  result.DisplayName,
+		Success:      true,
+		ExecutedAtMS: nowMillis(),
+	}
+	if err := s.gateway.SetDisabled(ctx, result.FileName, false); err != nil {
+		log.Success = false
+		log.Error = err.Error()
+		return result, log
+	}
+	result.Disabled = false
+	setAutoDisabledFile(snapshot, provider, result.FileName, false)
+	return resolveActionState(result), log
+}
+
+func applyXAIRecoveryActions(results []InspectionResultItem) []InspectionResultItem {
 	for i := range results {
 		result := &results[i]
 		if normalizeProvider(result.Provider) != "xai" || !result.Disabled || result.Action != ActionKeep || result.Error != "" {
 			continue
 		}
-		if result.ActionReason != XAIProbeSucceededDisabledReason || !xaiFiles[result.FileName] {
+		if result.ActionReason != XAIProbeSucceededDisabledReason {
 			continue
 		}
 		result.Action = ActionEnable

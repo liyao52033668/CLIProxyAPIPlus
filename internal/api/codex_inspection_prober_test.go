@@ -463,11 +463,11 @@ func TestXAIProviderInspectionClassifiesProbeResults(t *testing.T) {
 			wantExecutable: true,
 		},
 		{
-			name:           "healthy disabled account is not enabled",
+			name:           "healthy disabled account is enabled",
 			disabled:       true,
-			wantAction:     codexinspection.ActionKeep,
-			wantReason:     "xAI probe succeeded; account remains disabled",
-			wantExecutable: false,
+			wantAction:     codexinspection.ActionEnable,
+			wantReason:     "xAI probe succeeded",
+			wantExecutable: true,
 		},
 	}
 

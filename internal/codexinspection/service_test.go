@@ -675,7 +675,7 @@ func TestService_RunScheduledRestoresAutomaticallyDisabledXAIAccount(t *testing.
 	}
 }
 
-func TestService_RunScheduledKeepsManuallyDisabledXAIAccount(t *testing.T) {
+func TestService_RunScheduledEnablesHealthyDisabledXAIAccount(t *testing.T) {
 	settings := DefaultSettings()
 	settings.TargetType = "xai"
 	repo := &fakeRepository{snapshot: LatestSnapshot{Settings: settings}}
@@ -693,11 +693,11 @@ func TestService_RunScheduledKeepsManuallyDisabledXAIAccount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run(scheduled) error = %v", err)
 	}
-	if len(gateway.setDisabledCalls) != 0 {
-		t.Fatalf("len(setDisabledCalls) = %d, want 0", len(gateway.setDisabledCalls))
+	if len(gateway.setDisabledCalls) != 1 || gateway.setDisabledCalls[0] != (setDisabledCall{name: "grok.json", disabled: false}) {
+		t.Fatalf("setDisabledCalls = %+v, want Grok enable", gateway.setDisabledCalls)
 	}
-	if len(snapshot.Results) != 1 || !snapshot.Results[0].Disabled || snapshot.Results[0].Action != ActionKeep {
-		t.Fatalf("Results = %+v, want manually disabled keep", snapshot.Results)
+	if len(snapshot.Results) != 1 || snapshot.Results[0].Disabled || snapshot.Results[0].Action != ActionKeep {
+		t.Fatalf("Results = %+v, want enabled keep", snapshot.Results)
 	}
 }
 
@@ -788,6 +788,36 @@ func TestService_RunProviderSwitchPreservesXAIAutoDisabledState(t *testing.T) {
 	}
 	if !snapshot.AutoDisabledFiles["xai"]["grok.json"] {
 		t.Fatal("AutoDisabledFiles[xai][grok.json] = false, want preserved true")
+	}
+}
+
+func TestService_RunManualAutoEnablesHealthyDisabledXAIAccount(t *testing.T) {
+	settings := DefaultSettings()
+	settings.TargetType = "xai"
+	repo := &fakeRepository{snapshot: LatestSnapshot{Settings: settings}}
+	gateway := &fakeGateway{files: []AuthFileRecord{{FileName: "grok.json", Provider: "xai", Disabled: true}}}
+	prober := &fakeProber{results: []InspectionResultItem{{
+		FileName:     "grok.json",
+		Provider:     "xai",
+		Disabled:     true,
+		Action:       ActionEnable,
+		ActionReason: XAIProbeSucceededReason,
+		Executable:   true,
+	}}}
+	service := NewService(repo, gateway, prober)
+
+	snapshot, err := service.Run(context.Background(), RunRequest{TriggerType: TriggerTypeManual})
+	if err != nil {
+		t.Fatalf("Run(manual) error = %v", err)
+	}
+	if len(gateway.setDisabledCalls) != 1 || gateway.setDisabledCalls[0] != (setDisabledCall{name: "grok.json", disabled: false}) {
+		t.Fatalf("setDisabledCalls = %+v, want Grok enable", gateway.setDisabledCalls)
+	}
+	if len(snapshot.Results) != 1 || snapshot.Results[0].Disabled || snapshot.Results[0].Action != ActionKeep {
+		t.Fatalf("Results = %+v, want enabled keep", snapshot.Results)
+	}
+	if len(snapshot.ActionLogs) != 1 || !snapshot.ActionLogs[0].Success || snapshot.ActionLogs[0].Action != ActionEnable {
+		t.Fatalf("ActionLogs = %+v, want successful enable log", snapshot.ActionLogs)
 	}
 }
 
