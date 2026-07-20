@@ -71,6 +71,8 @@ func (r *FileSnapshotRepository) Load(ctx context.Context) (LatestSnapshot, erro
 	if snapshot.ActionLogs == nil {
 		snapshot.ActionLogs = []InspectionActionLog{}
 	}
+	initializeProviderStates(&snapshot)
+	syncSelectedProviderView(&snapshot)
 
 	return snapshot, nil
 }
@@ -80,6 +82,7 @@ func (r *FileSnapshotRepository) Save(ctx context.Context, snapshot LatestSnapsh
 		return err
 	}
 
+	persistSelectedProviderView(&snapshot)
 	if snapshot.Results == nil {
 		snapshot.Results = []InspectionResultItem{}
 	}

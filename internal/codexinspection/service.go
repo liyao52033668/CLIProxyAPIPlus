@@ -3,9 +3,13 @@ package codexinspection
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"strings"
+	"sync"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 var ErrRunAlreadyActive = errors.New("codex inspection run is already active")
@@ -53,51 +57,133 @@ type ExecuteActionsResult struct {
 	Logs     []InspectionActionLog `json:"logs"`
 }
 
+const (
+	defaultInspectionBatchSize = 25
+	xaiInspectionBatchSize     = 5
+	maxInspectionWorkers       = 8
+	maxProviderWorkers         = 4
+	maxXAIInspectionWorkers    = 2
+	maxConcurrentProviderRuns  = 2
+	xaiInspectionBatchPause    = 500 * time.Millisecond
+)
+
 type Service struct {
-	repo    SnapshotRepository
-	gateway AuthFileGateway
-	prober  Prober
-	mu      chan struct{}
-	active  bool
+	repo            SnapshotRepository
+	gateway         AuthFileGateway
+	prober          Prober
+	mu              sync.Mutex
+	actionsMu       sync.Mutex
+	activeProviders map[string]struct{}
+	runSlots        chan struct{}
+}
+
+type inspectionRunPlan struct {
+	provider string
+	request  RunRequest
+	settings InspectionSettings
 }
 
 func NewService(repo SnapshotRepository, gateway AuthFileGateway, prober Prober) *Service {
 	return &Service{
-		repo:    repo,
-		gateway: gateway,
-		prober:  prober,
-		mu:      make(chan struct{}, 1),
+		repo:            repo,
+		gateway:         gateway,
+		prober:          prober,
+		activeProviders: make(map[string]struct{}),
+		runSlots:        make(chan struct{}, maxConcurrentProviderRuns),
 	}
 }
 
 func (s *Service) GetSnapshot(ctx context.Context) (LatestSnapshot, error) {
+	s.lock()
 	snapshot, err := s.repo.Load(ctx)
+	s.unlock()
 	if err != nil {
 		return LatestSnapshot{}, err
 	}
-	return s.reconcileSnapshot(ctx, snapshot)
+	if s.gateway == nil {
+		return snapshot, nil
+	}
+
+	provider := normalizeProvider(snapshot.Settings.TargetType)
+	if provider == "" {
+		provider = DefaultSettings().TargetType
+	}
+	files, err := s.gateway.ListAuthFiles(ctx, provider)
+	if err != nil {
+		return LatestSnapshot{}, err
+	}
+
+	s.lock()
+	defer s.unlock()
+	latest, err := s.repo.Load(ctx)
+	if err != nil {
+		return LatestSnapshot{}, err
+	}
+	latestProvider := normalizeProvider(latest.Settings.TargetType)
+	if latestProvider == "" {
+		latestProvider = DefaultSettings().TargetType
+	}
+	if latestProvider != provider {
+		return latest, nil
+	}
+	return s.reconcileSnapshot(ctx, latest, provider, files)
 }
 
-func (s *Service) Run(ctx context.Context, req RunRequest) (snapshot LatestSnapshot, err error) {
-	s.lock()
-	if s.active {
-		s.unlock()
-		return LatestSnapshot{}, ErrRunAlreadyActive
+func (s *Service) Run(ctx context.Context, req RunRequest) (LatestSnapshot, error) {
+	_, plan, err := s.beginRun(ctx, req, RunStatusRunning)
+	if err != nil {
+		return LatestSnapshot{}, err
 	}
-	s.active = true
-	s.unlock()
+	return s.executeRun(ctx, plan)
+}
 
-	defer func() {
-		s.lock()
-		s.active = false
-		s.unlock()
-	}()
+func (s *Service) StartRun(ctx context.Context, req RunRequest) (LatestSnapshot, error) {
+	return s.startRun(ctx, req, nil)
+}
 
-	snapshot, err = s.repo.Load(ctx)
+func (s *Service) StartRunWithCompletion(ctx context.Context, req RunRequest, onFinish func(LatestSnapshot)) (LatestSnapshot, error) {
+	return s.startRun(ctx, req, onFinish)
+}
+
+func (s *Service) startRun(ctx context.Context, req RunRequest, onFinish func(LatestSnapshot)) (LatestSnapshot, error) {
+	snapshot, plan, err := s.beginRun(ctx, req, RunStatusQueued)
 	if err != nil {
 		return LatestSnapshot{}, err
 	}
 
+	runCtx := ctx
+	if runCtx == nil {
+		runCtx = context.Background()
+	} else if req.TriggerType == TriggerTypeManual {
+		runCtx = context.WithoutCancel(runCtx)
+	}
+	go func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				panicErr := fmt.Errorf("codex inspection panic: %v", recovered)
+				log.WithField("provider", plan.provider).WithError(panicErr).Error("codex inspection run panicked")
+				snapshot, _ := s.finishRun(context.WithoutCancel(runCtx), plan, RunStatusFailed, panicErr)
+				if onFinish != nil {
+					onFinish(snapshot)
+				}
+			}
+		}()
+		finished, _ := s.executeRun(runCtx, plan)
+		if onFinish != nil {
+			onFinish(finished)
+		}
+	}()
+	return snapshot, nil
+}
+
+func (s *Service) beginRun(ctx context.Context, req RunRequest, status RunStatus) (LatestSnapshot, inspectionRunPlan, error) {
+	s.lock()
+	defer s.unlock()
+
+	snapshot, err := s.repo.Load(ctx)
+	if err != nil {
+		return LatestSnapshot{}, inspectionRunPlan{}, err
+	}
 	provider := normalizeProvider(req.Provider)
 	if provider == "" {
 		provider = normalizeProvider(snapshot.Settings.TargetType)
@@ -105,83 +191,277 @@ func (s *Service) Run(ctx context.Context, req RunRequest) (snapshot LatestSnaps
 	if provider == "" {
 		provider = DefaultSettings().TargetType
 	}
-	if !strings.EqualFold(snapshot.Settings.TargetType, provider) {
-		snapshot.Results = []InspectionResultItem{}
-		snapshot.ActionLogs = []InspectionActionLog{}
+	if _, exists := s.activeProviders[provider]; exists {
+		return LatestSnapshot{}, inspectionRunPlan{}, ErrRunAlreadyActive
 	}
-	snapshot.Settings.TargetType = provider
 
-	startedAtMS := nowMillis()
+	if req.TriggerType == TriggerTypeManual {
+		selectProviderView(&snapshot, provider)
+	} else {
+		initializeProviderStates(&snapshot)
+	}
+	state := providerState(snapshot, provider)
 	nextTriggers := maps.Clone(snapshot.Run.NextTriggerAtMSByProvider)
 	if nextTriggers == nil {
 		nextTriggers = make(map[string]int64)
 	}
-	if schedule := snapshot.Settings.ScheduleFor(provider); !schedule.Enabled || schedule.IntervalMinutes <= 0 {
+	schedule := snapshot.Settings.ScheduleFor(provider)
+	if !schedule.Enabled || schedule.IntervalMinutes <= 0 {
 		delete(nextTriggers, provider)
+	} else if req.TriggerType == TriggerTypeScheduled {
+		nextTriggers[provider] = nowMillis() + intervalMilliseconds(schedule.IntervalMinutes)
 	}
-	snapshot.Run = InspectionRunState{
-		Status:                    RunStatusRunning,
-		TriggerType:               req.TriggerType,
-		StartedAtMS:               startedAtMS,
-		NextTriggerAtMSByProvider: nextTriggers,
+	snapshot.Run.NextTriggerAtMSByProvider = nextTriggers
+	state.Run = InspectionRunState{
+		Status:         status,
+		TriggerType:    req.TriggerType,
+		StartedAtMS:    nowMillis(),
+		BatchSize:      inspectionBatchSize(provider),
+		ProcessedCount: 0,
+		PendingCount:   0,
 	}
-	if err := s.repo.Save(ctx, snapshot); err != nil {
-		return LatestSnapshot{}, err
+	setProviderState(&snapshot, provider, state)
+	s.activeProviders[provider] = struct{}{}
+	if err = s.repo.Save(ctx, snapshot); err != nil {
+		delete(s.activeProviders, provider)
+		return LatestSnapshot{}, inspectionRunPlan{}, err
 	}
 
-	files, err := s.gateway.ListAuthFiles(ctx, provider)
+	plan := inspectionRunPlan{provider: provider, request: req, settings: snapshot.Settings}
+	return snapshotForProvider(snapshot, provider), plan, nil
+}
+
+func (s *Service) executeRun(ctx context.Context, plan inspectionRunPlan) (LatestSnapshot, error) {
+	select {
+	case s.runSlots <- struct{}{}:
+		defer func() { <-s.runSlots }()
+	case <-ctx.Done():
+		return s.finishRun(ctx, plan, RunStatusFailed, ctx.Err())
+	}
+
+	files, err := s.gateway.ListAuthFiles(ctx, plan.provider)
 	if err != nil {
-		return LatestSnapshot{}, err
+		return s.finishRun(ctx, plan, RunStatusFailed, err)
 	}
-	reconcileAutoDisabledFiles(&snapshot, provider, files)
-	probeFiles := filterAuthFilesByName(files, req.FileNames)
-	if len(req.FileNames) > 0 {
-		snapshot.Results = filterResultsByCurrentFiles(snapshot.Results, files)
+	probeFiles, err := s.initializeRun(ctx, plan, files)
+	if err != nil {
+		return s.finishRun(ctx, plan, RunStatusFailed, err)
 	}
 
-	results, probeErr := s.prober.ProbeAccounts(ctx, probeFiles, snapshot.Settings)
-	results = applyXAIRecoveryActions(results)
-	if probeErr != nil {
-		if len(req.FileNames) == 0 {
-			snapshot.Results = results
-		} else {
-			snapshot.Results = mergeRunResults(snapshot.Results, results)
+	batchSize := inspectionBatchSize(plan.provider)
+	batchSettings := inspectionSettingsForProvider(plan.settings, plan.provider)
+	runResults := make([]InspectionResultItem, 0, len(probeFiles))
+	for start := 0; start < len(probeFiles) || start == 0; start += batchSize {
+		end := min(start+batchSize, len(probeFiles))
+		batch := probeFiles[start:end]
+		results, probeErr := s.prober.ProbeAccounts(ctx, batch, batchSettings)
+		results = applyXAIRecoveryActions(results)
+		runResults = append(runResults, results...)
+		if commitErr := s.commitBatch(ctx, plan, files, batch, results); commitErr != nil {
+			return s.finishRun(ctx, plan, RunStatusFailed, commitErr)
 		}
-		snapshot.Run.Status = RunStatusFailed
-		snapshot.Run.FinishedAtMS = nowMillis()
-		snapshot.Run.Error = probeErr.Error()
-		snapshot.Run.Summary = buildSummary(snapshot.Results, len(files))
-		updateProviderNextTrigger(&snapshot, provider, req.TriggerType)
-		if saveErr := s.repo.Save(ctx, snapshot); saveErr != nil {
-			return LatestSnapshot{}, saveErr
+		if probeErr != nil {
+			return s.finishRun(ctx, plan, RunStatusFailed, probeErr)
 		}
-		return snapshot, probeErr
+		if plan.provider == "xai" && end < len(probeFiles) {
+			if waitErr := waitInspectionBatch(ctx, xaiInspectionBatchPause); waitErr != nil {
+				return s.finishRun(ctx, plan, RunStatusFailed, waitErr)
+			}
+		}
 	}
+	if actionErr := s.applyRunActions(ctx, plan, files, runResults); actionErr != nil {
+		return s.finishRun(ctx, plan, RunStatusFailed, actionErr)
+	}
+	return s.finishRun(ctx, plan, RunStatusCompleted, nil)
+}
+
+func (s *Service) initializeRun(ctx context.Context, plan inspectionRunPlan, files []AuthFileRecord) ([]AuthFileRecord, error) {
+	s.lock()
+	defer s.unlock()
+
+	snapshot, err := s.repo.Load(ctx)
+	if err != nil {
+		return nil, err
+	}
+	state := providerState(snapshot, plan.provider)
+	reconcileAutoDisabledFiles(&snapshot, plan.provider, files)
+	probeFiles := filterAuthFilesByName(files, plan.request.FileNames)
+	if len(plan.request.FileNames) == 0 {
+		probeFiles = rotateAuthFiles(probeFiles, state.Cursor)
+		if plan.settings.SampleSize > 0 && plan.settings.SampleSize < len(probeFiles) {
+			probeFiles = probeFiles[:plan.settings.SampleSize]
+			state.Results = filterResultsByCurrentFiles(state.Results, files)
+		} else {
+			state.Results = []InspectionResultItem{}
+		}
+	} else {
+		state.Results = filterResultsByCurrentFiles(state.Results, files)
+	}
+	state.ActionLogs = []InspectionActionLog{}
+	state.Run.Status = RunStatusRunning
+	state.Run.BatchSize = inspectionBatchSize(plan.provider)
+	state.Run.ProcessedCount = 0
+	state.Run.PendingCount = len(probeFiles)
+	state.Run.Summary = buildSummary(state.Results, len(files))
+	setProviderState(&snapshot, plan.provider, state)
+	if err = s.repo.Save(ctx, snapshot); err != nil {
+		return nil, err
+	}
+	return probeFiles, nil
+}
+
+func (s *Service) commitBatch(ctx context.Context, plan inspectionRunPlan, files, batch []AuthFileRecord, results []InspectionResultItem) error {
+	s.lock()
+	defer s.unlock()
+
+	snapshot, err := s.repo.Load(ctx)
+	if err != nil {
+		return err
+	}
+	state := providerState(snapshot, plan.provider)
+	state.Results = mergeRunResults(state.Results, results)
+	state.Run.ProcessedCount += len(batch)
+	state.Run.PendingCount = max(0, state.Run.PendingCount-len(batch))
+	previousAutoDeleted := state.Run.Summary.AutoDeletedCount
+	state.Run.Summary = buildSummary(state.Results, len(files))
+	state.Run.Summary.AutoDeletedCount = previousAutoDeleted
+	if len(plan.request.FileNames) == 0 && len(files) > 0 {
+		state.Cursor = (state.Cursor + len(batch)) % len(files)
+	}
+	setProviderState(&snapshot, plan.provider, state)
+	return s.repo.Save(ctx, snapshot)
+}
+
+func (s *Service) applyRunActions(ctx context.Context, plan inspectionRunPlan, files []AuthFileRecord, results []InspectionResultItem) error {
+	s.actionsMu.Lock()
+	defer s.actionsMu.Unlock()
+
+	s.lock()
+	snapshot, err := s.repo.Load(ctx)
+	if err != nil {
+		s.unlock()
+		return err
+	}
+	results = append([]InspectionResultItem(nil), results...)
+	snapshot.AutoDisabledFiles = cloneAutoDisabledFiles(snapshot.AutoDisabledFiles)
+	touchedProviders := map[string]struct{}{plan.provider: {}}
+	for _, result := range results {
+		resultProvider := normalizeProvider(result.Provider)
+		if resultProvider != "" {
+			touchedProviders[resultProvider] = struct{}{}
+		}
+	}
+	s.unlock()
 
 	autoActionLogs := []InspectionActionLog{}
 	autoDeletedCount := 0
-	if req.TriggerType == TriggerTypeScheduled {
-		results, autoActionLogs, autoDeletedCount = s.autoApplyScheduledActions(ctx, provider, results, &snapshot)
+	if plan.request.TriggerType == TriggerTypeScheduled {
+		results, autoActionLogs, autoDeletedCount = s.autoApplyScheduledActions(ctx, plan.provider, results, &snapshot)
 	} else {
-		results, autoActionLogs = s.autoApplyXAIRecoveryActions(ctx, provider, results, &snapshot)
+		results, autoActionLogs = s.autoApplyXAIRecoveryActions(ctx, plan.provider, results, &snapshot)
 	}
 
-	if len(req.FileNames) == 0 {
-		snapshot.Results = results
-	} else {
-		snapshot.Results = mergeRunResults(snapshot.Results, results)
+	s.lock()
+	defer s.unlock()
+
+	latest, err := s.repo.Load(ctx)
+	if err != nil {
+		return err
 	}
-	snapshot.ActionLogs = autoActionLogs
-	snapshot.Run.Status = RunStatusCompleted
-	snapshot.Run.FinishedAtMS = nowMillis()
-	snapshot.Run.Error = ""
-	snapshot.Run.Summary = buildSummary(snapshot.Results, len(files))
-	snapshot.Run.Summary.AutoDeletedCount = autoDeletedCount
-	updateProviderNextTrigger(&snapshot, provider, req.TriggerType)
-	if err := s.repo.Save(ctx, snapshot); err != nil {
+	state := providerState(latest, plan.provider)
+	for _, actionLog := range autoActionLogs {
+		if actionLog.Success && actionLog.Action == ActionDelete {
+			state.Results = deleteResultByFileName(state.Results, actionLog.FileName)
+		}
+	}
+	state.Results = mergeRunResults(state.Results, results)
+	state.ActionLogs = append(state.ActionLogs, autoActionLogs...)
+	previousAutoDeleted := state.Run.Summary.AutoDeletedCount
+	state.Run.Summary = buildSummary(state.Results, len(files))
+	state.Run.Summary.AutoDeletedCount = previousAutoDeleted + autoDeletedCount
+	for touchedProvider := range touchedProviders {
+		replaceAutoDisabledFiles(&latest, touchedProvider, snapshot.AutoDisabledFiles[touchedProvider])
+	}
+	setProviderState(&latest, plan.provider, state)
+	return s.repo.Save(ctx, latest)
+}
+
+func (s *Service) finishRun(ctx context.Context, plan inspectionRunPlan, status RunStatus, runErr error) (LatestSnapshot, error) {
+	s.lock()
+	defer s.unlock()
+	defer delete(s.activeProviders, plan.provider)
+
+	persistCtx := context.Background()
+	if ctx != nil {
+		persistCtx = context.WithoutCancel(ctx)
+	}
+	snapshot, err := s.repo.Load(persistCtx)
+	if err != nil {
+		if runErr != nil {
+			return LatestSnapshot{}, runErr
+		}
 		return LatestSnapshot{}, err
 	}
+	state := providerState(snapshot, plan.provider)
+	state.Run.Status = status
+	state.Run.FinishedAtMS = nowMillis()
+	if status == RunStatusCompleted {
+		state.Run.PendingCount = 0
+		state.Run.Error = ""
+	} else if runErr != nil {
+		state.Run.Error = runErr.Error()
+	}
+	setProviderState(&snapshot, plan.provider, state)
+	updateProviderNextTrigger(&snapshot, plan.provider, plan.request.TriggerType)
+	if saveErr := s.repo.Save(persistCtx, snapshot); saveErr != nil {
+		return LatestSnapshot{}, saveErr
+	}
+	return snapshotForProvider(snapshot, plan.provider), runErr
+}
 
+func (s *Service) UpdateSettings(ctx context.Context, settings InspectionSettings) (LatestSnapshot, error) {
+	s.lock()
+	defer s.unlock()
+
+	snapshot, err := s.repo.Load(ctx)
+	if err != nil {
+		return LatestSnapshot{}, err
+	}
+	settings.TargetType = normalizeProvider(settings.TargetType)
+	if settings.TargetType == "" {
+		settings.TargetType = DefaultSettings().TargetType
+	}
+	mergedSchedules := maps.Clone(snapshot.Settings.Schedules)
+	if mergedSchedules == nil {
+		mergedSchedules = make(map[string]InspectionSchedule)
+	}
+	for provider, schedule := range settings.Schedules {
+		provider = normalizeProvider(provider)
+		if provider != "" {
+			mergedSchedules[provider] = schedule
+		}
+	}
+	settings.Schedules = mergedSchedules
+
+	previousSchedule := snapshot.Settings.ScheduleFor(settings.TargetType)
+	selectProviderView(&snapshot, settings.TargetType)
+	nextTriggers := maps.Clone(snapshot.Run.NextTriggerAtMSByProvider)
+	if nextTriggers == nil {
+		nextTriggers = make(map[string]int64)
+	}
+	nextSchedule := settings.ScheduleFor(settings.TargetType)
+	if nextSchedule.Enabled && nextSchedule.IntervalMinutes > 0 {
+		if previousSchedule != nextSchedule || nextTriggers[settings.TargetType] <= 0 {
+			nextTriggers[settings.TargetType] = nowMillis() + intervalMilliseconds(nextSchedule.IntervalMinutes)
+		}
+	} else {
+		delete(nextTriggers, settings.TargetType)
+	}
+	snapshot.Settings = settings
+	snapshot.Run.NextTriggerAtMSByProvider = nextTriggers
+	if err = s.repo.Save(ctx, snapshot); err != nil {
+		return LatestSnapshot{}, err
+	}
 	return snapshot, nil
 }
 
@@ -190,21 +470,29 @@ func (s *Service) ExecuteActions(ctx context.Context, req ExecuteActionsRequest)
 		return ExecuteActionsResult{}, ErrDeleteConfirmationRequired
 	}
 
+	s.actionsMu.Lock()
+	defer s.actionsMu.Unlock()
+
+	s.lock()
 	snapshot, err := s.repo.Load(ctx)
+	s.unlock()
 	if err != nil {
 		return ExecuteActionsResult{}, err
 	}
+	initializeProviderStates(&snapshot)
 
+	provider := normalizeProvider(snapshot.Settings.TargetType)
+	state := providerState(snapshot, provider)
 	displayNames := map[string]string{}
 	providers := map[string]string{}
-	for _, item := range snapshot.Results {
+	for _, item := range state.Results {
 		displayNames[item.FileName] = item.DisplayName
 		providers[item.FileName] = normalizeProvider(item.Provider)
 	}
 
 	logs := make([]InspectionActionLog, 0, len(req.FileNames))
 	for _, fileName := range req.FileNames {
-		log := InspectionActionLog{
+		actionLog := InspectionActionLog{
 			Action:       req.Action,
 			FileName:     fileName,
 			DisplayName:  displayNames[fileName],
@@ -222,55 +510,55 @@ func (s *Service) ExecuteActions(ctx context.Context, req ExecuteActionsRequest)
 			callErr = s.gateway.DeleteFiles(ctx, []string{fileName})
 		case ActionKeep, ActionReauth, ActionFailed:
 		}
-
 		if callErr != nil {
-			log.Success = false
-			log.Error = callErr.Error()
-		} else {
-			provider := providers[fileName]
-			if provider == "" {
-				provider = normalizeProvider(snapshot.Settings.TargetType)
-			}
-			switch req.Action {
-			case ActionDisable:
-				updateResultDisabled(snapshot.Results, fileName, true)
-				setAutoDisabledFile(&snapshot, provider, fileName, false)
-			case ActionEnable:
-				updateResultDisabled(snapshot.Results, fileName, false)
-				setAutoDisabledFile(&snapshot, provider, fileName, false)
-			case ActionDelete:
-				snapshot.Results = deleteResultByFileName(snapshot.Results, fileName)
-				setAutoDisabledFile(&snapshot, provider, fileName, false)
-			}
+			actionLog.Success = false
+			actionLog.Error = callErr.Error()
 		}
-		logs = append(logs, log)
+		logs = append(logs, actionLog)
 	}
 
-	snapshot.ActionLogs = logs
-	autoDeletedCount := snapshot.Run.Summary.AutoDeletedCount
-	snapshot.Run.Summary = buildSummary(snapshot.Results, len(snapshot.Results))
-	snapshot.Run.Summary.AutoDeletedCount = autoDeletedCount
-	if err := s.repo.Save(ctx, snapshot); err != nil {
+	s.lock()
+	defer s.unlock()
+
+	latest, err := s.repo.Load(ctx)
+	if err != nil {
+		return ExecuteActionsResult{}, err
+	}
+	initializeProviderStates(&latest)
+	state = providerState(latest, provider)
+	for _, actionLog := range logs {
+		if !actionLog.Success {
+			continue
+		}
+		resultProvider := providers[actionLog.FileName]
+		if resultProvider == "" {
+			resultProvider = provider
+		}
+		switch req.Action {
+		case ActionDisable:
+			updateResultDisabled(state.Results, actionLog.FileName, true)
+			setAutoDisabledFile(&latest, resultProvider, actionLog.FileName, false)
+		case ActionEnable:
+			updateResultDisabled(state.Results, actionLog.FileName, false)
+			setAutoDisabledFile(&latest, resultProvider, actionLog.FileName, false)
+		case ActionDelete:
+			state.Results = deleteResultByFileName(state.Results, actionLog.FileName)
+			setAutoDisabledFile(&latest, resultProvider, actionLog.FileName, false)
+		}
+	}
+	state.ActionLogs = logs
+	autoDeletedCount := state.Run.Summary.AutoDeletedCount
+	state.Run.Summary = buildSummary(state.Results, len(state.Results))
+	state.Run.Summary.AutoDeletedCount = autoDeletedCount
+	setProviderState(&latest, provider, state)
+	if err := s.repo.Save(ctx, latest); err != nil {
 		return ExecuteActionsResult{}, err
 	}
 
-	return ExecuteActionsResult{Snapshot: snapshot, Logs: logs}, nil
+	return ExecuteActionsResult{Snapshot: snapshotForProvider(latest, provider), Logs: logs}, nil
 }
 
-func (s *Service) reconcileSnapshot(ctx context.Context, snapshot LatestSnapshot) (LatestSnapshot, error) {
-	if s.gateway == nil {
-		return snapshot, nil
-	}
-
-	provider := normalizeProvider(snapshot.Settings.TargetType)
-	if provider == "" {
-		provider = DefaultSettings().TargetType
-	}
-	files, err := s.gateway.ListAuthFiles(ctx, provider)
-	if err != nil {
-		return LatestSnapshot{}, err
-	}
-
+func (s *Service) reconcileSnapshot(ctx context.Context, snapshot LatestSnapshot, provider string, files []AuthFileRecord) (LatestSnapshot, error) {
 	current := make(map[string]AuthFileRecord, len(files))
 	for _, file := range files {
 		current[file.FileName] = file
@@ -456,6 +744,32 @@ func reconcileAutoDisabledFiles(snapshot *LatestSnapshot, provider string, files
 	return changed
 }
 
+func cloneAutoDisabledFiles(source map[string]map[string]bool) map[string]map[string]bool {
+	if len(source) == 0 {
+		return nil
+	}
+	cloned := make(map[string]map[string]bool, len(source))
+	for provider, files := range source {
+		cloned[provider] = maps.Clone(files)
+	}
+	return cloned
+}
+
+func replaceAutoDisabledFiles(snapshot *LatestSnapshot, provider string, files map[string]bool) {
+	provider = normalizeProvider(provider)
+	if snapshot == nil || provider == "" {
+		return
+	}
+	if len(files) == 0 {
+		delete(snapshot.AutoDisabledFiles, provider)
+		return
+	}
+	if snapshot.AutoDisabledFiles == nil {
+		snapshot.AutoDisabledFiles = make(map[string]map[string]bool)
+	}
+	snapshot.AutoDisabledFiles[provider] = maps.Clone(files)
+}
+
 func setAutoDisabledFile(snapshot *LatestSnapshot, provider string, fileName string, autoDisabled bool) {
 	if snapshot == nil {
 		return
@@ -584,12 +898,198 @@ func mergeRunResults(existing []InspectionResultItem, incoming []InspectionResul
 	return merged
 }
 
+func initializeProviderStates(snapshot *LatestSnapshot) {
+	if snapshot == nil {
+		return
+	}
+	if snapshot.ProviderStates == nil {
+		snapshot.ProviderStates = make(map[string]ProviderInspectionState)
+	}
+	provider := normalizeProvider(snapshot.Settings.TargetType)
+	if provider == "" {
+		provider = DefaultSettings().TargetType
+		snapshot.Settings.TargetType = provider
+	}
+	if _, exists := snapshot.ProviderStates[provider]; exists {
+		return
+	}
+	run := snapshot.Run
+	run.NextTriggerAtMSByProvider = nil
+	snapshot.ProviderStates[provider] = ProviderInspectionState{
+		Run:        run,
+		Results:    append([]InspectionResultItem(nil), snapshot.Results...),
+		ActionLogs: append([]InspectionActionLog(nil), snapshot.ActionLogs...),
+	}
+}
+
+func persistSelectedProviderView(snapshot *LatestSnapshot) {
+	if snapshot == nil {
+		return
+	}
+	initializeProviderStates(snapshot)
+	provider := normalizeProvider(snapshot.Settings.TargetType)
+	run := snapshot.Run
+	run.NextTriggerAtMSByProvider = nil
+	state := snapshot.ProviderStates[provider]
+	state.Run = run
+	state.Results = append([]InspectionResultItem(nil), snapshot.Results...)
+	state.ActionLogs = append([]InspectionActionLog(nil), snapshot.ActionLogs...)
+	snapshot.ProviderStates[provider] = state
+}
+
+func syncSelectedProviderView(snapshot *LatestSnapshot) {
+	if snapshot == nil {
+		return
+	}
+	initializeProviderStates(snapshot)
+	provider := normalizeProvider(snapshot.Settings.TargetType)
+	state := snapshot.ProviderStates[provider]
+	nextTriggers := maps.Clone(snapshot.Run.NextTriggerAtMSByProvider)
+	snapshot.Run = state.Run
+	snapshot.Run.NextTriggerAtMSByProvider = nextTriggers
+	snapshot.Results = append([]InspectionResultItem(nil), state.Results...)
+	snapshot.ActionLogs = append([]InspectionActionLog(nil), state.ActionLogs...)
+	if snapshot.Results == nil {
+		snapshot.Results = []InspectionResultItem{}
+	}
+	if snapshot.ActionLogs == nil {
+		snapshot.ActionLogs = []InspectionActionLog{}
+	}
+}
+
+func selectProviderView(snapshot *LatestSnapshot, provider string) {
+	if snapshot == nil {
+		return
+	}
+	provider = normalizeProvider(provider)
+	if provider == "" {
+		provider = DefaultSettings().TargetType
+	}
+	persistSelectedProviderView(snapshot)
+	nextTriggers := maps.Clone(snapshot.Run.NextTriggerAtMSByProvider)
+	snapshot.Settings.TargetType = provider
+	if _, exists := snapshot.ProviderStates[provider]; !exists {
+		snapshot.ProviderStates[provider] = ProviderInspectionState{
+			Run:        InspectionRunState{Status: RunStatusIdle},
+			Results:    []InspectionResultItem{},
+			ActionLogs: []InspectionActionLog{},
+		}
+	}
+	syncSelectedProviderView(snapshot)
+	snapshot.Run.NextTriggerAtMSByProvider = nextTriggers
+}
+
+func providerState(snapshot LatestSnapshot, provider string) ProviderInspectionState {
+	provider = normalizeProvider(provider)
+	state, exists := snapshot.ProviderStates[provider]
+	if !exists {
+		return ProviderInspectionState{
+			Run:        InspectionRunState{Status: RunStatusIdle},
+			Results:    []InspectionResultItem{},
+			ActionLogs: []InspectionActionLog{},
+		}
+	}
+	if state.Results == nil {
+		state.Results = []InspectionResultItem{}
+	}
+	if state.ActionLogs == nil {
+		state.ActionLogs = []InspectionActionLog{}
+	}
+	return state
+}
+
+func setProviderState(snapshot *LatestSnapshot, provider string, state ProviderInspectionState) {
+	if snapshot == nil {
+		return
+	}
+	initializeProviderStates(snapshot)
+	provider = normalizeProvider(provider)
+	state.Run.NextTriggerAtMSByProvider = nil
+	if state.Results == nil {
+		state.Results = []InspectionResultItem{}
+	}
+	if state.ActionLogs == nil {
+		state.ActionLogs = []InspectionActionLog{}
+	}
+	snapshot.ProviderStates[provider] = state
+	if normalizeProvider(snapshot.Settings.TargetType) != provider {
+		return
+	}
+	nextTriggers := maps.Clone(snapshot.Run.NextTriggerAtMSByProvider)
+	snapshot.Run = state.Run
+	snapshot.Run.NextTriggerAtMSByProvider = nextTriggers
+	snapshot.Results = append([]InspectionResultItem(nil), state.Results...)
+	snapshot.ActionLogs = append([]InspectionActionLog(nil), state.ActionLogs...)
+}
+
+func snapshotForProvider(snapshot LatestSnapshot, provider string) LatestSnapshot {
+	provider = normalizeProvider(provider)
+	state := providerState(snapshot, provider)
+	nextTriggers := maps.Clone(snapshot.Run.NextTriggerAtMSByProvider)
+	snapshot.Settings.TargetType = provider
+	snapshot.Run = state.Run
+	snapshot.Run.NextTriggerAtMSByProvider = nextTriggers
+	snapshot.Results = append([]InspectionResultItem(nil), state.Results...)
+	snapshot.ActionLogs = append([]InspectionActionLog(nil), state.ActionLogs...)
+	return snapshot
+}
+
+func inspectionBatchSize(provider string) int {
+	if normalizeProvider(provider) == "xai" {
+		return xaiInspectionBatchSize
+	}
+	return defaultInspectionBatchSize
+}
+
+func inspectionSettingsForProvider(settings InspectionSettings, provider string) InspectionSettings {
+	settings.SampleSize = 0
+	workerLimit := maxProviderWorkers
+	switch normalizeProvider(provider) {
+	case "codex":
+		workerLimit = maxInspectionWorkers
+	case "xai":
+		workerLimit = maxXAIInspectionWorkers
+	}
+	if settings.Workers <= 0 {
+		settings.Workers = 1
+	}
+	if settings.Workers > workerLimit {
+		settings.Workers = workerLimit
+	}
+	return settings
+}
+
+func rotateAuthFiles(files []AuthFileRecord, cursor int) []AuthFileRecord {
+	if len(files) == 0 {
+		return []AuthFileRecord{}
+	}
+	cursor %= len(files)
+	if cursor < 0 {
+		cursor += len(files)
+	}
+	rotated := make([]AuthFileRecord, 0, len(files))
+	rotated = append(rotated, files[cursor:]...)
+	rotated = append(rotated, files[:cursor]...)
+	return rotated
+}
+
+func waitInspectionBatch(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 func (s *Service) lock() {
-	s.mu <- struct{}{}
+	s.mu.Lock()
 }
 
 func (s *Service) unlock() {
-	<-s.mu
+	s.mu.Unlock()
 }
 
 func updateProviderNextTrigger(snapshot *LatestSnapshot, provider string, triggerType TriggerType) {

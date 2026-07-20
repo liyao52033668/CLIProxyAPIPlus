@@ -6,6 +6,7 @@ type RunStatus string
 
 const (
 	RunStatusIdle      RunStatus = "idle"
+	RunStatusQueued    RunStatus = "queued"
 	RunStatusRunning   RunStatus = "running"
 	RunStatusCompleted RunStatus = "completed"
 	RunStatusFailed    RunStatus = "failed"
@@ -176,6 +177,9 @@ type InspectionRunState struct {
 	TriggerType               TriggerType       `json:"triggerType"`
 	StartedAtMS               int64             `json:"startedAtMs"`
 	FinishedAtMS              int64             `json:"finishedAtMs"`
+	ProcessedCount            int               `json:"processedCount"`
+	PendingCount              int               `json:"pendingCount"`
+	BatchSize                 int               `json:"batchSize"`
 	NextTriggerAtMSByProvider map[string]int64  `json:"nextTriggerAtMsByProvider,omitempty"`
 	Summary                   InspectionSummary `json:"summary"`
 	Error                     string            `json:"error,omitempty"`
@@ -224,12 +228,20 @@ type InspectionActionLog struct {
 	ExecutedAtMS int64  `json:"executedAtMs"`
 }
 
+type ProviderInspectionState struct {
+	Run        InspectionRunState     `json:"run"`
+	Results    []InspectionResultItem `json:"results"`
+	ActionLogs []InspectionActionLog  `json:"actionLogs"`
+	Cursor     int                    `json:"cursor"`
+}
+
 type LatestSnapshot struct {
-	Settings          InspectionSettings         `json:"settings"`
-	Run               InspectionRunState         `json:"run"`
-	Results           []InspectionResultItem     `json:"results"`
-	ActionLogs        []InspectionActionLog      `json:"actionLogs"`
-	AutoDisabledFiles map[string]map[string]bool `json:"autoDisabledFiles,omitempty"`
+	Settings          InspectionSettings                 `json:"settings"`
+	Run               InspectionRunState                 `json:"run"`
+	Results           []InspectionResultItem             `json:"results"`
+	ActionLogs        []InspectionActionLog              `json:"actionLogs"`
+	ProviderStates    map[string]ProviderInspectionState `json:"providerStates,omitempty"`
+	AutoDisabledFiles map[string]map[string]bool         `json:"autoDisabledFiles,omitempty"`
 }
 
 func DefaultSettings() InspectionSettings {
@@ -249,10 +261,11 @@ func DefaultSettings() InspectionSettings {
 
 func DefaultSnapshot() LatestSnapshot {
 	return LatestSnapshot{
-		Settings:   DefaultSettings(),
-		Run:        InspectionRunState{Status: RunStatusIdle},
-		Results:    []InspectionResultItem{},
-		ActionLogs: []InspectionActionLog{},
+		Settings:       DefaultSettings(),
+		Run:            InspectionRunState{Status: RunStatusIdle},
+		Results:        []InspectionResultItem{},
+		ActionLogs:     []InspectionActionLog{},
+		ProviderStates: make(map[string]ProviderInspectionState),
 	}
 }
 

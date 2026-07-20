@@ -3,7 +3,11 @@ package codexinspection
 import (
 	"context"
 	"errors"
+	"fmt"
+	"slices"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestService_RunStoresLatestSnapshot(t *testing.T) {
@@ -99,7 +103,7 @@ func TestService_RunSelectsProviderAndClearsPreviousResults(t *testing.T) {
 
 func TestService_RunRejectsConcurrentRun(t *testing.T) {
 	service := NewService(&fakeRepository{snapshot: DefaultSnapshot()}, &fakeGateway{}, &fakeProber{})
-	service.active = true
+	service.activeProviders["codex"] = struct{}{}
 
 	_, err := service.Run(context.Background(), RunRequest{TriggerType: TriggerTypeManual})
 	if !errors.Is(err, ErrRunAlreadyActive) {
@@ -1121,6 +1125,287 @@ func TestService_RunScheduledKeepsUnauthorizedResultWhenAutoDeleteFails(t *testi
 	}
 }
 
+func TestService_StartRunReturnsQueuedAndCompletesInBackground(t *testing.T) {
+	repo := &fakeRepository{snapshot: DefaultSnapshot()}
+	gateway := &fakeGateway{files: []AuthFileRecord{{FileName: "alpha.json", Provider: "codex"}}}
+	prober := &blockingProber{
+		started: make(chan struct{}, 1),
+		release: make(chan struct{}),
+	}
+	service := NewService(repo, gateway, prober)
+
+	snapshot, err := service.StartRun(context.Background(), RunRequest{TriggerType: TriggerTypeManual})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+	if snapshot.Run.Status != RunStatusQueued {
+		t.Fatalf("StartRun().Run.Status = %q, want %q", snapshot.Run.Status, RunStatusQueued)
+	}
+
+	select {
+	case <-prober.started:
+	case <-time.After(time.Second):
+		t.Fatal("background probe did not start")
+	}
+	close(prober.release)
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		latest, getErr := service.GetSnapshot(context.Background())
+		if getErr != nil {
+			t.Fatalf("GetSnapshot() error = %v", getErr)
+		}
+		if latest.Run.Status == RunStatusCompleted {
+			if latest.Run.ProcessedCount != 1 || latest.Run.PendingCount != 0 {
+				t.Fatalf("progress = %d processed, %d pending", latest.Run.ProcessedCount, latest.Run.PendingCount)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("background run status = %q, want completed", latest.Run.Status)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestService_StartRunPersistsFailedStateAfterScheduledContextCancellation(t *testing.T) {
+	repo := &contextCheckingRepository{snapshot: DefaultSnapshot()}
+	prober := &blockingProber{started: make(chan struct{}, 1), release: make(chan struct{})}
+	service := NewService(repo, &fakeGateway{files: []AuthFileRecord{{FileName: "alpha.json", Provider: "codex"}}}, prober)
+	ctx, cancel := context.WithCancel(context.Background())
+	finishedCh := make(chan LatestSnapshot, 1)
+
+	if _, err := service.StartRunWithCompletion(ctx, RunRequest{TriggerType: TriggerTypeScheduled}, func(snapshot LatestSnapshot) {
+		finishedCh <- snapshot
+	}); err != nil {
+		t.Fatalf("StartRunWithCompletion() error = %v", err)
+	}
+	select {
+	case <-prober.started:
+	case <-time.After(time.Second):
+		t.Fatal("scheduled probe did not start")
+	}
+	cancel()
+
+	var finished LatestSnapshot
+	select {
+	case finished = <-finishedCh:
+	case <-time.After(time.Second):
+		t.Fatal("scheduled run did not finish after cancellation")
+	}
+	if finished.Run.Status != RunStatusFailed || finished.Run.Error != context.Canceled.Error() {
+		t.Fatalf("finished run = %+v, want failed context canceled", finished.Run)
+	}
+	persisted, err := repo.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if persisted.Run.Status != RunStatusFailed {
+		t.Fatalf("persisted status = %q, want %q", persisted.Run.Status, RunStatusFailed)
+	}
+}
+
+func TestService_StartRunRecoversPanicsAndClearsActiveProvider(t *testing.T) {
+	service := NewService(
+		&fakeRepository{snapshot: DefaultSnapshot()},
+		&fakeGateway{files: []AuthFileRecord{{FileName: "alpha.json", Provider: "codex"}}},
+		panicProber{},
+	)
+	finishedCh := make(chan LatestSnapshot, 1)
+
+	if _, err := service.StartRunWithCompletion(context.Background(), RunRequest{TriggerType: TriggerTypeManual}, func(snapshot LatestSnapshot) {
+		finishedCh <- snapshot
+	}); err != nil {
+		t.Fatalf("StartRunWithCompletion() error = %v", err)
+	}
+	var finished LatestSnapshot
+	select {
+	case finished = <-finishedCh:
+	case <-time.After(time.Second):
+		t.Fatal("panicking run did not finish")
+	}
+	if finished.Run.Status != RunStatusFailed || !strings.Contains(finished.Run.Error, "probe panic") {
+		t.Fatalf("finished run = %+v, want failed panic state", finished.Run)
+	}
+
+	service.prober = &fakeProber{}
+	if _, err := service.Run(context.Background(), RunRequest{TriggerType: TriggerTypeManual}); err != nil {
+		t.Fatalf("Run() after panic error = %v", err)
+	}
+}
+
+func TestService_RunScheduledProbeErrorDoesNotApplyActions(t *testing.T) {
+	gateway := &fakeGateway{files: []AuthFileRecord{{FileName: "expired.json", Provider: "codex"}}}
+	service := NewService(&fakeRepository{snapshot: DefaultSnapshot()}, gateway, &fakeProber{
+		results:  []InspectionResultItem{{FileName: "expired.json", Provider: "codex", Action: ActionDelete}},
+		probeErr: errors.New("probe failed"),
+	})
+
+	snapshot, err := service.Run(context.Background(), RunRequest{TriggerType: TriggerTypeScheduled})
+	if err == nil || err.Error() != "probe failed" {
+		t.Fatalf("Run() error = %v, want probe failed", err)
+	}
+	if len(gateway.deleteCalls) != 0 {
+		t.Fatalf("deleteCalls = %v, want none", gateway.deleteCalls)
+	}
+	if len(snapshot.Results) != 1 || snapshot.Results[0].Action != ActionDelete {
+		t.Fatalf("Results = %+v, want partial delete result", snapshot.Results)
+	}
+}
+
+func TestService_RunDoesNotApplyEarlierBatchActionsWhenLaterBatchFails(t *testing.T) {
+	files := make([]AuthFileRecord, defaultInspectionBatchSize+1)
+	for i := range files {
+		files[i] = AuthFileRecord{FileName: fmt.Sprintf("auth-%02d.json", i), Provider: "codex"}
+	}
+	gateway := &fakeGateway{files: files}
+	service := NewService(&fakeRepository{snapshot: DefaultSnapshot()}, gateway, &laterBatchErrorProber{})
+
+	if _, err := service.Run(context.Background(), RunRequest{TriggerType: TriggerTypeScheduled}); err == nil {
+		t.Fatal("Run() error = nil, want later batch failure")
+	}
+	if len(gateway.deleteCalls) != 0 {
+		t.Fatalf("deleteCalls = %v, want none", gateway.deleteCalls)
+	}
+}
+
+func TestService_RunSampleFiltersResultsForMissingFiles(t *testing.T) {
+	settings := DefaultSettings()
+	settings.SampleSize = 1
+	repo := &fakeRepository{snapshot: LatestSnapshot{
+		Settings: settings,
+		Results:  []InspectionResultItem{{FileName: "removed.json", Provider: "codex", Action: ActionDelete}},
+	}}
+	files := []AuthFileRecord{
+		{FileName: "alpha.json", Provider: "codex"},
+		{FileName: "beta.json", Provider: "codex"},
+	}
+	service := NewService(repo, &fakeGateway{files: files}, &batchRecordingProber{})
+
+	snapshot, err := service.Run(context.Background(), RunRequest{TriggerType: TriggerTypeManual})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	for _, result := range snapshot.Results {
+		if result.FileName == "removed.json" {
+			t.Fatalf("Results = %+v, want removed file filtered", snapshot.Results)
+		}
+	}
+}
+
+func TestService_GetSnapshotDoesNotWaitForAutomaticGatewayAction(t *testing.T) {
+	gateway := &fakeGateway{
+		files:         []AuthFileRecord{{FileName: "expired.json", Provider: "codex"}},
+		deleteStarted: make(chan struct{}, 1),
+		deleteRelease: make(chan struct{}),
+	}
+	service := NewService(&fakeRepository{snapshot: DefaultSnapshot()}, gateway, &fakeProber{
+		results: []InspectionResultItem{{FileName: "expired.json", Provider: "codex", Action: ActionDelete}},
+	})
+	runDone := make(chan error, 1)
+	go func() {
+		_, err := service.Run(context.Background(), RunRequest{TriggerType: TriggerTypeScheduled})
+		runDone <- err
+	}()
+
+	select {
+	case <-gateway.deleteStarted:
+	case <-time.After(time.Second):
+		t.Fatal("automatic delete did not start")
+	}
+	snapshotDone := make(chan error, 1)
+	go func() {
+		_, err := service.GetSnapshot(context.Background())
+		snapshotDone <- err
+	}()
+	select {
+	case err := <-snapshotDone:
+		if err != nil {
+			t.Fatalf("GetSnapshot() error = %v", err)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("GetSnapshot() waited for automatic gateway action")
+	}
+
+	close(gateway.deleteRelease)
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Run() did not finish")
+	}
+}
+
+func TestService_RunProcessesAccountsInBatches(t *testing.T) {
+	files := make([]AuthFileRecord, 53)
+	for i := range files {
+		files[i] = AuthFileRecord{FileName: fmt.Sprintf("auth-%02d.json", i), Provider: "codex"}
+	}
+	prober := &batchRecordingProber{}
+	service := NewService(&fakeRepository{snapshot: DefaultSnapshot()}, &fakeGateway{files: files}, prober)
+
+	snapshot, err := service.Run(context.Background(), RunRequest{TriggerType: TriggerTypeManual})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	wantBatchSizes := []int{25, 25, 3}
+	if !slices.Equal(prober.batchSizes, wantBatchSizes) {
+		t.Fatalf("batch sizes = %v, want %v", prober.batchSizes, wantBatchSizes)
+	}
+	if snapshot.Run.BatchSize != defaultInspectionBatchSize {
+		t.Fatalf("BatchSize = %d, want %d", snapshot.Run.BatchSize, defaultInspectionBatchSize)
+	}
+	if snapshot.Run.ProcessedCount != len(files) || snapshot.Run.PendingCount != 0 {
+		t.Fatalf("progress = %d processed, %d pending", snapshot.Run.ProcessedCount, snapshot.Run.PendingCount)
+	}
+}
+
+func TestService_RunRotatesSampleAcrossRuns(t *testing.T) {
+	settings := DefaultSettings()
+	settings.SampleSize = 2
+	files := make([]AuthFileRecord, 6)
+	for i := range files {
+		files[i] = AuthFileRecord{FileName: fmt.Sprintf("auth-%d.json", i), Provider: "codex"}
+	}
+	repo := &fakeRepository{snapshot: LatestSnapshot{Settings: settings}}
+	prober := &batchRecordingProber{}
+	service := NewService(repo, &fakeGateway{files: files}, prober)
+
+	if _, err := service.Run(context.Background(), RunRequest{TriggerType: TriggerTypeManual}); err != nil {
+		t.Fatalf("first Run() error = %v", err)
+	}
+	if got := prober.fileNames[0]; !slices.Equal(got, []string{"auth-0.json", "auth-1.json"}) {
+		t.Fatalf("first sample = %v", got)
+	}
+	prober.fileNames = nil
+	prober.batchSizes = nil
+	if _, err := service.Run(context.Background(), RunRequest{TriggerType: TriggerTypeManual}); err != nil {
+		t.Fatalf("second Run() error = %v", err)
+	}
+	if got := prober.fileNames[0]; !slices.Equal(got, []string{"auth-2.json", "auth-3.json"}) {
+		t.Fatalf("second sample = %v", got)
+	}
+}
+
+func TestInspectionSettingsForXAILimitsProbePressure(t *testing.T) {
+	settings := DefaultSettings()
+	settings.Workers = 20
+	settings.SampleSize = 100
+
+	adjusted := inspectionSettingsForProvider(settings, "xai")
+	if adjusted.Workers != maxXAIInspectionWorkers {
+		t.Fatalf("Workers = %d, want %d", adjusted.Workers, maxXAIInspectionWorkers)
+	}
+	if adjusted.SampleSize != 0 {
+		t.Fatalf("SampleSize = %d, want 0 within a prepared batch", adjusted.SampleSize)
+	}
+	if inspectionBatchSize("xai") != xaiInspectionBatchSize {
+		t.Fatalf("xAI batch size = %d, want %d", inspectionBatchSize("xai"), xaiInspectionBatchSize)
+	}
+}
+
 func TestDefaultProberMapsAuthFilesToKeepResults(t *testing.T) {
 	results, err := (DefaultProber{}).ProbeAccounts(context.Background(), []AuthFileRecord{
 		{
@@ -1225,6 +1510,43 @@ func TestService_RunClearsActiveAfterSuccess(t *testing.T) {
 	}
 }
 
+type contextCheckingRepository struct {
+	snapshot LatestSnapshot
+}
+
+func (r *contextCheckingRepository) Load(ctx context.Context) (LatestSnapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return LatestSnapshot{}, err
+	}
+	return r.snapshot, nil
+}
+
+func (r *contextCheckingRepository) Save(ctx context.Context, snapshot LatestSnapshot) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.snapshot = snapshot
+	return nil
+}
+
+type panicProber struct{}
+
+func (panicProber) ProbeAccounts(context.Context, []AuthFileRecord, InspectionSettings) ([]InspectionResultItem, error) {
+	panic("probe panic")
+}
+
+type laterBatchErrorProber struct {
+	calls int
+}
+
+func (p *laterBatchErrorProber) ProbeAccounts(_ context.Context, files []AuthFileRecord, _ InspectionSettings) ([]InspectionResultItem, error) {
+	p.calls++
+	if p.calls == 1 {
+		return []InspectionResultItem{{FileName: files[0].FileName, Provider: "codex", Action: ActionDelete}}, nil
+	}
+	return keepResults(files), errors.New("later batch failed")
+}
+
 type fakeRepository struct {
 	snapshot LatestSnapshot
 	saved    LatestSnapshot
@@ -1256,6 +1578,8 @@ type fakeGateway struct {
 	setDisabledErrors map[string]error
 	deleteCalls       [][]string
 	deleteErrors      map[string]error
+	deleteStarted     chan struct{}
+	deleteRelease     chan struct{}
 }
 
 func (g *fakeGateway) ListAuthFiles(_ context.Context, provider string) ([]AuthFileRecord, error) {
@@ -1273,7 +1597,20 @@ func (g *fakeGateway) SetDisabled(_ context.Context, name string, disabled bool)
 	return nil
 }
 
-func (g *fakeGateway) DeleteFiles(_ context.Context, names []string) error {
+func (g *fakeGateway) DeleteFiles(ctx context.Context, names []string) error {
+	if g.deleteStarted != nil {
+		select {
+		case g.deleteStarted <- struct{}{}:
+		default:
+		}
+	}
+	if g.deleteRelease != nil {
+		select {
+		case <-g.deleteRelease:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	copied := append([]string(nil), names...)
 	g.deleteCalls = append(g.deleteCalls, copied)
 	if g.deleteErrors != nil {
@@ -1297,4 +1634,52 @@ func (p *fakeProber) ProbeAccounts(_ context.Context, files []AuthFileRecord, se
 	p.receivedFiles = append([]AuthFileRecord(nil), files...)
 	p.received = settings
 	return p.results, p.probeErr
+}
+
+type blockingProber struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (p *blockingProber) ProbeAccounts(ctx context.Context, files []AuthFileRecord, _ InspectionSettings) ([]InspectionResultItem, error) {
+	select {
+	case p.started <- struct{}{}:
+	default:
+	}
+	select {
+	case <-p.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return keepResults(files), nil
+}
+
+type batchRecordingProber struct {
+	batchSizes []int
+	fileNames  [][]string
+}
+
+func (p *batchRecordingProber) ProbeAccounts(_ context.Context, files []AuthFileRecord, _ InspectionSettings) ([]InspectionResultItem, error) {
+	p.batchSizes = append(p.batchSizes, len(files))
+	names := make([]string, len(files))
+	for i := range files {
+		names[i] = files[i].FileName
+	}
+	p.fileNames = append(p.fileNames, names)
+	return keepResults(files), nil
+}
+
+func keepResults(files []AuthFileRecord) []InspectionResultItem {
+	results := make([]InspectionResultItem, len(files))
+	for i, file := range files {
+		results[i] = InspectionResultItem{
+			FileName:     file.FileName,
+			DisplayName:  file.DisplayName,
+			Provider:     file.Provider,
+			Disabled:     file.Disabled,
+			Action:       ActionKeep,
+			ActionReason: "no issue detected",
+		}
+	}
+	return results
 }
