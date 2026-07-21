@@ -17,6 +17,7 @@ import (
 
 	"github.com/fxamacker/cbor/v2"
 	"github.com/gin-gonic/gin"
+	cursorauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cursor"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/geminicli"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -253,7 +254,17 @@ func (h *Handler) APICall(c *gin.Context) {
 		if token == "" {
 			continue
 		}
-		reqHeaders[key] = strings.ReplaceAll(value, "$TOKEN$", token)
+		replacement := token
+		// Cursor dashboard APIs expect WorkosCursorSessionToken=user_xxx%3A%3A{jwt}.
+		// Keep Bearer $TOKEN$ as the raw access token for model/API calls.
+		if auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "cursor") {
+			if strings.EqualFold(key, "Cookie") || strings.Contains(value, "WorkosCursorSessionToken") {
+				if session := cursorSessionTokenValue(auth, token); session != "" {
+					replacement = session
+				}
+			}
+		}
+		reqHeaders[key] = strings.ReplaceAll(value, "$TOKEN$", replacement)
 	}
 
 	// When caller indicates CBOR in request headers, convert JSON string payload to CBOR bytes.
@@ -381,6 +392,51 @@ func tokenValueForAuth(auth *coreauth.Auth) string {
 		}
 	}
 	return ""
+}
+
+// extractCursorUserID returns the user_xxx portion of a Cursor subject claim.
+// Accepts "user_xxx" or provider-prefixed forms like "google-oauth2|user_xxx".
+func extractCursorUserID(sub string) string {
+	sub = strings.TrimSpace(sub)
+	if sub == "" {
+		return ""
+	}
+	if idx := strings.LastIndex(sub, "|"); idx >= 0 {
+		sub = strings.TrimSpace(sub[idx+1:])
+	}
+	if strings.HasPrefix(sub, "user_") {
+		return sub
+	}
+	return ""
+}
+
+func cursorUserIDFromAuth(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Metadata != nil {
+		if id := extractCursorUserID(stringValue(auth.Metadata, "sub")); id != "" {
+			return id
+		}
+	}
+	return ""
+}
+
+// cursorSessionTokenValue builds the Cookie value used by cursor.com dashboard APIs:
+// user_xxx%3A%3A{access_token}. Falls back to the raw access token when user id is unknown.
+func cursorSessionTokenValue(auth *coreauth.Auth, accessToken string) string {
+	accessToken = strings.TrimSpace(accessToken)
+	if accessToken == "" {
+		return ""
+	}
+	userID := cursorUserIDFromAuth(auth)
+	if userID == "" {
+		userID = extractCursorUserID(cursorauth.ParseJWTSub(accessToken))
+	}
+	if userID == "" {
+		return accessToken
+	}
+	return userID + "%3A%3A" + accessToken
 }
 
 func (h *Handler) resolveTokenForAuth(ctx context.Context, auth *coreauth.Auth) (string, error) {
