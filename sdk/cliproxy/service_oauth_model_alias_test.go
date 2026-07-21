@@ -33,6 +33,27 @@ func TestApplyOAuthModelAlias_Rename(t *testing.T) {
 	}
 }
 
+func TestApplyOAuthModelAlias_XAIRename(t *testing.T) {
+	cfg := &config.Config{
+		OAuthModelAlias: map[string][]config.OAuthModelAlias{
+			"xai": {
+				{Name: "grok-4.3", Alias: "grok-latest"},
+			},
+		},
+	}
+	models := []*ModelInfo{
+		{ID: "grok-4.3", Name: "models/grok-4.3", DisplayName: "Grok 4.3"},
+	}
+
+	out := applyOAuthModelAlias(cfg, "xai", "oauth", models)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 model, got %d", len(out))
+	}
+	if out[0].ID != "grok-latest" {
+		t.Fatalf("expected model id %q, got %q", "grok-latest", out[0].ID)
+	}
+}
+
 func TestApplyOAuthModelAlias_ForkAddsAlias(t *testing.T) {
 	cfg := &config.Config{
 		OAuthModelAlias: map[string][]config.OAuthModelAlias{

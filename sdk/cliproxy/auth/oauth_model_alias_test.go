@@ -228,6 +228,32 @@ func TestOAuthModelAliasChannel_Kiro(t *testing.T) {
 	}
 }
 
+func TestOAuthModelAliasChannel_XAI(t *testing.T) {
+	t.Parallel()
+
+	if got := OAuthModelAliasChannel("xai", "oauth"); got != "xai" {
+		t.Fatalf("OAuthModelAliasChannel() = %q, want %q", got, "xai")
+	}
+}
+
+func TestApplyOAuthModelAlias_XAI(t *testing.T) {
+	t.Parallel()
+
+	aliases := map[string][]internalconfig.OAuthModelAlias{
+		"xai": {{Name: "grok-4.3", Alias: "grok-latest"}},
+	}
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(&internalconfig.Config{})
+	mgr.SetOAuthModelAlias(aliases)
+
+	auth := &Auth{ID: "xai-auth", Provider: "xai"}
+	resolved := mgr.applyOAuthModelAlias(auth, "grok-latest")
+	if resolved != "grok-4.3" {
+		t.Fatalf("applyOAuthModelAlias() = %q, want %q", resolved, "grok-4.3")
+	}
+}
+
 func TestApplyOAuthModelAlias_SuffixPreservation(t *testing.T) {
 	t.Parallel()
 
