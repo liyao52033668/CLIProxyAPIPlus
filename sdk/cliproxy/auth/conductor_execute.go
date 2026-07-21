@@ -10,8 +10,11 @@ import (
 
 	"github.com/google/uuid"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
+	log "github.com/sirupsen/logrus"
 )
 
 func (m *Manager) RegisterExecutor(executor ProviderExecutor) {
@@ -224,18 +227,41 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 
 func (m *Manager) executeAutoWithModelFailover(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	_, maxRetryCredentials, _ := m.retrySettings()
-	resp, errExec := m.executeMixedOnce(ctx, providers, req, opts, maxRetryCredentials)
-	if errExec == nil {
-		return resp, nil
-	}
-	if hasAntigravityProvider(providers) && shouldAttemptAntigravityCreditsFallback(m, errExec, providers) {
-		if fallback, ok, errCredits := m.tryAntigravityCreditsExecute(ctx, req, opts); errCredits != nil {
-			return cliproxyexecutor.Response{}, errCredits
-		} else if ok {
-			return fallback, nil
+	excluded := make(map[string]struct{})
+	var lastErr error
+	for attempt := 0; attempt < autoModelFailoverMaxAttempts; attempt++ {
+		if ctx != nil {
+			if errCtx := ctx.Err(); errCtx != nil {
+				return cliproxyexecutor.Response{}, errCtx
+			}
 		}
+		attemptProviders, attemptReq, ok := m.prepareAutoAttempt(providers, req, excluded)
+		if !ok {
+			break
+		}
+		resp, errExec := m.executeMixedOnce(ctx, attemptProviders, attemptReq, opts, maxRetryCredentials)
+		if errExec == nil {
+			return resp, nil
+		}
+		lastErr = errExec
+		excludeAutoModel(excluded, attemptReq.Model)
+		if isRequestInvalidError(errExec) {
+			return cliproxyexecutor.Response{}, errExec
+		}
+		if hasAntigravityProvider(attemptProviders) && shouldAttemptAntigravityCreditsFallback(m, errExec, attemptProviders) {
+			if fallback, okCredits, errCredits := m.tryAntigravityCreditsExecute(ctx, attemptReq, opts); errCredits != nil {
+				return cliproxyexecutor.Response{}, errCredits
+			} else if okCredits {
+				return fallback, nil
+			}
+		}
+		// Failure already disabled the model via MarkResult(IsAuto). Re-resolve on next loop.
+		log.Debugf("auto model failover: model %q failed (%v), trying next model", attemptReq.Model, errExec)
 	}
-	return cliproxyexecutor.Response{}, errExec
+	if lastErr != nil {
+		return cliproxyexecutor.Response{}, lastErr
+	}
+	return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auto model available"}
 }
 
 // ExecuteCount performs a non-streaming execution using the configured selector and executor.
@@ -253,7 +279,33 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 
 func (m *Manager) executeCountAutoWithModelFailover(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	_, maxRetryCredentials, _ := m.retrySettings()
-	return m.executeCountMixedOnce(ctx, providers, req, opts, maxRetryCredentials)
+	excluded := make(map[string]struct{})
+	var lastErr error
+	for attempt := 0; attempt < autoModelFailoverMaxAttempts; attempt++ {
+		if ctx != nil {
+			if errCtx := ctx.Err(); errCtx != nil {
+				return cliproxyexecutor.Response{}, errCtx
+			}
+		}
+		attemptProviders, attemptReq, ok := m.prepareAutoAttempt(providers, req, excluded)
+		if !ok {
+			break
+		}
+		resp, errExec := m.executeCountMixedOnce(ctx, attemptProviders, attemptReq, opts, maxRetryCredentials)
+		if errExec == nil {
+			return resp, nil
+		}
+		lastErr = errExec
+		excludeAutoModel(excluded, attemptReq.Model)
+		if isRequestInvalidError(errExec) {
+			return cliproxyexecutor.Response{}, errExec
+		}
+		log.Debugf("auto model failover (count): model %q failed (%v), trying next model", attemptReq.Model, errExec)
+	}
+	if lastErr != nil {
+		return cliproxyexecutor.Response{}, lastErr
+	}
+	return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auto model available"}
 }
 
 // ExecuteStream performs a streaming execution using the configured selector and executor.
@@ -271,32 +323,107 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 
 func (m *Manager) executeStreamAutoWithModelFailover(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 	_, maxRetryCredentials, _ := m.retrySettings()
-	result, err := m.executeStreamMixedOnce(ctx, providers, req, opts, maxRetryCredentials)
-	if err != nil {
-		if hasAntigravityProvider(providers) && shouldAttemptAntigravityCreditsFallback(m, err, providers) {
-			if fallback, ok, errCredits := m.tryAntigravityCreditsExecuteStream(ctx, req, opts); errCredits != nil {
-				return nil, errCredits
-			} else if ok {
-				return fallback, nil
+	excluded := make(map[string]struct{})
+	var lastErr error
+	var lastHeaders http.Header
+	for attempt := 0; attempt < autoModelFailoverMaxAttempts; attempt++ {
+		if ctx != nil {
+			if errCtx := ctx.Err(); errCtx != nil {
+				return nil, errCtx
 			}
 		}
-		return nil, err
-	}
-	if result == nil {
-		return nil, nil
-	}
-	buffered, closed, bootstrapErr := readStreamBootstrap(ctx, result.Chunks)
-	if bootstrapErr != nil {
-		if hasAntigravityProvider(providers) && shouldAttemptAntigravityCreditsFallback(m, bootstrapErr, providers) {
-			if fallback, ok, errCredits := m.tryAntigravityCreditsExecuteStream(ctx, req, opts); errCredits != nil {
-				return nil, errCredits
-			} else if ok {
-				return fallback, nil
-			}
+		attemptProviders, attemptReq, ok := m.prepareAutoAttempt(providers, req, excluded)
+		if !ok {
+			break
 		}
-		return streamErrorResult(result.Headers, bootstrapErr), nil
+		result, err := m.executeStreamMixedOnce(ctx, attemptProviders, attemptReq, opts, maxRetryCredentials)
+		if err != nil {
+			lastErr = err
+			excludeAutoModel(excluded, attemptReq.Model)
+			if isRequestInvalidError(err) {
+				return nil, err
+			}
+			if hasAntigravityProvider(attemptProviders) && shouldAttemptAntigravityCreditsFallback(m, err, attemptProviders) {
+				if fallback, okCredits, errCredits := m.tryAntigravityCreditsExecuteStream(ctx, attemptReq, opts); errCredits != nil {
+					return nil, errCredits
+				} else if okCredits {
+					return fallback, nil
+				}
+			}
+			log.Debugf("auto model failover (stream): model %q failed (%v), trying next model", attemptReq.Model, err)
+			continue
+		}
+		if result == nil {
+			return nil, nil
+		}
+		buffered, closed, bootstrapErr := readStreamBootstrap(ctx, result.Chunks)
+		if bootstrapErr != nil {
+			lastErr = bootstrapErr
+			lastHeaders = result.Headers
+			excludeAutoModel(excluded, attemptReq.Model)
+			if isRequestInvalidError(bootstrapErr) {
+				return streamErrorResult(result.Headers, bootstrapErr), nil
+			}
+			if hasAntigravityProvider(attemptProviders) && shouldAttemptAntigravityCreditsFallback(m, bootstrapErr, attemptProviders) {
+				if fallback, okCredits, errCredits := m.tryAntigravityCreditsExecuteStream(ctx, attemptReq, opts); errCredits != nil {
+					return nil, errCredits
+				} else if okCredits {
+					return fallback, nil
+				}
+			}
+			// Bootstrap failures after a returned stream are rare (pool already bootstraps).
+			// excluded set is enough for same-request re-resolve; MarkResult already ran in pool on failure.
+			log.Debugf("auto model failover (stream bootstrap): model %q failed (%v), trying next model", attemptReq.Model, bootstrapErr)
+			continue
+		}
+		return replayBufferedStreamResult(result.Headers, buffered, result.Chunks, closed), nil
 	}
-	return replayBufferedStreamResult(result.Headers, buffered, result.Chunks, closed), nil
+	if lastErr != nil {
+		if lastHeaders != nil {
+			return streamErrorResult(lastHeaders, lastErr), nil
+		}
+		return nil, lastErr
+	}
+	return nil, &Error{Code: "auth_not_found", Message: "no auto model available"}
+}
+
+// prepareAutoAttempt re-resolves the global auto model and its providers for one attempt.
+// Returns ok=false when no candidate remains.
+func (m *Manager) prepareAutoAttempt(providers []string, req cliproxyexecutor.Request, excluded map[string]struct{}) ([]string, cliproxyexecutor.Request, bool) {
+	// Keep any thinking suffix from the current request model.
+	suffix := thinking.ParseSuffix(req.Model)
+	resolvedBase := util.ResolveAutoModelExcluding(excluded)
+	if strings.TrimSpace(resolvedBase) == "" {
+		return nil, req, false
+	}
+	nextModel := preserveResolvedModelSuffix(resolvedBase, suffix)
+	nextReq := req
+	nextReq.Model = nextModel
+
+	// Recompute providers from the newly resolved model so failover can leave the first provider.
+	nextProviders := util.GetProviderName(thinking.ParseSuffix(nextModel).ModelName)
+	if len(nextProviders) == 0 {
+		// Fall back to original provider list when registry lookup is empty.
+		nextProviders = providers
+	}
+	nextProviders = m.normalizeProviders(nextProviders)
+	if len(nextProviders) == 0 {
+		return nil, req, false
+	}
+	return nextProviders, nextReq, true
+}
+
+func excludeAutoModel(excluded map[string]struct{}, model string) {
+	if excluded == nil {
+		return
+	}
+	base := strings.TrimSpace(thinking.ParseSuffix(model).ModelName)
+	if base == "" {
+		base = strings.TrimSpace(model)
+	}
+	if base != "" {
+		excluded[base] = struct{}{}
+	}
 }
 
 func replayBufferedStreamResult(headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk, closed bool) *cliproxyexecutor.StreamResult {

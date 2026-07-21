@@ -79,9 +79,20 @@ func ResolveAutoModel(modelName string) (string, bool) {
 	if modelName != "auto" {
 		return modelName, false
 	}
+	return ResolveAutoModelExcluding(nil), true
+}
 
+// ResolveAutoModelExcluding picks the next global auto model while skipping excluded IDs.
+// Always excludes models whose base name is "auto".
+func ResolveAutoModelExcluding(extraExcluded map[string]struct{}) string {
 	modelRegistry := registry.GetGlobalRegistry()
 	excluded := map[string]struct{}{"auto": {}}
+	for modelID := range extraExcluded {
+		modelID = strings.TrimSpace(modelID)
+		if modelID != "" {
+			excluded[modelID] = struct{}{}
+		}
+	}
 	for _, model := range modelRegistry.GetAvailableModels("") {
 		modelID, _ := model["id"].(string)
 		baseModelID := modelID
@@ -96,11 +107,11 @@ func ResolveAutoModel(modelName string) (string, bool) {
 	firstModel, err := modelRegistry.GetFirstAvailableModelExcluding("", excluded)
 	if err != nil {
 		log.Warnf("Failed to resolve 'auto' model: %v", err)
-		return "", true
+		return ""
 	}
 
 	log.Infof("Resolved 'auto' model to: %s", firstModel)
-	return firstModel, true
+	return firstModel
 }
 
 // MarkAutoModelResult records the result of an auto-resolved model execution.

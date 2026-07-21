@@ -2,6 +2,7 @@ package registry
 
 import (
 	"testing"
+	"time"
 )
 
 func TestGetFirstAvailableModelSkipsDisabledModels(t *testing.T) {
@@ -214,6 +215,143 @@ func TestGetFirstAvailableModelPrefersHighestPriorityModelSet(t *testing.T) {
 	if model != "gpt-4o-mini" {
 		t.Fatalf("expected highest-priority model gpt-4o-mini, got %q", model)
 	}
+}
+
+// Regression: highestPriorityFunc may re-enter the registry (e.g. ClientSupportsModel).
+// Holding r.mutex.Lock across that callback deadlocked global auto model resolution
+// and froze the whole service (mutex not cancellable by request context).
+func TestGetFirstAvailableModelDoesNotDeadlockWhenPriorityFuncReentersRegistry(t *testing.T) {
+	r := newTestModelRegistry()
+	r.RegisterClient("client-1", "openai", []*ModelInfo{
+		{ID: "gpt-4o", DisplayName: "GPT-4o"},
+		{ID: "gpt-4o-mini", DisplayName: "GPT-4o Mini"},
+	})
+	r.SetHighestPriorityFunc(func(handlerType, modelID string) (int, bool) {
+		if !r.ClientSupportsModel("client-1", modelID) {
+			return 0, false
+		}
+		if modelID == "gpt-4o-mini" {
+			return 30, true
+		}
+		return 10, true
+	})
+
+	done := make(chan struct{})
+	var model string
+	var err error
+	go func() {
+		defer close(done)
+		model, err = r.GetFirstAvailableModel("openai")
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("GetFirstAvailableModel deadlocked when highestPriorityFunc re-entered registry")
+	}
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if model != "gpt-4o-mini" {
+		t.Fatalf("expected gpt-4o-mini, got %q", model)
+	}
+}
+
+func TestGetFirstAvailableModelGlobalAutoDoesNotDeadlockWhenPriorityFuncReentersRegistry(t *testing.T) {
+	r := newTestModelRegistry()
+	r.RegisterClient("client-1", "openai", []*ModelInfo{
+		{ID: "gpt-4o", DisplayName: "GPT-4o", Created: 100},
+		{ID: "gpt-4o-mini", DisplayName: "GPT-4o Mini", Created: 200},
+	})
+	r.SetHighestPriorityFunc(func(handlerType, modelID string) (int, bool) {
+		// Simulate production HighestAvailablePriorityForModel path for global auto (handlerType "").
+		if !r.ClientSupportsModel("client-1", modelID) {
+			return 0, false
+		}
+		return 10, true
+	})
+
+	done := make(chan struct{})
+	var model string
+	var err error
+	go func() {
+		defer close(done)
+		model, err = r.GetFirstAvailableModelExcluding("", map[string]struct{}{"auto": {}})
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("global auto GetFirstAvailableModelExcluding deadlocked when highestPriorityFunc re-entered registry")
+	}
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Without usage history, global auto falls back to smaller modelID.
+	if model != "gpt-4o" {
+		t.Fatalf("expected gpt-4o (smaller modelID when never selected), got %q", model)
+	}
+}
+
+func TestGetFirstAvailableModelGlobalAutoTieBreakOrder(t *testing.T) {
+	// recently selected wins
+	t.Run("prefers_recently_selected", func(t *testing.T) {
+		r := newTestModelRegistry()
+		r.RegisterClient("c1", "openai", []*ModelInfo{
+			{ID: "model-a", Created: 100},
+			{ID: "model-b", Created: 200},
+		})
+		// Mark model-a as more recently selected even though model-b has newer created.
+		r.mutex.Lock()
+		r.models["model-a"].LastSelectedAt = time.Now()
+		r.models["model-b"].LastSelectedAt = time.Now().Add(-time.Hour)
+		r.mutex.Unlock()
+
+		model, err := r.GetFirstAvailableModelExcluding("", nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if model != "model-a" {
+			t.Fatalf("expected model-a (more recently selected), got %q", model)
+		}
+	})
+
+	// never selected -> more auth clients wins (created ignored)
+	t.Run("prefers_more_auth_clients", func(t *testing.T) {
+		r := newTestModelRegistry()
+		r.RegisterClient("c1", "openai", []*ModelInfo{
+			{ID: "model-a", Created: 300},
+			{ID: "model-b", Created: 100},
+		})
+		r.RegisterClient("c2", "openai", []*ModelInfo{
+			{ID: "model-b", Created: 100},
+		})
+
+		model, err := r.GetFirstAvailableModelExcluding("", nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if model != "model-b" {
+			t.Fatalf("expected model-b (more auth clients), got %q", model)
+		}
+	})
+
+	// never selected + same auth count -> smaller modelID (created ignored)
+	t.Run("prefers_smaller_model_id", func(t *testing.T) {
+		r := newTestModelRegistry()
+		r.RegisterClient("c1", "openai", []*ModelInfo{
+			{ID: "model-z", Created: 300},
+			{ID: "model-a", Created: 100},
+		})
+
+		model, err := r.GetFirstAvailableModelExcluding("", nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if model != "model-a" {
+			t.Fatalf("expected model-a (smaller modelID), got %q", model)
+		}
+	})
 }
 
 func TestGetFirstAvailableModelRoundRobinWithinPriorityTie(t *testing.T) {

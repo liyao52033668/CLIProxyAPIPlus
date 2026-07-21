@@ -120,6 +120,8 @@ type ModelRegistration struct {
 	SuspendedClients map[string]string
 	// SelectionCount tracks how many times this model has been selected
 	SelectionCount int64
+	// LastSelectedAt is the last time this model was chosen by auto selection.
+	LastSelectedAt time.Time
 	// RegistrationOrder preserves deterministic model ordering based on first registration.
 	RegistrationOrder uint64
 }
@@ -966,21 +968,13 @@ func modelIDFromMap(model map[string]any) (string, bool) {
 	return modelID, true
 }
 
-func (r *ModelRegistry) highestPriorityForModelLocked(handlerType, modelID string) (int, bool) {
-	if r == nil || strings.TrimSpace(modelID) == "" {
-		return 0, false
-	}
-	if r.highestPriorityFunc == nil {
-		return 0, false
-	}
-	return r.highestPriorityFunc(handlerType, modelID)
-}
-
-func (r *ModelRegistry) topPriorityCandidateIndexesLocked(handlerType string, models []map[string]any) []int {
+// collectLocalAutoCandidatesLocked returns indexes of models that are locally
+// eligible for auto selection (have available clients and are not disabled).
+// Priority evaluation is intentionally NOT performed here because
+// highestPriorityFunc may re-enter the registry (and other managers) and must
+// not run while r.mutex is held.
+func (r *ModelRegistry) collectLocalAutoCandidatesLocked(models []map[string]any) []int {
 	candidates := make([]int, 0, len(models))
-	bestPriority := 0
-	foundPriority := false
-	anyPrioritySignal := r.highestPriorityFunc != nil
 	for index, model := range models {
 		modelID, ok := modelIDFromMap(model)
 		if !ok {
@@ -989,24 +983,42 @@ func (r *ModelRegistry) topPriorityCandidateIndexesLocked(handlerType string, mo
 		if count := r.getModelCountLocked(modelID); count <= 0 || r.isModelDisabledForAnyAuthLocked(modelID) {
 			continue
 		}
-		if !anyPrioritySignal {
-			candidates = append(candidates, index)
+		candidates = append(candidates, index)
+	}
+	return candidates
+}
+
+// filterTopPriorityCandidateIndexes evaluates highestPriorityFunc outside the
+// registry lock and keeps only the highest-priority candidate indexes.
+func (r *ModelRegistry) filterTopPriorityCandidateIndexes(handlerType string, models []map[string]any, candidateIndexes []int, priorityFunc func(handlerType, modelID string) (int, bool)) []int {
+	if priorityFunc == nil || len(candidateIndexes) == 0 {
+		return candidateIndexes
+	}
+	filtered := make([]int, 0, len(candidateIndexes))
+	bestPriority := 0
+	foundPriority := false
+	for _, index := range candidateIndexes {
+		if index < 0 || index >= len(models) {
 			continue
 		}
-		priority, ok := r.highestPriorityForModelLocked(handlerType, modelID)
+		modelID, ok := modelIDFromMap(models[index])
+		if !ok {
+			continue
+		}
+		priority, ok := priorityFunc(handlerType, modelID)
 		if !ok {
 			continue
 		}
 		if !foundPriority || priority > bestPriority {
 			bestPriority = priority
 			foundPriority = true
-			candidates = candidates[:0]
+			filtered = filtered[:0]
 		}
 		if priority == bestPriority {
-			candidates = append(candidates, index)
+			filtered = append(filtered, index)
 		}
 	}
-	return candidates
+	return filtered
 }
 
 func cloneModelMapValue(value any) any {
@@ -1447,6 +1459,8 @@ func (r *ModelRegistry) GetFirstAvailableModel(handlerType string) (string, erro
 }
 
 // GetFirstAvailableModelExcluding returns the first available model while skipping excluded model IDs.
+// Priority callbacks are evaluated outside the registry lock so they can safely re-enter the
+// registry (e.g. ClientSupportsModel) without deadlocking selection.
 func (r *ModelRegistry) GetFirstAvailableModelExcluding(handlerType string, excluded map[string]struct{}) (string, error) {
 	// Get all available models for this handler type
 	models := r.GetAvailableModels(handlerType)
@@ -1454,43 +1468,76 @@ func (r *ModelRegistry) GetFirstAvailableModelExcluding(handlerType string, excl
 		return "", fmt.Errorf("no models available for handler type: %s", handlerType)
 	}
 
+	// Snapshot local eligibility under the lock without invoking external callbacks.
 	r.mutex.Lock()
-	defer r.mutex.Unlock()
+	localCandidates := r.collectLocalAutoCandidatesLocked(models)
+	priorityFunc := r.highestPriorityFunc
+	r.mutex.Unlock()
 
-	candidateIndexes := r.topPriorityCandidateIndexesLocked(handlerType, models)
-	if len(candidateIndexes) == 0 {
+	// Apply exclusions BEFORE priority filtering so that excluding a top-priority model
+	// falls through to the next priority tier instead of returning empty.
+	if len(excluded) > 0 {
+		kept := make([]int, 0, len(localCandidates))
+		for _, index := range localCandidates {
+			modelID, ok := modelIDFromMap(models[index])
+			if !ok {
+				continue
+			}
+			if _, skip := excluded[modelID]; skip {
+				continue
+			}
+			kept = append(kept, index)
+		}
+		localCandidates = kept
+	}
+
+	if len(localCandidates) == 0 {
 		return "", fmt.Errorf("no available clients for any model in handler type: %s", handlerType)
 	}
 
-	filteredIndexes := make([]int, 0, len(candidateIndexes))
-	candidateIDs := make(map[string]struct{}, len(candidateIndexes))
-	for _, index := range candidateIndexes {
+	// Evaluate priority OUTSIDE the registry lock. highestPriorityFunc may call back into
+	// Manager -> ClientSupportsModel, which needs r.mutex.RLock().
+	filteredIndexes := r.filterTopPriorityCandidateIndexes(handlerType, models, localCandidates, priorityFunc)
+	if len(filteredIndexes) == 0 {
+		return "", fmt.Errorf("no available clients for any model in handler type: %s", handlerType)
+	}
+
+	candidateIDs := make(map[string]struct{}, len(filteredIndexes))
+	for _, index := range filteredIndexes {
 		modelID, ok := modelIDFromMap(models[index])
 		if !ok {
 			continue
 		}
-		if len(excluded) > 0 {
-			if _, skip := excluded[modelID]; skip {
-				continue
-			}
-		}
-		filteredIndexes = append(filteredIndexes, index)
 		candidateIDs[modelID] = struct{}{}
 	}
-	if len(filteredIndexes) == 0 {
+	if len(candidateIDs) == 0 {
 		return "", fmt.Errorf("no available clients for any model in handler type: %s", handlerType)
 	}
+
+	// Re-acquire the lock only for sticky/round-robin state mutation.
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+
 	if strings.TrimSpace(handlerType) == "" {
+		// Global auto tie-break order (among same priority):
+		// 1. more recently selected
+		// 2. more available auth clients
+		// 3. smaller modelID
+		// Note: model "created" is intentionally ignored — after restart many models share similar timestamps.
 		sort.Slice(filteredIndexes, func(i, j int) bool {
 			leftModel := models[filteredIndexes[i]]
 			rightModel := models[filteredIndexes[j]]
-			leftCreated, _ := leftModel["created"].(int64)
-			rightCreated, _ := rightModel["created"].(int64)
-			if leftCreated != rightCreated {
-				return leftCreated > rightCreated
-			}
 			leftID, _ := modelIDFromMap(leftModel)
 			rightID, _ := modelIDFromMap(rightModel)
+
+			leftSelectedAt, leftAuthCount := r.globalAutoSortMetaLocked(leftID)
+			rightSelectedAt, rightAuthCount := r.globalAutoSortMetaLocked(rightID)
+			if !leftSelectedAt.Equal(rightSelectedAt) {
+				return leftSelectedAt.After(rightSelectedAt)
+			}
+			if leftAuthCount != rightAuthCount {
+				return leftAuthCount > rightAuthCount
+			}
 			return leftID < rightID
 		})
 		modelID, ok := modelIDFromMap(models[filteredIndexes[0]])
@@ -1729,7 +1776,21 @@ func (r *ModelRegistry) incrementSelectionCount(modelID string) {
 func (r *ModelRegistry) incrementSelectionCountLocked(modelID string) {
 	if reg, ok := r.models[modelID]; ok && reg != nil {
 		reg.SelectionCount++
+		reg.LastSelectedAt = time.Now()
 	}
+}
+
+// globalAutoSortMetaLocked returns last-selected time and effective available auth count
+// for global auto model tie-breaking. Must be called with r.mutex held.
+func (r *ModelRegistry) globalAutoSortMetaLocked(modelID string) (time.Time, int) {
+	if modelID == "" {
+		return time.Time{}, 0
+	}
+	reg, ok := r.models[modelID]
+	if !ok || reg == nil {
+		return time.Time{}, 0
+	}
+	return reg.LastSelectedAt, r.getModelCountLocked(modelID)
 }
 
 // GetModelSelectionCount returns the number of times a model has been selected.

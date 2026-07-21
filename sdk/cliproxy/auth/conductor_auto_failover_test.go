@@ -224,3 +224,131 @@ func TestManagerExecute_AutoModelFailoverStopsOnInvalidRequest(t *testing.T) {
 		t.Fatalf("execute calls = %v, want [auth-invalid-a]", got)
 	}
 }
+
+// Rate-limit on the first auto-selected model must re-resolve to another model
+// within the same request (possibly a different provider), instead of returning
+// immediately after the first provider's credentials are exhausted.
+func TestManagerExecute_AutoModelFailoverReResolvesAcrossProviders(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	cursorExec := &authFallbackExecutor{
+		id: "cursor",
+		executeErrors: map[string]error{
+			"auth-xprov-cursor": &Error{HTTPStatus: http.StatusTooManyRequests, Message: "cursor: stream error: resource_exhausted", Code: "rate_limit_exceeded"},
+		},
+	}
+	openaiExec := &authFallbackExecutor{id: "openai"}
+	m.RegisterExecutor(cursorExec)
+	m.RegisterExecutor(openaiExec)
+
+	// Unique model IDs avoid pollution from other tests' DisableAutoModel state.
+	const modelA = "xprov-cursor-model-a"
+	const modelB = "xprov-openai-model-b"
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("auth-xprov-cursor", "cursor", []*registry.ModelInfo{{ID: modelA}})
+	reg.RegisterClient("auth-xprov-openai", "openai", []*registry.ModelInfo{{ID: modelB}})
+	t.Cleanup(func() {
+		reg.UnregisterClient("auth-xprov-cursor")
+		reg.UnregisterClient("auth-xprov-openai")
+		reg.SetHighestPriorityFunc(nil)
+		reg.EnableAutoModel(modelA, "auth-xprov-cursor")
+		reg.EnableAutoModel(modelB, "auth-xprov-openai")
+	})
+	reg.SetHighestPriorityFunc(func(handlerType, modelID string) (int, bool) {
+		switch modelID {
+		case modelA:
+			return 50, true
+		case modelB:
+			return 10, true
+		default:
+			return 0, false
+		}
+	})
+
+	if _, err := m.Register(context.Background(), &Auth{ID: "auth-xprov-cursor", Provider: "cursor"}); err != nil {
+		t.Fatalf("register cursor auth: %v", err)
+	}
+	if _, err := m.Register(context.Background(), &Auth{ID: "auth-xprov-openai", Provider: "openai"}); err != nil {
+		t.Fatalf("register openai auth: %v", err)
+	}
+
+	// Initial providers list mirrors handler resolution of the first auto model (cursor only).
+	resp, err := m.Execute(context.Background(), []string{"cursor"}, cliproxyexecutor.Request{Model: modelA}, cliproxyexecutor.Options{IsAuto: true})
+	if err != nil {
+		t.Fatalf("execute error = %v, want success via model failover", err)
+	}
+	if string(resp.Payload) != "auth-xprov-openai" {
+		t.Fatalf("payload = %q, want auth-xprov-openai", string(resp.Payload))
+	}
+	if got := cursorExec.ExecuteCalls(); len(got) != 1 || got[0] != "auth-xprov-cursor" {
+		t.Fatalf("cursor calls = %v, want [auth-xprov-cursor]", got)
+	}
+	if got := openaiExec.ExecuteCalls(); len(got) != 1 || got[0] != "auth-xprov-openai" {
+		t.Fatalf("openai calls = %v, want [auth-xprov-openai]", got)
+	}
+}
+
+func TestManagerExecuteStream_AutoModelFailoverReResolvesAcrossProviders(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	cursorExec := &authFallbackExecutor{
+		id: "cursor",
+		streamFirstErrors: map[string]error{
+			"auth-xprov-cursor-s": &Error{HTTPStatus: http.StatusTooManyRequests, Message: "cursor: stream error: resource_exhausted", Code: "rate_limit_exceeded"},
+		},
+	}
+	openaiExec := &authFallbackExecutor{id: "openai"}
+	m.RegisterExecutor(cursorExec)
+	m.RegisterExecutor(openaiExec)
+
+	const modelA = "xprov-cursor-model-as"
+	const modelB = "xprov-openai-model-bs"
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("auth-xprov-cursor-s", "cursor", []*registry.ModelInfo{{ID: modelA}})
+	reg.RegisterClient("auth-xprov-openai-s", "openai", []*registry.ModelInfo{{ID: modelB}})
+	t.Cleanup(func() {
+		reg.UnregisterClient("auth-xprov-cursor-s")
+		reg.UnregisterClient("auth-xprov-openai-s")
+		reg.SetHighestPriorityFunc(nil)
+		reg.EnableAutoModel(modelA, "auth-xprov-cursor-s")
+		reg.EnableAutoModel(modelB, "auth-xprov-openai-s")
+	})
+	reg.SetHighestPriorityFunc(func(handlerType, modelID string) (int, bool) {
+		switch modelID {
+		case modelA:
+			return 50, true
+		case modelB:
+			return 10, true
+		default:
+			return 0, false
+		}
+	})
+
+	if _, err := m.Register(context.Background(), &Auth{ID: "auth-xprov-cursor-s", Provider: "cursor"}); err != nil {
+		t.Fatalf("register cursor auth: %v", err)
+	}
+	if _, err := m.Register(context.Background(), &Auth{ID: "auth-xprov-openai-s", Provider: "openai"}); err != nil {
+		t.Fatalf("register openai auth: %v", err)
+	}
+
+	streamResult, err := m.ExecuteStream(context.Background(), []string{"cursor"}, cliproxyexecutor.Request{Model: modelA}, cliproxyexecutor.Options{IsAuto: true})
+	if err != nil {
+		t.Fatalf("execute stream error = %v, want success via model failover", err)
+	}
+	var payload []byte
+	for chunk := range streamResult.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("chunk error = %v, want success", chunk.Err)
+		}
+		payload = append(payload, chunk.Payload...)
+	}
+	if string(payload) != "auth-xprov-openai-s" {
+		t.Fatalf("payload = %q, want auth-xprov-openai-s", string(payload))
+	}
+	if got := cursorExec.StreamCalls(); len(got) != 1 || got[0] != "auth-xprov-cursor-s" {
+		t.Fatalf("cursor stream calls = %v, want [auth-xprov-cursor-s]", got)
+	}
+	if got := openaiExec.StreamCalls(); len(got) != 1 || got[0] != "auth-xprov-openai-s" {
+		t.Fatalf("openai stream calls = %v, want [auth-xprov-openai-s]", got)
+	}
+}
