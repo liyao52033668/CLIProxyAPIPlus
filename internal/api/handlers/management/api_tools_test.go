@@ -404,6 +404,163 @@ func TestCopilotUsageResponseJSONParsing(t *testing.T) {
 	}
 }
 
+func TestParseCopilotUsageBodyPaidPlanUsesSnapshots(t *testing.T) {
+	t.Parallel()
+
+	// Pro/Business/Enterprise return native quota_snapshots; limited_user_quotas is absent.
+	body := []byte(`{
+		"access_type_sku": "free_limited_copilot",
+		"chat_enabled": true,
+		"copilot_plan": "individual",
+		"quota_reset_date": "2026-08-01",
+		"quota_reset_date_utc": "2026-08-01T00:00:00Z",
+		"quota_snapshots": {
+			"chat": {
+				"entitlement": 1000,
+				"percent_remaining": 0.58,
+				"quota_id": "chat",
+				"quota_remaining": 580,
+				"remaining": 580,
+				"unlimited": false
+			},
+			"completions": {
+				"entitlement": 500,
+				"percent_remaining": 0.871,
+				"quota_id": "completions",
+				"quota_remaining": 435.5,
+				"remaining": 435.5,
+				"unlimited": false
+			},
+			"premium_interactions": {
+				"entitlement": 300,
+				"percent_remaining": 0.5,
+				"quota_id": "premium_interactions",
+				"quota_remaining": 150,
+				"remaining": 150,
+				"unlimited": false
+			}
+		}
+	}`)
+
+	usage, err := parseCopilotUsageBody(body)
+	if err != nil {
+		t.Fatalf("parseCopilotUsageBody: %v", err)
+	}
+	if usage.CopilotPlan != "individual" {
+		t.Fatalf("CopilotPlan = %q, want individual", usage.CopilotPlan)
+	}
+	if usage.QuotaResetDate != "2026-08-01T00:00:00Z" {
+		t.Fatalf("QuotaResetDate = %q, want UTC reset date", usage.QuotaResetDate)
+	}
+	if usage.QuotaSnapshots.PremiumInteractions.Entitlement != 300 {
+		t.Fatalf("premium entitlement = %v, want 300", usage.QuotaSnapshots.PremiumInteractions.Entitlement)
+	}
+	if usage.QuotaSnapshots.PremiumInteractions.Remaining != 150 {
+		t.Fatalf("premium remaining = %v, want 150", usage.QuotaSnapshots.PremiumInteractions.Remaining)
+	}
+	if usage.QuotaSnapshots.PremiumInteractions.Usage != 150 {
+		t.Fatalf("premium usage = %v, want 150", usage.QuotaSnapshots.PremiumInteractions.Usage)
+	}
+	if usage.QuotaSnapshots.Chat.Usage != 420 {
+		t.Fatalf("chat usage = %v, want 420", usage.QuotaSnapshots.Chat.Usage)
+	}
+}
+
+func TestParseCopilotUsageBodyFreePlanUsesLimitedQuotas(t *testing.T) {
+	t.Parallel()
+
+	// Free plan meters chat/completions via limited_user_quotas + monthly_quotas.
+	body := []byte(`{
+		"access_type_sku": "free_limited_copilot",
+		"chat_enabled": true,
+		"copilot_plan": "free",
+		"limited_user_reset_date": "2026-08-15",
+		"monthly_quotas": {
+			"chat": 50,
+			"completions": 2000
+		},
+		"limited_user_quotas": {
+			"chat": 12,
+			"completions": 1500
+		}
+	}`)
+
+	usage, err := parseCopilotUsageBody(body)
+	if err != nil {
+		t.Fatalf("parseCopilotUsageBody: %v", err)
+	}
+	if usage.CopilotPlan != "free" {
+		t.Fatalf("CopilotPlan = %q, want free", usage.CopilotPlan)
+	}
+	if usage.QuotaResetDate != "2026-08-15" {
+		t.Fatalf("QuotaResetDate = %q, want limited_user_reset_date", usage.QuotaResetDate)
+	}
+	if usage.QuotaSnapshots.Chat.Entitlement != 50 || usage.QuotaSnapshots.Chat.Remaining != 12 {
+		t.Fatalf("chat snapshot = %+v, want entitlement=50 remaining=12", usage.QuotaSnapshots.Chat)
+	}
+	if usage.QuotaSnapshots.Chat.Usage != 38 {
+		t.Fatalf("chat usage = %v, want 38", usage.QuotaSnapshots.Chat.Usage)
+	}
+	if usage.QuotaSnapshots.Completions.Entitlement != 2000 || usage.QuotaSnapshots.Completions.Remaining != 1500 {
+		t.Fatalf("completions snapshot = %+v", usage.QuotaSnapshots.Completions)
+	}
+	if !usage.QuotaSnapshots.PremiumInteractions.Unlimited {
+		t.Fatal("expected free premium interactions to be marked unlimited")
+	}
+}
+
+func TestParseCopilotUsageBodyNegativeRemaining(t *testing.T) {
+	t.Parallel()
+
+	// Live Free/individual accounts can report remaining=-1 after overshooting chat quota.
+	body := []byte(`{
+		"copilot_plan": "individual",
+		"quota_reset_date_utc": "2026-08-01T00:00:00.000Z",
+		"quota_snapshots": {
+			"chat": {
+				"entitlement": 200,
+				"remaining": -1,
+				"quota_remaining": -1,
+				"percent_remaining": 0.0,
+				"quota_id": "chat",
+				"unlimited": false
+			},
+			"completions": {
+				"entitlement": 2000,
+				"remaining": 1959,
+				"quota_remaining": 1959,
+				"percent_remaining": 97.9,
+				"quota_id": "completions",
+				"unlimited": false
+			},
+			"premium_interactions": {
+				"entitlement": 0,
+				"remaining": 0,
+				"percent_remaining": 0.0,
+				"quota_id": "premium_interactions",
+				"unlimited": false
+			}
+		}
+	}`)
+
+	usage, err := parseCopilotUsageBody(body)
+	if err != nil {
+		t.Fatalf("parseCopilotUsageBody: %v", err)
+	}
+	if usage.QuotaSnapshots.Chat.Usage != 200 {
+		t.Fatalf("chat usage = %v, want 200 for remaining=-1", usage.QuotaSnapshots.Chat.Usage)
+	}
+	if usage.QuotaSnapshots.Chat.PercentRemaining != 0 {
+		t.Fatalf("chat percent_remaining = %v, want 0", usage.QuotaSnapshots.Chat.PercentRemaining)
+	}
+	if usage.QuotaSnapshots.Completions.PercentRemaining != 97.9 {
+		t.Fatalf("completions percent_remaining = %v, want 97.9", usage.QuotaSnapshots.Completions.PercentRemaining)
+	}
+	if usage.QuotaSnapshots.Completions.Usage != 41 {
+		t.Fatalf("completions usage = %v, want 41", usage.QuotaSnapshots.Completions.Usage)
+	}
+}
+
 func TestFindCopilotAuth(t *testing.T) {
 	t.Parallel()
 

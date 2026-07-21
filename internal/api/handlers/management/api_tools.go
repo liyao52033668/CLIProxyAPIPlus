@@ -1044,6 +1044,162 @@ type CopilotUsageResponse struct {
 	QuotaSnapshots        QuotaSnapshots `json:"quota_snapshots"`
 }
 
+// normalizeQuotaDetail fills derived fields so Free/Pro responses share one shape.
+// GitHub may omit usage/percent fields while still returning entitlement/remaining.
+// Remaining can be negative when the account has overshot the limit; treat that as 0
+// when deriving usage/percent so the UI never shows negative progress.
+func normalizeQuotaDetail(detail QuotaDetail, quotaID string) QuotaDetail {
+	if detail.QuotaID == "" {
+		detail.QuotaID = quotaID
+	}
+	if detail.QuotaRemaining == 0 && detail.Remaining != 0 {
+		detail.QuotaRemaining = detail.Remaining
+	}
+	if detail.Remaining == 0 && detail.QuotaRemaining != 0 {
+		detail.Remaining = detail.QuotaRemaining
+	}
+
+	effectiveRemaining := detail.Remaining
+	if effectiveRemaining < 0 {
+		effectiveRemaining = 0
+	}
+
+	if detail.Entitlement > 0 {
+		if detail.Usage == 0 {
+			detail.Usage = detail.Entitlement - effectiveRemaining
+			if detail.Usage < 0 {
+				detail.Usage = 0
+			}
+		}
+		// Only derive percent when remaining is still positive but percent was omitted/zero.
+		// Fully used (remaining 0, percent 0) must stay at 0; do not recompute from a negative remaining.
+		if detail.PercentRemaining == 0 && effectiveRemaining > 0 {
+			detail.PercentRemaining = effectiveRemaining / detail.Entitlement
+		}
+		if detail.PercentUsed == 0 && detail.Usage > 0 {
+			detail.PercentUsed = detail.Usage / detail.Entitlement
+		}
+	}
+	return detail
+}
+
+// anyToFloat64 coerces JSON numbers stored as float64/int/int64/json.Number/string.
+func anyToFloat64(v any) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case float32:
+		return float64(n), true
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	case int32:
+		return float64(n), true
+	case json.Number:
+		f, err := n.Float64()
+		return f, err == nil
+	case string:
+		if n == "" {
+			return 0, false
+		}
+		f, err := json.Number(n).Float64()
+		return f, err == nil
+	default:
+		return 0, false
+	}
+}
+
+// quotaDetailFromLimited builds a QuotaDetail from monthly_quotas + limited_user_quotas.
+// monthly = entitlement, limited = remaining (Free / limited plans).
+func quotaDetailFromLimited(monthly, limited map[string]any, key string) QuotaDetail {
+	total, hasTotal := anyToFloat64(monthly[key])
+	if !hasTotal {
+		return QuotaDetail{QuotaID: key}
+	}
+	remaining := total
+	if r, ok := anyToFloat64(limited[key]); ok {
+		remaining = r
+	}
+	usage := total - remaining
+	percentRemaining := 0.0
+	percentUsed := 0.0
+	if total > 0 {
+		percentRemaining = remaining / total
+		percentUsed = usage / total
+	}
+	return QuotaDetail{
+		Entitlement:      total,
+		Usage:            usage,
+		PercentUsed:      percentUsed,
+		PercentRemaining: percentRemaining,
+		QuotaID:          key,
+		QuotaRemaining:   remaining,
+		Remaining:        remaining,
+		Unlimited:        false,
+	}
+}
+
+// parseCopilotUsageBody normalizes /copilot_internal/user into CopilotUsageResponse.
+//
+// Two official response shapes are supported:
+//   - Pro / Business / Enterprise: native quota_snapshots (chat/completions/premium_interactions)
+//   - Free / limited: limited_user_quotas + monthly_quotas (remaining + entitlement)
+//
+// GetCopilotQuota previously only handled the Free shape and zeroed Pro premium quota.
+func parseCopilotUsageBody(body []byte) (CopilotUsageResponse, error) {
+	var usage CopilotUsageResponse
+	if err := json.Unmarshal(body, &usage); err != nil {
+		return CopilotUsageResponse{}, err
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return CopilotUsageResponse{}, err
+	}
+
+	if snapshotsRaw, ok := raw["quota_snapshots"].(map[string]any); ok && len(snapshotsRaw) > 0 {
+		// Paid plans already return the canonical snapshot shape.
+		usage.QuotaSnapshots.Chat = normalizeQuotaDetail(usage.QuotaSnapshots.Chat, "chat")
+		usage.QuotaSnapshots.Completions = normalizeQuotaDetail(usage.QuotaSnapshots.Completions, "completions")
+		usage.QuotaSnapshots.PremiumInteractions = normalizeQuotaDetail(usage.QuotaSnapshots.PremiumInteractions, "premium_interactions")
+
+		// Prefer UTC reset date when present.
+		if resetUTC, ok := raw["quota_reset_date_utc"].(string); ok && strings.TrimSpace(resetUTC) != "" {
+			usage.QuotaResetDate = resetUTC
+		} else if usage.QuotaResetDate == "" {
+			if reset, ok := raw["quota_reset_date"].(string); ok {
+				usage.QuotaResetDate = reset
+			}
+		}
+		return usage, nil
+	}
+
+	// Free / limited plans: synthesize snapshots from monthly + limited remaining.
+	monthlyQuotas, _ := raw["monthly_quotas"].(map[string]any)
+	limitedQuotas, _ := raw["limited_user_quotas"].(map[string]any)
+	if monthlyQuotas == nil {
+		monthlyQuotas = map[string]any{}
+	}
+	if limitedQuotas == nil {
+		limitedQuotas = map[string]any{}
+	}
+
+	usage.QuotaSnapshots = QuotaSnapshots{
+		Chat:                quotaDetailFromLimited(monthlyQuotas, limitedQuotas, "chat"),
+		Completions:         quotaDetailFromLimited(monthlyQuotas, limitedQuotas, "completions"),
+		PremiumInteractions: QuotaDetail{QuotaID: "premium_interactions", Unlimited: true},
+	}
+
+	if reset, ok := raw["limited_user_reset_date"].(string); ok && strings.TrimSpace(reset) != "" {
+		usage.QuotaResetDate = reset
+	} else if resetUTC, ok := raw["quota_reset_date_utc"].(string); ok && strings.TrimSpace(resetUTC) != "" {
+		usage.QuotaResetDate = resetUTC
+	}
+
+	return usage, nil
+}
+
 // GetCopilotQuota fetches GitHub Copilot quota information from the /copilot_internal/user endpoint.
 //
 // Endpoint:
@@ -1095,9 +1251,15 @@ func (h *Handler) GetCopilotQuota(c *gin.Context) {
 		return
 	}
 
+	// Match VS Code / official Copilot client headers so GitHub returns the same
+	// plan-aware payload shape (quota_snapshots for paid, limited_user_quotas for free).
 	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("User-Agent", "CLIProxyAPIPlus")
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "GithubCopilot/1.0")
+	req.Header.Set("Editor-Version", "vscode/1.100.0")
+	req.Header.Set("Editor-Plugin-Version", "copilot/1.300.0")
+	req.Header.Set("Copilot-Integration-Id", "vscode-chat")
+	req.Header.Set("X-Github-Api-Version", "2026-01-09")
 
 	httpClient := &http.Client{
 		Timeout:   h.apiCallTimeout(),
@@ -1131,98 +1293,12 @@ func (h *Handler) GetCopilotQuota(c *gin.Context) {
 		return
 	}
 
-	type RawCopilotUsageResponse struct {
-		AccessTypeSKU         string         `json:"access_type_sku"`
-		AnalyticsTrackingID   string         `json:"analytics_tracking_id"`
-		AssignedDate          string         `json:"assigned_date"`
-		CanSignupForLimited   bool           `json:"can_signup_for_limited"`
-		ChatEnabled           bool           `json:"chat_enabled"`
-		CopilotPlan           string         `json:"copilot_plan"`
-		OrganizationLoginList []any          `json:"organization_login_list"`
-		OrganizationList      []any          `json:"organization_list"`
-		LimitedUserQuotas     map[string]int `json:"limited_user_quotas"`
-		MonthlyQuotas         map[string]int `json:"monthly_quotas"`
-		LimitedUserResetDate  string         `json:"limited_user_reset_date"`
-	}
-
-	var raw RawCopilotUsageResponse
-	if errUnmarshal := json.Unmarshal(respBody, &raw); errUnmarshal != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to parse response"})
-		return
-	}
-
 	log.Debugf("GetCopilotQuota raw response body: %s", string(respBody))
 
-	chatEntitlement := float64(raw.MonthlyQuotas["chat"])
-	chatRemaining := float64(raw.LimitedUserQuotas["chat"])
-	chatUsage := chatEntitlement - chatRemaining
-	chatPercentRemaining := 0.0
-	chatPercentUsed := 0.0
-	if chatEntitlement > 0 {
-		chatPercentRemaining = chatRemaining / chatEntitlement
-		chatPercentUsed = chatUsage / chatEntitlement
-	}
-
-	completionsEntitlement := float64(raw.MonthlyQuotas["completions"])
-	completionsRemaining := float64(raw.LimitedUserQuotas["completions"])
-	completionsUsage := completionsEntitlement - completionsRemaining
-	completionsPercentRemaining := 0.0
-	completionsPercentUsed := 0.0
-	if completionsEntitlement > 0 {
-		completionsPercentRemaining = completionsRemaining / completionsEntitlement
-		completionsPercentUsed = completionsUsage / completionsEntitlement
-	}
-
-	quotaSnapshots := QuotaSnapshots{
-		Chat: QuotaDetail{
-			Entitlement:      chatEntitlement,
-			Usage:            chatUsage,
-			PercentUsed:      chatPercentUsed,
-			OverageCount:     0,
-			OveragePermitted: false,
-			PercentRemaining: chatPercentRemaining,
-			QuotaID:          "chat",
-			QuotaRemaining:   chatRemaining,
-			Remaining:        chatRemaining,
-			Unlimited:        false,
-		},
-		Completions: QuotaDetail{
-			Entitlement:      completionsEntitlement,
-			Usage:            completionsUsage,
-			PercentUsed:      completionsPercentUsed,
-			OverageCount:     0,
-			OveragePermitted: false,
-			PercentRemaining: completionsPercentRemaining,
-			QuotaID:          "completions",
-			QuotaRemaining:   completionsRemaining,
-			Remaining:        completionsRemaining,
-			Unlimited:        false,
-		},
-		PremiumInteractions: QuotaDetail{
-			Entitlement:      0,
-			Usage:            0,
-			PercentUsed:      0,
-			OverageCount:     0,
-			OveragePermitted: false,
-			PercentRemaining: 0,
-			QuotaID:          "premium_interactions",
-			QuotaRemaining:   0,
-			Remaining:        0,
-			Unlimited:        true,
-		},
-	}
-
-	usage := CopilotUsageResponse{
-		AccessTypeSKU:         raw.AccessTypeSKU,
-		AnalyticsTrackingID:   raw.AnalyticsTrackingID,
-		AssignedDate:          raw.AssignedDate,
-		CanSignupForLimited:   raw.CanSignupForLimited,
-		ChatEnabled:           raw.ChatEnabled,
-		CopilotPlan:           raw.CopilotPlan,
-		OrganizationLoginList: raw.OrganizationLoginList,
-		OrganizationList:      raw.OrganizationList,
-		QuotaResetDate:        raw.LimitedUserResetDate,
-		QuotaSnapshots:        quotaSnapshots,
+	usage, errParse := parseCopilotUsageBody(respBody)
+	if errParse != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to parse response"})
+		return
 	}
 
 	c.JSON(http.StatusOK, usage)
@@ -1313,8 +1389,12 @@ func (h *Handler) enrichCopilotTokenResponse(ctx context.Context, response apiCa
 	}
 
 	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("User-Agent", "CLIProxyAPIPlus")
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "GithubCopilot/1.0")
+	req.Header.Set("Editor-Version", "vscode/1.100.0")
+	req.Header.Set("Editor-Plugin-Version", "copilot/1.300.0")
+	req.Header.Set("Copilot-Integration-Id", "vscode-chat")
+	req.Header.Set("X-Github-Api-Version", "2026-01-09")
 
 	httpClient := &http.Client{
 		Timeout:   h.apiCallTimeout(),
@@ -1343,105 +1423,17 @@ func (h *Handler) enrichCopilotTokenResponse(ctx context.Context, response apiCa
 		return response
 	}
 
-	// Parse the quota response
-	var quotaData CopilotUsageResponse
-	if err := json.Unmarshal(quotaBody, &quotaData); err != nil {
-		log.WithError(err).Debug("enrichCopilotTokenResponse: failed to parse response")
+	quotaData, errParse := parseCopilotUsageBody(quotaBody)
+	if errParse != nil {
+		log.WithError(errParse).Debug("enrichCopilotTokenResponse: failed to parse response")
 		return response
 	}
 
-	// Check if this is an enterprise account by looking for quota_snapshots in the response
-	// Enterprise accounts have quota_snapshots, non-enterprise have limited_user_quotas
-	var quotaRaw map[string]any
-	if err := json.Unmarshal(quotaBody, &quotaRaw); err == nil {
-		if _, hasQuotaSnapshots := quotaRaw["quota_snapshots"]; hasQuotaSnapshots {
-			// Enterprise account - has quota_snapshots
-			tokenResp["quota_snapshots"] = quotaData.QuotaSnapshots
-			tokenResp["access_type_sku"] = quotaData.AccessTypeSKU
-			tokenResp["copilot_plan"] = quotaData.CopilotPlan
-
-			// Add quota reset date for enterprise (quota_reset_date_utc)
-			if quotaResetDateUTC, ok := quotaRaw["quota_reset_date_utc"]; ok {
-				tokenResp["quota_reset_date"] = quotaResetDateUTC
-			} else if quotaData.QuotaResetDate != "" {
-				tokenResp["quota_reset_date"] = quotaData.QuotaResetDate
-			}
-		} else {
-			// Non-enterprise account - build quota from limited_user_quotas and monthly_quotas
-			var quotaSnapshots QuotaSnapshots
-
-			// Get monthly quotas (total entitlement) and limited_user_quotas (remaining)
-			monthlyQuotas, hasMonthly := quotaRaw["monthly_quotas"].(map[string]any)
-			limitedQuotas, hasLimited := quotaRaw["limited_user_quotas"].(map[string]any)
-
-			// Process chat quota
-			if hasMonthly && hasLimited {
-				if chatTotal, ok := monthlyQuotas["chat"].(float64); ok {
-					chatRemaining := chatTotal // default to full if no limited quota
-					if chatLimited, ok := limitedQuotas["chat"].(float64); ok {
-						chatRemaining = chatLimited
-					}
-					chatUsage := chatTotal - chatRemaining
-					percentRemaining := 0.0
-					percentUsed := 0.0
-					if chatTotal > 0 {
-						percentRemaining = (chatRemaining / chatTotal) * 100.0
-						percentUsed = (chatUsage / chatTotal) * 100.0
-					}
-					quotaSnapshots.Chat = QuotaDetail{
-						Entitlement:      chatTotal,
-						Usage:            chatUsage,
-						PercentUsed:      percentUsed,
-						Remaining:        chatRemaining,
-						QuotaRemaining:   chatRemaining,
-						PercentRemaining: percentRemaining,
-						QuotaID:          "chat",
-						Unlimited:        false,
-					}
-				}
-
-				// Process completions quota
-				if completionsTotal, ok := monthlyQuotas["completions"].(float64); ok {
-					completionsRemaining := completionsTotal // default to full if no limited quota
-					if completionsLimited, ok := limitedQuotas["completions"].(float64); ok {
-						completionsRemaining = completionsLimited
-					}
-					completionsUsage := completionsTotal - completionsRemaining
-					percentRemaining := 0.0
-					percentUsed := 0.0
-					if completionsTotal > 0 {
-						percentRemaining = (completionsRemaining / completionsTotal) * 100.0
-						percentUsed = (completionsUsage / completionsTotal) * 100.0
-					}
-					quotaSnapshots.Completions = QuotaDetail{
-						Entitlement:      completionsTotal,
-						Usage:            completionsUsage,
-						PercentUsed:      percentUsed,
-						Remaining:        completionsRemaining,
-						QuotaRemaining:   completionsRemaining,
-						PercentRemaining: percentRemaining,
-						QuotaID:          "completions",
-						Unlimited:        false,
-					}
-				}
-			}
-
-			// Premium interactions don't exist for non-enterprise, leave as zero values
-			quotaSnapshots.PremiumInteractions = QuotaDetail{
-				QuotaID:   "premium_interactions",
-				Unlimited: false,
-			}
-
-			// Add quota_snapshots to the token response
-			tokenResp["quota_snapshots"] = quotaSnapshots
-			tokenResp["access_type_sku"] = quotaData.AccessTypeSKU
-			tokenResp["copilot_plan"] = quotaData.CopilotPlan
-
-			// Add quota reset date for non-enterprise (limited_user_reset_date)
-			if limitedResetDate, ok := quotaRaw["limited_user_reset_date"]; ok {
-				tokenResp["quota_reset_date"] = limitedResetDate
-			}
-		}
+	tokenResp["quota_snapshots"] = quotaData.QuotaSnapshots
+	tokenResp["access_type_sku"] = quotaData.AccessTypeSKU
+	tokenResp["copilot_plan"] = quotaData.CopilotPlan
+	if quotaData.QuotaResetDate != "" {
+		tokenResp["quota_reset_date"] = quotaData.QuotaResetDate
 	}
 
 	// Re-serialize the enriched response
