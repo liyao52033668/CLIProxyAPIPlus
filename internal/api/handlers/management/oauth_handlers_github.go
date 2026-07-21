@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -23,24 +22,6 @@ func (h *Handler) RequestGitHubToken(c *gin.Context) {
 	fmt.Println("Initializing GitHub Copilot authentication...")
 
 	state := fmt.Sprintf("gh-%d", time.Now().UnixNano())
-
-	// Get plan_type from query parameter or request body
-	planType := strings.TrimSpace(strings.ToLower(c.Query("plan_type")))
-	if planType == "" {
-		var body struct {
-			PlanType string `json:"plan_type"`
-		}
-		if err := c.ShouldBindJSON(&body); err == nil {
-			planType = strings.TrimSpace(strings.ToLower(body.PlanType))
-		}
-	}
-
-	// Validate plan_type
-	validPlanTypes := map[string]bool{"": true, "free": true, "pro": true, "pro+": true, "max": true}
-	if !validPlanTypes[planType] {
-		log.Warnf("Invalid plan_type %q, defaulting to empty", planType)
-		planType = ""
-	}
 
 	// Initialize Copilot auth service
 	deviceClient := copilot.NewDeviceFlowClient(h.cfg)
@@ -89,12 +70,12 @@ func (h *Handler) RequestGitHubToken(c *gin.Context) {
 			Type:        "github-copilot",
 		}
 
-		fileName := copilot.CredentialFileName(username, planType, true)
+		fileName := copilot.CredentialFileName(username, true)
 		label := userInfo.Email
 		if label == "" {
 			label = username
 		}
-		metadata, errMeta := copilotTokenMetadataWithPlanType(tokenStorage, planType)
+		metadata, errMeta := copilotTokenMetadata(tokenStorage)
 		if errMeta != nil {
 			log.Errorf("Failed to build token metadata: %v", errMeta)
 			SetOAuthSessionError(state, "Failed to build token metadata")
@@ -117,7 +98,7 @@ func (h *Handler) RequestGitHubToken(c *gin.Context) {
 			return
 		}
 
-		fmt.Printf("Authentication successful! Token saved to %s (plan_type: %s)\n", savedPath, planType)
+		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
 		fmt.Println("You can now use GitHub Copilot services through this CLI")
 		completeOAuthSuccess(state, "github-copilot")
 	}()
@@ -132,7 +113,7 @@ func (h *Handler) RequestGitHubToken(c *gin.Context) {
 	})
 }
 
-func copilotTokenMetadataWithPlanType(storage *copilot.CopilotTokenStorage, planType string) (map[string]any, error) {
+func copilotTokenMetadata(storage *copilot.CopilotTokenStorage) (map[string]any, error) {
 	if storage == nil {
 		return nil, fmt.Errorf("token storage is nil")
 	}
@@ -144,7 +125,5 @@ func copilotTokenMetadataWithPlanType(storage *copilot.CopilotTokenStorage, plan
 	if errUnmarshal := json.Unmarshal(payload, &metadata); errUnmarshal != nil {
 		return nil, fmt.Errorf("unmarshal token storage: %w", errUnmarshal)
 	}
-	// Set plan_type from the request
-	metadata["plan_type"] = planType
 	return metadata, nil
 }

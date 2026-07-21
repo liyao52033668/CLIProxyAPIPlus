@@ -2420,7 +2420,9 @@ func xaiFreeUsageExhausted(body []byte) bool {
 	return strings.Contains(code, "free-usage-exhausted") ||
 		strings.Contains(message, "free-usage-exhausted") ||
 		strings.Contains(message, "used all the included free usage") ||
-		strings.Contains(message, "included free usage has been exhausted")
+		strings.Contains(message, "included free usage has been exhausted") ||
+		strings.Contains(message, "exhausted the included free usage") ||
+		strings.Contains(message, "included free usage")
 }
 
 func sanitizeXAIInputEncryptedContent(body []byte) []byte {

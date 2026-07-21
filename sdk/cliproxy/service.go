@@ -1301,11 +1301,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	case "github-copilot":
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		copilotPlanType := ""
-		if a.Attributes != nil {
-			copilotPlanType = strings.TrimSpace(a.Attributes["plan_type"])
-		}
-		models = executor.FetchGitHubCopilotModels(ctx, a, s.cfg, copilotPlanType)
+		models = executor.FetchGitHubCopilotModels(ctx, a, s.cfg)
 		hasCopilotAuto := false
 		for _, model := range models {
 			if model != nil && strings.EqualFold(strings.TrimSpace(model.ID), "gh-auto") {

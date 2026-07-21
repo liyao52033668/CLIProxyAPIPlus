@@ -977,11 +977,9 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 // only used as a safe fallback.
 const defaultCopilotClaudeContextLength = 128000
 
-// GetGitHubCopilotModels returns the full union of GitHub Copilot model definitions.
+// GetGitHubCopilotModels returns the static GitHub Copilot model definitions.
 // These models are available through the GitHub Copilot API at api.githubcopilot.com.
-//
-// Use the per-tier helpers (GetGitHubCopilotFreeModels, GetGitHubCopilotProModels,
-// GetGitHubCopilotProPlusModels, GetGitHubCopilotMaxModels) to filter by plan tier.
+// Runtime model registration prefers the dynamic /models API and falls back to this list.
 func GetGitHubCopilotModels() []*ModelInfo {
 	now := int64(1732752000) // 2024-11-27
 	copilotClaudeEndpoints := []string{"/chat/completions", "/messages"}
@@ -1163,105 +1161,6 @@ func GetGitHubCopilotAutoModel() *ModelInfo {
 		MaxCompletionTokens: 64000,
 		SupportedEndpoints:  []string{"/github/chat/threads/{thread_id}/messages"},
 	}
-}
-
-// GitHub Copilot plan tier model allowlists.
-// Higher tiers are supersets of lower tiers, mirroring the Codex tier model.
-// Tier identifiers map to GitHub Copilot plan types: free / pro / pro+ / max.
-
-// copilotFreeModelIDs lists the model IDs available to the GitHub Copilot Free plan.
-var copilotFreeModelIDs = []string{
-	"gpt-5-mini",
-	"claude-haiku-4.5",
-}
-
-// copilotProModelIDs lists the model IDs available to the GitHub Copilot Pro plan.
-// Pro is a superset of Free.
-var copilotProModelIDs = []string{
-	"gpt-5-mini",
-	"claude-haiku-4.5",
-	"gpt-5.4-mini",
-	"claude-sonnet-4.5",
-	"claude-sonnet-4.6",
-	"gpt-5.2",
-	"gpt-5.4",
-	"gpt-5.3-codex",
-}
-
-// copilotProPlusModelIDs lists the model IDs available to the GitHub Copilot Pro+ plan.
-// Pro+ is a superset of Pro.
-var copilotProPlusModelIDs = []string{
-	"gpt-5-mini",
-	"claude-haiku-4.5",
-	"gpt-5.4-mini",
-	"claude-sonnet-4.5",
-	"claude-sonnet-4.6",
-	"gpt-5.2",
-	"gpt-5.4",
-	"gpt-5.3-codex",
-	"gpt-5.5",
-	"claude-opus-4.7",
-	"claude-opus-4.8",
-}
-
-// copilotMaxModelIDs lists the model IDs available to the GitHub Copilot Max plan.
-// Max is a superset of Pro+.
-var copilotMaxModelIDs = []string{
-	"gpt-5-mini",
-	"claude-haiku-4.5",
-	"gpt-5.4-mini",
-	"claude-sonnet-4.5",
-	"claude-sonnet-4.6",
-	"gpt-5.2",
-	"gpt-5.4",
-	"gpt-5.3-codex",
-	"gpt-5.5",
-	"claude-opus-4.7",
-	"claude-opus-4.8",
-	"claude-opus-4.6",
-}
-
-// filterGitHubCopilotModelsByIDs returns a copy of allModels filtered to only those
-// whose ID appears in the allowlist (case-insensitive, whitespace-trimmed).
-func filterGitHubCopilotModelsByIDs(allModels []*ModelInfo, allowlist []string) []*ModelInfo {
-	allowed := make(map[string]struct{}, len(allowlist))
-	for _, id := range allowlist {
-		allowed[strings.ToLower(strings.TrimSpace(id))] = struct{}{}
-	}
-	out := make([]*ModelInfo, 0, len(allowlist))
-	for _, m := range allModels {
-		if m == nil {
-			continue
-		}
-		if _, ok := allowed[strings.ToLower(strings.TrimSpace(m.ID))]; ok {
-			out = append(out, cloneModelInfo(m))
-		}
-	}
-	return out
-}
-
-// GetGitHubCopilotFreeModels returns the model definitions available to the
-// GitHub Copilot Free plan tier.
-func GetGitHubCopilotFreeModels() []*ModelInfo {
-	return filterGitHubCopilotModelsByIDs(GetGitHubCopilotModels(), copilotFreeModelIDs)
-}
-
-// GetGitHubCopilotProModels returns the model definitions available to the
-// GitHub Copilot Pro plan tier. Pro is a superset of Free.
-func GetGitHubCopilotProModels() []*ModelInfo {
-	return filterGitHubCopilotModelsByIDs(GetGitHubCopilotModels(), copilotProModelIDs)
-}
-
-// GetGitHubCopilotProPlusModels returns the model definitions available to the
-// GitHub Copilot Pro+ plan tier. Pro+ is a superset of Pro.
-func GetGitHubCopilotProPlusModels() []*ModelInfo {
-	return filterGitHubCopilotModelsByIDs(GetGitHubCopilotModels(), copilotProPlusModelIDs)
-}
-
-// GetGitHubCopilotMaxModels returns the model definitions available to the
-// GitHub Copilot Max plan tier. Max is a superset of Pro+.
-func GetGitHubCopilotMaxModels() []*ModelInfo {
-	return filterGitHubCopilotModelsByIDs(GetGitHubCopilotModels(), copilotMaxModelIDs)
 }
 
 // GetKiroModels returns the Kiro (AWS CodeWhisperer) model definitions

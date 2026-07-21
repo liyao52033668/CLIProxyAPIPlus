@@ -1191,15 +1191,16 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 			expectValue: "xhigh",
 			expectErr:   false,
 		},
-		// Case 116: OpenAI to gpt-5, level xhigh (out of range) → error
+		// Case 116: OpenAI to gpt-5, level xhigh → clamp to high (compatibility provider)
 		{
 			name:        "116",
 			from:        "openai",
 			to:          "github-copilot",
 			model:       "gpt-5(xhigh)",
 			inputJSON:   `{"model":"gpt-5(xhigh)","messages":[{"role":"user","content":"hi"}]}`,
-			expectField: "",
-			expectErr:   true,
+			expectField: "reasoning_effort",
+			expectValue: "high",
+			expectErr:   false,
 		},
 		// Case 117: Claude to gpt-5.1, budget 0 → none (ZeroAllowed=true)
 		{
@@ -2400,15 +2401,16 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			expectValue: "xhigh",
 			expectErr:   false,
 		},
-		// Case 116: OpenAI to gpt-5, reasoning_effort=xhigh (out of range) → error
+		// Case 116: OpenAI to gpt-5, reasoning_effort=xhigh → clamp to high (compatibility provider)
 		{
 			name:        "116",
 			from:        "openai",
 			to:          "github-copilot",
 			model:       "gpt-5",
 			inputJSON:   `{"model":"gpt-5","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"xhigh"}`,
-			expectField: "",
-			expectErr:   true,
+			expectField: "reasoning_effort",
+			expectValue: "high",
+			expectErr:   false,
 		},
 		// Case 117: Claude to gpt-5.1, thinking.budget_tokens=0 → none (ZeroAllowed=true)
 		{

@@ -106,20 +106,13 @@ func TestGitHubCopilotAutoModelUsesThreadEndpoint(t *testing.T) {
 	}
 }
 
-func TestGitHubCopilotStaticTiersExcludeAuto(t *testing.T) {
+func TestGitHubCopilotStaticModelsExcludeAuto(t *testing.T) {
 	t.Parallel()
 
-	tiers := map[string][]*ModelInfo{
-		"free":     GetGitHubCopilotFreeModels(),
-		"pro":      GetGitHubCopilotProModels(),
-		"pro-plus": GetGitHubCopilotProPlusModels(),
-		"max":      GetGitHubCopilotMaxModels(),
-	}
-	for tier, models := range tiers {
-		for _, modelID := range []string{"auto", "gh-auto"} {
-			if findModelInfo(models, modelID) != nil {
-				t.Errorf("GitHub Copilot %s static models unexpectedly contain %s", tier, modelID)
-			}
+	models := GetGitHubCopilotModels()
+	for _, modelID := range []string{"auto", "gh-auto"} {
+		if findModelInfo(models, modelID) != nil {
+			t.Errorf("GitHub Copilot static models unexpectedly contain %s", modelID)
 		}
 	}
 }
@@ -223,96 +216,22 @@ func TestWithXAIBuiltinsAddsVideoModel(t *testing.T) {
 	}
 }
 
-func TestGitHubCopilotTierModelsContainment(t *testing.T) {
-	tiers := map[string][]*ModelInfo{
-		"free": GetGitHubCopilotFreeModels(),
-		"pro":  GetGitHubCopilotProModels(),
-		"pro+": GetGitHubCopilotProPlusModels(),
-		"max":  GetGitHubCopilotMaxModels(),
-		"all":  GetGitHubCopilotModels(),
-	}
+func TestGitHubCopilotStaticModelsContainExpectedIDs(t *testing.T) {
+	t.Parallel()
 
-	// Every model in a lower tier must appear in every higher tier.
-	mustContain := map[string][]string{
-		"free": {},
-		"pro": {
-			"gpt-5-mini", "claude-haiku-4.5",
-			"gpt-5.4-mini", "claude-sonnet-4.5", "claude-sonnet-4.6",
-			"gpt-5.2", "gpt-5.4", "gpt-5.3-codex",
-		},
-		"pro+": {
-			"gpt-5-mini", "claude-haiku-4.5",
-			"gpt-5.4-mini", "claude-sonnet-4.5", "claude-sonnet-4.6",
-			"gpt-5.2", "gpt-5.4", "gpt-5.3-codex",
-			"gpt-5.5", "claude-opus-4.7", "claude-opus-4.8",
-		},
-		"max": {
-			"gpt-5-mini", "claude-haiku-4.5",
-			"gpt-5.4-mini", "claude-sonnet-4.5", "claude-sonnet-4.6",
-			"gpt-5.2", "gpt-5.4", "gpt-5.3-codex",
-			"gpt-5.5", "claude-opus-4.7", "claude-opus-4.8",
-			"claude-opus-4.6",
-		},
-		"all": {
-			"gpt-5-mini", "claude-haiku-4.5",
-			"gpt-5.4-mini", "claude-sonnet-4.5", "claude-sonnet-4.6",
-			"gpt-5.2", "gpt-5.4", "gpt-5.3-codex",
-			"gpt-5.5", "claude-opus-4.7", "claude-opus-4.8",
-			"claude-opus-4.6",
-		},
+	models := GetGitHubCopilotModels()
+	wantIDs := []string{
+		"gpt-5-mini", "claude-haiku-4.5",
+		"gpt-5.4-mini", "claude-sonnet-4.5", "claude-sonnet-4.6",
+		"gpt-5.2", "gpt-5.4", "gpt-5.3-codex",
+		"gpt-5.5", "claude-opus-4.7", "claude-opus-4.8",
+		"claude-opus-4.6",
 	}
-
-	for tierName, wantIDs := range mustContain {
-		t.Run(tierName+"/contains-expected", func(t *testing.T) {
-			models := tiers[tierName]
-			for _, id := range wantIDs {
-				if findModelInfo(models, id) == nil {
-					t.Fatalf("%s tier missing required model %q", tierName, id)
-				}
-			}
-		})
-	}
-
-	// Free tier must NOT include Pro+ and Max models.
-	mustExclude := map[string][]string{
-		"free": {
-			"gpt-5.4-mini", "claude-sonnet-4.5", "claude-sonnet-4.6",
-			"gpt-5.2", "gpt-5.4", "gpt-5.3-codex",
-			"gpt-5.5", "claude-opus-4.7", "claude-opus-4.8", "claude-opus-4.6",
-		},
-		"pro": {
-			"gpt-5.5", "claude-opus-4.7", "claude-opus-4.8", "claude-opus-4.6",
-		},
-		"pro+": {
-			"claude-opus-4.6",
-		},
-	}
-
-	for tierName, bannedIDs := range mustExclude {
-		t.Run(tierName+"/excludes-higher-tier", func(t *testing.T) {
-			models := tiers[tierName]
-			for _, id := range bannedIDs {
-				if findModelInfo(models, id) != nil {
-					t.Fatalf("%s tier should NOT include model %q", tierName, id)
-				}
-			}
-		})
-	}
-
-	// Returned slices must be independent copies; mutating one must not affect another.
-	t.Run("returned-slices-are-independent", func(t *testing.T) {
-		free := GetGitHubCopilotFreeModels()
-		pro := GetGitHubCopilotProModels()
-		if len(free) == 0 || len(pro) == 0 {
-			t.Fatalf("expected non-empty tier slices, got free=%d pro=%d", len(free), len(pro))
+	for _, id := range wantIDs {
+		if findModelInfo(models, id) == nil {
+			t.Fatalf("static models missing required model %q", id)
 		}
-		originalID := free[0].ID
-		free[0].ID = "mutated"
-		defer func() { free[0].ID = originalID }()
-		if findModelInfo(GetGitHubCopilotFreeModels(), originalID) == nil {
-			t.Fatal("mutating returned slice affected subsequent calls")
-		}
-	})
+	}
 }
 
 func TestValidateModelsCatalogAllowsMissingSections(t *testing.T) {

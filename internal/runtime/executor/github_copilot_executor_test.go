@@ -448,8 +448,8 @@ func TestApplyHeaders_GitHubAPIVersion(t *testing.T) {
 	e := &GitHubCopilotExecutor{}
 	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
 	e.applyHeaders(req, "token", nil)
-	if got := req.Header.Get("X-Github-Api-Version"); got != "2025-04-01" {
-		t.Fatalf("X-Github-Api-Version = %q, want 2025-04-01", got)
+	if got := req.Header.Get("X-Github-Api-Version"); got != copilotGitHubAPIVer {
+		t.Fatalf("X-Github-Api-Version = %q, want %q", got, copilotGitHubAPIVer)
 	}
 }
 
