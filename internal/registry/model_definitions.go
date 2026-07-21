@@ -987,15 +987,6 @@ func GetGitHubCopilotModels() []*ModelInfo {
 	copilotClaudeEndpoints := []string{"/chat/completions", "/messages"}
 
 	return []*ModelInfo{
-		{
-			ID:          "auto",
-			Object:      "model",
-			Created:     now,
-			OwnedBy:     "github-copilot",
-			Type:        "github-copilot",
-			DisplayName: "Auto",
-			Description: "Automatic selection across available GitHub Copilot models",
-		},
 		// --- Free tier ---
 		{
 			ID:                  "gpt-5-mini",
@@ -1158,13 +1149,28 @@ func GetGitHubCopilotModels() []*ModelInfo {
 	}
 }
 
+// GetGitHubCopilotAutoModel returns the virtual model for GitHub's server-side Auto router.
+func GetGitHubCopilotAutoModel() *ModelInfo {
+	return &ModelInfo{
+		ID:                  "gh-auto",
+		Object:              "model",
+		Created:             1732752000,
+		OwnedBy:             "github-copilot",
+		Type:                "github-copilot",
+		DisplayName:         "GitHub Copilot Auto",
+		Description:         "GitHub Copilot server-side automatic model routing",
+		ContextLength:       128000,
+		MaxCompletionTokens: 64000,
+		SupportedEndpoints:  []string{"/github/chat/threads/{thread_id}/messages"},
+	}
+}
+
 // GitHub Copilot plan tier model allowlists.
 // Higher tiers are supersets of lower tiers, mirroring the Codex tier model.
 // Tier identifiers map to GitHub Copilot plan types: free / pro / pro+ / max.
 
 // copilotFreeModelIDs lists the model IDs available to the GitHub Copilot Free plan.
 var copilotFreeModelIDs = []string{
-	"auto",
 	"gpt-5-mini",
 	"claude-haiku-4.5",
 }
@@ -1172,7 +1178,6 @@ var copilotFreeModelIDs = []string{
 // copilotProModelIDs lists the model IDs available to the GitHub Copilot Pro plan.
 // Pro is a superset of Free.
 var copilotProModelIDs = []string{
-	"auto",
 	"gpt-5-mini",
 	"claude-haiku-4.5",
 	"gpt-5.4-mini",
@@ -1186,7 +1191,6 @@ var copilotProModelIDs = []string{
 // copilotProPlusModelIDs lists the model IDs available to the GitHub Copilot Pro+ plan.
 // Pro+ is a superset of Pro.
 var copilotProPlusModelIDs = []string{
-	"auto",
 	"gpt-5-mini",
 	"claude-haiku-4.5",
 	"gpt-5.4-mini",
@@ -1203,7 +1207,6 @@ var copilotProPlusModelIDs = []string{
 // copilotMaxModelIDs lists the model IDs available to the GitHub Copilot Max plan.
 // Max is a superset of Pro+.
 var copilotMaxModelIDs = []string{
-	"auto",
 	"gpt-5-mini",
 	"claude-haiku-4.5",
 	"gpt-5.4-mini",

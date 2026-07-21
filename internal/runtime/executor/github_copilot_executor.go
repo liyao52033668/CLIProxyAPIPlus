@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"slices"
@@ -26,31 +27,38 @@ import (
 )
 
 const (
-	githubCopilotBaseURL       = "https://api.githubcopilot.com"
-	githubCopilotChatPath      = "/chat/completions"
-	githubCopilotMessagesPath  = "/messages"
-	githubCopilotResponsesPath = "/responses"
-	githubCopilotAuthType      = "github-copilot"
-	githubCopilotTokenCacheTTL = 25 * time.Minute
+	githubCopilotBaseURL              = "https://api.githubcopilot.com"
+	githubCopilotChatPath             = "/chat/completions"
+	githubCopilotMessagesPath         = "/messages"
+	githubCopilotResponsesPath        = "/responses"
+	githubCopilotAutoSessionPath      = "/models/session"
+	githubCopilotAutoRouterPath       = "/models/session/intent"
+	githubCopilotSessionTokenHeader   = "Copilot-Session-Token"
+	githubCopilotSessionTokenMetadata = "github_copilot_session_token"
+	githubCopilotAuthType             = "github-copilot"
+	githubCopilotTokenCacheTTL        = 25 * time.Minute
 	// tokenExpiryBuffer is the time before expiry when we should refresh the token.
 	tokenExpiryBuffer = 5 * time.Minute
 	// maxScannerBufferSize is the maximum buffer size for SSE scanning (20MB).
 	maxScannerBufferSize = 20_971_520
 
 	// Copilot API header values.
-	copilotUserAgent     = "GitHubCopilotChat/0.35.0"
+	copilotUserAgent     = "GitHubCopilotChat/0.48.1"
 	copilotEditorVersion = "vscode/1.107.0"
-	copilotPluginVersion = "copilot-chat/0.35.0"
+	copilotPluginVersion = "copilot-chat/0.48.1"
 	copilotIntegrationID = "vscode-chat"
 	copilotOpenAIIntent  = "conversation-edits"
-	copilotGitHubAPIVer  = "2025-04-01"
+	copilotGitHubAPIVer  = "2026-01-09"
 )
 
 // GitHubCopilotExecutor handles requests to the GitHub Copilot API.
 type GitHubCopilotExecutor struct {
-	cfg   *config.Config
-	mu    sync.RWMutex
-	cache map[string]*cachedAPIToken
+	cfg       *config.Config
+	mu        sync.RWMutex
+	cache     map[string]*cachedAPIToken
+	sessionID string
+	machineID string
+	deviceID  string
 }
 
 // cachedAPIToken stores a cached Copilot API token with its expiry.
@@ -63,8 +71,11 @@ type cachedAPIToken struct {
 // NewGitHubCopilotExecutor constructs a new executor instance.
 func NewGitHubCopilotExecutor(cfg *config.Config) *GitHubCopilotExecutor {
 	return &GitHubCopilotExecutor{
-		cfg:   cfg,
-		cache: make(map[string]*cachedAPIToken),
+		cfg:       cfg,
+		cache:     make(map[string]*cachedAPIToken),
+		sessionID: uuid.NewString(),
+		machineID: uuid.NewString(),
+		deviceID:  uuid.NewString(),
 	}
 }
 
@@ -106,6 +117,9 @@ func (e *GitHubCopilotExecutor) HttpRequest(ctx context.Context, auth *cliproxya
 
 // Execute handles non-streaming requests to GitHub Copilot.
 func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	if isGitHubCopilotAutoModel(req.Model) {
+		return e.executeAuto(ctx, auth, req, opts)
+	}
 	if nativeExec, nativeAuth, nativeReq, ok, errGateway := e.nativeGateway(ctx, auth, req); errGateway != nil {
 		return resp, errGateway
 	} else if ok {
@@ -167,6 +181,7 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
 	headers := make(http.Header)
 	tmpReq := &http.Request{Header: headers}
 	e.applyHeaders(tmpReq, apiToken, body)
+	e.applySessionTokenHeader(tmpReq.Header, req.Metadata)
 	// Add Copilot-Vision-Request header if the request contains vision content
 	if hasVision {
 		tmpReq.Header.Set("Copilot-Vision-Request", "true")
@@ -208,6 +223,9 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
 
 // ExecuteStream handles streaming requests to GitHub Copilot.
 func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
+	if isGitHubCopilotAutoModel(req.Model) {
+		return e.executeAutoStream(ctx, auth, req, opts)
+	}
 	if nativeExec, nativeAuth, nativeReq, ok, errGateway := e.nativeGateway(ctx, auth, req); errGateway != nil {
 		return nil, errGateway
 	} else if ok {
@@ -273,6 +291,7 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	headers := make(http.Header)
 	tmpReq := &http.Request{Header: headers}
 	e.applyHeaders(tmpReq, apiToken, body)
+	e.applySessionTokenHeader(tmpReq.Header, req.Metadata)
 	// Add Copilot-Vision-Request header if the request contains vision content
 	if hasVision {
 		tmpReq.Header.Set("Copilot-Vision-Request", "true")
@@ -359,6 +378,287 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	}, nil
 }
 
+type githubCopilotAutoSessionRequest struct {
+	AutoMode githubCopilotAutoMode `json:"auto_mode"`
+}
+
+type githubCopilotAutoMode struct {
+	ModelHints []string `json:"model_hints"`
+}
+
+type githubCopilotAutoSessionResponse struct {
+	SessionToken    string   `json:"session_token"`
+	AvailableModels []string `json:"available_models"`
+	SelectedModel   string   `json:"selected_model"`
+	ExpiresAt       int64    `json:"expires_at"`
+}
+
+type githubCopilotAutoRouterRequest struct {
+	Prompt          string   `json:"prompt"`
+	AvailableModels []string `json:"available_models"`
+	HasImage        bool     `json:"has_image,omitempty"`
+}
+
+type githubCopilotAutoRouterResponse struct {
+	PredictedLabel  string   `json:"predicted_label"`
+	CandidateModels []string `json:"candidate_models"`
+	ChosenModel     string   `json:"chosen_model"`
+	Fallback        bool     `json:"fallback"`
+	FallbackReason  string   `json:"fallback_reason"`
+	RoutingMethod   string   `json:"routing_method"`
+}
+
+func isGitHubCopilotAutoModel(model string) bool {
+	baseModel := strings.TrimSpace(thinking.ParseSuffix(model).ModelName)
+	if separator := strings.LastIndex(baseModel, "/"); separator >= 0 {
+		baseModel = strings.TrimSpace(baseModel[separator+1:])
+	}
+	return strings.EqualFold(baseModel, "gh-auto")
+}
+
+func (e *GitHubCopilotExecutor) executeAuto(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	routedRequest, routedOptions, errRoute := e.routeAutoRequest(ctx, auth, req, opts)
+	if errRoute != nil {
+		return cliproxyexecutor.Response{}, errRoute
+	}
+	return e.Execute(ctx, auth, routedRequest, routedOptions)
+}
+
+func (e *GitHubCopilotExecutor) executeAutoStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	routedRequest, routedOptions, errRoute := e.routeAutoRequest(ctx, auth, req, opts)
+	if errRoute != nil {
+		return nil, errRoute
+	}
+	return e.ExecuteStream(ctx, auth, routedRequest, routedOptions)
+}
+
+func (e *GitHubCopilotExecutor) routeAutoRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Request, cliproxyexecutor.Options, error) {
+	model, sessionToken, errRoute := e.resolveGitHubCopilotAutoModel(ctx, auth, req, opts)
+	if errRoute != nil {
+		return req, opts, errRoute
+	}
+
+	routedRequest := req
+	routedRequest.Model = model
+	routedRequest.Metadata = cloneMetadata(req.Metadata)
+	routedRequest.Metadata[githubCopilotSessionTokenMetadata] = sessionToken
+	if body, errModel := sjson.SetBytes(req.Payload, "model", model); errModel == nil {
+		routedRequest.Payload = body
+	}
+
+	routedOptions := opts
+	routedOptions.IsAuto = true
+	return routedRequest, routedOptions, nil
+}
+
+func (e *GitHubCopilotExecutor) resolveGitHubCopilotAutoModel(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (string, string, error) {
+	from := opts.SourceFormat
+	to := sdktranslator.FromString("openai")
+	translatedRequest := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
+	prompt, errPrompt := buildGitHubCopilotAutoPrompt(translatedRequest)
+	if errPrompt != nil {
+		return "", "", errPrompt
+	}
+
+	apiToken, baseURL, errToken := e.ensureAPIToken(ctx, auth)
+	if errToken != nil {
+		return "", "", errToken
+	}
+
+	sessionBody, errMarshal := json.Marshal(githubCopilotAutoSessionRequest{
+		AutoMode: githubCopilotAutoMode{ModelHints: []string{"auto"}},
+	})
+	if errMarshal != nil {
+		return "", "", fmt.Errorf("github-copilot auto: marshal session request: %w", errMarshal)
+	}
+	sessionHeaders := e.autoAPIHeaders(apiToken, "")
+	_, rawSession, _, errSession := helps.DoJSON(ctx, e.cfg, helps.UpstreamRequest{
+		Provider: e.Identifier(),
+		Auth:     auth,
+		Method:   http.MethodPost,
+		URL:      baseURL + githubCopilotAutoSessionPath,
+		Headers:  sessionHeaders,
+		Body:     sessionBody,
+	})
+	if errSession != nil {
+		return "", "", toStatusErr(errSession)
+	}
+	var session githubCopilotAutoSessionResponse
+	if errUnmarshal := json.Unmarshal(rawSession, &session); errUnmarshal != nil {
+		return "", "", statusErr{code: http.StatusBadGateway, msg: fmt.Sprintf("github-copilot auto: decode session response: %v", errUnmarshal)}
+	}
+	sessionToken := strings.TrimSpace(session.SessionToken)
+	if sessionToken == "" {
+		return "", "", statusErr{code: http.StatusBadGateway, msg: "github-copilot auto: session response is missing session_token"}
+	}
+	if len(session.AvailableModels) == 0 {
+		return "", "", statusErr{code: http.StatusBadGateway, msg: "github-copilot auto: session response has no available models"}
+	}
+
+	routerBody, errMarshal := json.Marshal(githubCopilotAutoRouterRequest{
+		Prompt:          prompt,
+		AvailableModels: session.AvailableModels,
+		HasImage:        detectVisionContent(translatedRequest),
+	})
+	if errMarshal != nil {
+		return "", "", fmt.Errorf("github-copilot auto: marshal router request: %w", errMarshal)
+	}
+	routerHeaders := e.autoAPIHeaders(apiToken, sessionToken)
+	_, rawRouter, _, errRouter := helps.DoJSON(ctx, e.cfg, helps.UpstreamRequest{
+		Provider: e.Identifier(),
+		Auth:     auth,
+		Method:   http.MethodPost,
+		URL:      baseURL + githubCopilotAutoRouterPath,
+		Headers:  routerHeaders,
+		Body:     routerBody,
+	})
+	if errRouter != nil {
+		return "", "", toStatusErr(errRouter)
+	}
+	var router githubCopilotAutoRouterResponse
+	if errUnmarshal := json.Unmarshal(rawRouter, &router); errUnmarshal != nil {
+		return "", "", statusErr{code: http.StatusBadGateway, msg: fmt.Sprintf("github-copilot auto: decode router response: %v", errUnmarshal)}
+	}
+
+	model := selectGitHubCopilotAutoModel(router, session.SelectedModel, session.AvailableModels)
+	if model == "" || isGitHubCopilotAutoModel(model) || strings.EqualFold(model, "auto") {
+		return "", "", statusErr{code: http.StatusBadGateway, msg: "github-copilot auto: router response has no usable model"}
+	}
+	log.Infof("github-copilot: auto routed to %q (label=%q method=%q)", model, router.PredictedLabel, router.RoutingMethod)
+	return model, sessionToken, nil
+}
+
+func selectGitHubCopilotAutoModel(router githubCopilotAutoRouterResponse, selectedModel string, available []string) string {
+	availableSet := make(map[string]struct{}, len(available))
+	for _, model := range available {
+		availableSet[strings.ToLower(strings.TrimSpace(model))] = struct{}{}
+	}
+	candidates := []string{selectedModel}
+	if !router.Fallback {
+		candidates = append([]string{router.ChosenModel}, router.CandidateModels...)
+		candidates = append(candidates, selectedModel)
+	}
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		if _, ok := availableSet[strings.ToLower(candidate)]; ok {
+			return candidate
+		}
+	}
+	return strings.TrimSpace(available[0])
+}
+
+func (e *GitHubCopilotExecutor) applyClientIdentityAttributes(attributes map[string]string) {
+	attributes["header:VScode-SessionId"] = e.sessionID
+	attributes["header:VScode-MachineId"] = e.machineID
+	attributes["header:Editor-Device-Id"] = e.deviceID
+}
+
+func (e *GitHubCopilotExecutor) autoAPIHeaders(apiToken, sessionToken string) http.Header {
+	headers := make(http.Header)
+	headers.Set("Content-Type", "application/json")
+	headers.Set("Authorization", "Bearer "+apiToken)
+	headers.Set("Accept", "application/json")
+	headers.Set("User-Agent", copilotUserAgent)
+	headers.Set("Editor-Version", copilotEditorVersion)
+	headers.Set("Editor-Plugin-Version", copilotPluginVersion)
+	headers.Set("Copilot-Integration-Id", copilotIntegrationID)
+	headers.Set("X-Github-Api-Version", copilotGitHubAPIVer)
+	headers.Set("X-Request-Id", uuid.NewString())
+	headers.Set("VScode-SessionId", e.sessionID)
+	headers.Set("VScode-MachineId", e.machineID)
+	headers.Set("Editor-Device-Id", e.deviceID)
+	if sessionToken != "" {
+		headers.Set(githubCopilotSessionTokenHeader, sessionToken)
+	}
+	return headers
+}
+
+func cloneMetadata(metadata map[string]any) map[string]any {
+	cloned := make(map[string]any, len(metadata)+1)
+	for key, value := range metadata {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func buildGitHubCopilotAutoPrompt(body []byte) (string, error) {
+	if !gjson.ValidBytes(body) {
+		return "", statusErr{code: http.StatusBadRequest, msg: "github-copilot auto: invalid translated request"}
+	}
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.Exists() || !messages.IsArray() || len(messages.Array()) == 0 {
+		return "", statusErr{code: http.StatusBadRequest, msg: "github-copilot auto: at least one message is required"}
+	}
+
+	type promptMessage struct {
+		role string
+		text string
+	}
+	promptMessages := make([]promptMessage, 0, len(messages.Array()))
+	for _, message := range messages.Array() {
+		role := strings.ToLower(strings.TrimSpace(message.Get("role").String()))
+		switch role {
+		case "system", "developer", "user", "assistant", "tool":
+		default:
+			return "", statusErr{code: http.StatusBadRequest, msg: fmt.Sprintf("github-copilot auto: unsupported message role %q", role)}
+		}
+		text, errContent := githubCopilotAutoTextContent(message.Get("content"))
+		if errContent != nil {
+			return "", errContent
+		}
+		if strings.TrimSpace(text) == "" {
+			continue
+		}
+		promptMessages = append(promptMessages, promptMessage{role: role, text: text})
+	}
+	if len(promptMessages) == 0 {
+		return "", statusErr{code: http.StatusBadRequest, msg: "github-copilot auto: message content is empty"}
+	}
+	if len(promptMessages) == 1 && promptMessages[0].role == "user" {
+		return promptMessages[0].text, nil
+	}
+
+	var prompt strings.Builder
+	for i := range promptMessages {
+		label := strings.ToUpper(promptMessages[i].role[:1]) + promptMessages[i].role[1:]
+		prompt.WriteByte('[')
+		prompt.WriteString(label)
+		prompt.WriteString("]\n")
+		prompt.WriteString(promptMessages[i].text)
+		if i < len(promptMessages)-1 {
+			prompt.WriteString("\n\n")
+		}
+	}
+	return prompt.String(), nil
+}
+
+func githubCopilotAutoTextContent(content gjson.Result) (string, error) {
+	if !content.Exists() || content.Type == gjson.Null {
+		return "", nil
+	}
+	if content.Type == gjson.String {
+		return content.String(), nil
+	}
+	if !content.IsArray() {
+		return "", statusErr{code: http.StatusBadRequest, msg: "github-copilot auto: message content must be text"}
+	}
+
+	var text strings.Builder
+	for _, part := range content.Array() {
+		if part.Type == gjson.String {
+			text.WriteString(part.String())
+			continue
+		}
+		switch part.Get("type").String() {
+		case "text", "input_text", "output_text":
+			text.WriteString(part.Get("text").String())
+		default:
+			continue
+		}
+	}
+	return text.String(), nil
+}
+
 // CountTokens estimates token count locally using tiktoken, since the GitHub
 // Copilot API does not expose a dedicated token counting endpoint.
 func (e *GitHubCopilotExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
@@ -427,7 +727,7 @@ func (e *GitHubCopilotExecutor) nativeGateway(
 	if err != nil {
 		return nil, nil, req, false, err
 	}
-	nativeAuth := buildCopilotAnthropicGatewayAuth(auth, apiToken, baseURL, req.Payload)
+	nativeAuth := e.buildCopilotAnthropicGatewayAuth(auth, apiToken, baseURL, req.Payload, req.Metadata)
 	if nativeAuth == nil {
 		return nil, nil, req, false, nil
 	}
@@ -445,7 +745,7 @@ func githubCopilotUsesAnthropicGateway(model string) bool {
 	return true
 }
 
-func buildCopilotAnthropicGatewayAuth(auth *cliproxyauth.Auth, apiToken, baseURL string, body []byte) *cliproxyauth.Auth {
+func (e *GitHubCopilotExecutor) buildCopilotAnthropicGatewayAuth(auth *cliproxyauth.Auth, apiToken, baseURL string, body []byte, metadata map[string]any) *cliproxyauth.Auth {
 	apiToken = strings.TrimSpace(apiToken)
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	if apiToken == "" || baseURL == "" {
@@ -471,6 +771,10 @@ func buildCopilotAnthropicGatewayAuth(auth *cliproxyauth.Auth, apiToken, baseURL
 	nativeAuth.Attributes["header:Copilot-Integration-Id"] = copilotIntegrationID
 	nativeAuth.Attributes["header:X-Github-Api-Version"] = copilotGitHubAPIVer
 	nativeAuth.Attributes["header:X-Request-Id"] = uuid.NewString()
+	e.applyClientIdentityAttributes(nativeAuth.Attributes)
+	if sessionToken := metaStringValue(metadata, githubCopilotSessionTokenMetadata); sessionToken != "" {
+		nativeAuth.Attributes["header:"+githubCopilotSessionTokenHeader] = sessionToken
+	}
 	if isAgentInitiated(body) {
 		nativeAuth.Attributes["header:X-Initiator"] = "agent"
 	} else {
@@ -532,6 +836,12 @@ func (e *GitHubCopilotExecutor) ensureAPIToken(ctx context.Context, auth *clipro
 }
 
 // applyHeaders sets the required headers for GitHub Copilot API requests.
+func (e *GitHubCopilotExecutor) applySessionTokenHeader(headers http.Header, metadata map[string]any) {
+	if sessionToken := metaStringValue(metadata, githubCopilotSessionTokenMetadata); sessionToken != "" {
+		headers.Set(githubCopilotSessionTokenHeader, sessionToken)
+	}
+}
+
 func (e *GitHubCopilotExecutor) applyHeaders(r *http.Request, apiToken string, body []byte) {
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Authorization", "Bearer "+apiToken)
@@ -543,6 +853,9 @@ func (e *GitHubCopilotExecutor) applyHeaders(r *http.Request, apiToken string, b
 	r.Header.Set("Copilot-Integration-Id", copilotIntegrationID)
 	r.Header.Set("X-Github-Api-Version", copilotGitHubAPIVer)
 	r.Header.Set("X-Request-Id", uuid.NewString())
+	r.Header.Set("VScode-SessionId", e.sessionID)
+	r.Header.Set("VScode-MachineId", e.machineID)
+	r.Header.Set("Editor-Device-Id", e.deviceID)
 
 	initiator := "user"
 	if isAgentInitiated(body) {
@@ -1587,7 +1900,7 @@ func getGitHubCopilotModelsByTier(tier string) []*registry.ModelInfo {
 // FetchGitHubCopilotModels dynamically fetches available models from the GitHub Copilot API.
 // It exchanges the GitHub access token stored in auth.Metadata for a Copilot API token,
 // then queries the /models endpoint. Falls back to the static registry when the request fails.
-// The tier parameter filters models to the specified plan tier (free/pro/pro+/max).
+// The tier parameter selects the static fallback for free/pro/pro+/max accounts.
 func FetchGitHubCopilotModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config, tier string) []*registry.ModelInfo {
 	if auth == nil {
 		log.Debug("github-copilot: auth is nil, using static models")
@@ -1608,64 +1921,50 @@ func FetchGitHubCopilotModels(ctx context.Context, auth *cliproxyauth.Auth, cfg 
 		return getGitHubCopilotModelsByTier(tier)
 	}
 
+	modelIDs := make([]string, 0, len(entries))
+	for i := range entries {
+		modelIDs = append(modelIDs, entries[i].ID)
+	}
+	log.Infof("github-copilot: API returned %d model entries: %q", len(entries), modelIDs)
+
 	if len(entries) == 0 {
 		log.Warn("github-copilot: API returned no models")
 		return nil
 	}
 
-	// Get all models across all tiers (to identify high-tier exclusive models)
-	allModels := registry.GetGitHubCopilotModels()
-	allModelIDs := make(map[string]bool)
-	for _, m := range allModels {
-		allModelIDs[strings.ToLower(m.ID)] = true
-	}
-
-	// Get models available for the current tier
-	allowedModels := getGitHubCopilotModelsByTier(tier)
-	allowedModelIDs := make(map[string]bool)
-	for _, m := range allowedModels {
-		allowedModelIDs[strings.ToLower(m.ID)] = true
-	}
-
-	// Build blacklist: models that exist in static definitions but are NOT available for this tier
-	// These are the "high-tier exclusive" models that should be filtered out
-	blacklistedModelIDs := make(map[string]bool)
-	for id := range allModelIDs {
-		if !allowedModelIDs[id] {
-			blacklistedModelIDs[id] = true
-		}
-	}
+	staticModels := registry.GetGitHubCopilotModels()
 
 	now := time.Now().Unix()
-	models := make([]*registry.ModelInfo, 0, len(entries)+1)
-	seen := make(map[string]struct{}, len(entries)+1)
+	models := make([]*registry.ModelInfo, 0, len(entries))
+	seen := make(map[string]struct{}, len(entries))
 	for _, entry := range entries {
 		if !entry.Selectable() {
 			log.Debugf("github-copilot: skipping unavailable model %q", entry.ID)
 			continue
 		}
 
-		entry.ID = strings.ToLower(strings.TrimSpace(entry.ID))
-		entryID := entry.ID
-
-		// Blacklist filter: only exclude models that are explicitly in static definitions
-		// AND not available for this tier. Models not in static definitions pass through.
-		if blacklistedModelIDs[entryID] {
-			log.Debugf("github-copilot: skipping model %q not available for tier %q", entry.ID, tier)
-			continue
-		}
+		entry.ID = strings.TrimSpace(entry.ID)
+		entryKey := strings.ToLower(entry.ID)
 
 		// Deduplicate model IDs to avoid incorrect reference counting.
-		if _, dup := seen[entryID]; dup {
+		if _, dup := seen[entryKey]; dup {
 			continue
 		}
-		seen[entryID] = struct{}{}
+		seen[entryKey] = struct{}{}
 
+		object := strings.TrimSpace(entry.Object)
+		if object == "" {
+			object = "model"
+		}
+		ownedBy := strings.TrimSpace(entry.OwnedBy)
+		if ownedBy == "" {
+			ownedBy = "github-copilot"
+		}
 		m := &registry.ModelInfo{
 			ID:                 entry.ID,
-			Object:             "model",
+			Object:             object,
 			Created:            now,
-			OwnedBy:            "github-copilot",
+			OwnedBy:            ownedBy,
 			Type:               "github-copilot",
 			SupportedEndpoints: slices.Clone(entry.SupportedEndpoints),
 		}
@@ -1681,7 +1980,7 @@ func FetchGitHubCopilotModels(ctx context.Context, auth *cliproxyauth.Auth, cfg 
 
 		// Merge known metadata from the static definitions
 		var static *registry.ModelInfo
-		for _, sm := range allowedModels {
+		for _, sm := range staticModels {
 			if strings.EqualFold(sm.ID, entry.ID) {
 				static = sm
 				break
@@ -1724,19 +2023,10 @@ func FetchGitHubCopilotModels(ctx context.Context, auth *cliproxyauth.Auth, cfg 
 	}
 
 	if len(models) == 0 {
-		log.Warnf("github-copilot: API returned no selectable chat models for tier %q", tier)
+		log.Warn("github-copilot: API returned no selectable chat models")
 		return nil
 	}
 
-	if _, exists := seen["auto"]; !exists {
-		for _, model := range allowedModels {
-			if model != nil && strings.EqualFold(model.ID, "auto") {
-				models = append([]*registry.ModelInfo{model}, models...)
-				break
-			}
-		}
-	}
-
-	log.Infof("github-copilot: fetched %d models from API (filtered by tier %q)", len(models), tier)
+	log.Infof("github-copilot: fetched %d models from API", len(models))
 	return models
 }

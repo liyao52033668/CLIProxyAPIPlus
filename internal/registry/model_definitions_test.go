@@ -91,7 +91,22 @@ func TestGetKimiModelsThinkingIsLevelOnly(t *testing.T) {
 	}
 }
 
-func TestGitHubCopilotTiersIncludeAuto(t *testing.T) {
+func TestGitHubCopilotAutoModelUsesThreadEndpoint(t *testing.T) {
+	t.Parallel()
+
+	model := GetGitHubCopilotAutoModel()
+	if model == nil {
+		t.Fatal("GetGitHubCopilotAutoModel() returned nil")
+	}
+	if model.ID != "gh-auto" {
+		t.Fatalf("model ID = %q, want gh-auto", model.ID)
+	}
+	if len(model.SupportedEndpoints) != 1 || model.SupportedEndpoints[0] != "/github/chat/threads/{thread_id}/messages" {
+		t.Fatalf("supported endpoints = %v", model.SupportedEndpoints)
+	}
+}
+
+func TestGitHubCopilotStaticTiersExcludeAuto(t *testing.T) {
 	t.Parallel()
 
 	tiers := map[string][]*ModelInfo{
@@ -101,8 +116,10 @@ func TestGitHubCopilotTiersIncludeAuto(t *testing.T) {
 		"max":      GetGitHubCopilotMaxModels(),
 	}
 	for tier, models := range tiers {
-		if findModelInfo(models, "auto") == nil {
-			t.Errorf("GitHub Copilot %s models do not contain auto", tier)
+		for _, modelID := range []string{"auto", "gh-auto"} {
+			if findModelInfo(models, modelID) != nil {
+				t.Errorf("GitHub Copilot %s static models unexpectedly contain %s", tier, modelID)
+			}
 		}
 	}
 }

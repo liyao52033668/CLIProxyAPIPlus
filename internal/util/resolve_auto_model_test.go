@@ -37,7 +37,6 @@ func TestResolveAutoModelWithRegistry(t *testing.T) {
 	r := registry.GetGlobalRegistry()
 
 	r.RegisterClient("test-client-auto", "openai", []*registry.ModelInfo{
-		{ID: "auto", DisplayName: "Auto"},
 		{ID: "test-model-1", DisplayName: "Test Model 1"},
 		{ID: "test-model-2", DisplayName: "Test Model 2"},
 	})

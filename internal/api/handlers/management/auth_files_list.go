@@ -100,12 +100,21 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 	models := reg.GetModelsForClient(authID)
 
 	result := make([]gin.H, 0, len(models))
+	seen := make(map[string]struct{}, len(models))
 	for _, m := range models {
-		modelID := m.ID
+		modelID := strings.TrimSpace(m.ID)
 		// Use alias if available
 		if auth != nil && h.authManager != nil {
-			modelID = h.authManager.GetOAuthModelAlias(auth, m.ID)
+			modelID = strings.TrimSpace(h.authManager.GetOAuthModelAlias(auth, modelID))
 		}
+		if modelID == "" {
+			continue
+		}
+		modelKey := strings.ToLower(modelID)
+		if _, duplicate := seen[modelKey]; duplicate {
+			continue
+		}
+		seen[modelKey] = struct{}{}
 		entry := gin.H{
 			"id": modelID,
 		}

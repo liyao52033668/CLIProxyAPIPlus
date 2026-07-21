@@ -98,6 +98,15 @@ func TestResolveOAuthUpstreamModel_SuffixPreservation(t *testing.T) {
 			want:    "claude-opus-4.6",
 		},
 		{
+			name: "github-copilot virtual auto bypasses legacy alias",
+			aliases: map[string][]internalconfig.OAuthModelAlias{
+				"github-copilot": {{Name: "auto", Alias: "gh-auto"}},
+			},
+			channel: "github-copilot",
+			input:   "gh-auto",
+			want:    "",
+		},
+		{
 			name: "kimi suffix preserved",
 			aliases: map[string][]internalconfig.OAuthModelAlias{
 				"kimi": {{Name: "kimi-k2.5", Alias: "k2.5"}},

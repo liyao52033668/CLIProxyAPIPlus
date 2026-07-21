@@ -198,6 +198,12 @@ func resolveModelAliasFromConfigModels(requestedModel string, models []modelAlia
 // the suffix is preserved in the returned model name. However, if the alias's
 // original name already contains a suffix, the config suffix takes priority.
 func (m *Manager) resolveOAuthUpstreamModel(auth *Auth, requestedModel string) string {
+	if auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "github-copilot") {
+		baseModel := strings.TrimSpace(thinking.ParseSuffix(requestedModel).ModelName)
+		if strings.EqualFold(baseModel, "gh-auto") {
+			return ""
+		}
+	}
 	return resolveUpstreamModelFromAliasTable(m, auth, requestedModel, modelAliasChannel(auth))
 }
 

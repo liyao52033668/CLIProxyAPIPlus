@@ -1306,6 +1306,16 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 			copilotPlanType = strings.TrimSpace(a.Attributes["plan_type"])
 		}
 		models = executor.FetchGitHubCopilotModels(ctx, a, s.cfg, copilotPlanType)
+		hasCopilotAuto := false
+		for _, model := range models {
+			if model != nil && strings.EqualFold(strings.TrimSpace(model.ID), "gh-auto") {
+				hasCopilotAuto = true
+				break
+			}
+		}
+		if !hasCopilotAuto {
+			models = append(models, registry.GetGitHubCopilotAutoModel())
+		}
 		models = applyExcludedModels(models, excluded)
 	case "kiro":
 		models = s.fetchKiroModels(a)
@@ -1748,6 +1758,10 @@ func applyModelPrefixes(models []*ModelInfo, prefix string, forceModelPrefix boo
 		}
 		baseID := strings.TrimSpace(model.ID)
 		if baseID == "" {
+			continue
+		}
+		if strings.EqualFold(baseID, "gh-auto") && strings.EqualFold(strings.TrimSpace(model.Type), "github-copilot") {
+			addModel(model)
 			continue
 		}
 		if !forceModelPrefix || trimmedPrefix == baseID {

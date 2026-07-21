@@ -789,6 +789,179 @@ func TestGitHubCopilotExecuteStream_ClaudeModelUsesNativeGateway(t *testing.T) {
 	}
 }
 
+func TestIsGitHubCopilotAutoModelUsesDedicatedAlias(t *testing.T) {
+	t.Parallel()
+
+	for _, model := range []string{"gh-auto", "GH-AUTO", "gh/gh-auto"} {
+		if !isGitHubCopilotAutoModel(model) {
+			t.Errorf("isGitHubCopilotAutoModel(%q) = false, want true", model)
+		}
+	}
+	for _, model := range []string{"auto", "gh/auto", "gpt-5-mini"} {
+		if isGitHubCopilotAutoModel(model) {
+			t.Errorf("isGitHubCopilotAutoModel(%q) = true, want false", model)
+		}
+	}
+}
+
+func TestBuildGitHubCopilotAutoPromptPreservesConversation(t *testing.T) {
+	t.Parallel()
+
+	body, err := buildGitHubCopilotAutoPrompt([]byte(`{"model":"gh-auto","messages":[{"role":"system","content":"Be concise."},{"role":"user","content":"Hello"},{"role":"assistant","content":"Hi"},{"role":"user","content":"Reply with OK only."}]}`))
+	if err != nil {
+		t.Fatalf("buildGitHubCopilotAutoPrompt() error: %v", err)
+	}
+	for _, want := range []string{"[System]\nBe concise.", "[User]\nHello", "[Assistant]\nHi", "[User]\nReply with OK only."} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("prompt = %q, missing %q", body, want)
+		}
+	}
+}
+
+func TestSelectGitHubCopilotAutoModel(t *testing.T) {
+	t.Parallel()
+
+	model := selectGitHubCopilotAutoModel(githubCopilotAutoRouterResponse{
+		ChosenModel:     "claude-haiku-4.5",
+		CandidateModels: []string{"gpt-5-mini"},
+	}, "gpt-5-mini", []string{"claude-haiku-4.5", "gpt-5-mini"})
+	if model != "claude-haiku-4.5" {
+		t.Fatalf("model = %q, want claude-haiku-4.5", model)
+	}
+
+	model = selectGitHubCopilotAutoModel(githubCopilotAutoRouterResponse{}, "gpt-5-mini", []string{"gpt-5-mini"})
+	if model != "gpt-5-mini" {
+		t.Fatalf("selected model = %q, want gpt-5-mini", model)
+	}
+
+	model = selectGitHubCopilotAutoModel(githubCopilotAutoRouterResponse{
+		ChosenModel:     "claude-haiku-4.5",
+		CandidateModels: []string{"gpt-5-mini"},
+		Fallback:        true,
+	}, "mai-code-1-flash", []string{"mai-code-1-flash", "gpt-5-mini"})
+	if model != "mai-code-1-flash" {
+		t.Fatalf("fallback model = %q, want mai-code-1-flash", model)
+	}
+}
+
+func TestGitHubCopilotExecute_AutoUsesNativeRouter(t *testing.T) {
+	t.Parallel()
+
+	var gotSessionBody []byte
+	var gotRouterBody []byte
+	var gotChatBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer copilot-api-token" {
+			t.Errorf("Authorization = %q", got)
+		}
+		if got := r.Header.Get("X-Github-Api-Version"); got != copilotGitHubAPIVer {
+			t.Errorf("X-Github-Api-Version = %q, want %q", got, copilotGitHubAPIVer)
+		}
+		if got := r.Header.Get("VScode-SessionId"); got == "" {
+			t.Error("VScode-SessionId is empty")
+		}
+		switch r.URL.Path {
+		case githubCopilotAutoSessionPath:
+			gotSessionBody, _ = io.ReadAll(r.Body)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"session_token":"session-token","available_models":["gpt-5-mini"],"selected_model":"gpt-5-mini"}`)
+		case githubCopilotAutoRouterPath:
+			if got := r.Header.Get(githubCopilotSessionTokenHeader); got != "session-token" {
+				t.Errorf("Copilot-Session-Token = %q", got)
+			}
+			gotRouterBody, _ = io.ReadAll(r.Body)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"predicted_label":"no_reasoning","candidate_models":["gpt-5-mini"],"chosen_model":"gpt-5-mini","routing_method":"hydra"}`)
+		case githubCopilotChatPath:
+			if got := r.Header.Get(githubCopilotSessionTokenHeader); got != "session-token" {
+				t.Errorf("chat Copilot-Session-Token = %q", got)
+			}
+			gotChatBody, _ = io.ReadAll(r.Body)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"id":"chatcmpl-1","object":"chat.completion","created":1,"model":"gpt-5-mini","choices":[{"index":0,"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	e := NewGitHubCopilotExecutor(&config.Config{})
+	e.cache["gh-access-token"] = &cachedAPIToken{token: "copilot-api-token", apiEndpoint: server.URL, expiresAt: time.Now().Add(time.Hour)}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"access_token": "gh-access-token"}}
+	payload := []byte(`{"model":"gh-auto","messages":[{"role":"user","content":"Reply with OK only."}]}`)
+	resp, err := e.Execute(context.Background(), auth, cliproxyexecutor.Request{Model: "gh-auto", Payload: payload}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai"), OriginalRequest: payload})
+	if err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+	if gjson.GetBytes(gotSessionBody, "auto_mode.model_hints.0").String() != "auto" {
+		t.Fatalf("session body = %s", gotSessionBody)
+	}
+	if gjson.GetBytes(gotRouterBody, "prompt").String() != "Reply with OK only." {
+		t.Fatalf("router body = %s", gotRouterBody)
+	}
+	if gjson.GetBytes(gotChatBody, "model").String() != "gpt-5-mini" {
+		t.Fatalf("chat model = %q, want gpt-5-mini", gjson.GetBytes(gotChatBody, "model").String())
+	}
+	if gjson.GetBytes(resp.Payload, "model").String() != "gpt-5-mini" {
+		t.Fatalf("response model = %q", gjson.GetBytes(resp.Payload, "model").String())
+	}
+}
+
+func TestGitHubCopilotExecuteStream_AutoUsesNativeRouter(t *testing.T) {
+	t.Parallel()
+
+	var gotChatBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == githubCopilotAutoSessionPath {
+			_, _ = io.WriteString(w, `{"session_token":"session-token","available_models":["gpt-5-mini"],"selected_model":"gpt-5-mini"}`)
+			return
+		}
+		if r.URL.Path == githubCopilotAutoRouterPath {
+			_, _ = io.WriteString(w, `{"candidate_models":["gpt-5-mini"],"chosen_model":"gpt-5-mini"}`)
+			return
+		}
+		if r.URL.Path != githubCopilotChatPath {
+			http.NotFound(w, r)
+			return
+		}
+		gotChatBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-5-mini\",\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"OK\"},\"finish_reason\":null}]}\n\n")
+		_, _ = io.WriteString(w, "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-5-mini\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	e := NewGitHubCopilotExecutor(&config.Config{})
+	e.cache["gh-access-token"] = &cachedAPIToken{token: "copilot-api-token", apiEndpoint: server.URL, expiresAt: time.Now().Add(time.Hour)}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"access_token": "gh-access-token"}}
+	payload := []byte(`{"model":"gh-auto","stream":true,"messages":[{"role":"user","content":"Reply with OK only."}]}`)
+	result, err := e.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{Model: "gh-auto", Payload: payload}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai"), OriginalRequest: payload})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error: %v", err)
+	}
+	var stream strings.Builder
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error: %v", chunk.Err)
+		}
+		stream.Write(chunk.Payload)
+	}
+	if gjson.GetBytes(gotChatBody, "model").String() != "gpt-5-mini" {
+		t.Fatalf("chat model = %q", gjson.GetBytes(gotChatBody, "model").String())
+	}
+	if !strings.Contains(stream.String(), `"content":"OK"`) || !strings.Contains(stream.String(), `"finish_reason":"stop"`) {
+		t.Fatalf("stream = %q", stream.String())
+	}
+}
+
+func statusFromExecutorError(err error) int {
+	if status, ok := err.(interface{ StatusCode() int }); ok {
+		return status.StatusCode()
+	}
+	return 0
+}
+
 func TestCountTokens_EmptyPayload(t *testing.T) {
 	t.Parallel()
 	e := &GitHubCopilotExecutor{}
