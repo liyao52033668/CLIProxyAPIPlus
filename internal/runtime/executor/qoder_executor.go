@@ -549,9 +549,28 @@ func (e *QoderExecutor) ProbeAuth(ctx context.Context, auth *cliproxyauth.Auth) 
 	return nil
 }
 
-// CountTokens returns an unsupported error since Qoder does not expose a token counting endpoint.
+// CountTokens estimates token count locally using tiktoken, since the Qoder
+// API does not expose a dedicated token counting endpoint.
 func (e *QoderExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	return cliproxyexecutor.Response{}, statusErr{code: http.StatusNotImplemented, msg: "qoder does not support token counting"}
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+
+	from := opts.SourceFormat
+	to := sdktranslator.FromString("openai")
+	translated := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), false)
+
+	enc, err := helps.TokenizerForModel(baseModel)
+	if err != nil {
+		return cliproxyexecutor.Response{}, fmt.Errorf("qoder executor: tokenizer init failed: %w", err)
+	}
+
+	count, err := helps.CountOpenAIChatTokens(enc, translated)
+	if err != nil {
+		return cliproxyexecutor.Response{}, fmt.Errorf("qoder executor: token counting failed: %w", err)
+	}
+
+	usageJSON := helps.BuildOpenAIUsageJSON(count)
+	translatedUsage := sdktranslator.TranslateTokenCount(ctx, to, from, count, usageJSON)
+	return cliproxyexecutor.Response{Payload: translatedUsage}, nil
 }
 
 // buildQoderRequestBody wraps OpenAI-format messages into the Qoder request envelope.
