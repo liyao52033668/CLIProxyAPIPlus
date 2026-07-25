@@ -163,6 +163,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if errDo != nil {
 		return resp, toStatusErr(errDo)
 	}
+	body = normalizeOpenAICompatThinkingResponse(body)
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
 	// Ensure we at least record the request even if upstream doesn't return usage
 	reporter.EnsurePublished(ctx)
@@ -285,6 +286,7 @@ func (e *OpenAICompatExecutor) executeChatCompletionsViaForcedStream(ctx context
 		reporter.PublishFailure(ctx, err)
 		return resp, err
 	}
+	body = normalizeOpenAICompatThinkingResponse(body)
 	helps.AppendAPIResponseChunk(ctx, e.cfg, body)
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
 	reporter.EnsurePublished(ctx)
@@ -426,6 +428,18 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
+		thinkingState := newOpenAICompatThinkingStreamState()
+		emitTranslated := func(raw []byte) bool {
+			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, raw, &param)
+			for i := range chunks {
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+				case <-ctx.Done():
+					return false
+				}
+			}
+			return true
+		}
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
@@ -456,13 +470,16 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			}
 
 			// OpenAI-compatible streams must use SSE data lines.
-			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, bytes.Clone(trimmedLine), &param)
-			for i := range chunks {
-				select {
-				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
-				case <-ctx.Done():
-					return
+			data := bytes.TrimSpace(trimmedLine[len("data:"):])
+			if bytes.Equal(data, []byte("[DONE]")) {
+				for _, pending := range thinkingState.Flush() {
+					if !emitTranslated(pending) {
+						return
+					}
 				}
+			}
+			if !emitTranslated(thinkingState.Transform(bytes.Clone(trimmedLine))) {
+				return
 			}
 		}
 		if errScan := scanner.Err(); errScan != nil {
@@ -473,16 +490,16 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			case <-ctx.Done():
 			}
 		} else {
+			for _, pending := range thinkingState.Flush() {
+				if !emitTranslated(pending) {
+					return
+				}
+			}
 			// In case the upstream close the stream without a terminal [DONE] marker.
 			// Feed a synthetic done marker through the translator so pending
 			// response.completed events are still emitted exactly once.
-			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, []byte("data: [DONE]"), &param)
-			for i := range chunks {
-				select {
-				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
-				case <-ctx.Done():
-					return
-				}
+			if !emitTranslated([]byte("data: [DONE]")) {
+				return
 			}
 		}
 		// Ensure we record the request if no usage chunk was ever seen
@@ -639,6 +656,287 @@ type openAIChatAggregatedToolCall struct {
 	callType  string
 	name      string
 	arguments strings.Builder
+}
+
+const (
+	openAICompatThinkingStartTag = "<thinking>"
+	openAICompatThinkingEndTag   = "</thinking>"
+)
+
+type openAICompatThinkingTagParser struct {
+	inThinking bool
+	pending    string
+	seen       bool
+}
+
+func (p *openAICompatThinkingTagParser) Write(content string, final bool) (text, reasoning string, changed bool) {
+	changed = p.pending != "" || p.inThinking || p.seen
+	remaining := p.pending + content
+	p.pending = ""
+
+	for remaining != "" {
+		tag := openAICompatThinkingStartTag
+		if p.inThinking {
+			tag = openAICompatThinkingEndTag
+		}
+		if index := strings.Index(remaining, tag); index >= 0 {
+			if p.inThinking {
+				reasoning += remaining[:index]
+			} else {
+				text += remaining[:index]
+				p.seen = true
+				changed = true
+			}
+			remaining = remaining[index+len(tag):]
+			p.inThinking = !p.inThinking
+			continue
+		}
+
+		if final {
+			if p.inThinking {
+				reasoning += remaining
+			} else {
+				text += remaining
+			}
+			break
+		}
+
+		pendingLength := openAICompatTagPrefixSuffixLength(remaining, tag)
+		resolved := remaining[:len(remaining)-pendingLength]
+		if p.inThinking {
+			reasoning += resolved
+		} else {
+			text += resolved
+		}
+		if pendingLength > 0 {
+			p.pending = remaining[len(remaining)-pendingLength:]
+			changed = true
+		}
+		break
+	}
+
+	if final {
+		p.inThinking = false
+		p.pending = ""
+	}
+	return text, reasoning, changed
+}
+
+func openAICompatTagPrefixSuffixLength(content, tag string) int {
+	limit := min(len(content), len(tag)-1)
+	for length := limit; length > 0; length-- {
+		if strings.HasSuffix(content, tag[:length]) {
+			return length
+		}
+	}
+	return 0
+}
+
+// openAICompatShouldFlattenContentBlocks reports whether structured content is safe to
+// collapse into plain text. Mixed multimodal arrays (text + image_url, etc.) must pass
+// through unchanged so non-text parts are not dropped by TextFromContentBlocks.
+func openAICompatShouldFlattenContentBlocks(content gjson.Result) bool {
+	if !content.Exists() || content.Type == gjson.Null || content.Type == gjson.String {
+		return false
+	}
+	if content.IsArray() {
+		parts := content.Array()
+		if len(parts) == 0 {
+			return false
+		}
+		onlyText := true
+		hasText := false
+		for _, part := range parts {
+			switch part.Get("type").String() {
+			case "text", "output_text":
+				hasText = true
+			default:
+				onlyText = false
+			}
+			if !onlyText {
+				break
+			}
+		}
+		return onlyText && hasText
+	}
+	switch content.Get("type").String() {
+	case "text", "output_text":
+		return true
+	}
+	return false
+}
+
+func normalizeOpenAICompatThinkingResponse(body []byte) []byte {
+	choices := gjson.GetBytes(body, "choices")
+	if !choices.IsArray() {
+		return body
+	}
+	out := body
+	choices.ForEach(func(index, choice gjson.Result) bool {
+		content := choice.Get("message.content")
+		if !content.Exists() || content.Type == gjson.Null {
+			return true
+		}
+		// Flatten Responses-style structured content blocks (e.g. {"type":"output_text",...})
+		// into plain text so downstream Chat Completions consumers never receive raw blocks.
+		// Only rewrite non-string content when every part is text/output_text so multimodal
+		// arrays (image_url mixed with text, etc.) are left intact.
+		hasBlocks := openAICompatShouldFlattenContentBlocks(content)
+		var flattened string
+		if hasBlocks || content.Type == gjson.String {
+			flattened = translatorcommon.TextFromContentBlocks(content)
+		} else {
+			return true
+		}
+		hasThinking := strings.Contains(flattened, openAICompatThinkingStartTag)
+		if !hasBlocks && !hasThinking {
+			return true
+		}
+		text := flattened
+		reasoning := ""
+		if hasThinking {
+			parser := &openAICompatThinkingTagParser{}
+			text, reasoning, _ = parser.Write(flattened, true)
+		}
+		contentPath := fmt.Sprintf("choices.%d.message.content", index.Int())
+		out, _ = sjson.SetBytes(out, contentPath, text)
+		if reasoning != "" {
+			reasoningPath := fmt.Sprintf("choices.%d.message.reasoning_content", index.Int())
+			existing := choice.Get("message.reasoning_content").String()
+			out, _ = sjson.SetBytes(out, reasoningPath, existing+reasoning)
+		}
+		return true
+	})
+	return out
+}
+
+type openAICompatThinkingChoiceState struct {
+	parser openAICompatThinkingTagParser
+	buffer translatorcommon.ContentBlockTextBuffer
+}
+
+type openAICompatThinkingStreamState struct {
+	choices map[int]*openAICompatThinkingChoiceState
+	last    []byte
+}
+
+func newOpenAICompatThinkingStreamState() *openAICompatThinkingStreamState {
+	return &openAICompatThinkingStreamState{choices: make(map[int]*openAICompatThinkingChoiceState)}
+}
+
+func (s *openAICompatThinkingStreamState) Transform(line []byte) []byte {
+	data := bytes.TrimSpace(bytes.TrimPrefix(bytes.TrimSpace(line), []byte("data:")))
+	if bytes.Equal(data, []byte("[DONE]")) || !gjson.ValidBytes(data) {
+		return line
+	}
+	s.last = bytes.Clone(data)
+	out := data
+	rewrote := false
+	choices := gjson.GetBytes(data, "choices")
+	if !choices.IsArray() {
+		return line
+	}
+	choices.ForEach(func(arrayIndex, choice gjson.Result) bool {
+		choiceIndex := int(choice.Get("index").Int())
+		content := choice.Get("delta.content")
+		finishReason := choice.Get("finish_reason")
+		final := finishReason.Exists() && finishReason.Type != gjson.Null
+		state := s.choices[choiceIndex]
+		// Only allocate parser state for real content payloads. Null/missing content
+		// alone must not force later rewrites (or DeleteBytes of content:null).
+		if state == nil && content.Exists() && content.Type != gjson.Null {
+			if content.Type == gjson.String || openAICompatShouldFlattenContentBlocks(content) {
+				state = &openAICompatThinkingChoiceState{}
+				s.choices[choiceIndex] = state
+			}
+		}
+		if state == nil {
+			return true
+		}
+		// Flatten Responses-style structured content blocks (and stringified blocks
+		// possibly split across chunks) into plain text before thinking-tag parsing.
+		// Skip non-text / mixed multimodal structured parts so they pass through.
+		value := ""
+		if content.Exists() && content.Type != gjson.Null {
+			if content.Type == gjson.String || openAICompatShouldFlattenContentBlocks(content) {
+				value = state.buffer.Text(content)
+			} else {
+				if final {
+					delete(s.choices, choiceIndex)
+				}
+				return true
+			}
+		}
+		if final {
+			value += state.buffer.Flush()
+		}
+		raw := ""
+		if content.Type == gjson.String {
+			raw = content.String()
+		}
+		text, reasoning, changed := state.parser.Write(value, final)
+		mustRewrite := changed || value != raw || (content.Exists() && content.Type != gjson.Null && content.Type != gjson.String)
+		if !mustRewrite {
+			if final {
+				delete(s.choices, choiceIndex)
+			}
+			return true
+		}
+		basePath := fmt.Sprintf("choices.%d.delta", arrayIndex.Int())
+		if text == "" {
+			out, _ = sjson.DeleteBytes(out, basePath+".content")
+		} else {
+			out, _ = sjson.SetBytes(out, basePath+".content", text)
+		}
+		if reasoning != "" {
+			existing := choice.Get("delta.reasoning_content").String()
+			out, _ = sjson.SetBytes(out, basePath+".reasoning_content", existing+reasoning)
+		}
+		rewrote = true
+		if final {
+			delete(s.choices, choiceIndex)
+		}
+		return true
+	})
+	if !rewrote {
+		return line
+	}
+	return append([]byte("data: "), out...)
+}
+
+func (s *openAICompatThinkingStreamState) Flush() [][]byte {
+	if len(s.choices) == 0 || len(s.last) == 0 {
+		return nil
+	}
+	indexes := make([]int, 0, len(s.choices))
+	for index := range s.choices {
+		indexes = append(indexes, index)
+	}
+	sort.Ints(indexes)
+	chunks := make([][]byte, 0, len(indexes))
+	for _, index := range indexes {
+		state := s.choices[index]
+		pending := state.buffer.Flush()
+		text, reasoning, _ := state.parser.Write(pending, true)
+		if text == "" && reasoning == "" {
+			continue
+		}
+		chunk := []byte(`{"id":"","object":"chat.completion.chunk","created":0,"model":"","choices":[{"index":0,"delta":{},"finish_reason":null}]}`)
+		root := gjson.ParseBytes(s.last)
+		chunk, _ = sjson.SetBytes(chunk, "id", root.Get("id").String())
+		chunk, _ = sjson.SetBytes(chunk, "created", root.Get("created").Int())
+		chunk, _ = sjson.SetBytes(chunk, "model", root.Get("model").String())
+		chunk, _ = sjson.SetBytes(chunk, "choices.0.index", index)
+		if text != "" {
+			chunk, _ = sjson.SetBytes(chunk, "choices.0.delta.content", text)
+		}
+		if reasoning != "" {
+			chunk, _ = sjson.SetBytes(chunk, "choices.0.delta.reasoning_content", reasoning)
+		}
+		chunks = append(chunks, append([]byte("data: "), chunk...))
+	}
+	clear(s.choices)
+	return chunks
 }
 
 func newOpenAIChatStreamAggregator(model string) *openAIChatStreamAggregator {
