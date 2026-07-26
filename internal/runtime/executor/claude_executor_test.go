@@ -2454,3 +2454,70 @@ func TestClaudeExecutorRestoreResponseModelOnlyWhenNormalizerConfigured(t *testi
 		t.Fatalf("configured normalizer should restore model, got %q", got)
 	}
 }
+
+func TestPrependToFirstUserMessage_KeepsToolResultBlocksFirst(t *testing.T) {
+	// A conversation that opens on an assistant tool_use makes the first user
+	// message a tool_result carrier. Anthropic requires those blocks to stay at
+	// the head of the message, so the reminder must be appended, not prepended.
+	payload := []byte(`{"messages":[` +
+		`{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{}}]},` +
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}` +
+		`]}`)
+
+	out := prependToFirstUserMessage(payload, "guidance")
+
+	blocks := gjson.GetBytes(out, "messages.1.content")
+	if got := blocks.Get("0.type").String(); got != "tool_result" {
+		t.Fatalf("first block type = %q, want tool_result: %s", got, out)
+	}
+	if got := blocks.Get("0.tool_use_id").String(); got != "toolu_1" {
+		t.Fatalf("tool_use_id = %q, want toolu_1: %s", got, out)
+	}
+	last := blocks.Array()[len(blocks.Array())-1]
+	if last.Get("type").String() != "text" || !strings.Contains(last.Get("text").String(), "guidance") {
+		t.Fatalf("reminder should be appended last: %s", out)
+	}
+}
+
+func TestPrependToFirstUserMessage_AppendsWhenToolResultFollowsText(t *testing.T) {
+	// Malformed but observed histories can put free text before tool_result.
+	// Anthropic still requires tool_result blocks first, so the reminder must
+	// append rather than slide ahead of the tool_result.
+	payload := []byte(`{"messages":[` +
+		`{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{}}]},` +
+		`{"role":"user","content":[{"type":"text","text":"note"},{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}` +
+		`]}`)
+
+	out := prependToFirstUserMessage(payload, "guidance")
+
+	blocks := gjson.GetBytes(out, "messages.1.content").Array()
+	if len(blocks) != 3 {
+		t.Fatalf("content length = %d, want 3: %s", len(blocks), out)
+	}
+	if got := blocks[0].Get("type").String(); got != "text" || blocks[0].Get("text").String() != "note" {
+		t.Fatalf("original text should stay first among existing blocks: %s", out)
+	}
+	if got := blocks[1].Get("type").String(); got != "tool_result" {
+		t.Fatalf("tool_result should remain before reminder, got %q: %s", got, out)
+	}
+	if got := blocks[2].Get("type").String(); got != "text" || !strings.Contains(blocks[2].Get("text").String(), "guidance") {
+		t.Fatalf("reminder should be appended last: %s", out)
+	}
+}
+
+func TestPrependToFirstUserMessage_PrependsWhenNoLeadingToolResult(t *testing.T) {
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`)
+
+	out := prependToFirstUserMessage(payload, "guidance")
+
+	blocks := gjson.GetBytes(out, "messages.0.content")
+	if got := blocks.Get("0.type").String(); got != "text" {
+		t.Fatalf("first block type = %q, want text: %s", got, out)
+	}
+	if !strings.Contains(blocks.Get("0.text").String(), "guidance") {
+		t.Fatalf("reminder should be prepended first: %s", out)
+	}
+	if got := blocks.Get("1.text").String(); got != "hello" {
+		t.Fatalf("original block should follow, got %q: %s", got, out)
+	}
+}
