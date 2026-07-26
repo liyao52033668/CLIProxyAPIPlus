@@ -477,8 +477,13 @@ const (
             transition: border-color 0.3s;
         }
         .form-group input:focus {
-            outline: none;
             border-color: #667eea;
+        }
+        .auth-btn:focus-visible,
+        .submit-btn:focus-visible,
+        .form-group input:focus-visible {
+            outline: 3px solid #1d4ed8;
+            outline-offset: 2px;
         }
         .form-group .hint {
             font-size: 12px;
