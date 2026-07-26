@@ -7,6 +7,14 @@ import (
 	"golang.org/x/net/proxy"
 )
 
+func TestNewClaudeAuthDisableUTLS(t *testing.T) {
+	cfg := &config.Config{SDKConfig: config.SDKConfig{DisableUTLS: true}}
+	auth := NewClaudeAuth(cfg)
+	if _, ok := auth.httpClient.Transport.(*utlsRoundTripper); ok {
+		t.Fatal("expected standard transport when uTLS is disabled")
+	}
+}
+
 func TestNewClaudeAuthWithProxyURL_OverrideDirectTakesPrecedence(t *testing.T) {
 	cfg := &config.Config{SDKConfig: config.SDKConfig{ProxyURL: "socks5://proxy.example.com:1080"}}
 	auth := NewClaudeAuthWithProxyURL(cfg, "direct")

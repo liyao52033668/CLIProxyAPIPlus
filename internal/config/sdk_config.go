@@ -9,6 +9,10 @@ type SDKConfig struct {
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 
+	// DisableUTLS disables the uTLS Chrome ClientHello used for Anthropic HTTPS requests.
+	// The default is false for compatibility; enable it to use the standard Go TLS stack.
+	DisableUTLS bool `yaml:"disable-utls" json:"disable-utls"`
+
 	// CPAToken is the authorization token for CPA API requests (e.g., fetching latest release version).
 	CPAToken string `yaml:"cpa-token" json:"cpa-token"`
 	// DisableImageGeneration controls whether the built-in image_generation tool is injected/allowed.

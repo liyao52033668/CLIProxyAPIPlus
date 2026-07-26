@@ -213,7 +213,10 @@ func newUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 		proxyURL = strings.TrimSpace(cfg.ProxyURL)
 	}
 
-	utlsRT := cachedUtlsRoundTripper(proxyURL)
+	var utlsRT *utlsRoundTripper
+	if cfg == nil || !cfg.DisableUTLS {
+		utlsRT = cachedUtlsRoundTripper(proxyURL)
+	}
 
 	var standardTransport http.RoundTripper = &http.Transport{
 		DialContext: (&net.Dialer{
@@ -231,12 +234,15 @@ func newUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 		}
 	}
 
-	client := &http.Client{
-		Transport: &fallbackRoundTripper{
-			utls:     utlsRT,
-			fallback: standardTransport,
-		},
+	var transport http.RoundTripper = &fallbackRoundTripper{
+		utls:     utlsRT,
+		fallback: standardTransport,
 	}
+	if cfg != nil && cfg.DisableUTLS {
+		transport = standardTransport
+	}
+
+	client := &http.Client{Transport: transport}
 	if timeout > 0 {
 		client.Timeout = timeout
 	}

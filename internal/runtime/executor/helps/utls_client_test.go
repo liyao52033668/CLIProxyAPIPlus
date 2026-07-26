@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
@@ -31,6 +32,14 @@ func clientUtlsRoundTripper(t *testing.T, client *http.Client) *utlsRoundTripper
 		t.Fatalf("transport type = %T, want *fallbackRoundTripper", client.Transport)
 	}
 	return fallback.utls
+}
+
+func TestNewUtlsHTTPClientCanDisableUTLS(t *testing.T) {
+	cfg := &config.Config{SDKConfig: config.SDKConfig{DisableUTLS: true}}
+	client := NewUtlsHTTPClient(context.Background(), cfg, nil, 0)
+	if _, ok := client.Transport.(*fallbackRoundTripper); ok {
+		t.Fatal("expected standard transport when uTLS is disabled")
+	}
 }
 
 func TestNewUtlsHTTPClientReusesRoundTripper(t *testing.T) {

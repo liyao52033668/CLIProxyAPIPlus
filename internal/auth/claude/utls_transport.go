@@ -152,11 +152,20 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	return resp, nil
 }
 
-// NewAnthropicHttpClient creates an HTTP client that bypasses TLS fingerprinting
-// for Anthropic domains by using utls with Chrome fingerprint.
-// It accepts optional SDK configuration for proxy settings.
+// NewAnthropicHttpClient creates an HTTP client for Anthropic API requests.
+// It accepts optional SDK configuration for proxy settings. uTLS is enabled by
+// default for compatibility and can be disabled with SDKConfig.DisableUTLS.
 func NewAnthropicHttpClient(cfg *config.SDKConfig) *http.Client {
-	return &http.Client{
-		Transport: newUtlsRoundTripper(cfg),
+	if cfg != nil && cfg.DisableUTLS {
+		transport, _, errBuild := proxyutil.BuildHTTPTransport(cfg.ProxyURL)
+		if errBuild != nil {
+			log.Errorf("failed to configure standard Anthropic transport for %q: %v", proxyutil.Redact(cfg.ProxyURL), errBuild)
+			return &http.Client{}
+		}
+		if transport != nil {
+			return &http.Client{Transport: transport}
+		}
+		return &http.Client{}
 	}
+	return &http.Client{Transport: newUtlsRoundTripper(cfg)}
 }
