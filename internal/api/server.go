@@ -386,13 +386,13 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 
 	// === CLIProxyAPIPlus extension: Register CodeArts OAuth Web routes ===
 	s.codeArtsOAuthHandler = codearts.NewOAuthWebHandler(cfg)
-	s.codeArtsOAuthHandler.RegisterRoutes(engine)
+	s.codeArtsOAuthHandler.RegisterRoutes(engine, s.localOrManagementAuthMiddleware())
 	s.mgmt.SetCodeArtsOAuthHandler(s.codeArtsOAuthHandler)
 	log.Info("CodeArts OAuth Web routes registered at /v0/oauth/codearts/*")
 
 	// === CLIProxyAPIPlus extension: Register JoyCode OAuth Web routes ===
 	s.joyCodeOAuthHandler = joycode.NewOAuthWebHandler(cfg)
-	s.joyCodeOAuthHandler.RegisterRoutes(engine)
+	s.joyCodeOAuthHandler.RegisterRoutes(engine, s.localOrManagementAuthMiddleware())
 	s.mgmt.SetJoyCodeOAuthHandler(s.joyCodeOAuthHandler)
 	s.joyCodeOAuthHandler.SetAuthSuccessCallback(func(stateID string) {
 		management.CompleteOAuthSession(stateID)

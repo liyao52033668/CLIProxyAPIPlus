@@ -62,15 +62,17 @@ func (h *OAuthWebHandler) SetAuthSuccessCallback(callback AuthSuccessCallback) {
 	h.authSuccessCallback = callback
 }
 
-func (h *OAuthWebHandler) RegisterRoutes(router gin.IRouter) {
+func (h *OAuthWebHandler) RegisterRoutes(router gin.IRouter, protectedMiddleware ...gin.HandlerFunc) {
 	oauth := router.Group("/v0/oauth/joycode")
-	{
-		oauth.GET("", h.handleIndex)
-		oauth.GET("/start", h.handleStart)
-		oauth.GET("/callback", h.handleCallback)
-		oauth.GET("/status", h.handleStatus)
-	}
-	// JoyCode login page redirects to http://127.0.0.1:{port} with query params
+	oauth.GET("/callback", h.handleCallback)
+	oauth.GET("/status", h.handleStatus)
+
+	protected := oauth.Group("")
+	protected.Use(protectedMiddleware...)
+	protected.GET("", h.handleIndex)
+	protected.GET("/start", h.handleStart)
+
+	// JoyCode login page redirects to http://127.0.0.1:{port} with query params.
 	router.GET("/joycode/callback", h.handleCallback)
 }
 
@@ -141,7 +143,7 @@ func (h *OAuthWebHandler) handleStart(c *gin.Context) {
 		return
 	}
 
-	log.Infof("JoyCode OAuth: session %s started, login URL: %s", stateID, loginURL)
+	log.Infof("JoyCode OAuth: session %s started", stateID)
 
 	if c.GetHeader("Accept") == "application/json" {
 		c.JSON(http.StatusOK, gin.H{"url": loginURL, "state": stateID})
@@ -195,9 +197,10 @@ func (h *OAuthWebHandler) handleCallback(c *gin.Context) {
 	if ptKey == "" {
 		ptKey = c.Query("ptKey")
 	}
-
-	log.Infof("JoyCode OAuth: callback received, authKey=%s, ptKey_len=%d", authKey, len(ptKey))
-
+	if authKey == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing authKey parameter"})
+		return
+	}
 	if ptKey == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "missing pt_key parameter"})
 		return
@@ -205,40 +208,20 @@ func (h *OAuthWebHandler) handleCallback(c *gin.Context) {
 
 	h.mu.Lock()
 	var matchedSess *jcWebSession
-
-	if authKey != "" {
-		for _, sess := range h.sessions {
-			if sess.authKey == authKey {
-				matchedSess = sess
-				break
-			}
+	for _, sess := range h.sessions {
+		if sess.authKey == authKey && sess.status == jcWaiting {
+			matchedSess = sess
+			matchedSess.status = jcPending
+			break
 		}
-	}
-
-	if matchedSess == nil {
-		var latestSess *jcWebSession
-		for _, sess := range h.sessions {
-			if sess.status == jcWaiting {
-				if latestSess == nil || sess.startedAt.After(latestSess.startedAt) {
-					latestSess = sess
-				}
-			}
-		}
-		if latestSess != nil {
-			matchedSess = latestSess
-		}
-	}
-
-	if matchedSess != nil {
-		matchedSess.status = jcPending
 	}
 	h.mu.Unlock()
-
-	if matchedSess != nil {
-		go h.verifyAndSave(matchedSess, ptKey)
-	} else {
-		log.Warn("JoyCode OAuth: no matching session found for callback")
+	if matchedSess == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "unknown or expired session"})
+		return
 	}
+
+	go h.verifyAndSave(matchedSess, ptKey)
 
 	c.Header("Content-Type", "text/html; charset=utf-8")
 	c.String(http.StatusOK, `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Authorization Successful</title><script>setTimeout(function(){window.close();},2000);</script></head><body style="display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;font-family:sans-serif;background:#f5f5f5"><div style="text-align:center;padding:40px;background:white;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,0.1)"><h1 style="color:#2ecc71">&#10003; Authorization Successful</h1><p>Credential captured, syncing. Please return to the command line.</p></div></body></html>`)

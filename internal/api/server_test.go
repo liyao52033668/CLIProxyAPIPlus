@@ -1080,6 +1080,39 @@ func TestAuthMiddlewareRejectsEmptyProviderSet(t *testing.T) {
 	}
 }
 
+func TestCodeArtsAndJoyCodeOAuthSetupRoutesRequireManagementAuthForRemoteClients(t *testing.T) {
+	server := newTestServer(t)
+
+	for _, provider := range []string{"codearts", "joycode"} {
+		t.Run(provider, func(t *testing.T) {
+			setupPath := "/v0/oauth/" + provider
+			remoteReq := httptest.NewRequest(http.MethodGet, setupPath, nil)
+			remoteReq.RemoteAddr = "198.51.100.10:4321"
+			remoteRecorder := httptest.NewRecorder()
+			server.engine.ServeHTTP(remoteRecorder, remoteReq)
+			if remoteRecorder.Code != http.StatusForbidden {
+				t.Fatalf("remote status = %d, want %d; body=%s", remoteRecorder.Code, http.StatusForbidden, remoteRecorder.Body.String())
+			}
+
+			localReq := httptest.NewRequest(http.MethodGet, setupPath, nil)
+			localReq.RemoteAddr = "127.0.0.1:4321"
+			localRecorder := httptest.NewRecorder()
+			server.engine.ServeHTTP(localRecorder, localReq)
+			if localRecorder.Code != http.StatusOK {
+				t.Fatalf("local status = %d, want %d; body=%s", localRecorder.Code, http.StatusOK, localRecorder.Body.String())
+			}
+
+			statusReq := httptest.NewRequest(http.MethodGet, setupPath+"/status?state=missing", nil)
+			statusReq.RemoteAddr = "198.51.100.10:4321"
+			statusRecorder := httptest.NewRecorder()
+			server.engine.ServeHTTP(statusRecorder, statusReq)
+			if statusRecorder.Code == http.StatusForbidden || statusRecorder.Code == http.StatusUnauthorized {
+				t.Fatalf("status route unexpectedly required management auth: status=%d body=%s", statusRecorder.Code, statusRecorder.Body.String())
+			}
+		})
+	}
+}
+
 func TestKiroOAuthSetupRoutesRequireManagementAuthForRemoteClients(t *testing.T) {
 	server := newTestServer(t)
 

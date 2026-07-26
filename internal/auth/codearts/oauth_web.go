@@ -70,15 +70,17 @@ func (h *OAuthWebHandler) SetAuthSuccessCallback(callback AuthSuccessCallback) {
 }
 
 // RegisterRoutes registers CodeArts OAuth web routes.
-func (h *OAuthWebHandler) RegisterRoutes(router gin.IRouter) {
+func (h *OAuthWebHandler) RegisterRoutes(router gin.IRouter, protectedMiddleware ...gin.HandlerFunc) {
 	oauth := router.Group("/v0/oauth/codearts")
-	{
-		oauth.GET("", h.handleIndex)
-		oauth.GET("/start", h.handleStart)
-		oauth.GET("/callback", h.handleCallback)
-		oauth.GET("/status", h.handleStatus)
-	}
-	// Root-level callback: HuaweiCloud redirects to http://localhost:{port}/callback
+	oauth.GET("/callback", h.handleCallback)
+	oauth.GET("/status", h.handleStatus)
+
+	protected := oauth.Group("")
+	protected.Use(protectedMiddleware...)
+	protected.GET("", h.handleIndex)
+	protected.GET("/start", h.handleStart)
+
+	// HuaweiCloud redirects to http://localhost:{port}/callback.
 	router.GET("/callback", h.handleCallback)
 }
 
@@ -114,7 +116,7 @@ func (h *OAuthWebHandler) handleStart(c *gin.Context) {
 		return
 	}
 
-	log.Infof("CodeArts OAuth: session %s started, login URL: %s", stateID, loginURL)
+	log.Infof("CodeArts OAuth: session %s started", stateID)
 
 	if c.GetHeader("Accept") == "application/json" {
 		c.JSON(http.StatusOK, gin.H{"url": loginURL, "state": stateID})
@@ -149,7 +151,7 @@ func (h *OAuthWebHandler) CreateSessionAndGetAuthURL(stateID string) (string, er
 
 	loginURL := h.auth.AuthorizationURL(ticketID, port)
 
-	log.Infof("CodeArts OAuth: session %s started, login URL: %s", stateID, loginURL)
+	log.Infof("CodeArts OAuth: session %s started", stateID)
 
 	return loginURL, nil
 }
@@ -161,69 +163,45 @@ func (h *OAuthWebHandler) handleCallback(c *gin.Context) {
 	identifier := c.Query("identifier")
 	redirectURL := c.Query("redirect")
 
-	log.Infof("CodeArts OAuth: callback received, identifier=%s, redirect=%s", identifier, redirectURL)
-
 	if identifier == "" {
-		c.JSON(http.StatusOK, gin.H{"success": false, "error": "lack argument identifier"})
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "missing identifier"})
 		return
 	}
 
-	// Extract ticket_id from redirect URL to match the correct session
 	var ticketFromRedirect string
 	if redirectURL != "" {
-		if parsed, err := url.Parse(redirectURL); err == nil {
+		if parsed, errParse := url.Parse(redirectURL); errParse == nil {
 			ticketFromRedirect = parsed.Query().Get("ticket_id")
 		}
 	}
+	if ticketFromRedirect == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "missing or invalid ticket"})
+		return
+	}
 
 	h.mu.Lock()
-	var matchedSess *webSession
-
-	// First try: match by ticket_id from redirect URL
-	if ticketFromRedirect != "" {
-		if stateID, ok := h.ticketToState[ticketFromRedirect]; ok {
-			if sess, ok2 := h.sessions[stateID]; ok2 {
-				sess.identifier = identifier
-				sess.status = sPolling
-				matchedSess = sess
-				log.Infof("CodeArts OAuth: matched session by ticket_id=%s", ticketFromRedirect)
-			}
-		}
+	stateID, okState := h.ticketToState[ticketFromRedirect]
+	matchedSess, okSession := h.sessions[stateID]
+	if !okState || !okSession || matchedSess.status != sWaitingCB {
+		h.mu.Unlock()
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "unknown or expired session"})
+		return
 	}
-
-	// Fallback: match the most recent waiting session
-	if matchedSess == nil {
-		var latestSess *webSession
-		for _, sess := range h.sessions {
-			if sess.status == sWaitingCB {
-				if latestSess == nil || sess.startedAt.After(latestSess.startedAt) {
-					latestSess = sess
-				}
-			}
-		}
-		if latestSess != nil {
-			latestSess.identifier = identifier
-			latestSess.status = sPolling
-			matchedSess = latestSess
-			log.Infof("CodeArts OAuth: matched session by fallback (latest waiting), ticket=%s", latestSess.ticketID)
-		}
-	}
+	delete(h.ticketToState, ticketFromRedirect)
+	matchedSess.identifier = identifier
+	matchedSess.status = sPolling
 	h.mu.Unlock()
 
-	if matchedSess != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		matchedSess.cancel = cancel
-		go h.pollLogin(ctx, matchedSess)
-	} else {
-		log.Warn("CodeArts OAuth: no matching session found for callback")
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	matchedSess.cancel = cancel
+	go h.pollLogin(ctx, matchedSess)
 
 	if redirectURL != "" {
 		c.Redirect(http.StatusTemporaryRedirect, redirectURL)
-	} else {
-		c.Header("Content-Type", "text/html; charset=utf-8")
-		c.String(http.StatusOK, `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Authentication successful</title><script>setTimeout(function(){window.close();},3000);</script></head><body style="display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;font-family:sans-serif;background:#f5f5f5"><div style="text-align:center;padding:40px;background:white;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,0.1)"><h1>✅ Authentication successful!</h1><p>You can close this tab.</p><p style="color:#666;font-size:14px">This tab will close automatically in 3 seconds.</p></div></body></html>`)
+		return
 	}
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.String(http.StatusOK, `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Authentication successful</title><script>setTimeout(function(){window.close();},3000);</script></head><body style="display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;font-family:sans-serif;background:#f5f5f5"><div style="text-align:center;padding:40px;background:white;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,0.1)"><h1>✅ Authentication successful!</h1><p>You can close this tab.</p><p style="color:#666;font-size:14px">This tab will close automatically in 3 seconds.</p></div></body></html>`)
 }
 
 func (h *OAuthWebHandler) pollLogin(ctx context.Context, sess *webSession) {
@@ -231,7 +209,7 @@ func (h *OAuthWebHandler) pollLogin(ctx context.Context, sess *webSession) {
 		defer sess.cancel()
 	}
 
-	log.Infof("CodeArts OAuth: polling for login result, ticket=%s, identifier=%s", sess.ticketID, sess.identifier)
+	log.Infof("CodeArts OAuth: polling for login result for session %s", sess.stateID)
 
 	// Poll with ticket_id + identifier (matching Python: poll_login_ticket)
 	authResult, err := h.auth.PollForLoginResult(ctx, sess.ticketID, sess.identifier)
