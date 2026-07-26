@@ -224,7 +224,7 @@ func (h *OAuthWebHandler) handleCallback(c *gin.Context) {
 	go h.verifyAndSave(matchedSess, ptKey)
 
 	c.Header("Content-Type", "text/html; charset=utf-8")
-	c.String(http.StatusOK, `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Authorization Successful</title><script>setTimeout(function(){window.close();},2000);</script></head><body style="display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;font-family:sans-serif;background:#f5f5f5"><div style="text-align:center;padding:40px;background:white;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,0.1)"><h1 style="color:#2ecc71">&#10003; Authorization Successful</h1><p>Credential captured, syncing. Please return to the command line.</p></div></body></html>`)
+	c.String(http.StatusOK, `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Authorization Successful</title><script>setTimeout(function(){window.close();},2000);</script></head><body style="display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;font-family:sans-serif;background:#f5f5f5"><div style="text-align:center;padding:40px;background:white;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,0.1)"><h1 style="color:#2ecc71">&#10003; Authorization Successful</h1><p>Credential captured, syncing. Please return to the command line.</p></div></body></html>`)
 }
 
 func (h *OAuthWebHandler) verifyAndSave(sess *jcWebSession, ptKey string) {
@@ -342,7 +342,7 @@ func (h *OAuthWebHandler) saveTokenToFile(tokenData *JoyCodeTokenData) {
 }
 
 const joyCodeLoginPage = `<!DOCTYPE html>
-<html><head><title>JoyCode Login</title>
+<html lang="en"><head><title>JoyCode Login</title>
 <style>
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; background: #f5f5f5; }
 .card { background: white; border-radius: 12px; padding: 40px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); text-align: center; max-width: 400px; }
@@ -358,7 +358,7 @@ a.btn:hover { background: #c62828; }
 </div></body></html>`
 
 const joyCodeWaitingPage = `<!DOCTYPE html>
-<html><head><title>JoyCode Login - Waiting</title>
+<html lang="en"><head><title>JoyCode Login - Waiting</title>
 <style>
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; background: #f5f5f5; }
 .card { background: white; border-radius: 12px; padding: 40px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); text-align: center; max-width: 500px; }
@@ -374,7 +374,7 @@ a.btn:hover { background: #c62828; }
 <h1>&#x1f511; JoyCode Login</h1>
 <p>Click the button below to open JoyCode login page. After login, credentials will be captured automatically.</p>
 <a class="btn" href="%s" target="_blank">Open JoyCode Login</a>
-<div id="status">&#x23f3; Waiting for login callback...</div>
+<div id="status" role="status" aria-live="polite" aria-atomic="true">&#x23f3; Waiting for login callback...</div>
 </div>
 <script>
 var stateID = "%s";

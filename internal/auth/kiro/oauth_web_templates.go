@@ -3,7 +3,7 @@ package kiro
 
 const (
 	oauthWebStartPageHTML = `<!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -187,7 +187,7 @@ const (
             </p>
         </div>
         
-        <div class="status status-pending" id="statusBox">
+        <div class="status status-pending" id="statusBox" role="status" aria-live="polite" aria-atomic="true">
             <div class="spinner" id="spinner"></div>
             <div class="timer" id="timer">{{.ExpiresIn}}s</div>
             <div class="status-message" id="statusMessage">
@@ -286,7 +286,7 @@ const (
 </html>`
 
 	oauthWebErrorPageHTML = `<!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -333,7 +333,7 @@ const (
 </html>`
 
 	oauthWebSuccessPageHTML = `<!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -373,7 +373,7 @@ const (
 </html>`
 
 	oauthWebSelectPageHTML = `<!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">

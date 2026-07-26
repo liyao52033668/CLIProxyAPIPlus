@@ -201,7 +201,7 @@ func (h *OAuthWebHandler) handleCallback(c *gin.Context) {
 		return
 	}
 	c.Header("Content-Type", "text/html; charset=utf-8")
-	c.String(http.StatusOK, `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Authentication successful</title><script>setTimeout(function(){window.close();},3000);</script></head><body style="display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;font-family:sans-serif;background:#f5f5f5"><div style="text-align:center;padding:40px;background:white;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,0.1)"><h1>✅ Authentication successful!</h1><p>You can close this tab.</p><p style="color:#666;font-size:14px">This tab will close automatically in 3 seconds.</p></div></body></html>`)
+	c.String(http.StatusOK, `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Authentication successful</title><script>setTimeout(function(){window.close();},3000);</script></head><body style="display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;font-family:sans-serif;background:#f5f5f5"><div style="text-align:center;padding:40px;background:white;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,0.1)"><h1>✅ Authentication successful!</h1><p>You can close this tab.</p><p style="color:#666;font-size:14px">This tab will close automatically in 3 seconds.</p></div></body></html>`)
 }
 
 func (h *OAuthWebHandler) pollLogin(ctx context.Context, sess *webSession) {
@@ -340,7 +340,7 @@ func (h *OAuthWebHandler) saveTokenToFile(tokenData *CodeArtsTokenData) {
 
 // HTML templates
 const codeArtsLoginPage = `<!DOCTYPE html>
-<html><head><title>CodeArts IDE Login</title>
+<html lang="en"><head><title>CodeArts IDE Login</title>
 <style>
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; background: #f5f5f5; }
 .card { background: white; border-radius: 12px; padding: 40px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); text-align: center; max-width: 400px; }
@@ -356,7 +356,7 @@ a.btn:hover { background: #c62828; }
 </div></body></html>`
 
 const codeArtsWaitingPage = `<!DOCTYPE html>
-<html><head><title>CodeArts IDE Login - Waiting</title>
+<html lang="en"><head><title>CodeArts IDE Login - Waiting</title>
 <style>
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; background: #f5f5f5; }
 .card { background: white; border-radius: 12px; padding: 40px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); text-align: center; max-width: 500px; }
@@ -372,7 +372,7 @@ a.btn:hover { background: #c62828; }
 <h1>&#x1f511; CodeArts IDE Login</h1>
 <p>Click the button below to open HuaweiCloud login page. After login, you will be redirected back here.</p>
 <a class="btn" href="%s" target="_blank">Open HuaweiCloud Login</a>
-<div id="status">&#x23f3; Waiting for login callback...</div>
+<div id="status" role="status" aria-live="polite" aria-atomic="true">&#x23f3; Waiting for login callback...</div>
 </div>
 <script>
 var stateID = "%s";
