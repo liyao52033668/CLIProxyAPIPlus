@@ -482,14 +482,6 @@ func homeQueryCredentialFromContext(ctx context.Context) (string, bool) {
 	if ctx == nil {
 		return "", false
 	}
-	if queryCtx, ok := ctx.Value("gin").(interface{ Query(string) string }); ok && queryCtx != nil {
-		if apiKey := strings.TrimSpace(queryCtx.Query("key")); apiKey != "" {
-			return apiKey, true
-		}
-		if apiKey := strings.TrimSpace(queryCtx.Query("auth_token")); apiKey != "" {
-			return apiKey, true
-		}
-	}
 	ginCtx, ok := ctx.Value("gin").(interface{ Get(string) (any, bool) })
 	if !ok || ginCtx == nil {
 		return "", false

@@ -54,6 +54,9 @@ api-keys:
   - 'your-api-key-2'
   - 'your-api-key-3'
 
+# Allow API keys in URL query parameters such as ?key=. Disabled by default because URLs may be logged.
+allow-query-api-key: false
+
 # Enable debug logging
 debug: false
 

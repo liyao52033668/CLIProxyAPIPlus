@@ -23,18 +23,15 @@ func (c homeDispatchTestGinContext) Query(key string) string {
 	return c.query[key]
 }
 
-func TestHomeDispatchHeadersAddsQueryKeyCredential(t *testing.T) {
+func TestHomeDispatchHeadersIgnoresRawQueryCredential(t *testing.T) {
 	ginCtx := homeDispatchTestGinContext{query: map[string]string{"key": "12345"}}
 	ctx := context.WithValue(context.Background(), "gin", ginCtx)
 	headers := http.Header{"User-Agent": {"client"}}
 
 	got := homeDispatchHeaders(ctx, headers)
 
-	if got.Get("X-Goog-Api-Key") != "12345" {
-		t.Fatalf("X-Goog-Api-Key = %q, want %q", got.Get("X-Goog-Api-Key"), "12345")
-	}
-	if headers.Get("X-Goog-Api-Key") != "" {
-		t.Fatalf("original headers were mutated: %v", headers)
+	if got.Get("X-Goog-Api-Key") != "" {
+		t.Fatalf("X-Goog-Api-Key = %q, want empty", got.Get("X-Goog-Api-Key"))
 	}
 }
 
@@ -57,7 +54,10 @@ func TestHomeDispatchHeadersAddsQueryCredentialFromAccessMetadata(t *testing.T) 
 }
 
 func TestHomeDispatchHeadersKeepsExistingCredentialHeader(t *testing.T) {
-	ginCtx := homeDispatchTestGinContext{query: map[string]string{"key": "query-key"}}
+	ginCtx := homeDispatchTestGinContext{values: map[string]any{
+		"accessMetadata": map[string]string{"source": "query-key"},
+		"userApiKey":     "query-key",
+	}}
 	ctx := context.WithValue(context.Background(), "gin", ginCtx)
 	headers := http.Header{"X-Goog-Api-Key": {"header-key"}}
 

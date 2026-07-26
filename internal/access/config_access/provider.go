@@ -24,16 +24,17 @@ func Register(cfg *sdkconfig.SDKConfig) {
 
 	sdkaccess.RegisterProvider(
 		sdkaccess.AccessProviderTypeConfigAPIKey,
-		newProvider(sdkaccess.DefaultAccessProviderName, keys),
+		newProvider(sdkaccess.DefaultAccessProviderName, keys, cfg.AllowQueryAPIKey),
 	)
 }
 
 type provider struct {
-	name string
-	keys map[string]struct{}
+	name             string
+	keys             map[string]struct{}
+	allowQueryAPIKey bool
 }
 
-func newProvider(name string, keys []string) *provider {
+func newProvider(name string, keys []string, allowQueryAPIKey bool) *provider {
 	providerName := strings.TrimSpace(name)
 	if providerName == "" {
 		providerName = sdkaccess.DefaultAccessProviderName
@@ -42,7 +43,7 @@ func newProvider(name string, keys []string) *provider {
 	for _, key := range keys {
 		keySet[key] = struct{}{}
 	}
-	return &provider{name: providerName, keys: keySet}
+	return &provider{name: providerName, keys: keySet, allowQueryAPIKey: allowQueryAPIKey}
 }
 
 func (p *provider) Identifier() string {
@@ -64,7 +65,7 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 	authHeaderAnthropic := r.Header.Get("X-Api-Key")
 	queryKey := ""
 	queryAuthToken := ""
-	if r.URL != nil {
+	if p.allowQueryAPIKey && r.URL != nil {
 		queryKey = r.URL.Query().Get("key")
 		queryAuthToken = r.URL.Query().Get("auth_token")
 	}
