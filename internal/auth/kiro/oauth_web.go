@@ -77,17 +77,18 @@ func (h *OAuthWebHandler) SetTokenCallback(callback func(*KiroTokenData)) {
 	h.onTokenObtained = callback
 }
 
-func (h *OAuthWebHandler) RegisterRoutes(router gin.IRouter) {
+func (h *OAuthWebHandler) RegisterRoutes(router gin.IRouter, protectedMiddleware ...gin.HandlerFunc) {
 	oauth := router.Group("/v0/oauth/kiro")
-	{
-		oauth.GET("", h.handleSelect)
-		oauth.GET("/start", h.handleStart)
-		oauth.GET("/callback", h.handleCallback)
-		oauth.GET("/social/callback", h.handleSocialCallback)
-		oauth.GET("/status", h.handleStatus)
-		oauth.POST("/import", h.handleImportToken)
-		oauth.POST("/refresh", h.handleManualRefresh)
-	}
+	oauth.GET("/callback", h.handleCallback)
+	oauth.GET("/social/callback", h.handleSocialCallback)
+	oauth.GET("/status", h.handleStatus)
+
+	protected := oauth.Group("")
+	protected.Use(protectedMiddleware...)
+	protected.GET("", h.handleSelect)
+	protected.GET("/start", h.handleStart)
+	protected.POST("/import", h.handleImportToken)
+	protected.POST("/refresh", h.handleManualRefresh)
 }
 
 func generateStateID() (string, error) {

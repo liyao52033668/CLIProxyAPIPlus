@@ -1063,3 +1063,47 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 		}
 	}
 }
+
+func TestAuthMiddlewareRejectsEmptyProviderSet(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.GET("/protected", AuthMiddleware(sdkaccess.NewManager()), func(c *gin.Context) {
+		c.Status(http.StatusNoContent)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusUnauthorized, recorder.Body.String())
+	}
+}
+
+func TestKiroOAuthSetupRoutesRequireManagementAuthForRemoteClients(t *testing.T) {
+	server := newTestServer(t)
+
+	remoteReq := httptest.NewRequest(http.MethodGet, "/v0/oauth/kiro", nil)
+	remoteReq.RemoteAddr = "198.51.100.10:4321"
+	remoteRecorder := httptest.NewRecorder()
+	server.engine.ServeHTTP(remoteRecorder, remoteReq)
+	if remoteRecorder.Code != http.StatusForbidden {
+		t.Fatalf("remote status = %d, want %d; body=%s", remoteRecorder.Code, http.StatusForbidden, remoteRecorder.Body.String())
+	}
+
+	localReq := httptest.NewRequest(http.MethodGet, "/v0/oauth/kiro", nil)
+	localReq.RemoteAddr = "127.0.0.1:4321"
+	localRecorder := httptest.NewRecorder()
+	server.engine.ServeHTTP(localRecorder, localReq)
+	if localRecorder.Code != http.StatusOK {
+		t.Fatalf("local status = %d, want %d; body=%s", localRecorder.Code, http.StatusOK, localRecorder.Body.String())
+	}
+
+	statusReq := httptest.NewRequest(http.MethodGet, "/v0/oauth/kiro/status?state=missing", nil)
+	statusReq.RemoteAddr = "198.51.100.10:4321"
+	statusRecorder := httptest.NewRecorder()
+	server.engine.ServeHTTP(statusRecorder, statusReq)
+	if statusRecorder.Code == http.StatusForbidden || statusRecorder.Code == http.StatusUnauthorized {
+		t.Fatalf("callback status route unexpectedly required management auth: status=%d body=%s", statusRecorder.Code, statusRecorder.Body.String())
+	}
+}

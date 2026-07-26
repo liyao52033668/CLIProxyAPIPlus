@@ -259,3 +259,40 @@ func TestBuildAuthorizationURL(t *testing.T) {
 		}
 	}
 }
+
+func TestGetOIDCEndpointValidatesRegion(t *testing.T) {
+	tests := []struct {
+		name    string
+		region  string
+		want    string
+		wantErr bool
+	}{
+		{name: "default", region: "", want: "https://oidc.us-east-1.amazonaws.com"},
+		{name: "standard", region: "eu-west-2", want: "https://oidc.eu-west-2.amazonaws.com"},
+		{name: "gov", region: "us-gov-west-1", want: "https://oidc.us-gov-west-1.amazonaws.com"},
+		{name: "slash host breakout", region: "evil.example/", wantErr: true},
+		{name: "dot host breakout", region: "evil.example", wantErr: true},
+		{name: "scheme separator", region: "us-east-1:443", wantErr: true},
+		{name: "uppercase", region: "US-EAST-1", wantErr: true},
+		{name: "leading hyphen", region: "-us-east-1", wantErr: true},
+		{name: "double hyphen", region: "us--east-1", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := getOIDCEndpoint(tt.region)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("getOIDCEndpoint(%q) error = nil, want error; endpoint=%q", tt.region, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("getOIDCEndpoint(%q) error = %v", tt.region, err)
+			}
+			if got != tt.want {
+				t.Fatalf("endpoint = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

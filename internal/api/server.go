@@ -381,7 +381,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 
 	// === CLIProxyAPIPlus extension: Register Kiro OAuth Web routes ===
 	kiroOAuthHandler := kiro.NewOAuthWebHandler(cfg)
-	kiroOAuthHandler.RegisterRoutes(engine)
+	kiroOAuthHandler.RegisterRoutes(engine, s.localOrManagementAuthMiddleware())
 	log.Info("Kiro OAuth Web routes registered at /v0/oauth/kiro/*")
 
 	// === CLIProxyAPIPlus extension: Register CodeArts OAuth Web routes ===
@@ -838,6 +838,27 @@ func (s *Server) AttachWebsocketRoute(path string, handler http.Handler) {
 	}
 
 	s.engine.GET(trimmed, conditionalAuth, finalHandler)
+}
+
+// localOrManagementAuthMiddleware keeps local OAuth setup available while requiring
+// the configured management access policy for non-loopback clients.
+func (s *Server) localOrManagementAuthMiddleware() gin.HandlerFunc {
+	managementMiddleware := s.mgmt.Middleware()
+	return func(c *gin.Context) {
+		remoteAddr := ""
+		if c.Request != nil {
+			remoteAddr = strings.TrimSpace(c.Request.RemoteAddr)
+		}
+		host, _, errSplit := net.SplitHostPort(remoteAddr)
+		if errSplit != nil {
+			host = remoteAddr
+		}
+		if ip := net.ParseIP(strings.TrimSpace(host)); ip != nil && ip.IsLoopback() {
+			c.Next()
+			return
+		}
+		managementMiddleware(c)
+	}
 }
 
 func (s *Server) registerManagementRoutes() {
@@ -2159,8 +2180,8 @@ func (g *codexInspectionGatewayAdapter) findAuth(name string) (*auth.Auth, bool)
 // (management handlers moved to internal/api/handlers/management)
 
 // AuthMiddleware returns a Gin middleware handler that authenticates requests
-// using the configured authentication providers. When no providers are available,
-// it allows all requests (legacy behaviour).
+// using the configured authentication providers. A configured manager with no
+// providers rejects requests by default.
 func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if manager == nil {

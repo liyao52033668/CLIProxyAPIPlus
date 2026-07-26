@@ -96,11 +96,28 @@ type CreateTokenResponse struct {
 }
 
 // getOIDCEndpoint returns the OIDC endpoint for the given region.
-func getOIDCEndpoint(region string) string {
+func getOIDCEndpoint(region string) (string, error) {
+	region = strings.TrimSpace(region)
 	if region == "" {
 		region = defaultIDCRegion
 	}
-	return fmt.Sprintf("https://oidc.%s.amazonaws.com", region)
+	if len(region) > 64 {
+		return "", fmt.Errorf("invalid OIDC region")
+	}
+	previousHyphen := false
+	for i := 0; i < len(region); i++ {
+		ch := region[i]
+		if ch >= 'a' && ch <= 'z' || ch >= '0' && ch <= '9' {
+			previousHyphen = false
+			continue
+		}
+		if ch == '-' && i > 0 && i < len(region)-1 && !previousHyphen {
+			previousHyphen = true
+			continue
+		}
+		return "", fmt.Errorf("invalid OIDC region")
+	}
+	return fmt.Sprintf("https://oidc.%s.amazonaws.com", region), nil
 }
 
 // promptInput prompts the user for input with an optional default value.
@@ -153,7 +170,10 @@ func promptSelect(prompt string, options []string) int {
 
 // RegisterClientWithRegion registers a new OIDC client with AWS using a specific region.
 func (c *SSOOIDCClient) RegisterClientWithRegion(ctx context.Context, region string) (*RegisterClientResponse, error) {
-	endpoint := getOIDCEndpoint(region)
+	endpoint, err := getOIDCEndpoint(region)
+	if err != nil {
+		return nil, err
+	}
 
 	payload := map[string]any{
 		"clientName": "Kiro IDE",
@@ -199,7 +219,10 @@ func (c *SSOOIDCClient) RegisterClientWithRegion(ctx context.Context, region str
 
 // StartDeviceAuthorizationWithIDC starts the device authorization flow for IDC.
 func (c *SSOOIDCClient) StartDeviceAuthorizationWithIDC(ctx context.Context, clientID, clientSecret, startURL, region string) (*StartDeviceAuthResponse, error) {
-	endpoint := getOIDCEndpoint(region)
+	endpoint, err := getOIDCEndpoint(region)
+	if err != nil {
+		return nil, err
+	}
 
 	payload := map[string]string{
 		"clientId":     clientID,
@@ -244,7 +267,10 @@ func (c *SSOOIDCClient) StartDeviceAuthorizationWithIDC(ctx context.Context, cli
 
 // CreateTokenWithRegion polls for the access token after user authorization using a specific region.
 func (c *SSOOIDCClient) CreateTokenWithRegion(ctx context.Context, clientID, clientSecret, deviceCode, region string) (*CreateTokenResponse, error) {
-	endpoint := getOIDCEndpoint(region)
+	endpoint, err := getOIDCEndpoint(region)
+	if err != nil {
+		return nil, err
+	}
 
 	payload := map[string]string{
 		"clientId":     clientID,
@@ -310,7 +336,10 @@ func (c *SSOOIDCClient) RefreshTokenWithRegion(ctx context.Context, clientID, cl
 	if region == "" {
 		region = defaultIDCRegion
 	}
-	endpoint := getOIDCEndpoint(region)
+	endpoint, err := getOIDCEndpoint(region)
+	if err != nil {
+		return nil, err
+	}
 
 	payload := map[string]string{
 		"clientId":     clientID,
@@ -1117,7 +1146,10 @@ func (c *SSOOIDCClient) RegisterClientForAuthCode(ctx context.Context, redirectU
 }
 
 func (c *SSOOIDCClient) RegisterClientForAuthCodeWithIDC(ctx context.Context, redirectURI, issuerUrl, region string) (*RegisterClientResponse, error) {
-	endpoint := getOIDCEndpoint(region)
+	endpoint, err := getOIDCEndpoint(region)
+	if err != nil {
+		return nil, err
+	}
 
 	payload := map[string]any{
 		"clientName":   "Kiro IDE",
@@ -1316,7 +1348,10 @@ func (c *SSOOIDCClient) CreateTokenWithAuthCode(ctx context.Context, clientID, c
 }
 
 func (c *SSOOIDCClient) CreateTokenWithAuthCodeAndRegion(ctx context.Context, clientID, clientSecret, code, codeVerifier, redirectURI, region string) (*CreateTokenResponse, error) {
-	endpoint := getOIDCEndpoint(region)
+	endpoint, err := getOIDCEndpoint(region)
+	if err != nil {
+		return nil, err
+	}
 
 	payload := map[string]string{
 		"clientId":     clientID,
@@ -1516,7 +1551,10 @@ func (c *SSOOIDCClient) LoginWithIDCAuthCode(ctx context.Context, startURL, regi
 	}
 	log.Debugf("Client registered: %s", regResp.ClientID)
 
-	endpoint := getOIDCEndpoint(region)
+	endpoint, err := getOIDCEndpoint(region)
+	if err != nil {
+		return nil, err
+	}
 	scopes := "codewhisperer:completions,codewhisperer:analysis,codewhisperer:conversations,codewhisperer:transformations,codewhisperer:taskassist"
 	authURL := buildAuthorizationURL(endpoint, regResp.ClientID, redirectURI, scopes, state, codeChallenge)
 
