@@ -23,6 +23,7 @@ const (
 	apiAttemptsKey                 = "API_UPSTREAM_ATTEMPTS"
 	apiRequestKey                  = "API_REQUEST"
 	apiResponseKey                 = "API_RESPONSE"
+	apiResponseAggregationKey      = "__API_RESPONSE_AGGREGATION__"
 	apiWebsocketTimelineKey        = "API_WEBSOCKET_TIMELINE"
 	deferredAPIRequestBytesKey     = "DEFERRED_API_REQUEST_BYTES"
 	creditsUsedKey                 = "__antigravity_credits_used__"
@@ -46,6 +47,7 @@ type upstreamAttempt struct {
 	index                int
 	request              string
 	response             *strings.Builder
+	responseSynced       int
 	responseIntroWritten bool
 	statusWritten        bool
 	headersWritten       bool
@@ -53,6 +55,12 @@ type upstreamAttempt struct {
 	bodyHasContent       bool
 	prevWasSSEEvent      bool
 	errorWritten         bool
+}
+
+type apiResponseAggregation struct {
+	data                     []byte
+	hasResponse              bool
+	syntheticTrailingNewline bool
 }
 
 // RecordAPIRequest stores the upstream request metadata in Gin context for request logging.
@@ -439,24 +447,47 @@ func updateAggregatedResponse(ginCtx *gin.Context, attempts []*upstreamAttempt) 
 	if ginCtx == nil {
 		return
 	}
-	var builder strings.Builder
-	for idx, attempt := range attempts {
+
+	aggregation := getResponseAggregation(ginCtx)
+	for _, attempt := range attempts {
 		if attempt == nil || attempt.response == nil {
 			continue
 		}
 		responseText := attempt.response.String()
-		if responseText == "" {
+		if len(responseText) <= attempt.responseSynced {
 			continue
 		}
-		builder.WriteString(responseText)
-		if !strings.HasSuffix(responseText, "\n") {
-			builder.WriteString("\n")
+
+		if attempt.responseSynced == 0 {
+			if aggregation.hasResponse {
+				aggregation.data = append(aggregation.data, '\n')
+			}
+		} else if aggregation.syntheticTrailingNewline {
+			aggregation.data = aggregation.data[:len(aggregation.data)-1]
+			aggregation.syntheticTrailingNewline = false
 		}
-		if idx < len(attempts)-1 {
-			builder.WriteString("\n")
+
+		aggregation.data = append(aggregation.data, responseText[attempt.responseSynced:]...)
+		attempt.responseSynced = len(responseText)
+		aggregation.hasResponse = true
+	}
+
+	if aggregation.hasResponse && aggregation.data[len(aggregation.data)-1] != '\n' {
+		aggregation.data = append(aggregation.data, '\n')
+		aggregation.syntheticTrailingNewline = true
+	}
+	ginCtx.Set(apiResponseKey, aggregation.data)
+}
+
+func getResponseAggregation(ginCtx *gin.Context) *apiResponseAggregation {
+	if value, exists := ginCtx.Get(apiResponseAggregationKey); exists {
+		if aggregation, ok := value.(*apiResponseAggregation); ok && aggregation != nil {
+			return aggregation
 		}
 	}
-	ginCtx.Set(apiResponseKey, []byte(builder.String()))
+	aggregation := &apiResponseAggregation{}
+	ginCtx.Set(apiResponseAggregationKey, aggregation)
+	return aggregation
 }
 
 func appendAPIWebsocketTimeline(ginCtx *gin.Context, chunk []byte) {
