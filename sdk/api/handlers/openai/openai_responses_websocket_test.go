@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -131,13 +132,16 @@ type websocketPinnedFailoverExecutor struct {
 }
 
 type websocketPinnedFailoverStatusError struct {
-	status int
-	msg    string
+	status        int
+	msg           string
+	requestScoped bool
 }
 
 func (e websocketPinnedFailoverStatusError) Error() string { return e.msg }
 
 func (e websocketPinnedFailoverStatusError) StatusCode() int { return e.status }
+
+func (e websocketPinnedFailoverStatusError) IsRequestScoped() bool { return e.requestScoped }
 
 type websocketUpstreamDisconnectExecutor struct {
 	mu         sync.Mutex
@@ -1071,7 +1075,7 @@ func TestForwardResponsesWebsocketRestoresAndForwardsCompletedOutput(t *testing.
 		var timelineLog strings.Builder
 		completedOutput, errMsg, err := (*OpenAIResponsesAPIHandler)(nil).forwardResponsesWebsocket(
 			ctx,
-			conn,
+			newResponsesWebsocketWriter(conn),
 			func(...any) {},
 			data,
 			errCh,
@@ -1165,7 +1169,7 @@ func TestForwardResponsesWebsocketLogsAttemptedResponseOnWriteFailure(t *testing
 
 		_, _, err = (*OpenAIResponsesAPIHandler)(nil).forwardResponsesWebsocket(
 			ctx,
-			conn,
+			newResponsesWebsocketWriter(conn),
 			func(...any) {},
 			data,
 			errCh,
@@ -2319,5 +2323,115 @@ func TestResponsesWebsocketPinnedAuthMatchesModel(t *testing.T) {
 	}
 	if responsesWebsocketPinnedAuthMatchesModel(unregisteredAuth, modelB, modelA, true) {
 		t.Fatal("Home runtime auth matched a different model")
+	}
+}
+
+func TestWriteWebsocketCloseForUpstreamErrorMirrorsMessageTooBig(t *testing.T) {
+	tests := []struct {
+		name   string
+		err    error
+		reason string
+	}{
+		{
+			name: "raw close error",
+			err: &websocket.CloseError{
+				Code: websocket.CloseMessageTooBig,
+				Text: "message too big",
+			},
+			reason: "message too big",
+		},
+		{
+			name: "mapped stream error",
+			err: websocketPinnedFailoverStatusError{
+				status: http.StatusRequestEntityTooLarge,
+				msg:    `{"error":{"message":"upstream websocket message too big","code":"message_too_big"}}`,
+			},
+			reason: "upstream websocket message too big",
+		},
+		{
+			name: "request scoped status error without JSON code",
+			err: websocketPinnedFailoverStatusError{
+				status:        http.StatusRequestEntityTooLarge,
+				msg:           "upstream websocket message too big",
+				requestScoped: true,
+			},
+			reason: "message too big",
+		},
+		{
+			name: "multibyte reason stays valid",
+			err: &websocket.CloseError{
+				Code: websocket.CloseMessageTooBig,
+				Text: strings.Repeat("🙂", 31),
+			},
+			reason: strings.Repeat("🙂", 30),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			serverErr := make(chan error, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				conn, err := responsesWebsocketUpgrader.Upgrade(w, r, nil)
+				if err != nil {
+					serverErr <- err
+					return
+				}
+				matched, errWrite := writeWebsocketCloseForUpstreamError(conn, tt.err)
+				if !matched && errWrite == nil {
+					errWrite = errors.New("message-too-big error did not match")
+				}
+				if errClose := conn.Close(); errWrite == nil {
+					errWrite = errClose
+				}
+				serverErr <- errWrite
+			}))
+			defer server.Close()
+
+			wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+			conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+			if err != nil {
+				t.Fatalf("dial websocket: %v", err)
+			}
+			defer func() { _ = conn.Close() }()
+
+			if err = conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+				t.Fatalf("set read deadline: %v", err)
+			}
+			_, _, err = conn.ReadMessage()
+			var closeErr *websocket.CloseError
+			if !errors.As(err, &closeErr) {
+				t.Fatalf("expected websocket close error, got %v", err)
+			}
+			if closeErr.Code != websocket.CloseMessageTooBig {
+				t.Fatalf("expected close code 1009, got %d", closeErr.Code)
+			}
+			if closeErr.Text != tt.reason {
+				t.Fatalf("expected close reason %q, got %q", tt.reason, closeErr.Text)
+			}
+			if err = <-serverErr; err != nil {
+				t.Fatalf("close server websocket: %v", err)
+			}
+		})
+	}
+}
+
+func TestTruncateWebsocketCloseReason(t *testing.T) {
+	if got := truncateWebsocketCloseReason("short", 123); got != "short" {
+		t.Fatalf("short reason changed: %q", got)
+	}
+	long := strings.Repeat("a", 200)
+	if got := truncateWebsocketCloseReason(long, 123); len(got) != 123 {
+		t.Fatalf("truncated length = %d, want 123", len(got))
+	}
+	multibyte := strings.Repeat("🙂", 40)
+	got := truncateWebsocketCloseReason(multibyte, 123)
+	if len(got) > 123 {
+		t.Fatalf("multibyte truncated length = %d, want <= 123", len(got))
+	}
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncated reason is not valid UTF-8: %q", got)
+	}
+	if got := truncateWebsocketCloseReason("anything", 0); got != "" {
+		t.Fatalf("zero budget should return empty, got %q", got)
 	}
 }

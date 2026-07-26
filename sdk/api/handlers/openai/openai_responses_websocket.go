@@ -4,12 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -27,13 +31,14 @@ import (
 )
 
 const (
-	wsRequestTypeCreate  = "response.create"
-	wsRequestTypeAppend  = "response.append"
-	wsEventTypeError     = "error"
-	wsEventTypeCompleted = "response.completed"
-	wsDoneMarker         = "[DONE]"
-	wsTurnStateHeader    = "x-codex-turn-state"
-	wsTimelineBodyKey    = "WEBSOCKET_TIMELINE_OVERRIDE"
+	wsRequestTypeCreate   = "response.create"
+	wsRequestTypeAppend   = "response.append"
+	wsEventTypeError      = "error"
+	wsEventTypeCompleted  = "response.completed"
+	wsDoneMarker          = "[DONE]"
+	wsTurnStateHeader     = "x-codex-turn-state"
+	wsTimelineBodyKey     = "WEBSOCKET_TIMELINE_OVERRIDE"
+	wsCloseReasonMaxBytes = 123
 
 	codexLocalCompactionSummaryPrefix = "Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:"
 )
@@ -46,6 +51,165 @@ var responsesWebsocketUpgrader = websocket.Upgrader{
 	},
 }
 
+// writeWebsocketCloseForUpstreamError mirrors transport-level upstream close
+// codes to the downstream WebSocket client before the connection is torn down.
+// Without this the client only observes an abnormal closure (1006) and cannot
+// apply its own close-code based handling (e.g. falling back to SSE on 1009).
+func writeWebsocketCloseForUpstreamError(conn *websocket.Conn, err error) (bool, error) {
+	if conn == nil {
+		return false, nil
+	}
+	matched, payload := websocketClosePayloadForUpstreamError(err)
+	if !matched {
+		return false, nil
+	}
+	return true, conn.WriteControl(websocket.CloseMessage, payload, time.Time{})
+}
+
+func websocketClosePayloadForUpstreamError(err error) (bool, []byte) {
+	if err == nil {
+		return false, nil
+	}
+
+	code := 0
+	reason := ""
+	var closeErr *websocket.CloseError
+	if errors.As(err, &closeErr) && closeErr.Code == websocket.CloseMessageTooBig {
+		code = closeErr.Code
+		reason = closeErr.Text
+	} else if isWebsocketMessageTooBigError(err) {
+		code = websocket.CloseMessageTooBig
+		reason = strings.TrimSpace(gjson.Get(err.Error(), "error.message").String())
+	} else {
+		return false, nil
+	}
+	if reason == "" {
+		reason = "message too big"
+	}
+	reason = truncateWebsocketCloseReason(reason, wsCloseReasonMaxBytes)
+	return true, websocket.FormatCloseMessage(code, reason)
+}
+
+// isWebsocketMessageTooBigError recognizes the request-scoped 413 that executors
+// emit for upstream websocket 1009 closes. Prefer the typed RequestScopedError +
+// StatusCode contract; fall back to the historical error.code JSON field so
+// older wrappers and tests keep working.
+func isWebsocketMessageTooBigError(err error) bool {
+	if err == nil {
+		return false
+	}
+	type statusCoder interface {
+		StatusCode() int
+	}
+	var statusErr statusCoder
+	if !errors.As(err, &statusErr) || statusErr.StatusCode() != http.StatusRequestEntityTooLarge {
+		return false
+	}
+	var requestErr cliproxyexecutor.RequestScopedError
+	if errors.As(err, &requestErr) && requestErr.IsRequestScoped() {
+		return true
+	}
+	return gjson.Get(err.Error(), "error.code").String() == "message_too_big"
+}
+
+// responsesWebsocketWriter serializes downstream data writes and close frames so
+// an upstream transport error can preempt a blocked writer instead of waiting
+// behind it.
+type responsesWebsocketWriter struct {
+	conn    *websocket.Conn
+	writeMu sync.Mutex
+	closing atomic.Bool
+}
+
+func newResponsesWebsocketWriter(conn *websocket.Conn) *responsesWebsocketWriter {
+	return &responsesWebsocketWriter{conn: conn}
+}
+
+// closeForUpstreamError sends a best-effort close frame without waiting behind
+// an active downstream data writer. If a data write already owns writeMu, still
+// try WriteControl under a short deadline so the client can observe 1009, then
+// force-close the connection to unblock the writer.
+func (w *responsesWebsocketWriter) closeForUpstreamError(err error) (bool, error) {
+	if w == nil || w.conn == nil {
+		return false, nil
+	}
+	matched, payload := websocketClosePayloadForUpstreamError(err)
+	if !matched {
+		return false, nil
+	}
+	if !w.closing.CompareAndSwap(false, true) {
+		return true, nil
+	}
+	if !w.writeMu.TryLock() {
+		// A data writer already holds writeMu. Race gorilla's single writer lock
+		// briefly so a 1009 close frame can still land when the peer is between
+		// data frames; then Close() unblocks any stuck WriteMessage.
+		deadline := time.Now().Add(50 * time.Millisecond)
+		_ = w.conn.SetWriteDeadline(deadline)
+		errWrite := w.conn.WriteControl(websocket.CloseMessage, payload, deadline)
+		errClose := w.conn.Close()
+		if errWrite == nil {
+			return true, errClose
+		}
+		if errClose != nil {
+			return true, errClose
+		}
+		return true, errWrite
+	}
+	defer w.writeMu.Unlock()
+
+	errWrite := w.conn.WriteControl(websocket.CloseMessage, payload, time.Time{})
+	errClose := w.conn.Close()
+	if errWrite != nil {
+		return true, errWrite
+	}
+	return true, errClose
+}
+
+func (w *responsesWebsocketWriter) closeForUpstreamDisconnect(err error) {
+	if w == nil || w.conn == nil {
+		return
+	}
+	if matched, _ := w.closeForUpstreamError(err); matched {
+		return
+	}
+	_ = w.conn.Close()
+}
+
+func truncateWebsocketCloseReason(reason string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(reason) <= maxBytes && utf8.ValidString(reason) {
+		return reason
+	}
+
+	// Decode from the front so work and output stay bounded by maxBytes.
+	var truncated strings.Builder
+	truncated.Grow(min(len(reason), maxBytes))
+	remaining := maxBytes
+	runeErrorSize := utf8.RuneLen(utf8.RuneError)
+	for len(reason) > 0 && remaining > 0 {
+		r, size := utf8.DecodeRuneInString(reason)
+		if r == utf8.RuneError && size == 1 {
+			if runeErrorSize > remaining {
+				break
+			}
+			truncated.WriteRune(utf8.RuneError)
+			reason = reason[1:]
+			remaining -= runeErrorSize
+			continue
+		}
+		if size > remaining {
+			break
+		}
+		truncated.WriteString(reason[:size])
+		reason = reason[size:]
+		remaining -= size
+	}
+	return truncated.String()
+}
+
 // ResponsesWebsocket handles websocket requests for /v1/responses.
 // It accepts `response.create` and `response.append` requests and streams
 // response events back as JSON websocket text messages.
@@ -54,6 +218,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	if err != nil {
 		return
 	}
+	writer := newResponsesWebsocketWriter(conn)
 	passthroughSessionID := uuid.NewString()
 	downstreamSessionKey := websocketDownstreamSessionKey(c.Request)
 	retainResponsesWebsocketToolCaches(downstreamSessionKey)
@@ -75,8 +240,8 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 						select {
 						case <-wsDone:
 							return
-						case <-disconnectCh:
-							_ = conn.Close()
+						case disconnectErr := <-disconnectCh:
+							writer.closeForUpstreamDisconnect(disconnectErr)
 						}
 					}()
 				}
@@ -233,7 +398,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		if errMsg != nil {
 			h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
 			markAPIResponseTimestamp(c)
-			errorPayload, errWrite := writeResponsesWebsocketError(conn, &wsTimelineLog, errMsg)
+			errorPayload, errWrite := writeResponsesWebsocketError(writer, &wsTimelineLog, errMsg)
 			log.Infof(
 				"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
 				passthroughSessionID,
@@ -261,7 +426,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			}
 			lastRequest = updatedLastRequest
 			lastResponseOutput = []byte("[]")
-			if errWrite := writeResponsesWebsocketSyntheticPrewarm(c, conn, requestJSON, &wsTimelineLog, passthroughSessionID); errWrite != nil {
+			if errWrite := writeResponsesWebsocketSyntheticPrewarm(c, writer, requestJSON, &wsTimelineLog, passthroughSessionID); errWrite != nil {
 				wsTerminateErr = errWrite
 				return
 			}
@@ -301,7 +466,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 		dataChan, _, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, requestJSON, "")
 
-		completedOutput, forwardErrMsg, errForward := h.forwardResponsesWebsocket(c, conn, cliCancel, dataChan, errChan, &wsTimelineLog, passthroughSessionID)
+		completedOutput, forwardErrMsg, errForward := h.forwardResponsesWebsocket(c, writer, cliCancel, dataChan, errChan, &wsTimelineLog, passthroughSessionID)
 		if errForward != nil {
 			wsTerminateErr = errForward
 			log.Warnf("responses websocket: forward failed id=%s error=%v", passthroughSessionID, errForward)
@@ -841,7 +1006,7 @@ func shouldHandleResponsesWebsocketPrewarmLocally(rawJSON []byte, lastRequest []
 
 func writeResponsesWebsocketSyntheticPrewarm(
 	c *gin.Context,
-	conn *websocket.Conn,
+	writer *responsesWebsocketWriter,
 	requestJSON []byte,
 	wsTimelineLog *strings.Builder,
 	sessionID string,
@@ -859,7 +1024,7 @@ func writeResponsesWebsocketSyntheticPrewarm(
 		// 	websocketPayloadEventType(payloads[i]),
 		// 	websocketPayloadPreview(payloads[i]),
 		// )
-		if errWrite := writeResponsesWebsocketPayload(conn, wsTimelineLog, payloads[i], time.Now()); errWrite != nil {
+		if errWrite := writeResponsesWebsocketPayload(writer, wsTimelineLog, payloads[i], time.Now()); errWrite != nil {
 			log.Warnf(
 				"responses websocket: downstream_out write failed id=%s event=%s error=%v",
 				sessionID,
@@ -990,7 +1155,7 @@ func normalizeJSONArrayRaw(raw []byte) string {
 
 func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	c *gin.Context,
-	conn *websocket.Conn,
+	writer *responsesWebsocketWriter,
 	cancel handlers.APIHandlerCancelFunc,
 	data <-chan []byte,
 	errs <-chan *interfaces.ErrorMessage,
@@ -1022,7 +1187,16 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 			if errMsg != nil {
 				h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
 				markAPIResponseTimestamp(c)
-				errorPayload, errWrite := writeResponsesWebsocketError(conn, wsTimelineLog, errMsg)
+				if matched, errClose := writer.closeForUpstreamError(errMsg.Error); matched {
+					// Mirror the upstream transport close (e.g. 1009) to the client
+					// instead of a JSON error payload so it can react to the code.
+					cancel(errMsg.Error)
+					if errClose != nil {
+						return completedOutput, errMsg, errClose
+					}
+					return completedOutput, errMsg, websocket.ErrCloseSent
+				}
+				errorPayload, errWrite := writeResponsesWebsocketError(writer, wsTimelineLog, errMsg)
 				log.Infof(
 					"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
 					sessionID,
@@ -1056,7 +1230,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					}
 					h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
 					markAPIResponseTimestamp(c)
-					errorPayload, errWrite := writeResponsesWebsocketError(conn, wsTimelineLog, errMsg)
+					errorPayload, errWrite := writeResponsesWebsocketError(writer, wsTimelineLog, errMsg)
 					log.Infof(
 						"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
 						sessionID,
@@ -1101,7 +1275,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				// 	websocketPayloadEventType(payloads[i]),
 				// 	websocketPayloadPreview(payloads[i]),
 				// )
-				if errWrite := writeResponsesWebsocketPayload(conn, wsTimelineLog, payloads[i], time.Now()); errWrite != nil {
+				if errWrite := writeResponsesWebsocketPayload(writer, wsTimelineLog, payloads[i], time.Now()); errWrite != nil {
 					log.Warnf(
 						"responses websocket: downstream_out write failed id=%s event=%s error=%v",
 						sessionID,
@@ -1250,7 +1424,7 @@ func websocketJSONPayloadsFromChunk(chunk []byte) [][]byte {
 	return payloads
 }
 
-func writeResponsesWebsocketError(conn *websocket.Conn, wsTimelineLog *strings.Builder, errMsg *interfaces.ErrorMessage) ([]byte, error) {
+func writeResponsesWebsocketError(writer *responsesWebsocketWriter, wsTimelineLog *strings.Builder, errMsg *interfaces.ErrorMessage) ([]byte, error) {
 	status := http.StatusInternalServerError
 	errText := http.StatusText(status)
 	if errMsg != nil {
@@ -1320,7 +1494,7 @@ func writeResponsesWebsocketError(conn *websocket.Conn, wsTimelineLog *strings.B
 		}
 	}
 
-	return payload, writeResponsesWebsocketPayload(conn, wsTimelineLog, payload, time.Now())
+	return payload, writeResponsesWebsocketPayload(writer, wsTimelineLog, payload, time.Now())
 }
 
 func appendWebsocketEvent(builder *strings.Builder, eventType string, payload []byte) {
@@ -1374,9 +1548,17 @@ func setWebsocketBody(c *gin.Context, key string, body string) {
 	c.Set(key, []byte(trimmedBody))
 }
 
-func writeResponsesWebsocketPayload(conn *websocket.Conn, wsTimelineLog *strings.Builder, payload []byte, timestamp time.Time) error {
+func writeResponsesWebsocketPayload(writer *responsesWebsocketWriter, wsTimelineLog *strings.Builder, payload []byte, timestamp time.Time) error {
 	appendWebsocketTimelineEvent(wsTimelineLog, "response", payload, timestamp)
-	return conn.WriteMessage(websocket.TextMessage, payload)
+	if writer == nil || writer.conn == nil {
+		return fmt.Errorf("responses websocket: writer is nil")
+	}
+	writer.writeMu.Lock()
+	defer writer.writeMu.Unlock()
+	if writer.closing.Load() {
+		return websocket.ErrCloseSent
+	}
+	return writer.conn.WriteMessage(websocket.TextMessage, payload)
 }
 
 func appendWebsocketTimelineDisconnect(builder *strings.Builder, err error, timestamp time.Time) {
