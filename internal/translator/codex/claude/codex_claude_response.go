@@ -21,6 +21,10 @@ var (
 	dataTag = []byte("data:")
 )
 
+// codexThinkingSummaryPartSeparator joins consecutive reasoning summary parts inside
+// the single thinking block that represents one Codex reasoning item.
+const codexThinkingSummaryPartSeparator = "\n\n"
+
 // ConvertCodexResponseToClaudeParams holds parameters for response conversion.
 type ConvertCodexResponseToClaudeParams struct {
 	HasToolCall               bool
@@ -30,7 +34,6 @@ type ConvertCodexResponseToClaudeParams struct {
 	HasTextDelta              bool
 	TextBlockOpen             bool
 	ThinkingBlockOpen         bool
-	ThinkingStopPending       bool
 	ThinkingSignature         string
 	ThinkingSummarySeen       bool
 	TextBuffer                translatorcommon.ContentBlockTextBuffer
@@ -69,12 +72,6 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 	output := make([]byte, 0, 512)
 	rootResult := gjson.ParseBytes(rawJSON)
 	params := (*param).(*ConvertCodexResponseToClaudeParams)
-	if params.ThinkingBlockOpen && params.ThinkingStopPending {
-		switch rootResult.Get("type").String() {
-		case "response.content_part.added", "response.completed", "response.incomplete":
-			output = append(output, finalizeCodexThinkingBlock(params)...)
-		}
-	}
 
 	typeResult := rootResult.Get("type")
 	typeStr := typeResult.String()
@@ -87,20 +84,27 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 
 		output = translatorcommon.AppendSSEEventBytes(output, "message_start", template, 2)
 	} else if typeStr == "response.reasoning_summary_part.added" {
-		if params.ThinkingBlockOpen && params.ThinkingStopPending {
-			output = append(output, finalizeCodexThinkingBlock(params)...)
+		// Codex splits a single reasoning item into several summary parts, but only
+		// output_item.done carries that item's final encrypted_content. Keep one
+		// thinking block open for the whole item and separate the parts with a blank
+		// line, so the only signature ever emitted is the final one.
+		if params.ThinkingBlockOpen {
+			output = append(output, appendCodexThinkingDelta(params, codexThinkingSummaryPartSeparator)...)
+		} else {
+			output = append(output, startCodexThinkingBlock(params)...)
 		}
 		params.ThinkingSummarySeen = true
-		output = append(output, startCodexThinkingBlock(params)...)
 	} else if typeStr == "response.reasoning_summary_text.delta" {
-		template = []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":""}}`)
-		template, _ = sjson.SetBytes(template, "index", params.BlockIndex)
-		template, _ = sjson.SetBytes(template, "delta.thinking", rootResult.Get("delta").String())
-
-		output = translatorcommon.AppendSSEEventBytes(output, "content_block_delta", template, 2)
+		output = append(output, startCodexThinkingBlock(params)...)
+		// text.delta alone can open a thinking block when part.added was skipped;
+		// mark summary seen so output_item.done closes via finalizeCodexThinkingBlock.
+		params.ThinkingSummarySeen = true
+		output = append(output, appendCodexThinkingDelta(params, rootResult.Get("delta").String())...)
 	} else if typeStr == "response.reasoning_summary_part.done" {
-		params.ThinkingStopPending = true
+		// Intentionally does not close the thinking block: it stays open until
+		// output_item.done delivers the reasoning item's final encrypted_content.
 	} else if typeStr == "response.content_part.added" {
+		output = append(output, finalizeCodexThinkingBlock(params)...)
 		return [][]byte{output}
 	} else if typeStr == "response.output_text.delta" {
 		text := codexTextResultString((*param).(*ConvertCodexResponseToClaudeParams), rootResult.Get("delta"))
@@ -117,6 +121,9 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 	} else if typeStr == "response.content_part.done" {
 		output = append(output, stopCodexTextBlock(params)...)
 	} else if typeStr == "response.completed" || typeStr == "response.incomplete" {
+		// Fallback: close a thinking block left open by a stream that never
+		// delivered the reasoning item's output_item.done event.
+		output = append(output, finalizeCodexThinkingBlock(params)...)
 		output = append(output, stopCodexTextBlock(params)...)
 		responseData := rootResult.Get("response")
 		if !params.HasToolCall {
@@ -154,7 +161,12 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		if itemType == "function_call" {
 			output = append(output, startCodexToolBlock(params, itemResult, originalRequestRawJSON, false)...)
 		} else if itemType == "reasoning" {
+			// A previous reasoning item that never reported output_item.done must not
+			// leak its still-open block into this one.
+			output = append(output, finalizeCodexThinkingBlock(params)...)
 			params.ThinkingSummarySeen = false
+			// Kept only as a fallback for streams whose output_item.done omits
+			// encrypted_content; it is a pre-content snapshot, never the final value.
 			params.ThinkingSignature = itemResult.Get("encrypted_content").String()
 		}
 	} else if typeStr == "response.output_item.done" {
@@ -535,14 +547,28 @@ func startCodexThinkingBlock(params *ConvertCodexResponseToClaudeParams) []byte 
 	template := []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`)
 	template, _ = sjson.SetBytes(template, "index", params.BlockIndex)
 	params.ThinkingBlockOpen = true
-	params.ThinkingStopPending = false
 
 	return translatorcommon.AppendSSEEventBytes(nil, "content_block_start", template, 2)
 }
 
+// appendCodexThinkingDelta emits a thinking_delta for the currently open thinking block.
+func appendCodexThinkingDelta(params *ConvertCodexResponseToClaudeParams, text string) []byte {
+	if text == "" {
+		return nil
+	}
+
+	template := []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":""}}`)
+	template, _ = sjson.SetBytes(template, "index", params.BlockIndex)
+	template, _ = sjson.SetBytes(template, "delta.thinking", text)
+
+	return translatorcommon.AppendSSEEventBytes(nil, "content_block_delta", template, 2)
+}
+
 func finalizeCodexSignatureOnlyThinkingBlock(params *ConvertCodexResponseToClaudeParams) []byte {
 	if params.ThinkingSignature == "" {
-		return nil
+		// Close a block already opened by text.delta even when the final
+		// encrypted_content is missing; otherwise ThinkingBlockOpen leaks.
+		return finalizeCodexThinkingBlock(params)
 	}
 
 	output := startCodexThinkingBlock(params)
@@ -569,7 +595,6 @@ func finalizeCodexThinkingBlock(params *ConvertCodexResponseToClaudeParams) []by
 
 	params.BlockIndex++
 	params.ThinkingBlockOpen = false
-	params.ThinkingStopPending = false
 
 	return output
 }
