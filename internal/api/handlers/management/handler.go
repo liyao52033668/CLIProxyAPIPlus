@@ -242,6 +242,36 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 	}
 }
 
+// SecretExportMiddleware restricts plaintext credential reads to localhost unless
+// remote secret export is explicitly enabled.
+func (h *Handler) SecretExportMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("Cache-Control", "no-store")
+		_, localClient := managementRequestClientIP(c.Request)
+		if localClient {
+			c.Next()
+			return
+		}
+
+		allowSecretExport := false
+		if h != nil {
+			h.mu.Lock()
+			if h.cfg != nil {
+				allowSecretExport = h.cfg.RemoteManagement.AllowSecretExport
+			}
+			h.mu.Unlock()
+		}
+		if !allowSecretExport {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+				"error":   "secret_export_disabled",
+				"message": "remote secret export is disabled",
+			})
+			return
+		}
+		c.Next()
+	}
+}
+
 // managementRequestClientIP extracts the peer IP from Request.RemoteAddr.
 // RemoteAddr cannot be forged by client-controlled headers such as X-Forwarded-For.
 func managementRequestClientIP(r *http.Request) (clientIP string, localClient bool) {

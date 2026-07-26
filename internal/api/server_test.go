@@ -687,6 +687,7 @@ func TestManagementUsageRequiresManagementAuthAndPopsArray(t *testing.T) {
 	})
 
 	server := newTestServer(t)
+	server.cfg.RemoteManagement.AllowRemote = true
 
 	redisqueue.Enqueue([]byte(`{"id":1}`))
 	redisqueue.Enqueue([]byte(`{"id":2}`))
@@ -735,6 +736,68 @@ func TestManagementUsageRequiresManagementAuthAndPopsArray(t *testing.T) {
 
 	if remaining := redisqueue.PopOldest(1); len(remaining) != 0 {
 		t.Fatalf("remaining queue = %q, want empty", remaining)
+	}
+}
+
+func TestManagementSecretExportRequiresLocalhostOrExplicitOptIn(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
+
+	server := newTestServer(t)
+	server.cfg.RemoteManagement.AllowRemote = true
+
+	sensitivePaths := []string{
+		"/v0/management/config",
+		"/v0/management/config.yaml",
+		"/v0/management/proxy-url",
+		"/v0/management/api-keys",
+		"/v0/management/gemini-api-key",
+		"/v0/management/ampcode",
+		"/v0/management/ampcode/upstream-url",
+		"/v0/management/ampcode/upstream-api-key",
+		"/v0/management/ampcode/upstream-api-keys",
+		"/v0/management/claude-api-key",
+		"/v0/management/codex-api-key",
+		"/v0/management/openai-compatibility",
+		"/v0/management/vertex-api-key",
+		"/v0/management/auth-files/download?name=missing.json",
+	}
+	for _, path := range sensitivePaths {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.RemoteAddr = "198.51.100.10:4321"
+		req.Header.Set("Authorization", "Bearer test-management-key")
+		recorder := httptest.NewRecorder()
+		server.engine.ServeHTTP(recorder, req)
+		if recorder.Code != http.StatusForbidden {
+			t.Fatalf("%s remote status = %d, want %d; body=%s", path, recorder.Code, http.StatusForbidden, recorder.Body.String())
+		}
+	}
+
+	putConfigReq := httptest.NewRequest(http.MethodPut, "/v0/management/config.yaml", strings.NewReader("remote-management:\n  allow-secret-export: true\n"))
+	putConfigReq.RemoteAddr = "198.51.100.10:4321"
+	putConfigReq.Header.Set("Authorization", "Bearer test-management-key")
+	putConfigRecorder := httptest.NewRecorder()
+	server.engine.ServeHTTP(putConfigRecorder, putConfigReq)
+	if putConfigRecorder.Code != http.StatusForbidden {
+		t.Fatalf("remote config write status = %d, want %d; body=%s", putConfigRecorder.Code, http.StatusForbidden, putConfigRecorder.Body.String())
+	}
+
+	localReq := httptest.NewRequest(http.MethodGet, "/v0/management/config", nil)
+	localReq.RemoteAddr = "127.0.0.1:4321"
+	localReq.Header.Set("Authorization", "Bearer test-management-key")
+	localRecorder := httptest.NewRecorder()
+	server.engine.ServeHTTP(localRecorder, localReq)
+	if localRecorder.Code != http.StatusOK {
+		t.Fatalf("local status = %d, want %d; body=%s", localRecorder.Code, http.StatusOK, localRecorder.Body.String())
+	}
+
+	server.cfg.RemoteManagement.AllowSecretExport = true
+	remoteReq := httptest.NewRequest(http.MethodGet, "/v0/management/config", nil)
+	remoteReq.RemoteAddr = "198.51.100.10:4321"
+	remoteReq.Header.Set("Authorization", "Bearer test-management-key")
+	remoteRecorder := httptest.NewRecorder()
+	server.engine.ServeHTTP(remoteRecorder, remoteReq)
+	if remoteRecorder.Code != http.StatusOK {
+		t.Fatalf("opt-in remote status = %d, want %d; body=%s", remoteRecorder.Code, http.StatusOK, remoteRecorder.Body.String())
 	}
 }
 

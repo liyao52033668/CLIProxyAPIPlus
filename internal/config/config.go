@@ -229,6 +229,9 @@ type PprofConfig struct {
 type RemoteManagement struct {
 	// AllowRemote toggles remote (non-localhost) access to management API.
 	AllowRemote bool `yaml:"allow-remote"`
+	// AllowSecretExport permits remote clients to read plaintext credentials and auth files.
+	// Localhost clients remain allowed when this is false.
+	AllowSecretExport bool `yaml:"allow-secret-export"`
 	// SecretKey is the management key (plaintext or bcrypt hashed). YAML key intentionally 'secret-key'.
 	SecretKey string `yaml:"secret-key"`
 	// DisableControlPanel skips serving and syncing the bundled management UI when true.
