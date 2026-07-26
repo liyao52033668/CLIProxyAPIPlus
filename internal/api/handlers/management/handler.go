@@ -68,6 +68,7 @@ type Handler struct {
 	codeArtsOAuthHandler     *codearts.OAuthWebHandler
 	joyCodeOAuthHandler      *joycode.OAuthWebHandler
 	codexInspectionService   CodexInspectionService
+	apiCallResolver          apiCallResolver
 	onOAuthModelAliasUpdated func()
 }
 

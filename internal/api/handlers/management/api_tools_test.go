@@ -1,13 +1,14 @@
 package management
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -24,6 +25,229 @@ func (repeatingByteReader) Read(p []byte) (int, error) {
 		p[i] = 'x'
 	}
 	return len(p), nil
+}
+
+type staticAPICallResolver map[string][]string
+
+func (r staticAPICallResolver) LookupIPAddr(_ context.Context, host string) ([]net.IPAddr, error) {
+	values, ok := r[host]
+	if !ok {
+		return nil, fmt.Errorf("host not found: %s", host)
+	}
+	addresses := make([]net.IPAddr, 0, len(values))
+	for _, value := range values {
+		addresses = append(addresses, net.IPAddr{IP: net.ParseIP(value)})
+	}
+	return addresses, nil
+}
+
+func mustParseAPICallURL(t *testing.T, rawURL string) *url.URL {
+	t.Helper()
+	parsed, errParse := url.Parse(rawURL)
+	if errParse != nil {
+		t.Fatalf("url.Parse(%q): %v", rawURL, errParse)
+	}
+	return parsed
+}
+
+func TestValidateAPICallURLRejectsUnsafeTargets(t *testing.T) {
+	t.Parallel()
+
+	resolver := staticAPICallResolver{
+		"public.example":  {"93.184.216.34"},
+		"private.example": {"10.0.0.1"},
+		"mixed.example":   {"93.184.216.34", "192.168.1.5"},
+	}
+	cases := []struct {
+		name    string
+		rawURL  string
+		wantErr bool
+	}{
+		{name: "public HTTPS", rawURL: "https://public.example/v1"},
+		{name: "HTTP scheme", rawURL: "http://public.example/v1", wantErr: true},
+		{name: "userinfo", rawURL: "https://user@public.example/v1", wantErr: true},
+		{name: "loopback literal", rawURL: "https://127.0.0.1/v1", wantErr: true},
+		{name: "metadata literal", rawURL: "https://169.254.169.254/latest/meta-data", wantErr: true},
+		{name: "private DNS", rawURL: "https://private.example/v1", wantErr: true},
+		{name: "mixed DNS", rawURL: "https://mixed.example/v1", wantErr: true},
+		{name: "localhost name", rawURL: "https://localhost/v1", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			errValidate := validateAPICallURL(context.Background(), mustParseAPICallURL(t, tc.rawURL), resolver)
+			if tc.wantErr && errValidate == nil {
+				t.Fatal("validateAPICallURL returned nil, want error")
+			}
+			if !tc.wantErr && errValidate != nil {
+				t.Fatalf("validateAPICallURL returned error: %v", errValidate)
+			}
+		})
+	}
+}
+
+func TestTrustedAPICallTokenDestination(t *testing.T) {
+	t.Parallel()
+
+	h := &Handler{}
+	cases := []struct {
+		name   string
+		auth   *coreauth.Auth
+		rawURL string
+		want   bool
+	}{
+		{
+			name:   "provider host",
+			auth:   &coreauth.Auth{Provider: "claude"},
+			rawURL: "https://api.anthropic.com/api/oauth/usage",
+			want:   true,
+		},
+		{
+			name:   "provider subdomain not trusted",
+			auth:   &coreauth.Auth{Provider: "claude"},
+			rawURL: "https://evil.api.anthropic.com/v1",
+		},
+		{
+			name:   "unrelated host",
+			auth:   &coreauth.Auth{Provider: "claude"},
+			rawURL: "https://attacker.example/v1",
+		},
+		{
+			name: "configured base URL",
+			auth: &coreauth.Auth{
+				Provider:   "custom",
+				Attributes: map[string]string{"base_url": "https://gateway.example:8443/api"},
+			},
+			rawURL: "https://gateway.example:8443/v1/models",
+			want:   true,
+		},
+		{
+			name: "configured base URL different port",
+			auth: &coreauth.Auth{
+				Provider:   "custom",
+				Attributes: map[string]string{"base_url": "https://gateway.example:8443/api"},
+			},
+			rawURL: "https://gateway.example/v1/models",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := h.isTrustedAPICallTokenDestination(mustParseAPICallURL(t, tc.rawURL), tc.auth); got != tc.want {
+				t.Fatalf("isTrustedAPICallTokenDestination() = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAPICallRedirectPolicyRevalidatesTargets(t *testing.T) {
+	t.Parallel()
+
+	resolver := staticAPICallResolver{
+		"api.anthropic.com": {"160.79.104.10"},
+		"public.example":    {"93.184.216.34"},
+		"private.example":   {"10.0.0.1"},
+	}
+	initialURL := mustParseAPICallURL(t, "https://api.anthropic.com/v1")
+	cases := []struct {
+		name          string
+		rawURL        string
+		tokenInjected bool
+		wantErr       bool
+	}{
+		{name: "same origin with token", rawURL: "https://api.anthropic.com/v2", tokenInjected: true},
+		{name: "cross origin without token", rawURL: "https://public.example/v2"},
+		{name: "cross origin with token", rawURL: "https://public.example/v2", tokenInjected: true, wantErr: true},
+		{name: "private target", rawURL: "https://private.example/v2", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			request := httptest.NewRequest(http.MethodGet, tc.rawURL, nil)
+			errRedirect := newAPICallRedirectPolicy(initialURL, tc.tokenInjected, resolver)(request, nil)
+			if tc.wantErr && errRedirect == nil {
+				t.Fatal("redirect policy returned nil, want error")
+			}
+			if !tc.wantErr && errRedirect != nil {
+				t.Fatalf("redirect policy returned error: %v", errRedirect)
+			}
+		})
+	}
+}
+
+func TestAPICallRejectsUnsafeRequestOptions(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	resolver := staticAPICallResolver{"public.example": {"93.184.216.34"}}
+	manager := coreauth.NewManager(nil, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "claude:test",
+		Provider: "claude",
+		Metadata: map[string]any{"access_token": "test-token"},
+	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	authIndex := auth.EnsureIndex()
+
+	cases := []struct {
+		name string
+		body apiCallRequest
+	}{
+		{
+			name: "HTTP target",
+			body: apiCallRequest{Method: http.MethodGet, URL: "http://public.example/v1"},
+		},
+		{
+			name: "private target",
+			body: apiCallRequest{Method: http.MethodGet, URL: "https://169.254.169.254/latest/meta-data"},
+		},
+		{
+			name: "Host override",
+			body: apiCallRequest{
+				Method: http.MethodGet,
+				URL:    "https://public.example/v1",
+				Header: map[string]string{"Host": "internal.example"},
+			},
+		},
+		{
+			name: "token without auth",
+			body: apiCallRequest{
+				Method: http.MethodGet,
+				URL:    "https://public.example/v1",
+				Header: map[string]string{"Authorization": "Bearer $TOKEN$"},
+			},
+		},
+		{
+			name: "token to untrusted host",
+			body: apiCallRequest{
+				AuthIndexSnake: &authIndex,
+				Method:         http.MethodGet,
+				URL:            "https://public.example/v1",
+				Header:         map[string]string{"Authorization": "Bearer $TOKEN$"},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			payload, errMarshal := json.Marshal(tc.body)
+			if errMarshal != nil {
+				t.Fatalf("marshal request: %v", errMarshal)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/v0/management/api-call", strings.NewReader(string(payload)))
+			req.Header.Set("Content-Type", "application/json")
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			ctx.Request = req
+
+			h := &Handler{authManager: manager, apiCallResolver: resolver}
+			h.APICall(ctx)
+
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+			}
+		})
+	}
 }
 
 func TestAPICallRejectsOversizedJSONRequest(t *testing.T) {
@@ -60,32 +284,10 @@ func TestAPICallRejectsOversizedJSONRequestWithTrailingWhitespace(t *testing.T) 
 	}
 }
 
-func TestAPICallRejectsOversizedUpstreamResponse(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = io.CopyN(w, repeatingByteReader{}, (32<<20)+1)
-	}))
-	defer upstream.Close()
-
-	h := &Handler{}
-	payload, errMarshal := json.Marshal(apiCallRequest{Method: http.MethodGet, URL: upstream.URL})
-	if errMarshal != nil {
-		t.Fatalf("marshal request: %v", errMarshal)
-	}
-	req := httptest.NewRequest(http.MethodPost, "/v0/management/api-call", bytes.NewReader(payload))
-	req.Header.Set("Content-Type", "application/json")
-	recorder := httptest.NewRecorder()
-	ctx, _ := gin.CreateTestContext(recorder)
-	ctx.Request = req
-
-	h.APICall(ctx)
-
-	if recorder.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadGateway)
-	}
-	if !strings.Contains(recorder.Body.String(), "response too large") {
-		t.Fatalf("body = %s, want response too large", recorder.Body.String())
+func TestReadAPICallBodyRejectsOversizedResponse(t *testing.T) {
+	_, errRead := readAPICallBody(repeatingByteReader{}, maxAPICallResponseBodyBytes)
+	if !errors.Is(errRead, errAPICallBodyTooLarge) {
+		t.Fatalf("readAPICallBody error = %v, want %v", errRead, errAPICallBodyTooLarge)
 	}
 }
 

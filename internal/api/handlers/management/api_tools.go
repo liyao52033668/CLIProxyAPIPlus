@@ -132,16 +132,17 @@ type apiCallResponse struct {
 // Request JSON (supports both application/json and application/cbor):
 //   - auth_index / authIndex / AuthIndex (optional):
 //     The credential "auth_index" from GET /v0/management/auth-files (or other endpoints returning it).
-//     If omitted or not found, credential-specific proxy/token substitution is skipped.
+//     A valid credential is required when a header uses $TOKEN$.
 //   - method (required): HTTP method, e.g. GET, POST, PUT, PATCH, DELETE.
-//   - url (required): Absolute URL including scheme and host, e.g. "https://api.example.com/v1/ping".
+//   - url (required): Public HTTPS URL including scheme and host, e.g. "https://api.example.com/v1/ping".
 //   - header (optional): Request headers map.
 //     Supports magic variable "$TOKEN$" which is replaced using the selected credential:
 //     1) metadata.access_token
 //     2) attributes.api_key
 //     3) metadata.token / metadata.id_token / metadata.cookie
+//     Token substitution is limited to provider-owned hosts or the credential's configured base URL.
 //     Example: {"Authorization":"Bearer $TOKEN$"}.
-//     Note: if you need to override the HTTP Host header, set header["Host"].
+//     The Host header cannot be overridden.
 //   - data (optional): Raw request body as string (useful for POST/PUT/PATCH).
 //
 // Proxy selection (highest priority first):
@@ -222,6 +223,11 @@ func (h *Handler) APICall(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid url"})
 		return
 	}
+	resolver := h.apiCallDNSResolver()
+	if errValidate := validateAPICallURL(c.Request.Context(), parsedURL, resolver); errValidate != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "url target not allowed"})
+		return
+	}
 
 	authIndex := firstNonEmptyString(body.AuthIndexSnake, body.AuthIndexCamel, body.AuthIndexPascal)
 	auth := h.authByIndex(authIndex)
@@ -231,7 +237,27 @@ func (h *Handler) APICall(c *gin.Context) {
 		reqHeaders = map[string]string{}
 	}
 
-	var hostOverride string
+	tokenRequested := false
+	for key, value := range reqHeaders {
+		if strings.EqualFold(strings.TrimSpace(key), "host") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "host header override is not allowed"})
+			return
+		}
+		if strings.Contains(value, "$TOKEN$") {
+			tokenRequested = true
+		}
+	}
+	if tokenRequested {
+		if auth == nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "valid auth credential required for token substitution"})
+			return
+		}
+		if !h.isTrustedAPICallTokenDestination(parsedURL, auth) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "token destination not allowed"})
+			return
+		}
+	}
+
 	var token string
 	var tokenResolved bool
 	var tokenErr error
@@ -243,7 +269,7 @@ func (h *Handler) APICall(c *gin.Context) {
 			token, tokenErr = h.resolveTokenForAuth(c.Request.Context(), auth)
 			tokenResolved = true
 		}
-		if auth != nil && token == "" {
+		if token == "" {
 			if tokenErr != nil {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "auth token refresh failed"})
 				return
@@ -251,13 +277,10 @@ func (h *Handler) APICall(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "auth token not found"})
 			return
 		}
-		if token == "" {
-			continue
-		}
 		replacement := token
 		// Cursor dashboard APIs expect WorkosCursorSessionToken=user_xxx%3A%3A{jwt}.
 		// Keep Bearer $TOKEN$ as the raw access token for model/API calls.
-		if auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "cursor") {
+		if strings.EqualFold(strings.TrimSpace(auth.Provider), "cursor") {
 			if strings.EqualFold(key, "Cookie") || strings.Contains(value, "WorkosCursorSessionToken") {
 				if session := cursorSessionTokenValue(auth, token); session != "" {
 					replacement = session
@@ -291,20 +314,17 @@ func (h *Handler) APICall(c *gin.Context) {
 	}
 
 	for key, value := range reqHeaders {
-		if strings.EqualFold(key, "host") {
-			hostOverride = strings.TrimSpace(value)
-			continue
-		}
 		req.Header.Set(key, value)
-	}
-	if hostOverride != "" {
-		req.Host = hostOverride
 	}
 
 	httpClient := &http.Client{
-		Timeout: h.apiCallTimeout(),
+		Timeout:       h.apiCallTimeout(),
+		CheckRedirect: newAPICallRedirectPolicy(parsedURL, tokenRequested, resolver),
+		Transport: &securedAPICallTransport{
+			base:     h.apiCallTransport(auth),
+			resolver: resolver,
+		},
 	}
-	httpClient.Transport = h.apiCallTransport(auth)
 
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
