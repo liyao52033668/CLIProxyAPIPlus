@@ -28,6 +28,10 @@ This project only accepts pull requests that relate to third-party provider supp
 
 If you need to submit any non-third-party provider changes, please open them against the [mainline](https://github.com/router-for-me/CLIProxyAPI) repository.
 
+## Storage backends
+
+The file-based backend is the default. The Git backend, enabled with `GITSTORE_*` settings, is **experimental** because it currently uses the `go-git/v6` alpha API. Prefer the file, PostgreSQL, or object storage backend for production workloads. Deployments that enable Git storage should validate synchronization and recovery, keep tested backups, and plan a migration before relying on it for high-availability credentials.
+
 ## License
 
 This project is licensed under the AGPL-3.0 License - see the [LICENSE](LICENSE) file for details. `LICENSE-MIT` is retained only as the historical license file and does not change the current project license.

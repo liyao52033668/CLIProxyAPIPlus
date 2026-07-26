@@ -662,6 +662,7 @@ func main() {
 			log.Infof("object-backed token store enabled, bucket: %s", objectStoreBucket)
 		}
 	} else if useGitStore {
+		log.Warn("git token store is experimental and uses go-git/v6 alpha; prefer the file, Postgres, or object store backend for production workloads")
 		if gitStoreLocalPath == "" {
 			if writableBase != "" {
 				gitStoreLocalPath = writableBase

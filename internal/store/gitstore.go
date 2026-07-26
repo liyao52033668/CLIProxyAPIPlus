@@ -27,6 +27,9 @@ import (
 const gcInterval = 5 * time.Minute
 
 // GitTokenStore persists token records and auth metadata using git as the backing storage.
+//
+// This backend is experimental because it currently relies on the alpha go-git/v6
+// API. Prefer the file, Postgres, or object store backends for production workloads.
 type GitTokenStore struct {
 	mu        sync.Mutex
 	dirLock   sync.RWMutex
@@ -45,8 +48,8 @@ type resolvedRemoteBranch struct {
 	hash plumbing.Hash
 }
 
-// NewGitTokenStore creates a token store that saves credentials to disk through the
-// TokenStorage implementation embedded in the token record.
+// NewGitTokenStore creates an experimental token store that saves credentials to disk
+// through the TokenStorage implementation embedded in the token record.
 // When branch is non-empty, clone/pull/push operations target that branch instead of the remote default.
 func NewGitTokenStore(remote, username, password, branch string) *GitTokenStore {
 	return &GitTokenStore{
