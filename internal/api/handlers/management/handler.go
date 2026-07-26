@@ -62,7 +62,6 @@ type Handler struct {
 	tokenStore               coreauth.Store
 	invalidAuthSnapshot      func() []internalwatcher.InvalidAuthEntry
 	localPassword            string
-	allowRemoteOverride      bool
 	envSecret                string
 	logDir                   string
 	postAuthHook             coreauth.PostAuthHook
@@ -78,14 +77,15 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 	envSecret = strings.TrimSpace(envSecret)
 
 	h := &Handler{
-		cfg:                 cfg,
-		configFilePath:      configFilePath,
-		failedAttempts:      make(map[string]*attemptInfo),
-		authManager:         manager,
-		usageStats:          usage.GetRequestStatistics(),
-		tokenStore:          sdkAuth.GetTokenStore(),
-		allowRemoteOverride: envSecret != "",
-		envSecret:           envSecret,
+		cfg:            cfg,
+		configFilePath: configFilePath,
+		failedAttempts: make(map[string]*attemptInfo),
+		authManager:    manager,
+		usageStats:     usage.GetRequestStatistics(),
+		tokenStore:     sdkAuth.GetTokenStore(),
+		// MANAGEMENT_PASSWORD is an authentication secret only; it must not
+		// force-enable remote management access.
+		envSecret: envSecret,
 	}
 	h.startAttemptCleanup()
 	return h
@@ -282,9 +282,8 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 		allowRemote = cfg.RemoteManagement.AllowRemote
 		secretHash = cfg.RemoteManagement.SecretKey
 	}
-	if h.allowRemoteOverride {
-		allowRemote = true
-	}
+	// Always respect cfg.RemoteManagement.AllowRemote for remote clients.
+	// envSecret (MANAGEMENT_PASSWORD) is only used as an auth secret.
 	envSecret := h.envSecret
 
 	now := time.Now()

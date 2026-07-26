@@ -37,6 +37,79 @@ func TestAuthenticateManagementKey_LocalhostIPBan_BlocksCorrectKeyDuringBan(t *t
 	}
 }
 
+func TestAuthenticateManagementKey_EnvSecretDoesNotOverrideAllowRemote(t *testing.T) {
+	const envSecret = "env-management-secret"
+
+	t.Run("remote denied when AllowRemote false even with correct envSecret", func(t *testing.T) {
+		h := &Handler{
+			cfg: &config.Config{
+				RemoteManagement: config.RemoteManagement{
+					AllowRemote: false,
+				},
+			},
+			failedAttempts: make(map[string]*attemptInfo),
+			envSecret:      envSecret,
+		}
+
+		allowed, statusCode, errMsg := h.AuthenticateManagementKey("203.0.113.10", false, envSecret)
+		if allowed {
+			t.Fatal("expected remote auth to be denied when AllowRemote is false")
+		}
+		if statusCode != http.StatusForbidden {
+			t.Fatalf("status = %d, want %d", statusCode, http.StatusForbidden)
+		}
+		if errMsg != "remote management disabled" {
+			t.Fatalf("errMsg = %q, want %q", errMsg, "remote management disabled")
+		}
+	})
+
+	t.Run("remote allowed when AllowRemote true with correct envSecret", func(t *testing.T) {
+		h := &Handler{
+			cfg: &config.Config{
+				RemoteManagement: config.RemoteManagement{
+					AllowRemote: true,
+				},
+			},
+			failedAttempts: make(map[string]*attemptInfo),
+			envSecret:      envSecret,
+		}
+
+		allowed, statusCode, errMsg := h.AuthenticateManagementKey("203.0.113.10", false, envSecret)
+		if !allowed {
+			t.Fatalf("expected remote auth to succeed: status=%d msg=%q", statusCode, errMsg)
+		}
+		if statusCode != 0 {
+			t.Fatalf("status = %d, want 0", statusCode)
+		}
+		if errMsg != "" {
+			t.Fatalf("errMsg = %q, want empty", errMsg)
+		}
+	})
+
+	t.Run("localhost allowed with correct envSecret when AllowRemote false", func(t *testing.T) {
+		h := &Handler{
+			cfg: &config.Config{
+				RemoteManagement: config.RemoteManagement{
+					AllowRemote: false,
+				},
+			},
+			failedAttempts: make(map[string]*attemptInfo),
+			envSecret:      envSecret,
+		}
+
+		allowed, statusCode, errMsg := h.AuthenticateManagementKey("127.0.0.1", true, envSecret)
+		if !allowed {
+			t.Fatalf("expected localhost auth to succeed: status=%d msg=%q", statusCode, errMsg)
+		}
+		if statusCode != 0 {
+			t.Fatalf("status = %d, want 0", statusCode)
+		}
+		if errMsg != "" {
+			t.Fatalf("errMsg = %q, want empty", errMsg)
+		}
+	})
+}
+
 func TestManagementRequestClientIP_UsesRemoteAddrNotForwardedHeaders(t *testing.T) {
 	tests := []struct {
 		name       string
