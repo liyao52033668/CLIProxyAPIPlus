@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,6 +19,7 @@ import (
 type SignatureEntry struct {
 	Signature string
 	Timestamp time.Time
+	bytes     int
 }
 
 const (
@@ -32,6 +34,18 @@ const (
 
 	// CacheCleanupInterval controls how often stale entries are purged
 	CacheCleanupInterval = 10 * time.Minute
+
+	// SignatureCacheRefreshInterval limits sliding-TTL writes on frequently read entries.
+	SignatureCacheRefreshInterval = 10 * time.Minute
+
+	// SignatureCacheMaxEntriesPerGroup bounds entries retained for one model group.
+	SignatureCacheMaxEntriesPerGroup = 4096
+
+	// SignatureCacheMaxBytesPerGroup bounds signature payload bytes retained for one model group.
+	SignatureCacheMaxBytesPerGroup = 64 << 20
+
+	// SignatureCacheEvictBatchSize leaves headroom after reaching the entry limit.
+	SignatureCacheEvictBatchSize = 128
 )
 
 // signatureCache stores signatures by model group -> textHash -> SignatureEntry
@@ -53,8 +67,9 @@ var currentSignatureKVClient = func() (signatureKVClient, bool, error) {
 
 // groupCache is the inner map type
 type groupCache struct {
-	mu      sync.RWMutex
-	entries map[string]SignatureEntry
+	mu         sync.RWMutex
+	entries    map[string]SignatureEntry
+	totalBytes int64
 }
 
 // hashText creates a stable, Unicode-safe key from text content
@@ -97,7 +112,7 @@ func purgeExpiredCaches() {
 		// Remove expired entries
 		for k, entry := range sc.entries {
 			if now.Sub(entry.Timestamp) > SignatureCacheTTL {
-				delete(sc.entries, k)
+				deleteSignatureEntryLocked(sc, k, entry)
 			}
 		}
 		isEmpty := len(sc.entries) == 0
@@ -140,14 +155,24 @@ func CacheSignatureBestEffort(ctx context.Context, modelName, text, signature st
 
 	groupKey := GetModelGroup(modelName)
 	textHash := hashText(text)
+	entryBytes := len(textHash) + len(signature)
+	if entryBytes > SignatureCacheMaxBytesPerGroup {
+		return false
+	}
+
 	sc := getOrCreateGroupCache(groupKey)
 	sc.mu.Lock()
-	defer sc.mu.Unlock()
-
+	if existing, exists := sc.entries[textHash]; exists {
+		sc.totalBytes -= int64(existing.bytes)
+	}
 	sc.entries[textHash] = SignatureEntry{
 		Signature: signature,
 		Timestamp: time.Now(),
+		bytes:     entryBytes,
 	}
+	sc.totalBytes += int64(entryBytes)
+	enforceSignatureCacheLimitsLocked(sc, SignatureCacheMaxEntriesPerGroup, SignatureCacheMaxBytesPerGroup, SignatureCacheEvictBatchSize)
+	sc.mu.Unlock()
 	return true
 }
 
@@ -201,33 +226,87 @@ func GetCachedSignatureRequired(ctx context.Context, modelName, text string) (st
 	sc := val.(*groupCache)
 
 	textHash := hashText(text)
+	if signature, exists := getLocalCachedSignature(sc, textHash, time.Now()); exists {
+		return signature, nil
+	}
+	if groupKey == "gemini" {
+		return "skip_thought_signature_validator", nil
+	}
+	return "", nil
+}
 
-	now := time.Now()
+func getLocalCachedSignature(sc *groupCache, textHash string, now time.Time) (string, bool) {
+	if sc == nil {
+		return "", false
+	}
 
-	sc.mu.Lock()
+	sc.mu.RLock()
 	entry, exists := sc.entries[textHash]
 	if !exists {
-		sc.mu.Unlock()
-		if groupKey == "gemini" {
-			return "skip_thought_signature_validator", nil
-		}
-		return "", nil
+		sc.mu.RUnlock()
+		return "", false
 	}
-	if now.Sub(entry.Timestamp) > SignatureCacheTTL {
-		delete(sc.entries, textHash)
-		sc.mu.Unlock()
-		if groupKey == "gemini" {
-			return "skip_thought_signature_validator", nil
-		}
-		return "", nil
+	age := now.Sub(entry.Timestamp)
+	if age <= SignatureCacheTTL && age < SignatureCacheRefreshInterval {
+		sc.mu.RUnlock()
+		return entry.Signature, true
 	}
+	sc.mu.RUnlock()
 
-	// Refresh TTL on access (sliding expiration).
-	entry.Timestamp = now
-	sc.entries[textHash] = entry
-	sc.mu.Unlock()
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	entry, exists = sc.entries[textHash]
+	if !exists {
+		return "", false
+	}
+	age = now.Sub(entry.Timestamp)
+	if age > SignatureCacheTTL {
+		deleteSignatureEntryLocked(sc, textHash, entry)
+		return "", false
+	}
+	if age >= SignatureCacheRefreshInterval {
+		entry.Timestamp = now
+		sc.entries[textHash] = entry
+	}
+	return entry.Signature, true
+}
 
-	return entry.Signature, nil
+func deleteSignatureEntryLocked(sc *groupCache, textHash string, entry SignatureEntry) {
+	delete(sc.entries, textHash)
+	sc.totalBytes -= int64(entry.bytes)
+	if sc.totalBytes < 0 {
+		sc.totalBytes = 0
+	}
+}
+
+func enforceSignatureCacheLimitsLocked(sc *groupCache, maxEntries int, maxBytes int64, evictBatchSize int) {
+	if sc == nil || (len(sc.entries) <= maxEntries && sc.totalBytes <= maxBytes) {
+		return
+	}
+	type candidate struct {
+		textHash  string
+		timestamp time.Time
+	}
+	candidates := make([]candidate, 0, len(sc.entries))
+	for textHash, entry := range sc.entries {
+		candidates = append(candidates, candidate{textHash: textHash, timestamp: entry.Timestamp})
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].timestamp.Before(candidates[j].timestamp)
+	})
+
+	minimumEvictions := len(sc.entries) - maxEntries
+	if minimumEvictions > 0 && minimumEvictions < evictBatchSize {
+		minimumEvictions = evictBatchSize
+	}
+	for index, candidate := range candidates {
+		if index >= minimumEvictions && len(sc.entries) <= maxEntries && sc.totalBytes <= maxBytes {
+			break
+		}
+		if entry, exists := sc.entries[candidate.textHash]; exists {
+			deleteSignatureEntryLocked(sc, candidate.textHash, entry)
+		}
+	}
 }
 
 // ClearSignatureCache clears signature cache for a specific model group or all groups.
@@ -263,7 +342,9 @@ func DeleteCachedSignatureRequired(ctx context.Context, modelName, text string) 
 	}
 	sc := val.(*groupCache)
 	sc.mu.Lock()
-	delete(sc.entries, textHash)
+	if entry, exists := sc.entries[textHash]; exists {
+		deleteSignatureEntryLocked(sc, textHash, entry)
+	}
 	isEmpty := len(sc.entries) == 0
 	sc.mu.Unlock()
 	if isEmpty {

@@ -191,26 +191,123 @@ func TestCacheSignature_Overwrite(t *testing.T) {
 	}
 }
 
-// Note: TTL expiration test is tricky to test without mocking time
-// We test the logic path exists but actual expiration would require time manipulation
 func TestCacheSignature_ExpirationLogic(t *testing.T) {
 	ClearSignatureCache("")
 
-	// This test verifies the expiration check exists
-	// In a real scenario, we'd mock time.Now()
 	text := "text"
 	sig := "validSig1234567890123456789012345678901234567890123456"
 
 	CacheSignature(testModelName, text, sig)
 
-	// Fresh entry should be retrievable
 	if got := GetCachedSignature(testModelName, text); got != sig {
 		t.Errorf("Fresh entry should be retrievable, got '%s'", got)
 	}
+}
 
-	// We can't easily test actual expiration without time mocking
-	// but the logic is verified by the implementation
-	_ = time.Now() // Acknowledge we're not testing time passage
+func TestGetLocalCachedSignatureRefreshesTTLPeriodically(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	textHash := "hash"
+	signature := "signature"
+	sc := &groupCache{
+		entries: map[string]SignatureEntry{
+			textHash: {
+				Signature: signature,
+				Timestamp: now.Add(-SignatureCacheRefreshInterval / 2),
+				bytes:     len(textHash) + len(signature),
+			},
+		},
+		totalBytes: int64(len(textHash) + len(signature)),
+	}
+
+	if got, ok := getLocalCachedSignature(sc, textHash, now); !ok || got != signature {
+		t.Fatalf("fresh cache read = %q, %v; want signature", got, ok)
+	}
+	freshTimestamp := sc.entries[textHash].Timestamp
+	if !freshTimestamp.Equal(now.Add(-SignatureCacheRefreshInterval / 2)) {
+		t.Fatalf("fresh cache read updated timestamp to %v", freshTimestamp)
+	}
+
+	refreshAt := now.Add(SignatureCacheRefreshInterval)
+	if got, ok := getLocalCachedSignature(sc, textHash, refreshAt); !ok || got != signature {
+		t.Fatalf("refreshing cache read = %q, %v; want signature", got, ok)
+	}
+	if refreshedTimestamp := sc.entries[textHash].Timestamp; !refreshedTimestamp.Equal(refreshAt) {
+		t.Fatalf("refreshed timestamp = %v, want %v", refreshedTimestamp, refreshAt)
+	}
+}
+
+func TestGetLocalCachedSignatureDeletesExpiredEntry(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	textHash := "hash"
+	entry := SignatureEntry{
+		Signature: "signature",
+		Timestamp: now.Add(-SignatureCacheTTL - time.Second),
+		bytes:     13,
+	}
+	sc := &groupCache{
+		entries:    map[string]SignatureEntry{textHash: entry},
+		totalBytes: int64(entry.bytes),
+	}
+
+	if got, ok := getLocalCachedSignature(sc, textHash, now); ok || got != "" {
+		t.Fatalf("expired cache read = %q, %v; want miss", got, ok)
+	}
+	if len(sc.entries) != 0 || sc.totalBytes != 0 {
+		t.Fatalf("expired cache state = %d entries, %d bytes; want empty", len(sc.entries), sc.totalBytes)
+	}
+}
+
+func TestEnforceSignatureCacheLimitsEvictsOldestBatch(t *testing.T) {
+	sc := &groupCache{entries: make(map[string]SignatureEntry)}
+	for index, textHash := range []string{"oldest", "older", "middle", "newer", "newest"} {
+		entry := SignatureEntry{
+			Signature: "signature",
+			Timestamp: time.Unix(int64(index+1), 0),
+			bytes:     10,
+		}
+		sc.entries[textHash] = entry
+		sc.totalBytes += int64(entry.bytes)
+	}
+
+	enforceSignatureCacheLimitsLocked(sc, 4, 100, 2)
+
+	if len(sc.entries) != 3 {
+		t.Fatalf("cache entries = %d, want 3 after batch eviction", len(sc.entries))
+	}
+	if _, exists := sc.entries["oldest"]; exists {
+		t.Fatal("oldest entry was not evicted")
+	}
+	if _, exists := sc.entries["older"]; exists {
+		t.Fatal("second-oldest entry was not evicted")
+	}
+	if _, exists := sc.entries["newest"]; !exists {
+		t.Fatal("newest entry was evicted")
+	}
+	if sc.totalBytes != 30 {
+		t.Fatalf("cache bytes = %d, want 30", sc.totalBytes)
+	}
+}
+
+func TestEnforceSignatureCacheLimitsEvictsToByteLimit(t *testing.T) {
+	sc := &groupCache{entries: make(map[string]SignatureEntry)}
+	for index, textHash := range []string{"oldest", "middle", "newest"} {
+		entry := SignatureEntry{
+			Signature: "signature",
+			Timestamp: time.Unix(int64(index+1), 0),
+			bytes:     40,
+		}
+		sc.entries[textHash] = entry
+		sc.totalBytes += int64(entry.bytes)
+	}
+
+	enforceSignatureCacheLimitsLocked(sc, 10, 80, 2)
+
+	if len(sc.entries) != 2 || sc.totalBytes != 80 {
+		t.Fatalf("byte-limited cache = %d entries, %d bytes; want 2 entries, 80 bytes", len(sc.entries), sc.totalBytes)
+	}
+	if _, exists := sc.entries["oldest"]; exists {
+		t.Fatal("oldest entry was not evicted for byte limit")
+	}
 }
 
 func TestSignatureModeSetters_LogAtInfoLevel(t *testing.T) {
