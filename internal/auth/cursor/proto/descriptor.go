@@ -2,6 +2,7 @@ package proto
 
 import (
 	"encoding/base64"
+	"fmt"
 	"sync"
 
 	"google.golang.org/protobuf/proto"
@@ -1212,33 +1213,41 @@ const agentDescriptorB64 = "" +
 var (
 	fileDescOnce sync.Once
 	fileDesc     protoreflect.FileDescriptor
+	fileDescErr  error
 )
 
 // AgentFileDescriptor returns the parsed FileDescriptor for agent.proto.
-func AgentFileDescriptor() protoreflect.FileDescriptor {
+func AgentFileDescriptor() (protoreflect.FileDescriptor, error) {
 	fileDescOnce.Do(func() {
 		raw, err := base64.StdEncoding.DecodeString(agentDescriptorB64)
 		if err != nil {
-			panic("cursor proto: failed to decode descriptor: " + err.Error())
+			fileDescErr = fmt.Errorf("cursor proto: failed to decode descriptor: %w", err)
+			return
 		}
 		fdp := &descrptorpb.FileDescriptorProto{}
 		if err := proto.Unmarshal(raw, fdp); err != nil {
-			panic("cursor proto: failed to unmarshal descriptor: " + err.Error())
+			fileDescErr = fmt.Errorf("cursor proto: failed to unmarshal descriptor: %w", err)
+			return
 		}
 		fd, err := protodesc.NewFile(fdp, nil)
 		if err != nil {
-			panic("cursor proto: failed to create file descriptor: " + err.Error())
+			fileDescErr = fmt.Errorf("cursor proto: failed to create file descriptor: %w", err)
+			return
 		}
 		fileDesc = fd
 	})
-	return fileDesc
+	return fileDesc, fileDescErr
 }
 
 // Msg returns the MessageDescriptor for a top-level message by name.
-func Msg(name string) protoreflect.MessageDescriptor {
-	md := AgentFileDescriptor().Messages().ByName(protoreflect.Name(name))
-	if md == nil {
-		panic("cursor proto: message not found: " + name)
+func Msg(name string) (protoreflect.MessageDescriptor, error) {
+	fd, err := AgentFileDescriptor()
+	if err != nil {
+		return nil, err
 	}
-	return md
+	md := fd.Messages().ByName(protoreflect.Name(name))
+	if md == nil {
+		return nil, fmt.Errorf("cursor proto: message not found: %s", name)
+	}
+	return md, nil
 }

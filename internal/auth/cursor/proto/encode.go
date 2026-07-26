@@ -49,48 +49,205 @@ type McpToolDef struct {
 	InputSchema json.RawMessage
 }
 
-// --- Helper: create a dynamic message and set fields ---
-
-func newMsg(name string) *dynamicpb.Message {
-	return dynamicpb.NewMessage(Msg(name))
+// encoder accumulates the first encoding error so nested message construction
+// can avoid threading error returns through every field helper call.
+// Field existence and types are still validated; the first failure is kept.
+type encoder struct {
+	err error
 }
 
-func NewMsg(name string) *dynamicpb.Message {
-	return newMsg(name)
+func (e *encoder) setErr(err error) {
+	if e.err == nil && err != nil {
+		e.err = err
+	}
 }
 
-func field(msg *dynamicpb.Message, name string) protoreflect.FieldDescriptor {
+func (e *encoder) newMsg(name string) *dynamicpb.Message {
+	if e.err != nil {
+		return nil
+	}
+	md, err := Msg(name)
+	if err != nil {
+		e.setErr(err)
+		return nil
+	}
+	return dynamicpb.NewMessage(md)
+}
+
+// NewMsg creates a dynamic message by top-level descriptor name.
+func NewMsg(name string) (*dynamicpb.Message, error) {
+	md, err := Msg(name)
+	if err != nil {
+		return nil, err
+	}
+	return dynamicpb.NewMessage(md), nil
+}
+
+// requireField returns a field descriptor, recording an error if missing.
+func (e *encoder) requireField(msg *dynamicpb.Message, name string) protoreflect.FieldDescriptor {
+	if e.err != nil {
+		return nil
+	}
+	if msg == nil {
+		e.setErr(fmt.Errorf("cursor proto: cannot access field %q on nil message", name))
+		return nil
+	}
+	fd := msg.Descriptor().Fields().ByName(protoreflect.Name(name))
+	if fd == nil {
+		e.setErr(fmt.Errorf("cursor proto: field %q not found in %s", name, msg.Descriptor().Name()))
+		return nil
+	}
+	return fd
+}
+
+func (e *encoder) requireFieldType(msg *dynamicpb.Message, name string, kind protoreflect.Kind, repeated bool) protoreflect.FieldDescriptor {
+	fd := e.requireField(msg, name)
+	if fd == nil {
+		return nil
+	}
+	actualRepeated := fd.Cardinality() == protoreflect.Repeated
+	if fd.IsMap() || actualRepeated != repeated || fd.Kind() != kind {
+		cardinality := "singular"
+		if repeated {
+			cardinality = "repeated"
+		}
+		e.setErr(fmt.Errorf("cursor proto: field %q in %s must be %s %s, got %s", name, msg.Descriptor().Name(), cardinality, kind, fd.Kind()))
+		return nil
+	}
+	return fd
+}
+
+func (e *encoder) requireMessageField(msg *dynamicpb.Message, name string, sub *dynamicpb.Message, repeated bool) protoreflect.FieldDescriptor {
+	if sub == nil {
+		e.setErr(fmt.Errorf("cursor proto: field %q has nil message value", name))
+		return nil
+	}
+	fd := e.requireFieldType(msg, name, protoreflect.MessageKind, repeated)
+	if fd == nil {
+		return nil
+	}
+	if fd.Message().FullName() != sub.Descriptor().FullName() {
+		e.setErr(fmt.Errorf("cursor proto: field %q in %s expects %s, got %s", name, msg.Descriptor().Name(), fd.Message().FullName(), sub.Descriptor().FullName()))
+		return nil
+	}
+	return fd
+}
+
+// lookupField returns a field without recording an error (optional / compatibility fields).
+func lookupField(msg *dynamicpb.Message, name string) protoreflect.FieldDescriptor {
+	if msg == nil {
+		return nil
+	}
 	return msg.Descriptor().Fields().ByName(protoreflect.Name(name))
 }
 
-func setStr(msg *dynamicpb.Message, name, val string) {
-	if val != "" {
-		msg.Set(field(msg, name), protoreflect.ValueOfString(val))
+func (e *encoder) setStr(msg *dynamicpb.Message, name, val string) {
+	if e.err != nil || val == "" {
+		return
 	}
-}
-
-func setBytes(msg *dynamicpb.Message, name string, val []byte) {
-	if len(val) > 0 {
-		msg.Set(field(msg, name), protoreflect.ValueOfBytes(val))
+	fd := e.requireFieldType(msg, name, protoreflect.StringKind, false)
+	if fd == nil {
+		return
 	}
+	msg.Set(fd, protoreflect.ValueOfString(val))
 }
 
-func setUint32(msg *dynamicpb.Message, name string, val uint32) {
-	msg.Set(field(msg, name), protoreflect.ValueOfUint32(val))
+// setStrForce sets a string field even when val is empty (e.g. exec_id).
+func (e *encoder) setStrForce(msg *dynamicpb.Message, name, val string) {
+	if e.err != nil {
+		return
+	}
+	fd := e.requireFieldType(msg, name, protoreflect.StringKind, false)
+	if fd == nil {
+		return
+	}
+	msg.Set(fd, protoreflect.ValueOfString(val))
 }
 
-func setBool(msg *dynamicpb.Message, name string, val bool) {
-	msg.Set(field(msg, name), protoreflect.ValueOfBool(val))
+func (e *encoder) setBytes(msg *dynamicpb.Message, name string, val []byte) {
+	if e.err != nil || len(val) == 0 {
+		return
+	}
+	fd := e.requireFieldType(msg, name, protoreflect.BytesKind, false)
+	if fd == nil {
+		return
+	}
+	msg.Set(fd, protoreflect.ValueOfBytes(val))
 }
 
-func setMsg(msg *dynamicpb.Message, name string, sub *dynamicpb.Message) {
-	msg.Set(field(msg, name), protoreflect.ValueOfMessage(sub.ProtoReflect()))
+func (e *encoder) setUint32(msg *dynamicpb.Message, name string, val uint32) {
+	if e.err != nil {
+		return
+	}
+	fd := e.requireFieldType(msg, name, protoreflect.Uint32Kind, false)
+	if fd == nil {
+		return
+	}
+	msg.Set(fd, protoreflect.ValueOfUint32(val))
 }
 
-func marshal(msg *dynamicpb.Message) []byte {
+func (e *encoder) setBool(msg *dynamicpb.Message, name string, val bool) {
+	if e.err != nil {
+		return
+	}
+	fd := e.requireFieldType(msg, name, protoreflect.BoolKind, false)
+	if fd == nil {
+		return
+	}
+	msg.Set(fd, protoreflect.ValueOfBool(val))
+}
+
+func (e *encoder) setMsg(msg *dynamicpb.Message, name string, sub *dynamicpb.Message) {
+	if e.err != nil {
+		return
+	}
+	fd := e.requireMessageField(msg, name, sub, false)
+	if fd == nil {
+		return
+	}
+	msg.Set(fd, protoreflect.ValueOfMessage(sub.ProtoReflect()))
+}
+
+func (e *encoder) appendBytes(msg *dynamicpb.Message, name string, val []byte) {
+	if e.err != nil {
+		return
+	}
+	fd := e.requireFieldType(msg, name, protoreflect.BytesKind, true)
+	if fd == nil {
+		return
+	}
+	msg.Mutable(fd).List().Append(protoreflect.ValueOfBytes(val))
+}
+
+func (e *encoder) appendBytesIfPresent(msg *dynamicpb.Message, name string, val []byte) {
+	if e.err != nil || msg == nil {
+		return
+	}
+	if lookupField(msg, name) == nil {
+		return
+	}
+	e.appendBytes(msg, name, val)
+}
+
+func (e *encoder) appendMsg(msg *dynamicpb.Message, name string, sub *dynamicpb.Message) {
+	if e.err != nil {
+		return
+	}
+	fd := e.requireMessageField(msg, name, sub, true)
+	if fd == nil {
+		return
+	}
+	msg.Mutable(fd).List().Append(protoreflect.ValueOfMessage(sub.ProtoReflect()))
+}
+
+func (e *encoder) marshal(msg *dynamicpb.Message) []byte {
+	if e.err != nil || msg == nil {
+		return nil
+	}
 	b, err := proto.Marshal(msg)
 	if err != nil {
-		panic("cursor proto marshal: " + err.Error())
+		e.setErr(fmt.Errorf("cursor proto marshal: %w", err))
+		return nil
 	}
 	return b
 }
@@ -99,18 +256,23 @@ func marshal(msg *dynamicpb.Message) []byte {
 
 // EncodeHeartbeat returns an encoded AgentClientMessage with clientHeartbeat.
 // Mirrors: create(AgentClientMessageSchema, { message: { case: 'clientHeartbeat', value: create(ClientHeartbeatSchema, {}) } })
-func EncodeHeartbeat() []byte {
-	hb := newMsg("ClientHeartbeat")
-	acm := newMsg("AgentClientMessage")
-	setMsg(acm, "client_heartbeat", hb)
-	return marshal(acm)
+func EncodeHeartbeat() ([]byte, error) {
+	var e encoder
+	hb := e.newMsg("ClientHeartbeat")
+	acm := e.newMsg("AgentClientMessage")
+	e.setMsg(acm, "client_heartbeat", hb)
+	b := e.marshal(acm)
+	return b, e.err
 }
 
 // EncodeRunRequest builds a full AgentClientMessage wrapping an AgentRunRequest.
 // Mirrors buildCursorRequest() in cursor-fetch.ts.
 // If p.RawCheckpoint is set, it is used directly as the conversation_state bytes
 // (from a previous conversation_checkpoint_update), skipping manual turn construction.
-func EncodeRunRequest(p *RunRequestParams) []byte {
+func EncodeRunRequest(p *RunRequestParams) ([]byte, error) {
+	if p == nil {
+		return nil, fmt.Errorf("cursor proto: run request params are nil")
+	}
 	if p.RawCheckpoint != nil {
 		return encodeRunRequestWithCheckpoint(p)
 	}
@@ -119,39 +281,39 @@ func EncodeRunRequest(p *RunRequestParams) []byte {
 		p.BlobStore = make(map[string][]byte)
 	}
 
+	var e encoder
+
 	// --- Conversation turns ---
 	// Each turn is serialized as bytes (ConversationTurnStructure → bytes)
 	var turnBytes [][]byte
 	for _, turn := range p.Turns {
 		// UserMessage for this turn
-		um := newMsg("UserMessage")
-		setStr(um, "text", turn.UserText)
-		setStr(um, "message_id", generateId())
-		umBytes := marshal(um)
+		um := e.newMsg("UserMessage")
+		e.setStr(um, "text", turn.UserText)
+		e.setStr(um, "message_id", generateId())
+		umBytes := e.marshal(um)
 
 		// Steps (assistant response)
 		var stepBytes [][]byte
 		if turn.AssistantText != "" {
-			am := newMsg("AssistantMessage")
-			setStr(am, "text", turn.AssistantText)
-			step := newMsg("ConversationStep")
-			setMsg(step, "assistant_message", am)
-			stepBytes = append(stepBytes, marshal(step))
+			am := e.newMsg("AssistantMessage")
+			e.setStr(am, "text", turn.AssistantText)
+			step := e.newMsg("ConversationStep")
+			e.setMsg(step, "assistant_message", am)
+			stepBytes = append(stepBytes, e.marshal(step))
 		}
 
 		// AgentConversationTurnStructure (fields are bytes, not submessages)
-		agentTurn := newMsg("AgentConversationTurnStructure")
-		setBytes(agentTurn, "user_message", umBytes)
+		agentTurn := e.newMsg("AgentConversationTurnStructure")
+		e.setBytes(agentTurn, "user_message", umBytes)
 		for _, sb := range stepBytes {
-			stepsField := field(agentTurn, "steps")
-			list := agentTurn.Mutable(stepsField).List()
-			list.Append(protoreflect.ValueOfBytes(sb))
+			e.appendBytes(agentTurn, "steps", sb)
 		}
 
 		// ConversationTurnStructure (oneof turn → agentConversationTurn)
-		cts := newMsg("ConversationTurnStructure")
-		setMsg(cts, "agent_conversation_turn", agentTurn)
-		turnBytes = append(turnBytes, marshal(cts))
+		cts := e.newMsg("ConversationTurnStructure")
+		e.setMsg(cts, "agent_conversation_turn", agentTurn)
+		turnBytes = append(turnBytes, e.marshal(cts))
 	}
 
 	// --- System prompt blob ---
@@ -160,145 +322,136 @@ func EncodeRunRequest(p *RunRequestParams) []byte {
 	p.BlobStore[hex.EncodeToString(blobId)] = systemJSON
 
 	// --- ConversationStateStructure ---
-	css := newMsg("ConversationStateStructure")
+	css := e.newMsg("ConversationStateStructure")
 	// rootPromptMessagesJson: repeated bytes
-	rootField := field(css, "root_prompt_messages_json")
-	rootList := css.Mutable(rootField).List()
-	rootList.Append(protoreflect.ValueOfBytes(blobId))
+	e.appendBytes(css, "root_prompt_messages_json", blobId)
 	// turns: repeated bytes (field 8) + turns_old (field 2) for compatibility
-	turnsField := field(css, "turns")
-	turnsList := css.Mutable(turnsField).List()
 	for _, tb := range turnBytes {
-		turnsList.Append(protoreflect.ValueOfBytes(tb))
+		e.appendBytes(css, "turns", tb)
 	}
-	turnsOldField := field(css, "turns_old")
-	if turnsOldField != nil {
-		turnsOldList := css.Mutable(turnsOldField).List()
-		for _, tb := range turnBytes {
-			turnsOldList.Append(protoreflect.ValueOfBytes(tb))
-		}
+	for _, tb := range turnBytes {
+		e.appendBytesIfPresent(css, "turns_old", tb)
 	}
 
 	// --- UserMessage (current) ---
-	userMessage := newMsg("UserMessage")
-	setStr(userMessage, "text", p.UserText)
-	setStr(userMessage, "message_id", p.MessageId)
+	userMessage := e.newMsg("UserMessage")
+	e.setStr(userMessage, "text", p.UserText)
+	e.setStr(userMessage, "message_id", p.MessageId)
 
 	// Images via SelectedContext
 	if len(p.Images) > 0 {
-		sc := newMsg("SelectedContext")
-		imgsField := field(sc, "selected_images")
-		imgsList := sc.Mutable(imgsField).List()
+		sc := e.newMsg("SelectedContext")
 		for _, img := range p.Images {
-			si := newMsg("SelectedImage")
-			setStr(si, "uuid", generateId())
-			setStr(si, "mime_type", img.MimeType)
-			setBytes(si, "data", img.Data)
-			imgsList.Append(protoreflect.ValueOfMessage(si.ProtoReflect()))
+			si := e.newMsg("SelectedImage")
+			e.setStr(si, "uuid", generateId())
+			e.setStr(si, "mime_type", img.MimeType)
+			e.setBytes(si, "data", img.Data)
+			e.appendMsg(sc, "selected_images", si)
 		}
-		setMsg(userMessage, "selected_context", sc)
+		e.setMsg(userMessage, "selected_context", sc)
 	}
 
 	// --- UserMessageAction ---
-	uma := newMsg("UserMessageAction")
-	setMsg(uma, "user_message", userMessage)
+	uma := e.newMsg("UserMessageAction")
+	e.setMsg(uma, "user_message", userMessage)
 
 	// --- ConversationAction ---
-	ca := newMsg("ConversationAction")
-	setMsg(ca, "user_message_action", uma)
+	ca := e.newMsg("ConversationAction")
+	e.setMsg(ca, "user_message_action", uma)
 
 	// --- ModelDetails ---
-	md := newMsg("ModelDetails")
-	setStr(md, "model_id", p.ModelId)
-	setStr(md, "display_model_id", p.ModelId)
-	setStr(md, "display_name", p.ModelId)
+	md := e.newMsg("ModelDetails")
+	e.setStr(md, "model_id", p.ModelId)
+	e.setStr(md, "display_model_id", p.ModelId)
+	e.setStr(md, "display_name", p.ModelId)
 
 	// --- AgentRunRequest ---
-	arr := newMsg("AgentRunRequest")
-	setMsg(arr, "conversation_state", css)
-	setMsg(arr, "action", ca)
-	setMsg(arr, "model_details", md)
-	setStr(arr, "conversation_id", p.ConversationId)
+	arr := e.newMsg("AgentRunRequest")
+	e.setMsg(arr, "conversation_state", css)
+	e.setMsg(arr, "action", ca)
+	e.setMsg(arr, "model_details", md)
+	e.setStr(arr, "conversation_id", p.ConversationId)
 
 	// McpTools
 	if len(p.McpTools) > 0 {
-		mcpTools := newMsg("McpTools")
-		toolsField := field(mcpTools, "mcp_tools")
-		toolsList := mcpTools.Mutable(toolsField).List()
+		mcpTools := e.newMsg("McpTools")
 		for _, tool := range p.McpTools {
-			td := newMsg("McpToolDefinition")
-			setStr(td, "name", tool.Name)
-			setStr(td, "description", tool.Description)
+			td := e.newMsg("McpToolDefinition")
+			e.setStr(td, "name", tool.Name)
+			e.setStr(td, "description", tool.Description)
 			if len(tool.InputSchema) > 0 {
-				setBytes(td, "input_schema", jsonToProtobufValueBytes(tool.InputSchema))
+				e.setBytes(td, "input_schema", jsonToProtobufValueBytes(tool.InputSchema))
 			}
-			setStr(td, "provider_identifier", "proxy")
-			setStr(td, "tool_name", tool.Name)
-			toolsList.Append(protoreflect.ValueOfMessage(td.ProtoReflect()))
+			e.setStr(td, "provider_identifier", "proxy")
+			e.setStr(td, "tool_name", tool.Name)
+			e.appendMsg(mcpTools, "mcp_tools", td)
 		}
-		setMsg(arr, "mcp_tools", mcpTools)
+		e.setMsg(arr, "mcp_tools", mcpTools)
 	}
 
 	// --- AgentClientMessage ---
-	acm := newMsg("AgentClientMessage")
-	setMsg(acm, "run_request", arr)
+	acm := e.newMsg("AgentClientMessage")
+	e.setMsg(acm, "run_request", arr)
 
-	return marshal(acm)
+	b := e.marshal(acm)
+	return b, e.err
 }
 
 // encodeRunRequestWithCheckpoint builds an AgentClientMessage using a raw checkpoint
 // as conversation_state. The checkpoint bytes are embedded directly without deserialization.
-func encodeRunRequestWithCheckpoint(p *RunRequestParams) []byte {
+func encodeRunRequestWithCheckpoint(p *RunRequestParams) ([]byte, error) {
+	var e encoder
+
 	// Build UserMessage
-	userMessage := newMsg("UserMessage")
-	setStr(userMessage, "text", p.UserText)
-	setStr(userMessage, "message_id", p.MessageId)
+	userMessage := e.newMsg("UserMessage")
+	e.setStr(userMessage, "text", p.UserText)
+	e.setStr(userMessage, "message_id", p.MessageId)
 	if len(p.Images) > 0 {
-		sc := newMsg("SelectedContext")
-		imgsField := field(sc, "selected_images")
-		imgsList := sc.Mutable(imgsField).List()
+		sc := e.newMsg("SelectedContext")
 		for _, img := range p.Images {
-			si := newMsg("SelectedImage")
-			setStr(si, "uuid", generateId())
-			setStr(si, "mime_type", img.MimeType)
-			setBytes(si, "data", img.Data)
-			imgsList.Append(protoreflect.ValueOfMessage(si.ProtoReflect()))
+			si := e.newMsg("SelectedImage")
+			e.setStr(si, "uuid", generateId())
+			e.setStr(si, "mime_type", img.MimeType)
+			e.setBytes(si, "data", img.Data)
+			e.appendMsg(sc, "selected_images", si)
 		}
-		setMsg(userMessage, "selected_context", sc)
+		e.setMsg(userMessage, "selected_context", sc)
 	}
 
 	// Build ConversationAction with UserMessageAction
-	uma := newMsg("UserMessageAction")
-	setMsg(uma, "user_message", userMessage)
-	ca := newMsg("ConversationAction")
-	setMsg(ca, "user_message_action", uma)
-	caBytes := marshal(ca)
+	uma := e.newMsg("UserMessageAction")
+	e.setMsg(uma, "user_message", userMessage)
+	ca := e.newMsg("ConversationAction")
+	e.setMsg(ca, "user_message_action", uma)
+	caBytes := e.marshal(ca)
 
 	// Build ModelDetails
-	md := newMsg("ModelDetails")
-	setStr(md, "model_id", p.ModelId)
-	setStr(md, "display_model_id", p.ModelId)
-	setStr(md, "display_name", p.ModelId)
-	mdBytes := marshal(md)
+	md := e.newMsg("ModelDetails")
+	e.setStr(md, "model_id", p.ModelId)
+	e.setStr(md, "display_model_id", p.ModelId)
+	e.setStr(md, "display_name", p.ModelId)
+	mdBytes := e.marshal(md)
 
 	// Build McpTools
 	var mcpToolsBytes []byte
 	if len(p.McpTools) > 0 {
-		mcpTools := newMsg("McpTools")
-		toolsField := field(mcpTools, "mcp_tools")
-		toolsList := mcpTools.Mutable(toolsField).List()
+		mcpTools := e.newMsg("McpTools")
 		for _, tool := range p.McpTools {
-			td := newMsg("McpToolDefinition")
-			setStr(td, "name", tool.Name)
-			setStr(td, "description", tool.Description)
+			td := e.newMsg("McpToolDefinition")
+			e.setStr(td, "name", tool.Name)
+			e.setStr(td, "description", tool.Description)
 			if len(tool.InputSchema) > 0 {
-				setBytes(td, "input_schema", jsonToProtobufValueBytes(tool.InputSchema))
+				e.setBytes(td, "input_schema", jsonToProtobufValueBytes(tool.InputSchema))
 			}
-			setStr(td, "provider_identifier", "proxy")
-			setStr(td, "tool_name", tool.Name)
-			toolsList.Append(protoreflect.ValueOfMessage(td.ProtoReflect()))
+			e.setStr(td, "provider_identifier", "proxy")
+			e.setStr(td, "tool_name", tool.Name)
+			e.appendMsg(mcpTools, "mcp_tools", td)
 		}
-		mcpToolsBytes = marshal(mcpTools)
+		mcpToolsBytes = e.marshal(mcpTools)
+	}
+
+	if e.err != nil {
+		return nil, e.err
 	}
 
 	// Manually assemble AgentRunRequest using protowire to embed raw checkpoint
@@ -329,7 +482,7 @@ func encodeRunRequestWithCheckpoint(p *RunRequestParams) []byte {
 	acmBuf = protowire.AppendBytes(acmBuf, arrBuf)
 
 	log.Debugf("cursor encode: built RunRequest with checkpoint (%d bytes), total=%d bytes", len(p.RawCheckpoint), len(acmBuf))
-	return acmBuf
+	return acmBuf, nil
 }
 
 // ResumeRequestParams holds data for a ResumeAction request.
@@ -341,284 +494,330 @@ type ResumeRequestParams struct {
 
 // EncodeResumeRequest builds an AgentClientMessage with ResumeAction.
 // Used to resume a conversation by conversation_id without re-sending full history.
-func EncodeResumeRequest(p *ResumeRequestParams) []byte {
+func EncodeResumeRequest(p *ResumeRequestParams) ([]byte, error) {
+	if p == nil {
+		return nil, fmt.Errorf("cursor proto: resume request params are nil")
+	}
+	var e encoder
+
 	// RequestContext with tools
-	rc := newMsg("RequestContext")
+	rc := e.newMsg("RequestContext")
 	if len(p.McpTools) > 0 {
-		toolsField := field(rc, "tools")
-		toolsList := rc.Mutable(toolsField).List()
 		for _, tool := range p.McpTools {
-			td := newMsg("McpToolDefinition")
-			setStr(td, "name", tool.Name)
-			setStr(td, "description", tool.Description)
+			td := e.newMsg("McpToolDefinition")
+			e.setStr(td, "name", tool.Name)
+			e.setStr(td, "description", tool.Description)
 			if len(tool.InputSchema) > 0 {
-				setBytes(td, "input_schema", jsonToProtobufValueBytes(tool.InputSchema))
+				e.setBytes(td, "input_schema", jsonToProtobufValueBytes(tool.InputSchema))
 			}
-			setStr(td, "provider_identifier", "proxy")
-			setStr(td, "tool_name", tool.Name)
-			toolsList.Append(protoreflect.ValueOfMessage(td.ProtoReflect()))
+			e.setStr(td, "provider_identifier", "proxy")
+			e.setStr(td, "tool_name", tool.Name)
+			e.appendMsg(rc, "tools", td)
 		}
 	}
 
 	// ResumeAction
-	ra := newMsg("ResumeAction")
-	setMsg(ra, "request_context", rc)
+	ra := e.newMsg("ResumeAction")
+	e.setMsg(ra, "request_context", rc)
 
 	// ConversationAction with resume_action
-	ca := newMsg("ConversationAction")
-	setMsg(ca, "resume_action", ra)
+	ca := e.newMsg("ConversationAction")
+	e.setMsg(ca, "resume_action", ra)
 
 	// ModelDetails
-	md := newMsg("ModelDetails")
-	setStr(md, "model_id", p.ModelId)
-	setStr(md, "display_model_id", p.ModelId)
-	setStr(md, "display_name", p.ModelId)
+	md := e.newMsg("ModelDetails")
+	e.setStr(md, "model_id", p.ModelId)
+	e.setStr(md, "display_model_id", p.ModelId)
+	e.setStr(md, "display_name", p.ModelId)
 
 	// AgentRunRequest — no conversation_state needed for resume
-	arr := newMsg("AgentRunRequest")
-	setMsg(arr, "action", ca)
-	setMsg(arr, "model_details", md)
-	setStr(arr, "conversation_id", p.ConversationId)
+	arr := e.newMsg("AgentRunRequest")
+	e.setMsg(arr, "action", ca)
+	e.setMsg(arr, "model_details", md)
+	e.setStr(arr, "conversation_id", p.ConversationId)
 
 	// McpTools at top level
 	if len(p.McpTools) > 0 {
-		mcpTools := newMsg("McpTools")
-		toolsField := field(mcpTools, "mcp_tools")
-		toolsList := mcpTools.Mutable(toolsField).List()
+		mcpTools := e.newMsg("McpTools")
 		for _, tool := range p.McpTools {
-			td := newMsg("McpToolDefinition")
-			setStr(td, "name", tool.Name)
-			setStr(td, "description", tool.Description)
+			td := e.newMsg("McpToolDefinition")
+			e.setStr(td, "name", tool.Name)
+			e.setStr(td, "description", tool.Description)
 			if len(tool.InputSchema) > 0 {
-				setBytes(td, "input_schema", jsonToProtobufValueBytes(tool.InputSchema))
+				e.setBytes(td, "input_schema", jsonToProtobufValueBytes(tool.InputSchema))
 			}
-			setStr(td, "provider_identifier", "proxy")
-			setStr(td, "tool_name", tool.Name)
-			toolsList.Append(protoreflect.ValueOfMessage(td.ProtoReflect()))
+			e.setStr(td, "provider_identifier", "proxy")
+			e.setStr(td, "tool_name", tool.Name)
+			e.appendMsg(mcpTools, "mcp_tools", td)
 		}
-		setMsg(arr, "mcp_tools", mcpTools)
+		e.setMsg(arr, "mcp_tools", mcpTools)
 	}
 
-	acm := newMsg("AgentClientMessage")
-	setMsg(acm, "run_request", arr)
-	return marshal(acm)
+	acm := e.newMsg("AgentClientMessage")
+	e.setMsg(acm, "run_request", arr)
+	b := e.marshal(acm)
+	return b, e.err
 }
 
 // --- KV response encoders ---
 // Mirrors handleKvMessage() in cursor-fetch.ts
 
 // EncodeKvGetBlobResult responds to a getBlobArgs request.
-func EncodeKvGetBlobResult(kvId uint32, blobData []byte) []byte {
-	result := newMsg("GetBlobResult")
+func EncodeKvGetBlobResult(kvId uint32, blobData []byte) ([]byte, error) {
+	var e encoder
+	result := e.newMsg("GetBlobResult")
 	if blobData != nil {
-		setBytes(result, "blob_data", blobData)
+		e.setBytes(result, "blob_data", blobData)
 	}
 
-	kvc := newMsg("KvClientMessage")
-	setUint32(kvc, "id", kvId)
-	setMsg(kvc, "get_blob_result", result)
+	kvc := e.newMsg("KvClientMessage")
+	e.setUint32(kvc, "id", kvId)
+	e.setMsg(kvc, "get_blob_result", result)
 
-	acm := newMsg("AgentClientMessage")
-	setMsg(acm, "kv_client_message", kvc)
-	return marshal(acm)
+	acm := e.newMsg("AgentClientMessage")
+	e.setMsg(acm, "kv_client_message", kvc)
+	b := e.marshal(acm)
+	return b, e.err
 }
 
 // EncodeKvSetBlobResult responds to a setBlobArgs request.
-func EncodeKvSetBlobResult(kvId uint32) []byte {
-	result := newMsg("SetBlobResult")
+func EncodeKvSetBlobResult(kvId uint32) ([]byte, error) {
+	var e encoder
+	result := e.newMsg("SetBlobResult")
 
-	kvc := newMsg("KvClientMessage")
-	setUint32(kvc, "id", kvId)
-	setMsg(kvc, "set_blob_result", result)
+	kvc := e.newMsg("KvClientMessage")
+	e.setUint32(kvc, "id", kvId)
+	e.setMsg(kvc, "set_blob_result", result)
 
-	acm := newMsg("AgentClientMessage")
-	setMsg(acm, "kv_client_message", kvc)
-	return marshal(acm)
+	acm := e.newMsg("AgentClientMessage")
+	e.setMsg(acm, "kv_client_message", kvc)
+	b := e.marshal(acm)
+	return b, e.err
 }
 
 // --- Exec response encoders ---
 // Mirrors handleExecMessage() and sendExec() in cursor-fetch.ts
 
 // EncodeExecRequestContextResult responds to requestContextArgs with tool definitions.
-func EncodeExecRequestContextResult(execMsgId uint32, execId string, tools []McpToolDef) []byte {
+func EncodeExecRequestContextResult(execMsgId uint32, execId string, tools []McpToolDef) ([]byte, error) {
+	var e encoder
 	// RequestContext with tools
-	rc := newMsg("RequestContext")
+	rc := e.newMsg("RequestContext")
 	if len(tools) > 0 {
-		toolsField := field(rc, "tools")
-		toolsList := rc.Mutable(toolsField).List()
 		for _, tool := range tools {
-			td := newMsg("McpToolDefinition")
-			setStr(td, "name", tool.Name)
-			setStr(td, "description", tool.Description)
+			td := e.newMsg("McpToolDefinition")
+			e.setStr(td, "name", tool.Name)
+			e.setStr(td, "description", tool.Description)
 			if len(tool.InputSchema) > 0 {
-				setBytes(td, "input_schema", jsonToProtobufValueBytes(tool.InputSchema))
+				e.setBytes(td, "input_schema", jsonToProtobufValueBytes(tool.InputSchema))
 			}
-			setStr(td, "provider_identifier", "proxy")
-			setStr(td, "tool_name", tool.Name)
-			toolsList.Append(protoreflect.ValueOfMessage(td.ProtoReflect()))
+			e.setStr(td, "provider_identifier", "proxy")
+			e.setStr(td, "tool_name", tool.Name)
+			e.appendMsg(rc, "tools", td)
 		}
 	}
 
 	// RequestContextSuccess
-	rcs := newMsg("RequestContextSuccess")
-	setMsg(rcs, "request_context", rc)
+	rcs := e.newMsg("RequestContextSuccess")
+	e.setMsg(rcs, "request_context", rc)
 
 	// RequestContextResult (oneof success)
-	rcr := newMsg("RequestContextResult")
-	setMsg(rcr, "success", rcs)
+	rcr := e.newMsg("RequestContextResult")
+	e.setMsg(rcr, "success", rcs)
 
+	if e.err != nil {
+		return nil, e.err
+	}
 	return encodeExecClientMsg(execMsgId, execId, "request_context_result", rcr)
 }
 
 // EncodeExecMcpResult responds with MCP tool result.
-func EncodeExecMcpResult(execMsgId uint32, execId string, content string, isError bool) []byte {
-	textContent := newMsg("McpTextContent")
-	setStr(textContent, "text", content)
+func EncodeExecMcpResult(execMsgId uint32, execId string, content string, isError bool) ([]byte, error) {
+	var e encoder
+	textContent := e.newMsg("McpTextContent")
+	e.setStr(textContent, "text", content)
 
-	contentItem := newMsg("McpToolResultContentItem")
-	setMsg(contentItem, "text", textContent)
+	contentItem := e.newMsg("McpToolResultContentItem")
+	e.setMsg(contentItem, "text", textContent)
 
-	success := newMsg("McpSuccess")
-	contentField := field(success, "content")
-	contentList := success.Mutable(contentField).List()
-	contentList.Append(protoreflect.ValueOfMessage(contentItem.ProtoReflect()))
-	setBool(success, "is_error", isError)
+	success := e.newMsg("McpSuccess")
+	e.appendMsg(success, "content", contentItem)
+	e.setBool(success, "is_error", isError)
 
-	result := newMsg("McpResult")
-	setMsg(result, "success", success)
+	result := e.newMsg("McpResult")
+	e.setMsg(result, "success", success)
 
+	if e.err != nil {
+		return nil, e.err
+	}
 	return encodeExecClientMsg(execMsgId, execId, "mcp_result", result)
 }
 
 // EncodeExecMcpError responds with MCP error.
-func EncodeExecMcpError(execMsgId uint32, execId string, errMsg string) []byte {
-	mcpErr := newMsg("McpError")
-	setStr(mcpErr, "error", errMsg)
+func EncodeExecMcpError(execMsgId uint32, execId string, errMsg string) ([]byte, error) {
+	var e encoder
+	mcpErr := e.newMsg("McpError")
+	e.setStr(mcpErr, "error", errMsg)
 
-	result := newMsg("McpResult")
-	setMsg(result, "error", mcpErr)
+	result := e.newMsg("McpResult")
+	e.setMsg(result, "error", mcpErr)
 
+	if e.err != nil {
+		return nil, e.err
+	}
 	return encodeExecClientMsg(execMsgId, execId, "mcp_result", result)
 }
 
 // --- Rejection encoders (mirror handleExecMessage rejections) ---
 
-func EncodeExecReadRejected(execMsgId uint32, execId string, path, reason string) []byte {
-	rej := newMsg("ReadRejected")
-	setStr(rej, "path", path)
-	setStr(rej, "reason", reason)
-	result := newMsg("ReadResult")
-	setMsg(result, "rejected", rej)
+func EncodeExecReadRejected(execMsgId uint32, execId string, path, reason string) ([]byte, error) {
+	var e encoder
+	rej := e.newMsg("ReadRejected")
+	e.setStr(rej, "path", path)
+	e.setStr(rej, "reason", reason)
+	result := e.newMsg("ReadResult")
+	e.setMsg(result, "rejected", rej)
+	if e.err != nil {
+		return nil, e.err
+	}
 	return encodeExecClientMsg(execMsgId, execId, "read_result", result)
 }
 
-func EncodeExecShellRejected(execMsgId uint32, execId string, command, workDir, reason string) []byte {
-	rej := newMsg("ShellRejected")
-	setStr(rej, "command", command)
-	setStr(rej, "working_directory", workDir)
-	setStr(rej, "reason", reason)
-	result := newMsg("ShellResult")
-	setMsg(result, "rejected", rej)
+func EncodeExecShellRejected(execMsgId uint32, execId string, command, workDir, reason string) ([]byte, error) {
+	var e encoder
+	rej := e.newMsg("ShellRejected")
+	e.setStr(rej, "command", command)
+	e.setStr(rej, "working_directory", workDir)
+	e.setStr(rej, "reason", reason)
+	result := e.newMsg("ShellResult")
+	e.setMsg(result, "rejected", rej)
+	if e.err != nil {
+		return nil, e.err
+	}
 	return encodeExecClientMsg(execMsgId, execId, "shell_result", result)
 }
 
-func EncodeExecWriteRejected(execMsgId uint32, execId string, path, reason string) []byte {
-	rej := newMsg("WriteRejected")
-	setStr(rej, "path", path)
-	setStr(rej, "reason", reason)
-	result := newMsg("WriteResult")
-	setMsg(result, "rejected", rej)
+func EncodeExecWriteRejected(execMsgId uint32, execId string, path, reason string) ([]byte, error) {
+	var e encoder
+	rej := e.newMsg("WriteRejected")
+	e.setStr(rej, "path", path)
+	e.setStr(rej, "reason", reason)
+	result := e.newMsg("WriteResult")
+	e.setMsg(result, "rejected", rej)
+	if e.err != nil {
+		return nil, e.err
+	}
 	return encodeExecClientMsg(execMsgId, execId, "write_result", result)
 }
 
-func EncodeExecDeleteRejected(execMsgId uint32, execId string, path, reason string) []byte {
-	rej := newMsg("DeleteRejected")
-	setStr(rej, "path", path)
-	setStr(rej, "reason", reason)
-	result := newMsg("DeleteResult")
-	setMsg(result, "rejected", rej)
+func EncodeExecDeleteRejected(execMsgId uint32, execId string, path, reason string) ([]byte, error) {
+	var e encoder
+	rej := e.newMsg("DeleteRejected")
+	e.setStr(rej, "path", path)
+	e.setStr(rej, "reason", reason)
+	result := e.newMsg("DeleteResult")
+	e.setMsg(result, "rejected", rej)
+	if e.err != nil {
+		return nil, e.err
+	}
 	return encodeExecClientMsg(execMsgId, execId, "delete_result", result)
 }
 
-func EncodeExecLsRejected(execMsgId uint32, execId string, path, reason string) []byte {
-	rej := newMsg("LsRejected")
-	setStr(rej, "path", path)
-	setStr(rej, "reason", reason)
-	result := newMsg("LsResult")
-	setMsg(result, "rejected", rej)
+func EncodeExecLsRejected(execMsgId uint32, execId string, path, reason string) ([]byte, error) {
+	var e encoder
+	rej := e.newMsg("LsRejected")
+	e.setStr(rej, "path", path)
+	e.setStr(rej, "reason", reason)
+	result := e.newMsg("LsResult")
+	e.setMsg(result, "rejected", rej)
+	if e.err != nil {
+		return nil, e.err
+	}
 	return encodeExecClientMsg(execMsgId, execId, "ls_result", result)
 }
 
-func EncodeExecGrepError(execMsgId uint32, execId string, errMsg string) []byte {
-	grepErr := newMsg("GrepError")
-	setStr(grepErr, "error", errMsg)
-	result := newMsg("GrepResult")
-	setMsg(result, "error", grepErr)
+func EncodeExecGrepError(execMsgId uint32, execId string, errMsg string) ([]byte, error) {
+	var e encoder
+	grepErr := e.newMsg("GrepError")
+	e.setStr(grepErr, "error", errMsg)
+	result := e.newMsg("GrepResult")
+	e.setMsg(result, "error", grepErr)
+	if e.err != nil {
+		return nil, e.err
+	}
 	return encodeExecClientMsg(execMsgId, execId, "grep_result", result)
 }
 
-func EncodeExecFetchError(execMsgId uint32, execId string, url, errMsg string) []byte {
-	fetchErr := newMsg("FetchError")
-	setStr(fetchErr, "url", url)
-	setStr(fetchErr, "error", errMsg)
-	result := newMsg("FetchResult")
-	setMsg(result, "error", fetchErr)
+func EncodeExecFetchError(execMsgId uint32, execId string, url, errMsg string) ([]byte, error) {
+	var e encoder
+	fetchErr := e.newMsg("FetchError")
+	e.setStr(fetchErr, "url", url)
+	e.setStr(fetchErr, "error", errMsg)
+	result := e.newMsg("FetchResult")
+	e.setMsg(result, "error", fetchErr)
+	if e.err != nil {
+		return nil, e.err
+	}
 	return encodeExecClientMsg(execMsgId, execId, "fetch_result", result)
 }
 
-func EncodeExecDiagnosticsResult(execMsgId uint32, execId string) []byte {
-	result := newMsg("DiagnosticsResult")
+func EncodeExecDiagnosticsResult(execMsgId uint32, execId string) ([]byte, error) {
+	var e encoder
+	result := e.newMsg("DiagnosticsResult")
+	if e.err != nil {
+		return nil, e.err
+	}
 	return encodeExecClientMsg(execMsgId, execId, "diagnostics_result", result)
 }
 
-func EncodeExecBackgroundShellSpawnRejected(execMsgId uint32, execId string, command, workDir, reason string) []byte {
-	rej := newMsg("ShellRejected")
-	setStr(rej, "command", command)
-	setStr(rej, "working_directory", workDir)
-	setStr(rej, "reason", reason)
-	result := newMsg("BackgroundShellSpawnResult")
-	setMsg(result, "rejected", rej)
+func EncodeExecBackgroundShellSpawnRejected(execMsgId uint32, execId string, command, workDir, reason string) ([]byte, error) {
+	var e encoder
+	rej := e.newMsg("ShellRejected")
+	e.setStr(rej, "command", command)
+	e.setStr(rej, "working_directory", workDir)
+	e.setStr(rej, "reason", reason)
+	result := e.newMsg("BackgroundShellSpawnResult")
+	e.setMsg(result, "rejected", rej)
+	if e.err != nil {
+		return nil, e.err
+	}
 	return encodeExecClientMsg(execMsgId, execId, "background_shell_spawn_result", result)
 }
 
-func EncodeExecWriteShellStdinError(execMsgId uint32, execId string, errMsg string) []byte {
-	wsErr := newMsg("WriteShellStdinError")
-	setStr(wsErr, "error", errMsg)
-	result := newMsg("WriteShellStdinResult")
-	setMsg(result, "error", wsErr)
+func EncodeExecWriteShellStdinError(execMsgId uint32, execId string, errMsg string) ([]byte, error) {
+	var e encoder
+	wsErr := e.newMsg("WriteShellStdinError")
+	e.setStr(wsErr, "error", errMsg)
+	result := e.newMsg("WriteShellStdinResult")
+	e.setMsg(result, "error", wsErr)
+	if e.err != nil {
+		return nil, e.err
+	}
 	return encodeExecClientMsg(execMsgId, execId, "write_shell_stdin_result", result)
 }
 
 // encodeExecClientMsg wraps an exec result in AgentClientMessage.
 // Mirrors sendExec() in cursor-fetch.ts.
-func encodeExecClientMsg(id uint32, execId string, resultFieldName string, resultMsg *dynamicpb.Message) []byte {
-	ecm := newMsg("ExecClientMessage")
-	setUint32(ecm, "id", id)
+func encodeExecClientMsg(id uint32, execId string, resultFieldName string, resultMsg *dynamicpb.Message) ([]byte, error) {
+	var e encoder
+	ecm := e.newMsg("ExecClientMessage")
+	e.setUint32(ecm, "id", id)
 	// Force set exec_id even if empty - Cursor requires this field to be set
-	ecm.Set(field(ecm, "exec_id"), protoreflect.ValueOfString(execId))
+	e.setStrForce(ecm, "exec_id", execId)
 
-	// Debug: check if field exists
-	fd := field(ecm, resultFieldName)
+	fd := e.requireMessageField(ecm, resultFieldName, resultMsg, false)
 	if fd == nil {
-		panic(fmt.Sprintf("field %q NOT FOUND in ExecClientMessage! Available fields: %v", resultFieldName, listFields(ecm)))
+		return nil, e.err
 	}
 
 	// Debug: log the actual field being set
 	log.Debugf("encodeExecClientMsg: setting field %q (number=%d, kind=%s)", fd.Name(), fd.Number(), fd.Kind())
-
 	ecm.Set(fd, protoreflect.ValueOfMessage(resultMsg.ProtoReflect()))
 
-	acm := newMsg("AgentClientMessage")
-	setMsg(acm, "exec_client_message", ecm)
-	return marshal(acm)
-}
-
-func listFields(msg *dynamicpb.Message) []string {
-	var names []string
-	for i := 0; i < msg.Descriptor().Fields().Len(); i++ {
-		names = append(names, string(msg.Descriptor().Fields().Get(i).Name()))
-	}
-	return names
+	acm := e.newMsg("AgentClientMessage")
+	e.setMsg(acm, "exec_client_message", ecm)
+	b := e.marshal(acm)
+	return b, e.err
 }
 
 // --- Utilities ---
