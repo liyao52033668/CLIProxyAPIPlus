@@ -576,7 +576,7 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 		defer close(out)
 		defer helps.CloseResponseBody(e.Identifier(), httpResp.Body)
 		scanner := bufio.NewScanner(httpResp.Body)
-		scanner.Buffer(nil, streamScannerBuffer)
+		scanner.Buffer(make([]byte, 0, 64*1024), streamScannerBuffer)
 		var param any
 		for scanner.Scan() {
 			line := scanner.Bytes()
@@ -696,7 +696,7 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 		defer close(out)
 		defer helps.CloseResponseBody(e.Identifier(), httpResp.Body)
 		scanner := bufio.NewScanner(httpResp.Body)
-		scanner.Buffer(nil, streamScannerBuffer)
+		scanner.Buffer(make([]byte, 0, 64*1024), streamScannerBuffer)
 		var param any
 		for scanner.Scan() {
 			line := scanner.Bytes()

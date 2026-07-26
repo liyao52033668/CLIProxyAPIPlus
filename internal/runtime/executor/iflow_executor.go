@@ -218,7 +218,7 @@ func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		defer helps.CloseResponseBody(e.Identifier(), httpResp.Body)
 
 		scanner := bufio.NewScanner(httpResp.Body)
-		scanner.Buffer(nil, 52_428_800) // 50MB
+		scanner.Buffer(make([]byte, 0, 64*1024), streamScannerBuffer)
 		var param any
 		for scanner.Scan() {
 			line := scanner.Bytes()

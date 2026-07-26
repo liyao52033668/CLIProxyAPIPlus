@@ -1070,7 +1070,7 @@ attemptLoop:
 					helps.CloseResponseBody(e.Identifier(), resp.Body)
 				}()
 				scanner := bufio.NewScanner(resp.Body)
-				scanner.Buffer(nil, streamScannerBuffer)
+				scanner.Buffer(make([]byte, 0, 64*1024), streamScannerBuffer)
 				for scanner.Scan() {
 					line := scanner.Bytes()
 					helps.AppendAPIResponseChunk(ctx, e.cfg, line)
@@ -1570,7 +1570,7 @@ attemptLoop:
 					}
 				}()
 				scanner := bufio.NewScanner(resp.Body)
-				scanner.Buffer(nil, streamScannerBuffer)
+				scanner.Buffer(make([]byte, 0, 64*1024), streamScannerBuffer)
 				var param any
 				for scanner.Scan() {
 					line := scanner.Bytes()

@@ -39,8 +39,8 @@ const (
 	githubCopilotTokenCacheTTL        = 25 * time.Minute
 	// tokenExpiryBuffer is the time before expiry when we should refresh the token.
 	tokenExpiryBuffer = 5 * time.Minute
-	// maxScannerBufferSize is the maximum buffer size for SSE scanning (20MB).
-	maxScannerBufferSize = 20_971_520
+	// maxScannerBufferSize is the maximum buffer size for SSE scanning (4MiB).
+	maxScannerBufferSize = 4 << 20
 
 	// Copilot API header values.
 	copilotUserAgent     = "GitHubCopilotChat/0.48.1"
@@ -317,7 +317,7 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 		defer helps.CloseResponseBody(e.Identifier(), httpResp.Body)
 
 		scanner := bufio.NewScanner(httpResp.Body)
-		scanner.Buffer(nil, maxScannerBufferSize)
+		scanner.Buffer(make([]byte, 0, 64*1024), maxScannerBufferSize)
 		var param any
 
 		for scanner.Scan() {

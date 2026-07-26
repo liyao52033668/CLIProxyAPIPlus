@@ -390,7 +390,7 @@ func (e *GitLabExecutor) requestCodeSuggestionsStream(
 		defer func() { _ = httpResp.Body.Close() }()
 
 		scanner := bufio.NewScanner(httpResp.Body)
-		scanner.Buffer(nil, 52_428_800)
+		scanner.Buffer(make([]byte, 0, 64*1024), streamScannerBuffer)
 
 		var (
 			param     any

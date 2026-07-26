@@ -210,7 +210,7 @@ func (e *CodeBuddyExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 		}()
 
 		scanner := bufio.NewScanner(httpResp.Body)
-		scanner.Buffer(nil, maxScannerBufferSize)
+		scanner.Buffer(make([]byte, 0, 64*1024), maxScannerBufferSize)
 		var param any
 		for scanner.Scan() {
 			line := scanner.Bytes()

@@ -30,8 +30,8 @@ const (
 	// glAPIVersion is the API version used for Gemini requests.
 	glAPIVersion = "v1beta"
 
-	// streamScannerBuffer is the buffer size for SSE stream scanning.
-	streamScannerBuffer = 52_428_800
+	// streamScannerBuffer is the maximum buffer size for SSE stream scanning.
+	streamScannerBuffer = 4 << 20
 )
 
 // GeminiExecutor is a stateless executor for the official Gemini API using API keys.
@@ -251,7 +251,7 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		defer close(out)
 		defer helps.CloseResponseBody(e.Identifier(), httpResp.Body)
 		scanner := bufio.NewScanner(httpResp.Body)
-		scanner.Buffer(nil, streamScannerBuffer)
+		scanner.Buffer(make([]byte, 0, 64*1024), streamScannerBuffer)
 		var param any
 		for scanner.Scan() {
 			line := scanner.Bytes()

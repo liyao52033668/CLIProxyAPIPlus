@@ -240,7 +240,7 @@ func (e *OpenAICompatExecutor) executeChatCompletionsViaForcedStream(ctx context
 
 	aggregator := newOpenAIChatStreamAggregator(baseModel)
 	scanner := bufio.NewScanner(httpResp.Body)
-	scanner.Buffer(nil, 52_428_800) // 50MB
+	scanner.Buffer(make([]byte, 0, 64*1024), streamScannerBuffer)
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		helps.AppendAPIResponseChunk(ctx, e.cfg, line)
@@ -426,7 +426,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		defer close(out)
 		defer helps.CloseResponseBody(e.Identifier(), httpResp.Body)
 		scanner := bufio.NewScanner(httpResp.Body)
-		scanner.Buffer(nil, 52_428_800) // 50MB
+		scanner.Buffer(make([]byte, 0, 64*1024), streamScannerBuffer)
 		var param any
 		thinkingState := newOpenAICompatThinkingStreamState()
 		emitTranslated := func(raw []byte) bool {
