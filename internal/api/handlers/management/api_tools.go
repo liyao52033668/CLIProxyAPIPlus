@@ -17,7 +17,9 @@ import (
 
 	"github.com/fxamacker/cbor/v2"
 	"github.com/gin-gonic/gin"
+	antigravityAuth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/antigravity"
 	cursorauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cursor"
+	geminiAuth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/gemini"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/geminicli"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -79,22 +81,6 @@ func readAPICallBody(reader io.Reader, limit int64) ([]byte, error) {
 	}
 	return data, nil
 }
-
-const (
-	geminiOAuthClientID     = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
-	geminiOAuthClientSecret = "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"
-)
-
-var geminiOAuthScopes = []string{
-	"https://www.googleapis.com/auth/cloud-platform",
-	"https://www.googleapis.com/auth/userinfo.email",
-	"https://www.googleapis.com/auth/userinfo.profile",
-}
-
-const (
-	antigravityOAuthClientID     = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
-	antigravityOAuthClientSecret = "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"
-)
 
 var antigravityOAuthTokenURL = "https://oauth2.googleapis.com/token"
 
@@ -520,9 +506,9 @@ func (h *Handler) refreshGeminiOAuthAccessToken(ctx context.Context, auth *corea
 	}
 
 	conf := &oauth2.Config{
-		ClientID:     geminiOAuthClientID,
-		ClientSecret: geminiOAuthClientSecret,
-		Scopes:       geminiOAuthScopes,
+		ClientID:     geminiAuth.OAuthClientID(),
+		ClientSecret: geminiAuth.OAuthClientSecret(),
+		Scopes:       geminiAuth.Scopes,
 		Endpoint:     google.Endpoint,
 	}
 
@@ -575,8 +561,8 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *
 		tokenURL = "https://oauth2.googleapis.com/token"
 	}
 	form := url.Values{}
-	form.Set("client_id", antigravityOAuthClientID)
-	form.Set("client_secret", antigravityOAuthClientSecret)
+	form.Set("client_id", antigravityAuth.OAuthClientID())
+	form.Set("client_secret", antigravityAuth.OAuthClientSecret())
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", refreshToken)
 

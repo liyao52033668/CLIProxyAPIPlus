@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
@@ -26,12 +27,27 @@ import (
 	"golang.org/x/oauth2/google"
 )
 
-// OAuth configuration constants for Gemini
 const (
-	ClientID            = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
-	ClientSecret        = "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"
-	DefaultCallbackPort = 8085
+	defaultOAuthClientID     = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
+	defaultOAuthClientSecret = "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"
+	DefaultCallbackPort      = 8085
 )
+
+// OAuthClientID returns the Gemini OAuth client ID, allowing deployments to override it.
+func OAuthClientID() string {
+	if value := os.Getenv("GEMINI_CLIENT_ID"); value != "" {
+		return value
+	}
+	return defaultOAuthClientID
+}
+
+// OAuthClientSecret returns the Gemini OAuth client secret, allowing deployments to override it.
+func OAuthClientSecret() string {
+	if value := os.Getenv("GEMINI_CLIENT_SECRET"); value != "" {
+		return value
+	}
+	return defaultOAuthClientSecret
+}
 
 // OAuth scopes for Gemini authentication
 var Scopes = []string{
@@ -90,8 +106,8 @@ func (g *GeminiAuth) GetAuthenticatedClient(ctx context.Context, ts *GeminiToken
 
 	// Configure the OAuth2 client.
 	conf := &oauth2.Config{
-		ClientID:     ClientID,
-		ClientSecret: ClientSecret,
+		ClientID:     OAuthClientID(),
+		ClientSecret: OAuthClientSecret(),
 		RedirectURL:  callbackURL, // This will be used by the local server.
 		Scopes:       Scopes,
 		Endpoint:     google.Endpoint,
@@ -176,8 +192,8 @@ func (g *GeminiAuth) createTokenStorage(ctx context.Context, config *oauth2.Conf
 	}
 
 	ifToken["token_uri"] = "https://oauth2.googleapis.com/token"
-	ifToken["client_id"] = ClientID
-	ifToken["client_secret"] = ClientSecret
+	ifToken["client_id"] = OAuthClientID()
+	ifToken["client_secret"] = OAuthClientSecret()
 	ifToken["scopes"] = Scopes
 	ifToken["universe_domain"] = "googleapis.com"
 
