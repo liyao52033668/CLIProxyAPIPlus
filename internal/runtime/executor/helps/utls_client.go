@@ -26,6 +26,29 @@ type utlsRoundTripper struct {
 	dialer      proxy.Dialer
 }
 
+var (
+	utlsRoundTripperCache      = make(map[string]*utlsRoundTripper)
+	utlsRoundTripperCacheMutex sync.RWMutex
+)
+
+func cachedUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
+	utlsRoundTripperCacheMutex.RLock()
+	cached := utlsRoundTripperCache[proxyURL]
+	utlsRoundTripperCacheMutex.RUnlock()
+	if cached != nil {
+		return cached
+	}
+
+	utlsRoundTripperCacheMutex.Lock()
+	defer utlsRoundTripperCacheMutex.Unlock()
+	if cached = utlsRoundTripperCache[proxyURL]; cached != nil {
+		return cached
+	}
+	cached = newUtlsRoundTripper(proxyURL)
+	utlsRoundTripperCache[proxyURL] = cached
+	return cached
+}
+
 func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
 	var dialer proxy.Dialer = proxy.Direct
 	if proxyURL != "" {
@@ -190,7 +213,7 @@ func newUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 		proxyURL = strings.TrimSpace(cfg.ProxyURL)
 	}
 
-	utlsRT := newUtlsRoundTripper(proxyURL)
+	utlsRT := cachedUtlsRoundTripper(proxyURL)
 
 	var standardTransport http.RoundTripper = &http.Transport{
 		DialContext: (&net.Dialer{
