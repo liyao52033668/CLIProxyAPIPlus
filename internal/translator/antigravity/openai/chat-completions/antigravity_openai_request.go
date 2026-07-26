@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/antigravity/gemini"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
@@ -463,6 +464,9 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	}
 
 	out = applyOpenAIToolChoiceToAntigravity(out, rawJSON, functionNameMap)
+	if strings.Contains(strings.ToLower(modelName), "claude") {
+		out = gemini.SanitizeAntigravityClaudeGeminiRequestSignatures(modelName, out)
+	}
 	return common.AttachDefaultSafetySettings(out, "request.safetySettings")
 }
 
