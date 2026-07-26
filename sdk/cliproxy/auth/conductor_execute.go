@@ -427,7 +427,7 @@ func excludeAutoModel(excluded map[string]struct{}, model string) {
 }
 
 func replayBufferedStreamResult(headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk, closed bool) *cliproxyexecutor.StreamResult {
-	out := make(chan cliproxyexecutor.StreamChunk)
+	out := make(chan cliproxyexecutor.StreamChunk, 16)
 	go func() {
 		defer close(out)
 		for _, chunk := range buffered {

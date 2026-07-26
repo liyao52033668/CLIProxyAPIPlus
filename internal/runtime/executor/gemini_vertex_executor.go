@@ -571,7 +571,7 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 		return nil, errDo
 	}
 
-	out := make(chan cliproxyexecutor.StreamChunk)
+	out := make(chan cliproxyexecutor.StreamChunk, 16)
 	go func() {
 		defer close(out)
 		defer helps.CloseResponseBody(e.Identifier(), httpResp.Body)
@@ -691,7 +691,7 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 		return nil, errDo
 	}
 
-	out := make(chan cliproxyexecutor.StreamChunk)
+	out := make(chan cliproxyexecutor.StreamChunk, 16)
 	go func() {
 		defer close(out)
 		defer helps.CloseResponseBody(e.Identifier(), httpResp.Body)

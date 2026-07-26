@@ -527,7 +527,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		}
 		return nil, errDo
 	}
-	out := make(chan cliproxyexecutor.StreamChunk)
+	out := make(chan cliproxyexecutor.StreamChunk, 16)
 	go func() {
 		defer close(out)
 		defer helps.CloseResponseBody(e.Identifier(), httpResp.Body)

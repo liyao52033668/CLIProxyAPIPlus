@@ -345,7 +345,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 			return nil, err
 		}
 
-		out := make(chan cliproxyexecutor.StreamChunk)
+		out := make(chan cliproxyexecutor.StreamChunk, 16)
 		go func(resp *http.Response, reqBody []byte, attemptModel string) {
 			defer close(out)
 			defer helps.CloseResponseBody(e.Identifier(), resp.Body)

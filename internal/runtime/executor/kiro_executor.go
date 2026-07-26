@@ -1033,7 +1033,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 				return nil, statusErr{code: httpResp.StatusCode, msg: string(b)}
 			}
 
-			out := make(chan cliproxyexecutor.StreamChunk)
+			out := make(chan cliproxyexecutor.StreamChunk, 16)
 
 			// Record success immediately since connection was established successfully
 			// Streaming errors will be handled separately

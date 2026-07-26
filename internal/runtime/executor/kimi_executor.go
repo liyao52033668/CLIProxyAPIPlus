@@ -244,7 +244,7 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	if errDo != nil {
 		return nil, toStatusErr(errDo)
 	}
-	out := make(chan cliproxyexecutor.StreamChunk)
+	out := make(chan cliproxyexecutor.StreamChunk, 16)
 	go func() {
 		defer close(out)
 		defer helps.CloseResponseBody(e.Identifier(), httpResp.Body)

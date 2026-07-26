@@ -118,7 +118,7 @@ func (m *Manager) Stream(ctx context.Context, provider string, req *HTTPRequest)
 	if err != nil {
 		return nil, err
 	}
-	out := make(chan StreamEvent)
+	out := make(chan StreamEvent, 16)
 	go func() {
 		defer close(out)
 		send := func(ev StreamEvent) bool {

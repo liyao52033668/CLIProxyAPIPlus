@@ -1063,7 +1063,7 @@ attemptLoop:
 			if useCredits {
 				clearAntigravityCreditsFailureState(auth)
 			}
-			out := make(chan cliproxyexecutor.StreamChunk)
+			out := make(chan cliproxyexecutor.StreamChunk, 16)
 			go func(resp *http.Response) {
 				defer close(out)
 				defer func() {
@@ -1558,7 +1558,7 @@ attemptLoop:
 				clearAntigravityCreditsFailureState(auth)
 			}
 			replayAccumulator := newAntigravityReasoningReplayAccumulator(replayScope, requestPayload)
-			out := make(chan cliproxyexecutor.StreamChunk)
+			out := make(chan cliproxyexecutor.StreamChunk, 16)
 			go func(resp *http.Response) {
 				defer close(out)
 				defer func() {

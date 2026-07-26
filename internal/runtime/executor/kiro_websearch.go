@@ -262,7 +262,7 @@ func (e *KiroExecutor) handleWebSearchStream(
 	}
 
 	// Create output channel
-	out := make(chan cliproxyexecutor.StreamChunk)
+	out := make(chan cliproxyexecutor.StreamChunk, 16)
 
 	// Usage reporting: track web search requests like normal streaming requests
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), req.Model, auth)
