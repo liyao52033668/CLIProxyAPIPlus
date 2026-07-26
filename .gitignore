@@ -18,6 +18,7 @@ conv/*
 temp/*
 refs/*
 tmp/*
+audit-workspace/
 
 # Storage backends
 pgstore/*
