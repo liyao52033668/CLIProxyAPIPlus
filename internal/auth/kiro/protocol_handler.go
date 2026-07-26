@@ -240,7 +240,6 @@ func (h *ProtocolHandler) handleCallback(w http.ResponseWriter, r *http.Request)
 <body>
 <h1>Login Successful!</h1>
 <p>You can close this window and return to the terminal.</p>
-<script>window.close();</script>
 </body>
 </html>`)
 	}

@@ -1255,7 +1255,7 @@ func (c *SSOOIDCClient) startAuthCodeCallbackServer(ctx context.Context, expecte
 		fmt.Fprint(w, `<!DOCTYPE html>
 <html><head><title>Login Successful</title></head>
 <body><h1>Login Successful!</h1><p>You can close this window and return to the terminal.</p>
-<script>window.close();</script></body></html>`)
+</body></html>`)
 		resultChan <- AuthCodeCallbackResult{Code: code, State: state}
 		close(doneChan)
 	})

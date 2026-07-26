@@ -2,7 +2,7 @@ package codex
 
 // LoginSuccessHTML is the HTML template for the page shown after a successful
 // OAuth2 authentication with Codex. It informs the user that the authentication
-// was successful and provides a countdown timer to automatically close the window.
+// was successful and provides a manual close control for the window.
 const LoginSuccessHtml = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -129,11 +129,6 @@ const LoginSuccessHtml = `<!DOCTYPE html>
         .button-secondary:hover {
             background: #e5e7eb;
         }
-        .countdown {
-            color: #9ca3af;
-            font-size: 0.75rem;
-            margin-top: 1rem;
-        }
         .footer {
             margin-top: 2rem;
             padding-top: 1.5rem;
@@ -168,36 +163,19 @@ const LoginSuccessHtml = `<!DOCTYPE html>
             </a>
         </div>
         
-        <div class="countdown">
-            This window will close automatically in <span id="countdown">10</span> seconds
-        </div>
-        
         <div class="footer">
             <p>Powered by <a href="https://chatgpt.com" target="_blank">ChatGPT</a></p>
         </div>
     </div>
-    
+
     <script>
-        let countdown = 10;
-        const countdownElement = document.getElementById('countdown');
-        
-        const timer = setInterval(() => {
-            countdown--;
-            countdownElement.textContent = countdown;
-            
-            if (countdown <= 0) {
-                clearInterval(timer);
-                window.close();
-            }
-        }, 1000);
-        
         // Close window when user presses Escape
         document.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') {
                 window.close();
             }
         });
-        
+
         // Focus the close button for keyboard accessibility
         document.querySelector('.button-primary').focus();
     </script>

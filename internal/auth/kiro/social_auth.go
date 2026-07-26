@@ -165,7 +165,7 @@ func (c *SocialAuthClient) startWebCallbackServer(ctx context.Context, expectedS
 		fmt.Fprint(w, `<!DOCTYPE html>
 <html><head><title>Login Successful</title></head>
 <body><h1>Login Successful!</h1><p>You can close this window and return to the terminal.</p>
-<script>window.close();</script></body></html>`)
+</body></html>`)
 		resultChan <- WebCallbackResult{Code: code, State: state}
 	})
 

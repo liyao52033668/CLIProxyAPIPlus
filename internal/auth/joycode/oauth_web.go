@@ -224,7 +224,7 @@ func (h *OAuthWebHandler) handleCallback(c *gin.Context) {
 	go h.verifyAndSave(matchedSess, ptKey)
 
 	c.Header("Content-Type", "text/html; charset=utf-8")
-	c.String(http.StatusOK, `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Authorization Successful</title><script>setTimeout(function(){window.close();},2000);</script></head><body style="display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;font-family:sans-serif;background:#f5f5f5"><div style="text-align:center;padding:40px;background:white;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,0.1)"><h1 style="color:#2ecc71">&#10003; Authorization Successful</h1><p>Credential captured, syncing. Please return to the command line.</p></div></body></html>`)
+	c.String(http.StatusOK, `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Authorization Successful</title></head><body style="display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;font-family:sans-serif;background:#f5f5f5"><div style="text-align:center;padding:40px;background:white;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,0.1)"><h1 style="color:#2ecc71">&#10003; Authorization Successful</h1><p>Credential captured, syncing. Please return to the command line.</p></div></body></html>`)
 }
 
 func (h *OAuthWebHandler) verifyAndSave(sess *jcWebSession, ptKey string) {
