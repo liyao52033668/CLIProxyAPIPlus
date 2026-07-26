@@ -17,12 +17,12 @@ func NewCodexProvider(caller ManagementAPICaller, config APICallConfig) Provider
 }
 
 func (p codexProvider) Check(ctx context.Context, input ProviderInput) (ProviderOutput, error) {
-	// 官方接口已允许不带账号 ID；同步到账号时追加 header，否则只使用通用认证头刷新限额。
+	// The official API allows requests without an account ID; append the account header when syncing a specific account, otherwise use common auth headers for quota refresh.
 	headers := p.config.Headers
 	if accountID := optionalAccountID(input.Identity.AccountID); accountID != "" {
 		headers = mergeHeaders(headers, map[string]string{"Chatgpt-Account-Id": accountID})
 	}
-	// 统一调用 CPA api-call，由后端补齐固定 URL/header 和当前账号的动态 header。
+	// Always call CPA api-call so the backend fills fixed URL/headers and per-account dynamic headers.
 	request := apicall.Request{
 		AuthIndex: input.Identity.Identity,
 		Method:    p.config.Method,

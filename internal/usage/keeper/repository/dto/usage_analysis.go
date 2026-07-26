@@ -1,6 +1,6 @@
 package dto
 
-// UsageAnalysisModelStatRecord 是按模型聚合的分析结果。
+// UsageAnalysisModelStatRecord is model-aggregated analysis output.
 type UsageAnalysisModelStatRecord struct {
 	Model              string
 	TotalRequests      int64
@@ -15,7 +15,7 @@ type UsageAnalysisModelStatRecord struct {
 	LatencySampleCount int64
 }
 
-// UsageAnalysisAPIStatRecord 是按 API 聚合的分析结果。
+// UsageAnalysisAPIStatRecord is API-aggregated analysis output.
 type UsageAnalysisAPIStatRecord struct {
 	APIGroupKey     string
 	DisplayName     string

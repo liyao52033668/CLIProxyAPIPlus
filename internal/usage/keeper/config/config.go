@@ -32,59 +32,59 @@ var (
 )
 
 type Config struct {
-	// AppPort 是 Web 服务监听端口。
+	// AppPort is the web service listen port.
 	AppPort string
-	// AppBasePath 是 Web 服务部署子路径，空值表示根路径。
+	// AppBasePath is the web service deployment subpath; empty means root.
 	AppBasePath string
-	// CPABaseURL 是 CPA 服务基础地址。
+	// CPABaseURL is the CPA service base URL.
 	CPABaseURL string
-	// CPAManagementKey 是访问 CPA 管理数据的密钥。
+	// CPAManagementKey is the key used to access CPA management data.
 	CPAManagementKey string
-	// RedisQueueAddr 是 CPA management data stream 的 TCP 地址，空值时按 CPA_BASE_URL 推导。
+	// RedisQueueAddr is the TCP address of the CPA management data stream; empty derives from CPA_BASE_URL.
 	RedisQueueAddr string
-	// RedisQueueTLS 控制是否使用 TLS 连接 Redis 队列。
+	// RedisQueueTLS controls whether the Redis queue connection uses TLS.
 	RedisQueueTLS bool
-	// RedisQueueKey 是 CPA usage 队列名。
+	// RedisQueueKey is the CPA usage queue name.
 	RedisQueueKey string
-	// RedisQueueBatchSize 是单次 Redis LPOP 最多拉取的消息数。
+	// RedisQueueBatchSize is the max number of messages pulled per Redis LPOP.
 	RedisQueueBatchSize int
-	// RedisQueueIdleInterval 是 Redis 队列为空时的下一次检查间隔。
+	// RedisQueueIdleInterval is the delay before the next check when the Redis queue is empty.
 	RedisQueueIdleInterval time.Duration
-	// RedisQueueErrorBackoff 是 Redis 临时错误后的固定退避间隔。
+	// RedisQueueErrorBackoff is the fixed backoff after a transient Redis error.
 	RedisQueueErrorBackoff time.Duration
-	// MetadataSyncInterval 是 auth files 和 provider metadata 的固定刷新间隔。
+	// MetadataSyncInterval is the fixed refresh interval for auth files and provider metadata.
 	MetadataSyncInterval time.Duration
-	// WorkDir 是应用工作目录，数据库、日志和备份默认从这里派生。
+	// WorkDir is the application working directory; DB, logs, and backups are derived from it by default.
 	WorkDir string
-	// SQLitePath 是 SQLite 数据库文件路径。
+	// SQLitePath is the SQLite database file path.
 	SQLitePath string
-	// PostgresDSN 是 Postgres 连接串，供 usage repository 的 Postgres opener 使用。
+	// PostgresDSN is the Postgres connection string used by the usage repository Postgres opener.
 	PostgresDSN string
-	// BackupEnabled 控制是否保存 SQLite 数据库备份文件。
+	// BackupEnabled controls whether SQLite database backup files are written.
 	BackupEnabled bool
-	// BackupDir 是 SQLite 数据库备份目录。
+	// BackupDir is the SQLite database backup directory.
 	BackupDir string
-	// BackupInterval 是两次备份写入之间的最小间隔。
+	// BackupInterval is the minimum interval between backup writes.
 	BackupInterval time.Duration
-	// BackupRetentionDays 是备份文件保留天数。
+	// BackupRetentionDays is the backup file retention period in days.
 	BackupRetentionDays int
-	// RequestTimeout 是访问 CPA HTTP 和 Redis TCP 的超时时间。
+	// RequestTimeout is the timeout for CPA HTTP and Redis TCP access.
 	RequestTimeout time.Duration
-	// TLSSkipVerify 控制是否跳过 CPA HTTPS 和 Redis 队列 TLS 的证书验证。
+	// TLSSkipVerify controls whether CPA HTTPS and Redis queue TLS certificate verification is skipped.
 	TLSSkipVerify bool
-	// LogLevel 是应用日志级别。
+	// LogLevel is the application log level.
 	LogLevel string
-	// LogFileEnabled 控制是否写入持久化日志文件。
+	// LogFileEnabled controls whether persistent log files are written.
 	LogFileEnabled bool
-	// LogDir 是应用日志文件目录。
+	// LogDir is the application log file directory.
 	LogDir string
-	// LogRetentionDays 是日志保留天数，0 表示不自动清理。
+	// LogRetentionDays is log retention in days; 0 disables automatic cleanup.
 	LogRetentionDays int
-	// AuthEnabled 控制是否启用登录保护。
+	// AuthEnabled controls whether login protection is enabled.
 	AuthEnabled bool
-	// LoginPassword 是启用登录保护时使用的登录密码。
+	// LoginPassword is the login password used when auth protection is enabled.
 	LoginPassword string
-	// AuthSessionTTL 是登录 session 有效时长。
+	// AuthSessionTTL is the login session lifetime.
 	AuthSessionTTL time.Duration
 }
 

@@ -2,7 +2,7 @@ package entities
 
 import "time"
 
-// UsageIdentityAuthType 表示 usage identity 的来源类型。
+// UsageIdentityAuthType is the source type of a usage identity.
 type UsageIdentityAuthType int
 
 const (
@@ -10,7 +10,7 @@ const (
 	UsageIdentityAuthTypeAIProvider UsageIdentityAuthType = 2
 )
 
-// UsageIdentity 是从 CPA auth_files 和 provider config 同步出的 usage source 身份实体。
+// UsageIdentity is a usage-source identity synced from CPA auth_files and provider config.
 type UsageIdentity struct {
 	ID           uint                  `gorm:"primaryKey;index:idx_usage_identities_auth_type_name_id,priority:3"`
 	Name         string                `gorm:"index:idx_usage_identities_auth_type_name_id,priority:2"`

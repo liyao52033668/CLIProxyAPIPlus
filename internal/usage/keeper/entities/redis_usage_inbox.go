@@ -2,7 +2,7 @@ package entities
 
 import "time"
 
-// RedisUsageInbox 是从 CPA Redis queue 拉取后等待解码/入库的原始消息实体。
+// RedisUsageInbox is a raw message pulled from the CPA Redis queue and waiting to be decoded/persisted.
 type RedisUsageInbox struct {
 	ID            uint   `gorm:"primaryKey;index:idx_redis_usage_inboxes_status_id,priority:2"`
 	QueueKey      string `gorm:"not null"`

@@ -114,7 +114,7 @@ func registerUsageEventsRoute(
 	})
 }
 
-// Source 下拉提交的是 usage identity，进入仓储前转换成 auth_index 查询。
+// The Source dropdown submits a usage identity; convert it to an auth_index query before the repository layer.
 func applyUsageEventsSourceFilter(filter *servicedto.UsageFilter) error {
 	if filter == nil {
 		return nil
@@ -128,7 +128,7 @@ func applyUsageEventsSourceFilter(filter *servicedto.UsageFilter) error {
 	return nil
 }
 
-// 列表结果先按 auth_index 解析展示名，再组装前端需要的事件 payload。
+// Resolve display names by auth_index first, then assemble the frontend event payload.
 func buildUsageEventsPayload(rows []servicedto.UsageEventRecord, resolver usageIdentityResolver) []usageEventPayload {
 	if len(rows) == 0 {
 		return []usageEventPayload{}
@@ -193,7 +193,7 @@ func loadUsageEventSourceFilterOptions(c *gin.Context, usageIdentityProvider ser
 	return buildUsageSourceFilterOptions(identities), nil
 }
 
-// Source 筛选项从活跃身份生成，避免把 usage_events.source 当成可选项暴露给页面。
+// Build Source filter options from active identities instead of exposing usage_events.source values to the page.
 func buildUsageSourceFilterOptions(identities []entities.UsageIdentity) []usageSourceFilterOption {
 	if len(identities) == 0 {
 		return []usageSourceFilterOption{}
@@ -201,7 +201,7 @@ func buildUsageSourceFilterOptions(identities []entities.UsageIdentity) []usageS
 	options := make([]usageSourceFilterOption, 0, len(identities))
 	seen := make(map[string]struct{}, len(identities))
 	for _, identity := range identities {
-		// Source 下拉只展示活跃且有流量的身份，避免已删除身份继续出现在筛选项里。
+		// The Source dropdown only shows active identities with traffic so deleted ones do not remain as filters.
 		if identity.IsDeleted || identity.TotalRequests == 0 {
 			continue
 		}

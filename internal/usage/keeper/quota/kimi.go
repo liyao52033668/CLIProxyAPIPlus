@@ -16,7 +16,7 @@ func NewKimiProvider(caller ManagementAPICaller, config APICallConfig) ProviderH
 }
 
 func (p kimiProvider) Check(ctx context.Context, input ProviderInput) (ProviderOutput, error) {
-	// Kimi 只需要当前 auth_index 调用单个 usage endpoint，解析后交给统一出口转换。
+	// Kimi only needs the current auth_index against a single usage endpoint; parse then convert via the shared export path.
 	response, err := p.caller.CallManagementAPI(ctx, apicall.Request{
 		AuthIndex: input.Identity.Identity,
 		Method:    p.config.Method,

@@ -69,7 +69,7 @@ func TestOpenDatabaseBackfillDoesNotOverwriteExistingUsageEventFields(t *testing
 	dbPath := filepath.Join(t.TempDir(), "legacy.db")
 	seedLegacyRedisUsageTables(t, dbPath)
 
-	// 模拟目标列已经有值的部分迁移数据库。
+	// Simulate a partially migrated database where target columns already have values.
 	db, err := gorm.Open(sqlite.Open(testSQLiteDSN(dbPath)), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("open partially migrated database: %v", err)

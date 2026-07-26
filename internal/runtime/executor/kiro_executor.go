@@ -263,15 +263,15 @@ func (e *KiroExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	if e.isTokenExpired(accessToken) {
 		log.Infof("kiro: access token expired, attempting recovery")
 
-		// 方案 B: 先尝试从文件重新加载 token（后台刷新器可能已更新文件）
+		// Approach B: try reloading the token from file first (background refresher may have updated it)
 		reloadedAuth, reloadErr := e.reloadAuthFromFile(auth)
 		if reloadErr == nil && reloadedAuth != nil {
-			// 文件中有更新的 token，使用它
+			// File has a newer token; use it
 			auth = reloadedAuth
 			accessToken, profileArn = kiroCredentials(auth)
 			log.Infof("kiro: recovered token from file (background refresh), expires_at: %v", auth.Metadata["expires_at"])
 		} else {
-			// 文件中的 token 也过期了，执行主动刷新
+			// File token is also expired; perform an active refresh
 			log.Debugf("kiro: file reload failed (%v), attempting active refresh", reloadErr)
 			refreshedAuth, refreshErr := e.Refresh(ctx, auth)
 			if refreshErr != nil {
@@ -697,15 +697,15 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	if e.isTokenExpired(accessToken) {
 		log.Infof("kiro: access token expired, attempting recovery before stream request")
 
-		// 方案 B: 先尝试从文件重新加载 token（后台刷新器可能已更新文件）
+		// Approach B: try reloading the token from file first (background refresher may have updated it)
 		reloadedAuth, reloadErr := e.reloadAuthFromFile(auth)
 		if reloadErr == nil && reloadedAuth != nil {
-			// 文件中有更新的 token，使用它
+			// File has a newer token; use it
 			auth = reloadedAuth
 			accessToken, profileArn = kiroCredentials(auth)
 			log.Infof("kiro: recovered token from file (background refresh) for stream, expires_at: %v", auth.Metadata["expires_at"])
 		} else {
-			// 文件中的 token 也过期了，执行主动刷新
+			// File token is also expired; perform an active refresh
 			log.Debugf("kiro: file reload failed (%v), attempting active refresh for stream", reloadErr)
 			refreshedAuth, refreshErr := e.Refresh(ctx, auth)
 			if refreshErr != nil {
@@ -1120,7 +1120,7 @@ func kiroCredentials(auth *cliproxyauth.Auth) (accessToken, profileArn string) {
 //
 // False positives (discussion text) have characteristics:
 // - In the middle of a sentence
-// - Preceded by discussion words like "标签", "tag", "returns"
+// - Preceded by discussion words like "tag", "returns", or Chinese discussion terms
 // - Inside code blocks or inline code
 //
 // Parameters:
@@ -1692,15 +1692,15 @@ func (e *KiroExecutor) fetchAndSaveProfileArn(ctx context.Context, auth *cliprox
 	return profileArn
 }
 
-// reloadAuthFromFile 从文件重新加载 auth 数据（方案 B: Fallback 机制）
-// 当内存中的 token 已过期时，尝试从文件读取最新的 token
-// 这解决了后台刷新器已更新文件但内存中 Auth 对象尚未同步的时间差问题
+// reloadAuthFromFile reloads auth data from file (Approach B: fallback)
+// When the in-memory token is expired, try reading the latest token from disk
+// This bridges the gap where the background refresher updated the file but in-memory Auth is not yet synced
 func (e *KiroExecutor) reloadAuthFromFile(auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
 	if auth == nil {
 		return nil, fmt.Errorf("kiro executor: cannot reload nil auth")
 	}
 
-	// 确定文件路径
+	// Resolve the auth file path
 	var authPath string
 	if auth.Attributes != nil {
 		if p := strings.TrimSpace(auth.Attributes["path"]); p != "" {
@@ -1721,34 +1721,34 @@ func (e *KiroExecutor) reloadAuthFromFile(auth *cliproxyauth.Auth) (*cliproxyaut
 		}
 	}
 
-	// 读取文件
+	// Read the file
 	raw, err := os.ReadFile(authPath)
 	if err != nil {
 		return nil, fmt.Errorf("kiro executor: failed to read auth file %s: %w", authPath, err)
 	}
 
-	// 解析 JSON
+	// Parse JSON
 	var metadata map[string]any
 	if err := json.Unmarshal(raw, &metadata); err != nil {
 		return nil, fmt.Errorf("kiro executor: failed to parse auth file %s: %w", authPath, err)
 	}
 
-	// 检查文件中的 token 是否比内存中的更新
+	// Check whether the file token is newer than the in-memory one
 	fileExpiresAt, _ := metadata["expires_at"].(string)
 	fileAccessToken, _ := metadata["access_token"].(string)
 	memExpiresAt, _ := auth.Metadata["expires_at"].(string)
 	memAccessToken, _ := auth.Metadata["access_token"].(string)
 
-	// 文件中必须有有效的 access_token
+	// File must contain a non-empty access_token
 	if fileAccessToken == "" {
 		return nil, fmt.Errorf("kiro executor: auth file has no access_token field")
 	}
 
-	// 如果有 expires_at，检查是否过期
+	// If expires_at is present, reject an already-expired file token
 	if fileExpiresAt != "" {
 		fileExpTime, parseErr := time.Parse(time.RFC3339, fileExpiresAt)
 		if parseErr == nil {
-			// 如果文件中的 token 也已过期，不使用它
+			// Do not use the file token if it is also expired
 			if time.Now().After(fileExpTime) {
 				log.Debugf("kiro executor: file token also expired at %s, not using", fileExpiresAt)
 				return nil, fmt.Errorf("kiro executor: file token also expired")
@@ -1756,18 +1756,18 @@ func (e *KiroExecutor) reloadAuthFromFile(auth *cliproxyauth.Auth) (*cliproxyaut
 		}
 	}
 
-	// 判断文件中的 token 是否比内存中的更新
-	// 条件1: access_token 不同（说明已刷新）
-	// 条件2: expires_at 更新（说明已刷新）
+	// Decide whether the file token is newer than memory
+	// Condition 1: access_token differs (token was refreshed)
+	// Condition 2: expires_at is later (token was refreshed)
 	isNewer := false
 
-	// 优先检查 access_token 是否变化
+	// Prefer checking whether access_token changed
 	if fileAccessToken != memAccessToken {
 		isNewer = true
 		log.Debugf("kiro executor: file access_token differs from memory, using file token")
 	}
 
-	// 如果 access_token 相同，检查 expires_at
+	// If access_token is unchanged, compare expires_at
 	if !isNewer && fileExpiresAt != "" && memExpiresAt != "" {
 		fileExpTime, fileParseErr := time.Parse(time.RFC3339, fileExpiresAt)
 		memExpTime, memParseErr := time.Parse(time.RFC3339, memExpiresAt)
@@ -1777,7 +1777,7 @@ func (e *KiroExecutor) reloadAuthFromFile(auth *cliproxyauth.Auth) (*cliproxyaut
 		}
 	}
 
-	// 如果文件中没有 expires_at 但 access_token 相同，无法判断是否更新
+	// Without expires_at and with the same access_token, freshness cannot be determined
 	if !isNewer && fileExpiresAt == "" && fileAccessToken == memAccessToken {
 		return nil, fmt.Errorf("kiro executor: cannot determine if file token is newer (no expires_at, same access_token)")
 	}
@@ -1787,12 +1787,12 @@ func (e *KiroExecutor) reloadAuthFromFile(auth *cliproxyauth.Auth) (*cliproxyaut
 		return nil, fmt.Errorf("kiro executor: file token not newer")
 	}
 
-	// 创建更新后的 auth 对象
+	// Build the updated auth object
 	updated := auth.Clone()
 	updated.Metadata = metadata
 	updated.UpdatedAt = time.Now()
 
-	// 同步更新 Attributes
+	// Keep Attributes in sync
 	if updated.Attributes == nil {
 		updated.Attributes = make(map[string]string)
 	}

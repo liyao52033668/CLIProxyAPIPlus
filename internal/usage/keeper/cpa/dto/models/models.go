@@ -1,12 +1,12 @@
 package models
 
-// ModelsResponse 是 CPA OpenAI-compatible /models 响应 DTO。
+// ModelsResponse is the CPA OpenAI-compatible /models response DTO.
 type ModelsResponse struct {
 	Object string      `json:"object"`
 	Data   []ModelInfo `json:"data"`
 }
 
-// ModelInfo 是 CPA OpenAI-compatible /models 响应中的单个模型 DTO。
+// ModelInfo is a single model DTO in the CPA OpenAI-compatible /models response.
 type ModelInfo struct {
 	ID      string `json:"id"`
 	Object  string `json:"object,omitempty"`

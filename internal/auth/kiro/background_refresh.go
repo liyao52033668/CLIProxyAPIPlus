@@ -59,8 +59,8 @@ type BackgroundRefresher struct {
 	wg               sync.WaitGroup
 	oauth            *KiroOAuth
 	ssoClient        *SSOOIDCClient
-	callbackMu       sync.RWMutex                                   // 保护回调函数的并发访问
-	onTokenRefreshed func(tokenID string, tokenData *KiroTokenData) // 刷新成功回调
+	callbackMu       sync.RWMutex                                   // Guards concurrent access to the callback
+	onTokenRefreshed func(tokenID string, tokenData *KiroTokenData) // Invoked after a successful refresh
 }
 
 func NewBackgroundRefresher(repo TokenRepository, opts ...RefresherOption) *BackgroundRefresher {
@@ -225,13 +225,13 @@ func (r *BackgroundRefresher) refreshSingle(ctx context.Context, token *Token) {
 		return
 	}
 
-	// 方案 A: 刷新成功后触发回调，通知 Watcher 更新内存中的 Auth 对象
+	// Approach A: after a successful refresh, invoke the callback so Watcher updates in-memory Auth
 	r.callbackMu.RLock()
 	callback := r.onTokenRefreshed
 	r.callbackMu.RUnlock()
 
 	if callback != nil {
-		// 使用 defer recover 隔离回调 panic，防止崩溃整个进程
+		// Isolate callback panics with recover so they cannot crash the process
 		func() {
 			defer func() {
 				if rec := recover(); rec != nil {

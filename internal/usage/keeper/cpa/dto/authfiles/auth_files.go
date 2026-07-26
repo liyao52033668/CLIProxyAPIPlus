@@ -2,12 +2,12 @@ package authfiles
 
 import "time"
 
-// AuthFilesResponse 是 CPA /management/auth-files 响应 DTO。
+// AuthFilesResponse is the CPA /management/auth-files response DTO.
 type AuthFilesResponse struct {
 	Files []AuthFile `json:"files"`
 }
 
-// AuthFile 是 CPA /management/auth-files 中单个 auth file 的原始响应 DTO。
+// AuthFile is the raw response DTO for a single auth file from CPA /management/auth-files.
 type AuthFile struct {
 	AuthIndex      string           `json:"auth_index"`
 	Name           string           `json:"name"`
@@ -28,7 +28,7 @@ type AuthFile struct {
 	IDToken        *AuthFileIDToken `json:"id_token"`
 }
 
-// AuthFileIDToken 是 Codex auth file 的 id_token 订阅元数据 DTO。
+// AuthFileIDToken is the id_token subscription metadata DTO for a Codex auth file.
 type AuthFileIDToken struct {
 	AccountID        *string    `json:"chatgpt_account_id,omitempty"`
 	AccountIDCamel   *string    `json:"chatgptAccountId,omitempty"`

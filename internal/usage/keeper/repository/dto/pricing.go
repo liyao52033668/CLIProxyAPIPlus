@@ -1,6 +1,6 @@
 package dto
 
-// ModelPriceSettingInput 是价格设置写入参数。
+// ModelPriceSettingInput is the write payload for price settings.
 type ModelPriceSettingInput struct {
 	Model                string
 	PromptPricePer1M     float64

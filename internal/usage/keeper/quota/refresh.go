@@ -90,7 +90,7 @@ type RefreshTaskRecord struct {
 
 func (s *Service) GetCachedQuota(ctx context.Context, request CacheRequest) (CacheResponse, error) {
 	_ = ctx
-	// 缓存读取只返回已完成任务的结果，不触发新的 provider 请求。
+	// Cache reads only return completed task results and do not trigger new provider requests.
 	limit := request.Limit
 	if limit <= 0 {
 		return CacheResponse{}, fmt.Errorf("%w: limit is required", ErrValidation)
@@ -99,7 +99,7 @@ func (s *Service) GetCachedQuota(ctx context.Context, request CacheRequest) (Cac
 	s.cleanupExpiredRefreshTasks(time.Now())
 	s.refreshMu.Lock()
 	defer s.refreshMu.Unlock()
-	// 按请求顺序去重并读取每个 auth_index 最近一次完成的任务缓存。
+	// Deduplicate in request order and read the latest completed task cache per auth_index.
 	seen := make(map[string]struct{}, len(request.AuthIndexes))
 	for _, rawAuthIndex := range request.AuthIndexes {
 		if len(response.Items) >= limit {
@@ -128,7 +128,7 @@ func (s *Service) GetCachedQuota(ctx context.Context, request CacheRequest) (Cac
 }
 
 func (s *Service) Refresh(ctx context.Context, request RefreshRequest) (RefreshResponse, error) {
-	// 刷新入口只负责校验、去重、建任务；实际 provider 调用交给后台 worker。
+	// The refresh entrypoint only validates, deduplicates, and creates tasks; workers perform provider calls.
 	limit := request.Limit
 	if limit <= 0 {
 		return RefreshResponse{}, fmt.Errorf("%w: limit is required", ErrValidation)
@@ -138,7 +138,7 @@ func (s *Service) Refresh(ctx context.Context, request RefreshRequest) (RefreshR
 	s.cleanupExpiredRefreshTasks(time.Now())
 
 	for _, rawAuthIndex := range request.AuthIndexes {
-		// 每个 auth_index 独立生成任务，便于前端逐行轮询和展示错误。
+		// Create one task per auth_index so the frontend can poll row-by-row and show per-row errors.
 		authIndex := strings.TrimSpace(rawAuthIndex)
 		if authIndex == "" {
 			response.Rejected = append(response.Rejected, RefreshRejectedAuthIndex{AuthIndex: authIndex, Error: "invalid"})
@@ -190,7 +190,7 @@ func (s *Service) GetRefreshTask(ctx context.Context, taskID string) (RefreshTas
 }
 
 func (s *Service) validateRefreshAuthIndex(ctx context.Context, authIndex string) (string, error) {
-	// 先按 auth-file 身份查找；查不到时再区分“非 auth file”和“不存在”。
+	// Look up auth-file identities first; if missing, distinguish non-auth-file from not-found.
 	identity, err := repository.GetActiveAuthFileUsageIdentityByAuthIndex(ctx, s.db, authIndex)
 	if err == nil {
 		if _, _, ok := s.resolveQuotaHandler(identity.Provider, identity.Type); !ok {
@@ -213,7 +213,7 @@ func (s *Service) validateRefreshAuthIndex(ctx context.Context, authIndex string
 }
 
 func (s *Service) ensureRefreshTask(authIndex string, source RefreshSource) (*RefreshTaskRecord, bool) {
-	// 同一个 auth_index 已经 queued/running 时复用现有任务，避免重复打到上游接口。
+	// Reuse an existing queued/running task for the same auth_index to avoid duplicate upstream calls.
 	now := time.Now().UTC()
 	s.refreshMu.Lock()
 	defer s.refreshMu.Unlock()
@@ -235,7 +235,7 @@ func (s *Service) ensureRefreshTask(authIndex string, source RefreshSource) (*Re
 }
 
 func (s *Service) runRefreshTask(taskID string) {
-	// worker token 控制全局并发，防止一次批量刷新同时压垮 CPA/上游接口。
+	// Worker tokens cap global concurrency so one bulk refresh cannot overwhelm CPA/upstream APIs.
 	s.refreshWorkerTokens <- struct{}{}
 	defer func() { <-s.refreshWorkerTokens }()
 
@@ -243,7 +243,7 @@ func (s *Service) runRefreshTask(taskID string) {
 	if !ok {
 		return
 	}
-	// 每个任务独立设置超时；超时或 provider 错误都会沉淀到任务状态里给前端展示。
+	// Each task has its own timeout; timeouts and provider errors are stored on the task for frontend display.
 	ctx, cancel := context.WithTimeout(context.Background(), defaultRefreshTaskTimeout)
 	defer cancel()
 	response, err := s.Check(ctx, CheckRequest{AuthIndex: authIndex})
@@ -316,7 +316,7 @@ func (s *Service) cleanupExpiredRefreshTasks(now time.Time) {
 }
 
 func (s *Service) cleanupExpiredRefreshTasksLocked(now time.Time) {
-	// 任务过期时同步删除 task_id 和 auth_index 索引，避免缓存映射残留。
+	// On task expiry, delete both task_id and auth_index indexes to avoid stale cache mappings.
 	for taskID, task := range s.refreshTasks {
 		if task.ExpiresAt.IsZero() || now.Before(task.ExpiresAt) {
 			continue

@@ -2,7 +2,7 @@ package dto
 
 import "time"
 
-// UsageIdentityStatsDelta 是 usage identity 聚合统计的仓储层扫描结果。
+// UsageIdentityStatsDelta is the repository scan result for usage-identity aggregation stats.
 type UsageIdentityStatsDelta struct {
 	TotalRequests   int64
 	SuccessCount    int64

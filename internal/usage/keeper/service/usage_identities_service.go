@@ -34,12 +34,12 @@ func NewUsageIdentityService(db *gorm.DB) UsageIdentityProvider {
 }
 
 func (s *usageIdentityService) ListUsageIdentities(ctx context.Context) ([]entities.UsageIdentity, error) {
-	// identities 页面需要全量历史，包含已删除身份，用于展示 deleted 状态和统计数据。
+	// The identities page needs full history, including deleted identities, for deleted status and stats.
 	return repository.ListUsageIdentities(ctx, s.db)
 }
 
 func (s *usageIdentityService) ListActiveUsageIdentities(ctx context.Context) ([]entities.UsageIdentity, error) {
-	// source 解析和筛选只需要活跃身份，过滤条件下推到 repository 的 SQL 查询中执行。
+	// Source resolution and filtering only need active identities; push the filter into repository SQL.
 	return repository.ListActiveUsageIdentities(ctx, s.db)
 }
 

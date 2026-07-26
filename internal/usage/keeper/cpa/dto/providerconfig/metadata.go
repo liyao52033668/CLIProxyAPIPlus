@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-// ProviderMetadataConfig 是各 AI provider 管理接口配置的聚合视图，不是单个 CPA endpoint 的原始响应 DTO。
+// ProviderMetadataConfig is an aggregated view of AI provider management configs, not a raw single-endpoint CPA response DTO.
 type ProviderMetadataConfig struct {
 	GeminiAPIKeys       []ProviderKeyConfig         `json:"gemini-api-key"`
 	ClaudeAPIKeys       []ProviderKeyConfig         `json:"claude-api-key"`
@@ -14,7 +14,7 @@ type ProviderMetadataConfig struct {
 	OpenAICompatibility []OpenAICompatibilityConfig `json:"openai-compatibility"`
 }
 
-// ProviderKeyConfig 是 gemini/claude/codex/vertex API key 配置的兼容归一化视图，支持 CPA 返回的多种 key 命名。
+// ProviderKeyConfig is a compatibility-normalized view of gemini/claude/codex/vertex API-key config, supporting multiple CPA key names.
 type ProviderKeyConfig struct {
 	APIKey    string
 	Prefix    string
@@ -34,7 +34,7 @@ func (p *ProviderKeyConfig) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// OpenAICompatibilityConfig 是 openai-compatibility provider 配置的兼容归一化视图，不直接等同于 CPA 原始 JSON。
+// OpenAICompatibilityConfig is a compatibility-normalized openai-compatibility provider config view, not identical to raw CPA JSON.
 type OpenAICompatibilityConfig struct {
 	Name          string
 	Prefix        string
@@ -64,7 +64,7 @@ func (c *OpenAICompatibilityConfig) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// OpenAIApiKeyEntry 是 openai-compatibility 中 api key entry 的兼容归一化视图，支持字符串和对象两种 CPA 返回形态。
+// OpenAIApiKeyEntry is a compatibility-normalized openai-compatibility API-key entry supporting both string and object CPA shapes.
 type OpenAIApiKeyEntry struct {
 	APIKey    string
 	AuthIndex string

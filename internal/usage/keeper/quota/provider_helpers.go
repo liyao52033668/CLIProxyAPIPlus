@@ -9,7 +9,7 @@ import (
 )
 
 func mergeHeaders(base map[string]string, overrides map[string]string) map[string]string {
-	// provider 默认 header 先铺底，身份相关 header 后覆盖，保证账号参数优先。
+	// Apply provider default headers first, then override with identity headers so account params win.
 	if len(base) == 0 && len(overrides) == 0 {
 		return nil
 	}
@@ -28,7 +28,7 @@ func targetHTTPError(response *apicall.Response) error {
 }
 
 func targetErrorMessage(response *apicall.Response) string {
-	// 优先解析结构化 body，再回退到 body_text，尽量把上游返回的真实错误带给用户。
+	// Prefer structured body parsing, then fall back to body_text, to surface real upstream errors.
 	for _, data := range [][]byte{response.Body, []byte(strings.TrimSpace(response.BodyText))} {
 		if message := targetErrorMessageFromBytes(data); message != "" {
 			return message
@@ -45,7 +45,7 @@ func targetErrorMessageFromBytes(data []byte) string {
 	if err := json.Unmarshal(data, &text); err == nil {
 		return strings.TrimSpace(text)
 	}
-	// 相邻项目常见错误形态包含 message/error/detail，也兼容 error 内嵌对象。
+	// Common sibling-project error shapes include message/error/detail, and nested error objects are supported.
 	object := rawObject(data)
 	if object == nil {
 		return strings.TrimSpace(string(data))

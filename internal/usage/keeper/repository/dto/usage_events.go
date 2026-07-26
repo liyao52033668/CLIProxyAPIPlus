@@ -2,7 +2,7 @@ package dto
 
 import "time"
 
-// UsageEventsPageRecord 是 usage events 列表的仓储查询结果。
+// UsageEventsPageRecord is the repository query result for a usage-events list page.
 type UsageEventsPageRecord struct {
 	Events     []UsageEventRecord
 	Models     []string
@@ -12,12 +12,12 @@ type UsageEventsPageRecord struct {
 	TotalPages int
 }
 
-// UsageEventFilterOptionsRecord 是 usage events 筛选项的仓储查询结果。
+// UsageEventFilterOptionsRecord is the repository query result for usage-events filter options.
 type UsageEventFilterOptionsRecord struct {
 	Models []string
 }
 
-// UsageEventRecord 是单条 usage event 的查询结果。
+// UsageEventRecord is the query result for a single usage event.
 type UsageEventRecord struct {
 	ID              uint
 	Timestamp       time.Time

@@ -30,7 +30,7 @@ func InsertRedisUsageInboxMessages(db *gorm.DB, inputs []dto.RedisInboxInsert) (
 	}
 
 	rows := make([]entities.RedisUsageInbox, 0, len(inputs))
-	// 先把 Redis 原始消息转换成 inbox 行，后续落库只处理标准化后的模型数据。
+	// Convert raw Redis messages into inbox rows first; later persistence only handles the normalized model.
 	for _, input := range inputs {
 		hash := sha256.Sum256([]byte(input.RawMessage))
 		rows = append(rows, entities.RedisUsageInbox{
@@ -44,7 +44,7 @@ func InsertRedisUsageInboxMessages(db *gorm.DB, inputs []dto.RedisInboxInsert) (
 	}
 
 	if err := db.Transaction(func(tx *gorm.DB) error {
-		// Redis 拉取批次仍由配置控制；这里只把数据库写入拆成安全大小。
+		// Redis pull batch size remains config-driven; only split DB writes into safe sizes here.
 		return tx.CreateInBatches(&rows, insertBatchSize(entities.RedisUsageInbox{})).Error
 	}); err != nil {
 		return nil, err
@@ -79,7 +79,7 @@ func MarkRedisUsageInboxProcessFailed(db *gorm.DB, id uint, processErr error) er
 	}).Error
 }
 
-// ListProcessableRedisUsageInbox 返回待处理和可重试的数据，不返回已解码失败或已丢弃的数据。
+// ListProcessableRedisUsageInbox returns pending and retryable rows, excluding decode-failed or discarded ones.
 func ListProcessableRedisUsageInbox(db *gorm.DB, limit int) ([]entities.RedisUsageInbox, error) {
 	query := db.Where("status = ? OR status = ?", RedisUsageInboxStatusPending, RedisUsageInboxStatusProcessFailed).Order("id asc")
 	if limit > 0 {
@@ -104,8 +104,8 @@ func ListPendingRedisUsageInbox(db *gorm.DB, limit int) ([]entities.RedisUsageIn
 	return rows, nil
 }
 
-// CleanupRedisUsageInbox 清理已完成和失败的 Redis inbox 原始消息，pending 数据永远不在这里删除。
-// processed 保留到下一个本地日开始后才清理；decode_failed/process_failed/discarded 保留 7 天便于排查。
+// CleanupRedisUsageInbox removes completed and failed Redis inbox raw messages; pending rows are never deleted here.
+// processed rows are kept until the next local day starts; decode_failed/process_failed/discarded are retained 7 days for troubleshooting.
 func CleanupRedisUsageInbox(db *gorm.DB, now time.Time) (dto.RedisUsageInboxCleanupResult, error) {
 	localNow := now.In(time.Local)
 	localDayStart := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 0, 0, 0, 0, time.Local)

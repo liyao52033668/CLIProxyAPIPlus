@@ -6,7 +6,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/service"
 )
 
-// loadUsageResolutionData 为 Request Events 和 Credentials 加载 source 解析所需的活跃 usage identities。
+// loadUsageResolutionData loads active usage identities needed for source resolution in Request Events and Credentials.
 func loadUsageResolutionData(
 	c *gin.Context,
 	usageIdentityProvider service.UsageIdentityProvider,
@@ -15,6 +15,6 @@ func loadUsageResolutionData(
 		return []entities.UsageIdentity{}, nil
 	}
 
-	// Request Events 的 Source 下拉和 Credentials 的展示解析只需要活跃身份，直接调用 SQL 层 active-only 查询。
+	// Request Events source dropdowns and Credentials display resolution only need active identities; use the SQL active-only query.
 	return usageIdentityProvider.ListActiveUsageIdentities(c.Request.Context())
 }

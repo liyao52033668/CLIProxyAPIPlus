@@ -2,7 +2,7 @@ package entities
 
 import "time"
 
-// ModelPriceSetting 是模型价格配置实体，用于按模型计算成本。
+// ModelPriceSetting is a model price configuration entity used for per-model cost calculation.
 type ModelPriceSetting struct {
 	ID                   uint   `gorm:"primaryKey"`
 	Model                string `gorm:"uniqueIndex:uniq_model_price_settings_model"`

@@ -1,13 +1,13 @@
 package dto
 
-// SyncResult 是同步服务的结果。
+// SyncResult is the sync service result.
 type SyncResult struct {
 	Status         string
 	InsertedEvents int
 	DedupedEvents  int
 }
 
-// RedisBatchSyncResult 是 Redis 批次同步的结果。
+// RedisBatchSyncResult is the result of a Redis batch sync.
 type RedisBatchSyncResult struct {
 	Empty          bool
 	Status         string
@@ -15,14 +15,14 @@ type RedisBatchSyncResult struct {
 	DedupedEvents  int
 }
 
-// RedisInboxPullResult 是 Redis inbox 拉取结果。
+// RedisInboxPullResult is the Redis inbox pull result.
 type RedisInboxPullResult struct {
 	Empty        bool
 	Status       string
 	InsertedRows int
 }
 
-// ProviderMetadataInput 是 provider metadata 拉平后的服务层输入。
+// ProviderMetadataInput is the service-layer input after provider metadata is flattened.
 type ProviderMetadataInput struct {
 	LookupKey    string
 	Prefix       string

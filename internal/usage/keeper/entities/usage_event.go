@@ -2,7 +2,7 @@ package entities
 
 import "time"
 
-// UsageEvent 是落库后的单条 usage 请求事件实体。
+// UsageEvent is a single persisted usage request event.
 type UsageEvent struct {
 	ID              uint      `gorm:"primaryKey;index:idx_usage_events_timestamp_id,sort:desc,priority:2;index:idx_usage_events_auth_type_auth_index_id,priority:3;index:idx_usage_events_auth_type_source_id,priority:3"`
 	EventKey        string    `gorm:"uniqueIndex:uniq_usage_events_event_key"`

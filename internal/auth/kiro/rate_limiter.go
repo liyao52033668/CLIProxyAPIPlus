@@ -19,7 +19,7 @@ const (
 	DefaultSuspendCooldown   = 1 * time.Hour
 )
 
-// TokenState Token 状态
+// TokenState tracks per-token rate-limit state
 type TokenState struct {
 	LastRequest    time.Time
 	RequestCount   int
@@ -32,7 +32,7 @@ type TokenState struct {
 	SuspendReason  string
 }
 
-// RateLimiter 频率限制器
+// RateLimiter enforces per-token request rate limits
 type RateLimiter struct {
 	mu                sync.RWMutex
 	states            map[string]*TokenState
@@ -47,7 +47,7 @@ type RateLimiter struct {
 	rng               *rand.Rand
 }
 
-// NewRateLimiter 创建默认配置的频率限制器
+// NewRateLimiter creates a rate limiter with default settings
 func NewRateLimiter() *RateLimiter {
 	return &RateLimiter{
 		states:            make(map[string]*TokenState),
@@ -63,7 +63,7 @@ func NewRateLimiter() *RateLimiter {
 	}
 }
 
-// RateLimiterConfig 频率限制器配置
+// RateLimiterConfig holds custom rate-limiter settings
 type RateLimiterConfig struct {
 	MinTokenInterval  time.Duration
 	MaxTokenInterval  time.Duration
@@ -75,7 +75,7 @@ type RateLimiterConfig struct {
 	SuspendCooldown   time.Duration
 }
 
-// NewRateLimiterWithConfig 使用自定义配置创建频率限制器
+// NewRateLimiterWithConfig creates a rate limiter with custom settings
 func NewRateLimiterWithConfig(cfg RateLimiterConfig) *RateLimiter {
 	rl := NewRateLimiter()
 	if cfg.MinTokenInterval > 0 {
@@ -105,7 +105,7 @@ func NewRateLimiterWithConfig(cfg RateLimiterConfig) *RateLimiter {
 	return rl
 }
 
-// getOrCreateState 获取或创建 Token 状态
+// getOrCreateState returns existing token state or creates a new one
 func (rl *RateLimiter) getOrCreateState(tokenKey string) *TokenState {
 	state, exists := rl.states[tokenKey]
 	if !exists {
@@ -117,7 +117,7 @@ func (rl *RateLimiter) getOrCreateState(tokenKey string) *TokenState {
 	return state
 }
 
-// resetDailyIfNeeded 如果需要则重置每日计数
+// resetDailyIfNeeded resets the daily request counter when the day rolls over
 func (rl *RateLimiter) resetDailyIfNeeded(state *TokenState) {
 	now := time.Now()
 	if now.After(state.DailyResetTime) {
@@ -126,14 +126,14 @@ func (rl *RateLimiter) resetDailyIfNeeded(state *TokenState) {
 	}
 }
 
-// calculateInterval 计算带抖动的随机间隔
+// calculateInterval returns a random interval with jitter
 func (rl *RateLimiter) calculateInterval() time.Duration {
 	baseInterval := rl.minTokenInterval + time.Duration(rl.rng.Int63n(int64(rl.maxTokenInterval-rl.minTokenInterval)))
 	jitter := time.Duration(float64(baseInterval) * rl.jitterPercent * (rl.rng.Float64()*2 - 1))
 	return baseInterval + jitter
 }
 
-// WaitForToken 等待 Token 可用（带抖动的随机间隔）
+// WaitForToken blocks until the token is allowed to send (random interval with jitter)
 func (rl *RateLimiter) WaitForToken(tokenKey string) {
 	rl.mu.Lock()
 	state := rl.getOrCreateState(tokenKey)
@@ -141,7 +141,7 @@ func (rl *RateLimiter) WaitForToken(tokenKey string) {
 
 	now := time.Now()
 
-	// 检查是否在冷却期
+	// Check whether the token is still in cooldown
 	if now.Before(state.CooldownEnd) {
 		waitTime := state.CooldownEnd.Sub(now)
 		rl.mu.Unlock()
@@ -151,7 +151,7 @@ func (rl *RateLimiter) WaitForToken(tokenKey string) {
 		now = time.Now()
 	}
 
-	// 计算距离上次请求的间隔
+	// Compute the wait until the next allowed request after the last one
 	interval := rl.calculateInterval()
 	nextAllowedTime := state.LastRequest.Add(interval)
 
@@ -169,7 +169,7 @@ func (rl *RateLimiter) WaitForToken(tokenKey string) {
 	rl.mu.Unlock()
 }
 
-// MarkTokenFailed 标记 Token 失败
+// MarkTokenFailed records a failure and applies backoff cooldown
 func (rl *RateLimiter) MarkTokenFailed(tokenKey string) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
@@ -179,7 +179,7 @@ func (rl *RateLimiter) MarkTokenFailed(tokenKey string) {
 	state.CooldownEnd = time.Now().Add(rl.calculateBackoff(state.FailCount))
 }
 
-// MarkTokenSuccess 标记 Token 成功
+// MarkTokenSuccess clears failure state after a successful request
 func (rl *RateLimiter) MarkTokenSuccess(tokenKey string) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
@@ -189,7 +189,7 @@ func (rl *RateLimiter) MarkTokenSuccess(tokenKey string) {
 	state.CooldownEnd = time.Time{}
 }
 
-// CheckAndMarkSuspended 检测暂停错误并标记
+// CheckAndMarkSuspended detects suspension-like errors and marks the token suspended
 func (rl *RateLimiter) CheckAndMarkSuspended(tokenKey string, errorMsg string) bool {
 	suspendKeywords := []string{
 		"suspended",
@@ -219,7 +219,7 @@ func (rl *RateLimiter) CheckAndMarkSuspended(tokenKey string, errorMsg string) b
 	return false
 }
 
-// IsTokenAvailable 检查 Token 是否可用
+// IsTokenAvailable reports whether the token can be used now
 func (rl *RateLimiter) IsTokenAvailable(tokenKey string) bool {
 	rl.mu.RLock()
 	defer rl.mu.RUnlock()
@@ -231,7 +231,7 @@ func (rl *RateLimiter) IsTokenAvailable(tokenKey string) bool {
 
 	now := time.Now()
 
-	// 检查是否被暂停
+	// Check suspension status
 	if state.IsSuspended {
 		if now.After(state.SuspendedAt.Add(rl.suspendCooldown)) {
 			return true
@@ -239,12 +239,12 @@ func (rl *RateLimiter) IsTokenAvailable(tokenKey string) bool {
 		return false
 	}
 
-	// 检查是否在冷却期
+	// Check whether the token is still in cooldown
 	if now.Before(state.CooldownEnd) {
 		return false
 	}
 
-	// 检查每日请求限制
+	// Check the daily request limit
 	rl.mu.RUnlock()
 	rl.mu.Lock()
 	rl.resetDailyIfNeeded(state)
@@ -260,7 +260,7 @@ func (rl *RateLimiter) IsTokenAvailable(tokenKey string) bool {
 	return true
 }
 
-// calculateBackoff 计算指数退避时间
+// calculateBackoff computes exponential backoff duration
 func (rl *RateLimiter) calculateBackoff(failCount int) time.Duration {
 	if failCount <= 0 {
 		return 0
@@ -268,7 +268,7 @@ func (rl *RateLimiter) calculateBackoff(failCount int) time.Duration {
 
 	backoff := float64(rl.backoffBase) * math.Pow(rl.backoffMultiplier, float64(failCount-1))
 
-	// 添加抖动
+	// Add jitter
 	jitter := backoff * rl.jitterPercent * (rl.rng.Float64()*2 - 1)
 	backoff += jitter
 
@@ -278,7 +278,7 @@ func (rl *RateLimiter) calculateBackoff(failCount int) time.Duration {
 	return time.Duration(backoff)
 }
 
-// GetTokenState 获取 Token 状态（只读）
+// GetTokenState returns a read-only copy of the token state
 func (rl *RateLimiter) GetTokenState(tokenKey string) *TokenState {
 	rl.mu.RLock()
 	defer rl.mu.RUnlock()
@@ -288,19 +288,19 @@ func (rl *RateLimiter) GetTokenState(tokenKey string) *TokenState {
 		return nil
 	}
 
-	// 返回副本以防止外部修改
+	// Return a copy to prevent external mutation
 	stateCopy := *state
 	return &stateCopy
 }
 
-// ClearTokenState 清除 Token 状态
+// ClearTokenState removes tracked state for the token
 func (rl *RateLimiter) ClearTokenState(tokenKey string) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 	delete(rl.states, tokenKey)
 }
 
-// ResetSuspension 重置暂停状态
+// ResetSuspension clears suspension and related cooldown state
 func (rl *RateLimiter) ResetSuspension(tokenKey string) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()

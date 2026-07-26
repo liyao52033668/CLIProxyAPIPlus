@@ -2,14 +2,14 @@ package dto
 
 import "time"
 
-// RedisInboxInsert 是 Redis usage inbox 的入库参数。
+// RedisInboxInsert is the insert payload for the Redis usage inbox.
 type RedisInboxInsert struct {
 	QueueKey   string
 	RawMessage string
 	PoppedAt   time.Time
 }
 
-// RedisUsageInboxCleanupResult 是 Redis usage inbox 的清理结果。
+// RedisUsageInboxCleanupResult is the cleanup result for the Redis usage inbox.
 type RedisUsageInboxCleanupResult struct {
 	ProcessedDeleted int64
 	FailedDeleted    int64

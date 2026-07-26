@@ -30,7 +30,7 @@ func NewMetadataSyncRunner(syncer MetadataSyncer, interval time.Duration) *Metad
 	}
 }
 
-// Run 启动独立 metadata 同步任务：启动后立即执行一次，之后按固定间隔刷新 auth files 和 provider metadata。
+// Run starts standalone metadata sync: runs once immediately, then refreshes auth files and provider metadata on a fixed interval.
 func (r *MetadataSyncRunner) Run(ctx context.Context) error {
 	if err := r.validate(); err != nil {
 		return err

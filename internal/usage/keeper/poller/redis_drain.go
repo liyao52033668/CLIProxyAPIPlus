@@ -11,7 +11,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// Redis inbox 处理频率固定为 5 秒：拉取任务只负责把 Redis 原始消息落库，处理任务按这个间隔独立消费本地 inbox。
+// Redis inbox processing runs every 5 seconds: pull only persists raw Redis messages, while process independently consumes the local inbox on that interval.
 const redisInboxProcessInterval = 5 * time.Second
 
 type RedisBatchSyncer interface {
@@ -49,7 +49,7 @@ func NewRedisDrain(syncer RedisBatchSyncer, cfg RedisDrainConfig) *RedisDrain {
 	}
 }
 
-// Run 启动 Redis 连续同步：一个 goroutine 只执行 Pull，另一个 goroutine 只执行 Process，二者互不串行等待。
+// Run starts continuous Redis sync with one Pull-only goroutine and one Process-only goroutine that never wait on each other.
 func (d *RedisDrain) Run(ctx context.Context) error {
 	if err := d.validate(); err != nil {
 		return err
@@ -72,7 +72,7 @@ func (d *RedisDrain) Run(ctx context.Context) error {
 	return nil
 }
 
-// runPullLoop 只从 CPA Redis 队列 LPOP 数据并写入 redis_usage_inboxes，不解码、不写 usage_events。
+// runPullLoop only LPOP from the CPA Redis queue into redis_usage_inboxes; it does not decode or write usage_events.
 func (d *RedisDrain) runPullLoop(ctx context.Context) {
 	logrus.WithField("idle_interval", d.config.IdleInterval.String()).Info("redis inbox pull task started")
 	for {
@@ -99,7 +99,7 @@ func (d *RedisDrain) runPullLoop(ctx context.Context) {
 	}
 }
 
-// runProcessLoop 固定每 5 秒处理已落库的 inbox 行，失败行保留为可重试状态，坏消息单独标记不阻塞后续行。
+// runProcessLoop processes persisted inbox rows every 5 seconds; failed rows stay retryable and bad messages are marked without blocking later rows.
 func (d *RedisDrain) runProcessLoop(ctx context.Context) {
 	logrus.WithField("interval", redisInboxProcessInterval.String()).Info("redis inbox process task started")
 	for {
@@ -145,7 +145,7 @@ func (d *RedisDrain) Status() Status {
 	}
 }
 
-// SyncNow 是手动同步入口：Redis 模式下先 Pull 一次再 Process 一次，保持用户手动触发时立即看到新数据的直觉。
+// SyncNow is the manual sync entrypoint: in Redis mode it Pulls once then Processes once so users immediately see new data.
 func (d *RedisDrain) SyncNow(ctx context.Context) error {
 	if err := d.validate(); err != nil {
 		return err
@@ -157,7 +157,7 @@ func (d *RedisDrain) SyncNow(ctx context.Context) error {
 	return err
 }
 
-// runRedisPull 只防止 Pull 自身重入，不阻塞 Process；这样 Redis 长轮询或退避不会跳过本地 inbox 处理周期。
+// runRedisPull only prevents Pull re-entry and never blocks Process, so Redis long-poll/backoff cannot skip local inbox cycles.
 func (d *RedisDrain) runRedisPull(ctx context.Context) (*servicedto.RedisInboxPullResult, error) {
 	d.mu.Lock()
 	if d.pullRunning {
@@ -178,7 +178,7 @@ func (d *RedisDrain) runRedisPull(ctx context.Context) (*servicedto.RedisInboxPu
 	return result, err
 }
 
-// runRedisProcess 只防止 Process 自身重入，不阻塞 Pull；Process 的输入必须来自已持久化的 redis_usage_inboxes。
+// runRedisProcess only prevents Process re-entry and never blocks Pull; Process input must come from persisted redis_usage_inboxes.
 func (d *RedisDrain) runRedisProcess(ctx context.Context) (*servicedto.RedisBatchSyncResult, error) {
 	d.mu.Lock()
 	if d.processRunning {

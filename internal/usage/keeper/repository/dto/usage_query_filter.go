@@ -2,7 +2,7 @@ package dto
 
 import "time"
 
-// UsageQueryFilter 是仓储层的 usage 查询条件。
+// UsageQueryFilter is the repository-layer usage query filter.
 type UsageQueryFilter struct {
 	Range     string
 	StartTime *time.Time

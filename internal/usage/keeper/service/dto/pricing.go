@@ -1,6 +1,6 @@
 package dto
 
-// UpdatePricingInput 是更新定价的服务层输入。
+// UpdatePricingInput is the service-layer input for updating pricing.
 type UpdatePricingInput struct {
 	Model                string
 	PromptPricePer1M     float64
