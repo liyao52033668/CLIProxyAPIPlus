@@ -104,7 +104,7 @@ type Config struct {
 	// Routing controls credential selection behavior.
 	Routing RoutingConfig `yaml:"routing" json:"routing"`
 
-	// WebsocketAuth enables or disables authentication for the WebSocket API.
+	// WebsocketAuth enables or disables authentication for the WebSocket API. It defaults to true.
 	WebsocketAuth bool `yaml:"ws-auth" json:"ws-auth"`
 
 	// AntigravitySignatureCacheEnabled controls whether signature cache validation is enabled for thinking blocks.
@@ -846,8 +846,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	if err != nil {
 		if optional {
 			if os.IsNotExist(err) || errors.Is(err, syscall.EISDIR) {
-				// Missing and optional: return empty config (cloud deploy standby).
-				return &Config{}, nil
+				// Missing and optional: return secure defaults for cloud deploy standby.
+				return &Config{WebsocketAuth: true}, nil
 			}
 		}
 		return nil, fmt.Errorf("failed to read config file: %w", err)
@@ -855,7 +855,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// In cloud deploy mode (optional=true), if file is empty or contains only whitespace, return empty config.
 	if optional && len(data) == 0 {
-		return &Config{}, nil
+		return &Config{WebsocketAuth: true}, nil
 	}
 
 	// Unmarshal the YAML data into the Config struct.
@@ -866,6 +866,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.LogsMaxTotalSizeMB = 0
 	cfg.ErrorLogsMaxFiles = 10
 	cfg.UsageStatisticsEnabled = false
+	cfg.WebsocketAuth = true
 	cfg.RedisUsageQueueRetentionSeconds = 60
 	cfg.DisableCooling = false
 	cfg.Timeouts.BootstrapSeconds = 30
@@ -896,8 +897,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.IncognitoBrowser = false // Default to normal browser (AWS uses incognito by force)
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
-			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
-			return &Config{}, nil
+			// In cloud deploy mode, if YAML parsing fails, return secure defaults instead of error.
+			return &Config{WebsocketAuth: true}, nil
 		}
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}

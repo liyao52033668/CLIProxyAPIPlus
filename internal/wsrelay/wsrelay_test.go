@@ -99,6 +99,47 @@ func TestConsumeNonStreamResponseReturnsErrorWhenChannelClosesBeforeTerminalResp
 	}
 }
 
+func TestManagerRejectsCrossOriginWebsocket(t *testing.T) {
+	manager := NewManager(Options{})
+	_, wsURL := newRelayTestServer(t, manager)
+
+	header := http.Header{"Origin": []string{"https://attacker.example"}}
+	conn, response, errDial := websocket.DefaultDialer.Dial(wsURL, header)
+	if conn != nil {
+		_ = conn.Close()
+	}
+	if errDial == nil {
+		t.Fatal("Dial() succeeded for cross-origin request")
+	}
+	if response == nil || response.StatusCode != http.StatusForbidden {
+		status := 0
+		if response != nil {
+			status = response.StatusCode
+		}
+		t.Fatalf("upgrade status = %d, want %d", status, http.StatusForbidden)
+	}
+}
+
+func TestManagerAllowsExplicitOriginPolicy(t *testing.T) {
+	manager := NewManager(Options{
+		CheckOrigin: func(r *http.Request) bool {
+			return r.Header.Get("Origin") == "https://trusted.example"
+		},
+	})
+	_, wsURL := newRelayTestServer(t, manager)
+
+	header := http.Header{"Origin": []string{"https://trusted.example"}}
+	conn, response, errDial := websocket.DefaultDialer.Dial(wsURL, header)
+	if errDial != nil {
+		status := 0
+		if response != nil {
+			status = response.StatusCode
+		}
+		t.Fatalf("Dial() error = %v, status = %d", errDial, status)
+	}
+	defer func() { _ = conn.Close() }()
+}
+
 func TestManagerStopRejectsNewWebsocket(t *testing.T) {
 	manager := NewManager(Options{Path: "/relay"})
 	_, wsURL := newRelayTestServer(t, manager)

@@ -24,6 +24,26 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestResponsesWebsocketOriginPolicy(t *testing.T) {
+	t.Parallel()
+
+	if responsesWebsocketUpgrader.CheckOrigin == nil {
+		t.Fatal("responses websocket CheckOrigin is nil")
+	}
+
+	sameOrigin := httptest.NewRequest(http.MethodGet, "http://api.example.com/v1/responses", nil)
+	sameOrigin.Header.Set("Origin", "https://api.example.com")
+	if !responsesWebsocketUpgrader.CheckOrigin(sameOrigin) {
+		t.Fatal("same-origin websocket request was rejected")
+	}
+
+	crossOrigin := httptest.NewRequest(http.MethodGet, "http://api.example.com/v1/responses", nil)
+	crossOrigin.Header.Set("Origin", "https://attacker.example")
+	if responsesWebsocketUpgrader.CheckOrigin(crossOrigin) {
+		t.Fatal("cross-origin websocket request was accepted")
+	}
+}
+
 type websocketCaptureExecutor struct {
 	streamCalls int
 	payloads    [][]byte

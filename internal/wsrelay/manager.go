@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/wsorigin"
 )
 
 // Manager exposes a websocket endpoint that proxies Gemini requests to
@@ -45,6 +46,7 @@ type Options struct {
 	ReadTimeout       time.Duration
 	WriteTimeout      time.Duration
 	HeartbeatInterval time.Duration
+	CheckOrigin       func(*http.Request) bool
 	LogDebugf         func(string, ...any)
 	LogInfof          func(string, ...any)
 	LogWarnf          func(string, ...any)
@@ -77,9 +79,7 @@ func NewManager(opts Options) *Manager {
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
-			CheckOrigin: func(r *http.Request) bool {
-				return true
-			},
+			CheckOrigin:     wsorigin.SameOrigin,
 		},
 		providerFactory:   opts.ProviderFactory,
 		onConnected:       opts.OnConnected,
@@ -90,6 +90,9 @@ func NewManager(opts Options) *Manager {
 		logDebugf:         opts.LogDebugf,
 		logInfof:          opts.LogInfof,
 		logWarnf:          opts.LogWarnf,
+	}
+	if opts.CheckOrigin != nil {
+		mgr.upgrader.CheckOrigin = opts.CheckOrigin
 	}
 	if mgr.logDebugf == nil {
 		mgr.logDebugf = func(string, ...any) {}
