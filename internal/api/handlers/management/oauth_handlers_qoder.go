@@ -6,13 +6,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
-
-	// "github.com/router-for-me/CLIProxyAPI/v7/internal/browser"
 
 	qoderauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/qoder"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
@@ -69,6 +66,7 @@ func (h *Handler) RequestQoderPATToken(c *gin.Context) {
 		"type":                  "qoder",
 		"auth_method":           "pat",
 		"login_mode":            "pat",
+		"login_method":          "token",
 		"access_token":          pat,
 		"personal_access_token": pat,
 		"machine_id":            machineID,
@@ -127,16 +125,15 @@ func (h *Handler) RequestQoderToken(c *gin.Context) {
 	log.Info("Initializing Qoder authentication...")
 
 	CompleteOAuthSessionsByProvider("qoder")
+	// Legacy local callback server is no longer required for device flow.
 	stopQoderCallbackServer(qoderauth.CallbackPort)
 
-	nonce, challenge, verifier, errPKCE := qoderauth.GeneratePKCE()
-	if errPKCE != nil {
-		log.Errorf("Failed to generate PKCE parameters: %v", errPKCE)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate PKCE parameters"})
+	flow, errFlow := qoderauth.StartDeviceFlow(qoderauth.GenerateBrowserMachineID())
+	if errFlow != nil {
+		log.Errorf("Failed to start Qoder device flow: %v", errFlow)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start device flow"})
 		return
 	}
-
-	machineID := qoderauth.GenerateMachineID("cliproxy", "00:00:00:00:00:00", "server", "x86_64")
 
 	state, errState := misc.GenerateRandomState()
 	if errState != nil {
@@ -146,102 +143,70 @@ func (h *Handler) RequestQoderToken(c *gin.Context) {
 	}
 
 	RegisterOAuthSession(state, "qoder")
-
-	// Start HTTP callback server (for Windows VBS handler)
-	callbackPort := qoderauth.CallbackPort
-	_, cbChan, errServer := startQoderCallbackServerWebUI(callbackPort, state)
-	if errServer != nil {
-		log.Errorf("Failed to start Qoder callback server: %v", errServer)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
-		return
-	}
-
-	// Use qoder:// redirect URI (required by Qoder server)
-	authURL := qoderauth.BuildAuthURLWithRedirectAndState(nonce, challenge, machineID, qoderauth.RedirectURI, state)
-
-	log.Infof("Qoder auth URL built: %s for state: %s", authURL, state)
-
-	SetOAuthSessionError(state, "auth_url|"+authURL)
-	log.Infof("Qoder auth URL stored for state: %s", state)
-
-	cleanupURIHandler := qoderauth.RegisterURIHandler(callbackPort)
+	SetOAuthSessionError(state, "auth_url|"+flow.AuthURL)
+	log.Infof("Qoder device auth URL stored for state: %s", state)
 
 	go func() {
-		defer func() {
-			stopQoderCallbackServer(callbackPort)
-			cleanupURIHandler()
+		authSvc := qoderauth.NewQoderAuth(nil)
+		pollCtx, cancel := context.WithTimeout(ctx, qoderauth.PollTimeout)
+		defer cancel()
+
+		// Abort poll when the OAuth session is cancelled from the UI.
+		go func() {
+			ticker := time.NewTicker(500 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-pollCtx.Done():
+					return
+				case <-ticker.C:
+					if !IsOAuthSessionPending(state, "qoder") {
+						cancel()
+						return
+					}
+				}
+			}
 		}()
 
-		tokenString, authField, errWait := waitForQoderCallback(h.cfg.AuthDir, state, cbChan, defaultOAuthCallbackWait)
-		if errWait != nil {
-			if errors.Is(errWait, errOAuthSessionNotPending) {
+		tokenResp, errPoll := authSvc.PollDeviceToken(pollCtx, flow.Nonce, flow.Verifier)
+		if errPoll != nil {
+			if errors.Is(errPoll, context.Canceled) || errors.Is(errPoll, errOAuthSessionNotPending) {
 				return
 			}
-			log.Errorf("Qoder authentication timed out: %v", errWait)
-			SetOAuthSessionError(state, "Authentication timed out")
+			if errors.Is(errPoll, context.DeadlineExceeded) || strings.Contains(errPoll.Error(), "timed out") {
+				log.Errorf("Qoder authentication timed out: %v", errPoll)
+				SetOAuthSessionError(state, "Authentication timed out")
+				return
+			}
+			log.Errorf("Qoder device poll failed: %v", errPoll)
+			SetOAuthSessionError(state, "Authentication failed: "+errPoll.Error())
 			return
 		}
 
-		if tokenString == "" {
+		deviceToken := tokenResp.AccessToken()
+		if deviceToken == "" {
 			log.Error("Authentication failed: token not found")
 			SetOAuthSessionError(state, "Authentication failed: token not found")
 			return
 		}
 
-		// Decode auth field to get user info
-		uid := ""
-		name := ""
+		uid := strings.TrimSpace(tokenResp.UserID)
+		name := strings.TrimSpace(tokenResp.UserName)
 		email := ""
-		if authField != "" {
-			// URL decode first since authField may come from URL query string
-			authFieldDecoded, err := url.QueryUnescape(authField)
-			if err != nil {
-				log.Warnf("qoder: failed to URL decode auth field: %v", err)
-				authFieldDecoded = authField
+		if profile := authSvc.ResolveUserProfile(deviceToken); profile != nil {
+			if uid == "" {
+				uid = strings.TrimSpace(profile.ID)
 			}
-			previewLen := min(50, len(authField))
-			log.Infof("qoder: authField before URL decode (len=%d): %s", len(authField), authField[:previewLen])
-			previewLen = min(50, len(authFieldDecoded))
-			log.Infof("qoder: authField after URL decode (len=%d): %s", len(authFieldDecoded), authFieldDecoded[:previewLen])
-			authInfo, errDecode := qoderauth.DecodeAuthFieldToJSON(authFieldDecoded)
-			if errDecode != nil {
-				previewLen := min(100, len(authField))
-				log.Warnf("qoder: failed to decode auth field: %v, raw authField (first %d chars): %s", errDecode, previewLen, authField[:previewLen])
-			} else {
-				log.Infof("qoder: decoded auth field: %+v", authInfo)
-				if v, ok := authInfo["uid"].(string); ok {
-					uid = v
-				}
-				if v, ok := authInfo["name"].(string); ok {
-					name = v
-				}
-				if v, ok := authInfo["email"].(string); ok {
-					email = v
-				}
+			if name == "" {
+				name = strings.TrimSpace(profile.Name)
 			}
+			email = strings.TrimSpace(profile.Email)
 		}
-
-		// Fallback: fetch user info via device token
 		if uid == "" {
-			authSvc := qoderauth.NewQoderAuth(nil)
-			user, errUser := authSvc.FetchUserStatus(tokenString)
-			if errUser != nil {
-				log.Warnf("qoder: user status probe failed: %v", errUser)
-			} else {
-				log.Infof("qoder: user status via API - id=%s, name=%s, email=%s", user.ID, user.Name, user.Email)
-				uid = user.ID
-				name = user.Name
-				email = user.Email
-			}
-		}
-
-		// Fallback: derive a stable UID from the token hash so we can still save credentials
-		if uid == "" {
-			tokenHash := sha256.Sum256([]byte(tokenString))
+			tokenHash := sha256.Sum256([]byte(deviceToken))
 			uid = hex.EncodeToString(tokenHash[:16])
 			log.Warnf("qoder: using derived UID from token hash: %s", uid)
 		}
-
 		if uid == "" {
 			log.Error("qoder: cannot determine user ID")
 			SetOAuthSessionError(state, "Cannot determine user ID")
@@ -250,20 +215,34 @@ func (h *Handler) RequestQoderToken(c *gin.Context) {
 
 		now := time.Now()
 		metadata := map[string]any{
-			"type":         "qoder",
-			"access_token": tokenString,
-			"auth":         authField,
-			"nonce":        nonce,
-			"verifier":     verifier,
-			"machine_id":   machineID,
-			"uid":          uid,
-			"timestamp":    now.UnixMilli(),
+			"type":                 "qoder",
+			"auth_method":          "oauth",
+			"login_method":         "browser",
+			"login_mode":           "browser",
+			"refresh_strategy":     "device-token",
+			"access_token":         deviceToken,
+			"security_oauth_token": deviceToken,
+			"refresh_token":        strings.TrimSpace(tokenResp.RefreshToken),
+			"nonce":                flow.Nonce,
+			"verifier":             flow.Verifier,
+			"machine_id":           flow.MachineID,
+			"client_id":            flow.ClientID,
+			"uid":                  uid,
+			"timestamp":            now.UnixMilli(),
 		}
 		if name != "" {
 			metadata["name"] = name
 		}
 		if email != "" {
 			metadata["email"] = email
+		}
+		if expireUnix := tokenResp.ExpireUnix(); expireUnix > 0 {
+			metadata["expired"] = time.Unix(expireUnix, 0).UTC().Format(time.RFC3339)
+			metadata["expires_at"] = expireUnix
+		}
+		if refreshExpireUnix := tokenResp.RefreshExpireUnix(); refreshExpireUnix > 0 {
+			metadata["refresh_token_expired"] = time.Unix(refreshExpireUnix, 0).UTC().Format(time.RFC3339)
+			metadata["refresh_token_expires_at"] = refreshExpireUnix
 		}
 
 		fileName := qoderauth.CredentialFileName(uid, email)
@@ -295,7 +274,7 @@ func (h *Handler) RequestQoderToken(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"status": "ok",
-		"url":    authURL,
+		"url":    flow.AuthURL,
 		"state":  state,
 	})
 }

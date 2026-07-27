@@ -10,15 +10,29 @@ const (
 	CenterBase   = "https://center.qoder.sh"
 	ChatBase     = "https://api3.qoder.sh"
 	OpenAPIBase  = "https://openapi.qoder.sh"
-	IDEVersion   = "1.18.0"
 	// CosyVersion is the compile-time fallback qodercli version; the live value
 	// is resolved from the remote channel manifest via GetCosyVersion.
 	CosyVersion = "1.1.5"
+	// RedirectURI is retained for legacy IDE-style callbacks; qodercli device
+	// flow no longer requires it.
 	RedirectURI = "qoder://aicoding.aicoding-agent/login-success"
+
+	// ClientIDCLI is the production client_id used by official qodercli.
+	ClientIDCLI = "e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb"
+	// ClientIDAlt is the non-production client_id used by qodercli.
+	ClientIDAlt = "e93fe488-5778-4c35-a6fc-0f54ed7b3139"
 )
 
 // SelectAccountsPath is the browser login page path.
 const SelectAccountsPath = "/device/selectAccounts"
+
+// OpenAPI auth endpoints used by qodercli.
+const (
+	DeviceTokenPollPath    = "/api/v1/deviceToken/poll"
+	DeviceTokenRefreshPath = "/api/v1/deviceToken/refresh"
+	JobTokenExchangePath   = "/api/v1/jobToken/exchange"
+	UserInfoPath           = "/api/v1/userinfo"
+)
 
 // ServerPublicKeyPEM is the RSA public key for COSY authentication.
 const ServerPublicKeyPEM = `-----BEGIN PUBLIC KEY-----
@@ -44,8 +58,10 @@ const (
 	UserStatusPath = "/api/v3/user/status"
 )
 
-// Polling configuration
+// Polling configuration (aligned with qodercli: 1s interval, 5 minute timeout).
 const (
+	PollInterval         = 1 * time.Second
+	PollTimeout          = 5 * time.Minute
 	PollBaseDelay        = 3 * time.Second
 	PollMaxDelay         = 30 * time.Second
 	PollBackoffMultiply  = 1.5

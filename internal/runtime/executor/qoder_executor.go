@@ -516,7 +516,57 @@ func (e *QoderExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	if auth == nil {
 		return nil, fmt.Errorf("qoder executor: auth is nil")
 	}
-	// Qoder tokens (access_token from the PKCE login) are long-lived
+	creds := qoderCreds(auth)
+	if qoderIsPATAuth(creds, auth) {
+		// PAT sessions are re-established via center jobToken exchange on demand.
+		qoderClearSession(auth)
+		if _, err := e.ensureSession(ctx, auth); err != nil {
+			return nil, err
+		}
+		return auth, nil
+	}
+	if !qoderIsBrowserDeviceAuth(creds, auth) {
+		return auth, nil
+	}
+	refreshToken := strings.TrimSpace(creds.refreshToken)
+	if refreshToken == "" {
+		// No device refresh token; keep using the current device token.
+		return auth, nil
+	}
+	authSvc := qoder.NewQoderAuth(nil)
+	tokenResp, err := authSvc.RefreshDeviceToken(ctx, refreshToken)
+	if err != nil {
+		return nil, fmt.Errorf("qoder executor: refresh device token: %w", err)
+	}
+	deviceToken := tokenResp.AccessToken()
+	if deviceToken == "" {
+		return nil, fmt.Errorf("qoder executor: refresh device token returned empty token")
+	}
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata["access_token"] = deviceToken
+	auth.Metadata["security_oauth_token"] = deviceToken
+	if nextRefresh := strings.TrimSpace(tokenResp.RefreshToken); nextRefresh != "" {
+		auth.Metadata["refresh_token"] = nextRefresh
+	}
+	auth.Metadata["login_method"] = "browser"
+	auth.Metadata["login_mode"] = "browser"
+	auth.Metadata["auth_method"] = "oauth"
+	auth.Metadata["refresh_strategy"] = "device-token"
+	if expireUnix := tokenResp.ExpireUnix(); expireUnix > 0 {
+		auth.Metadata["expired"] = time.Unix(expireUnix, 0).UTC().Format(time.RFC3339)
+		auth.Metadata["expires_at"] = expireUnix
+	}
+	if refreshExpireUnix := tokenResp.RefreshExpireUnix(); refreshExpireUnix > 0 {
+		auth.Metadata["refresh_token_expired"] = time.Unix(refreshExpireUnix, 0).UTC().Format(time.RFC3339)
+		auth.Metadata["refresh_token_expires_at"] = refreshExpireUnix
+	}
+	auth.Metadata["last_refresh"] = time.Now().UTC().Format(time.RFC3339)
+	// Drop cached machine session so the next request rebuilds COSY fields with the new token.
+	delete(auth.Metadata, "machine_token")
+	delete(auth.Metadata, "machine_type")
+	sharedQoderSessionCache.clear(auth.ID)
 	return auth, nil
 }
 
@@ -1157,9 +1207,11 @@ func buildQoderCosyHTTPRequest(ctx context.Context, auth *cliproxyauth.Auth, met
 	key := base64.StdEncoding.EncodeToString(rsaEncrypt([]byte(aesKey)))
 	timestamp := fmt.Sprintf("%d", time.Now().Unix())
 	cosyVersion := qoder.GetCosyVersion()
+	// ideVersion is an IDE-plugin field; qodercli leaves it empty and only
+	// reports cosyVersion (the CLI version) in the COSY payload.
 	payloadJSON, _ := json.Marshal(map[string]any{
 		"cosyVersion": cosyVersion,
-		"ideVersion":  qoder.IDEVersion,
+		"ideVersion":  "",
 		"info":        info,
 		"requestId":   uuid.NewString(),
 		"version":     "v1",
@@ -1416,6 +1468,20 @@ func qoderEnsureSessionWithUpdater(ctx context.Context, auth *cliproxyauth.Auth,
 		creds.machineType = strings.ReplaceAll(uuid.NewString(), "-", "")[:18]
 	}
 
+	// Browser device tokens from qodercli OpenAPI are already security_oauth_token
+	// values and must not be re-exchanged through center jobToken.
+	if qoderIsBrowserDeviceAuth(creds, auth) {
+		if creds.sessionAccessToken == "" {
+			creds.sessionAccessToken = creds.accessToken
+		}
+		if creds.userType == "" {
+			creds.userType = "personal_standard"
+		}
+		qoderStoreSession(auth, creds)
+		sharedQoderSessionCache.store(auth, creds)
+		return creds, nil
+	}
+
 	inner := map[string]any{
 		"personalToken":      creds.personalAccessToken,
 		"securityOauthToken": "",
@@ -1423,6 +1489,7 @@ func qoderEnsureSessionWithUpdater(ctx context.Context, auth *cliproxyauth.Auth,
 		"needRefresh":        false,
 		"authInfo":           map[string]any{},
 	}
+	// Legacy non-PAT credentials without browser markers still go through jobToken.
 	if creds.personalAccessToken == "" {
 		inner["securityOauthToken"] = creds.accessToken
 	}
@@ -1498,6 +1565,49 @@ func qoderEnsureSessionWithUpdater(ctx context.Context, auth *cliproxyauth.Auth,
 	return creds, nil
 }
 
+// qoderIsPATAuth reports whether credentials should use the PAT jobToken path.
+func qoderIsPATAuth(creds qoderCredentials, auth *cliproxyauth.Auth) bool {
+	if strings.TrimSpace(creds.personalAccessToken) != "" {
+		return true
+	}
+	return qoderMetadataEqualsAny(auth, "auth_method", "pat") ||
+		qoderMetadataEqualsAny(auth, "login_mode", "pat") ||
+		qoderMetadataEqualsAny(auth, "login_method", "token", "pat")
+}
+
+// qoderIsBrowserDeviceAuth reports whether credentials are OpenAPI device tokens
+// that can be used directly as security_oauth_token.
+//
+// All non-PAT Qoder credentials follow the qodercli browser device-token model:
+// access_token is already a security_oauth_token and must not go through center jobToken.
+func qoderIsBrowserDeviceAuth(creds qoderCredentials, auth *cliproxyauth.Auth) bool {
+	if qoderIsPATAuth(creds, auth) {
+		return false
+	}
+	return strings.TrimSpace(creds.accessToken) != "" || strings.TrimSpace(creds.sessionAccessToken) != ""
+}
+
+func qoderMetadataEqualsAny(auth *cliproxyauth.Auth, key string, values ...string) bool {
+	if auth == nil || auth.Metadata == nil || key == "" {
+		return false
+	}
+	raw, ok := auth.Metadata[key]
+	if !ok {
+		return false
+	}
+	s, ok := raw.(string)
+	if !ok {
+		return false
+	}
+	s = strings.ToLower(strings.TrimSpace(s))
+	for _, v := range values {
+		if s == strings.ToLower(strings.TrimSpace(v)) {
+			return true
+		}
+	}
+	return false
+}
+
 func qoderNormalizePATMachineIdentity(creds qoderCredentials) (qoderCredentials, bool) {
 	if creds.personalAccessToken == "" {
 		return creds, false
@@ -1551,11 +1661,15 @@ func qoderClearSession(auth *cliproxyauth.Auth) {
 	if auth.Metadata == nil {
 		return
 	}
+	// Keep browser device access/refresh tokens; only drop session-derived fields.
+	// For PAT, security_oauth_token/refresh_token come from jobToken and can be cleared.
 	delete(auth.Metadata, "security_oauth_token")
-	delete(auth.Metadata, "refresh_token")
 	delete(auth.Metadata, "user_type")
 	delete(auth.Metadata, "machine_token")
 	delete(auth.Metadata, "machine_type")
+	if qoderIsPATAuth(qoderCreds(auth), auth) {
+		delete(auth.Metadata, "refresh_token")
+	}
 }
 
 func qoderIsLoginExpiredResponse(statusCode int, body []byte) bool {

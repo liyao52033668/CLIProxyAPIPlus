@@ -114,69 +114,46 @@ func TestFetchQoderModels_UsesDynamicModelList(t *testing.T) {
 	requestCount := 0
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", qoderRoundTripFunc(func(req *http.Request) (*http.Response, error) {
 		requestCount++
-		switch requestCount {
-		case 1:
-			if req.Method != http.MethodPost {
-				t.Fatalf("exchange method = %q, want %q", req.Method, http.MethodPost)
-			}
-			if req.URL.String() != qoder.CenterBase+"/algo/api/v3/user/jobToken?Encode=1" {
-				t.Fatalf("exchange url = %q, want %q", req.URL.String(), qoder.CenterBase+"/algo/api/v3/user/jobToken?Encode=1")
-			}
-			encodedBody, err := io.ReadAll(req.Body)
-			if err != nil {
-				t.Fatalf("ReadAll(exchange body) error = %v", err)
-			}
-			outer := gjson.ParseBytes(decodeQoderBodyForTest(t, string(encodedBody)))
-			inner := gjson.Parse(outer.Get("payload").String())
-			if got := inner.Get("personalToken").String(); got != "" {
-				t.Fatalf("personalToken = %q, want empty for browser token", got)
-			}
-			if got := inner.Get("securityOauthToken").String(); got != "token" {
-				t.Fatalf("securityOauthToken = %q, want %q", got, "token")
-			}
-			if got := inner.Get("refreshToken").String(); got != "" {
-				t.Fatalf("refreshToken = %q, want empty string during exchange", got)
-			}
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Header:     make(http.Header),
-				Body:       io.NopCloser(strings.NewReader(`{"id":"user-1","name":"Qoder User","securityOauthToken":"session-token","refreshToken":"refresh-token","userType":"personal_standard"}`)),
-				Request:    req,
-			}, nil
-		case 2:
-			if req.Method != http.MethodGet {
-				t.Fatalf("model list method = %q, want %q", req.Method, http.MethodGet)
-			}
-			if req.URL.String() != qoder.ChatBase+qoder.ModelListPath+"?Encode=1" {
-				t.Fatalf("model list url = %q, want %q", req.URL.String(), qoder.ChatBase+qoder.ModelListPath+"?Encode=1")
-			}
-			if got := req.Header.Get("Authorization"); !strings.HasPrefix(got, "Bearer COSY.") {
-				t.Fatalf("Authorization = %q, want COSY bearer signature", got)
-			}
-			if got := req.Header.Get("Cosy-Machinetoken"); got == "" || got == "machine-1" {
-				t.Fatalf("Cosy-Machinetoken = %q, want exchanged/generated token", got)
-			}
-			if got := req.Header.Get("Cosy-Version"); got == "" {
-				t.Fatal("expected Cosy-Version header")
-			}
-			if got := req.Header.Get("Cosy-Clienttype"); got != "5" {
-				t.Fatalf("Cosy-Clienttype = %q, want %q", got, "5")
-			}
-			encodedResponse := customBase64Encode([]byte(`{"chat":[{"key":"qwen3.7-max","display_name":"Qwen3.7-Max"},{"key":"qoder-new","display_name":"Qoder New"}]}`))
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Header:     make(http.Header),
-				Body:       io.NopCloser(strings.NewReader(`{"body":"` + encodedResponse + `"}`)),
-				Request:    req,
-			}, nil
-		default:
+		if requestCount != 1 {
 			t.Fatalf("unexpected request %d: %s %s", requestCount, req.Method, req.URL.String())
 			return nil, nil
 		}
+		// Browser device tokens skip center jobToken and go straight to model list.
+		if req.Method != http.MethodGet {
+			t.Fatalf("model list method = %q, want %q", req.Method, http.MethodGet)
+		}
+		if req.URL.String() != qoder.ChatBase+qoder.ModelListPath+"?Encode=1" {
+			t.Fatalf("model list url = %q, want %q", req.URL.String(), qoder.ChatBase+qoder.ModelListPath+"?Encode=1")
+		}
+		if got := req.Header.Get("Authorization"); !strings.HasPrefix(got, "Bearer COSY.") {
+			t.Fatalf("Authorization = %q, want COSY bearer signature", got)
+		}
+		if got := req.Header.Get("Cosy-Machinetoken"); got == "" {
+			t.Fatal("expected generated Cosy-Machinetoken")
+		}
+		if got := req.Header.Get("Cosy-Version"); got == "" {
+			t.Fatal("expected Cosy-Version header")
+		}
+		if got := req.Header.Get("Cosy-Clienttype"); got != "5" {
+			t.Fatalf("Cosy-Clienttype = %q, want %q", got, "5")
+		}
+		encodedResponse := customBase64Encode([]byte(`{"chat":[{"key":"qwen3.7-max","display_name":"Qwen3.7-Max"},{"key":"qoder-new","display_name":"Qoder New"}]}`))
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"body":"` + encodedResponse + `"}`)),
+			Request:    req,
+		}, nil
 	}))
 
 	models := FetchQoderModels(ctx, &cliproxyauth.Auth{
-		Metadata: map[string]any{"access_token": "token", "refresh_token": "stale-refresh", "uid": "user-1", "machine_id": "machine-1"},
+		Metadata: map[string]any{
+			"login_method":  "browser",
+			"access_token":  "token",
+			"refresh_token": "stale-refresh",
+			"uid":           "user-1",
+			"machine_id":    "machine-1",
+		},
 	}, &config.Config{})
 	if len(models) != 2 {
 		t.Fatalf("len(models) = %d, want %d", len(models), 2)
@@ -206,31 +183,25 @@ func TestFetchQoderModels_UsesDynamicModelList(t *testing.T) {
 	}
 }
 
-func TestQoderEnsureSession_ReusesCachedIDESessionAcrossAuthClones(t *testing.T) {
-	const authID = "qoder-ide-session-cache"
+func TestQoderEnsureSession_ReusesCachedBrowserSessionAcrossAuthClones(t *testing.T) {
+	const authID = "qoder-browser-session-cache"
 	ClearQoderRuntimeState(authID)
 	t.Cleanup(func() { ClearQoderRuntimeState(authID) })
 
 	requestCount := 0
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", qoderRoundTripFunc(func(req *http.Request) (*http.Response, error) {
 		requestCount++
-		if req.URL.String() != qoder.CenterBase+"/algo/api/v3/user/jobToken?Encode=1" {
-			t.Fatalf("request url = %q, want job token exchange", req.URL.String())
-		}
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     make(http.Header),
-			Body:       io.NopCloser(strings.NewReader(`{"id":"u1","securityOauthToken":"session-token","refreshToken":"refresh-token","userType":"personal_standard"}`)),
-			Request:    req,
-		}, nil
+		t.Fatalf("browser device tokens must not call upstream during ensureSession: %s %s", req.Method, req.URL.String())
+		return nil, nil
 	}))
 
 	newAuth := func() *cliproxyauth.Auth {
 		return &cliproxyauth.Auth{
 			ID: authID,
 			Metadata: map[string]any{
-				"access_token": "ide-oauth-token",
-				"machine_id":   "ide-machine-id",
+				"login_method": "browser",
+				"access_token": "browser-device-token",
+				"machine_id":   "browser-machine-id",
 				"uid":          "u1",
 			},
 		}
@@ -240,19 +211,25 @@ func TestQoderEnsureSession_ReusesCachedIDESessionAcrossAuthClones(t *testing.T)
 	if err != nil {
 		t.Fatalf("first qoderEnsureSession() error = %v", err)
 	}
+	if firstSession.sessionAccessToken != "browser-device-token" {
+		t.Fatalf("first session token = %q, want browser device token", firstSession.sessionAccessToken)
+	}
 	secondAuth := newAuth()
 	secondSession, err := qoderEnsureSession(ctx, secondAuth, &config.Config{})
 	if err != nil {
 		t.Fatalf("second qoderEnsureSession() error = %v", err)
 	}
-	if requestCount != 1 {
-		t.Fatalf("job token exchange count = %d, want 1", requestCount)
+	if requestCount != 0 {
+		t.Fatalf("upstream request count = %d, want 0", requestCount)
 	}
 	if secondSession.sessionAccessToken != firstSession.sessionAccessToken {
 		t.Fatalf("cached session token = %q, want %q", secondSession.sessionAccessToken, firstSession.sessionAccessToken)
 	}
-	if got, _ := secondAuth.Metadata["security_oauth_token"].(string); got != "session-token" {
-		t.Fatalf("second auth session token = %q, want %q", got, "session-token")
+	if secondSession.machineToken == "" || secondSession.machineType == "" {
+		t.Fatal("expected cached machine identity fields")
+	}
+	if got, _ := secondAuth.Metadata["security_oauth_token"].(string); got != "browser-device-token" {
+		t.Fatalf("second auth session token = %q, want browser device token", got)
 	}
 }
 
@@ -660,6 +637,7 @@ func TestFetchQoderModels_RefreshesExpiredPATSession(t *testing.T) {
 
 func TestQoderExecutorExecute_RefreshesExpiredSessionFromModelList(t *testing.T) {
 	requestCount := 0
+	refreshedMachineToken := ""
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", qoderRoundTripFunc(func(req *http.Request) (*http.Response, error) {
 		requestCount++
 		switch requestCount {
@@ -670,6 +648,9 @@ func TestQoderExecutorExecute_RefreshesExpiredSessionFromModelList(t *testing.T)
 			if req.URL.String() != qoder.ChatBase+qoder.ModelListPath+"?Encode=1" {
 				t.Fatalf("first request url = %q, want %q", req.URL.String(), qoder.ChatBase+qoder.ModelListPath+"?Encode=1")
 			}
+			if got := req.Header.Get("Cosy-Machinetoken"); got != "stale-machine-token" {
+				t.Fatalf("first Cosy-Machinetoken = %q, want stale session token", got)
+			}
 			return &http.Response{
 				StatusCode: http.StatusForbidden,
 				Header:     make(http.Header),
@@ -677,36 +658,16 @@ func TestQoderExecutorExecute_RefreshesExpiredSessionFromModelList(t *testing.T)
 				Request:    req,
 			}, nil
 		case 2:
-			if req.Method != http.MethodPost {
-				t.Fatalf("exchange method = %q, want %q", req.Method, http.MethodPost)
-			}
-			if req.URL.String() != qoder.CenterBase+"/algo/api/v3/user/jobToken?Encode=1" {
-				t.Fatalf("exchange url = %q, want %q", req.URL.String(), qoder.CenterBase+"/algo/api/v3/user/jobToken?Encode=1")
-			}
-			encodedBody, err := io.ReadAll(req.Body)
-			if err != nil {
-				t.Fatalf("ReadAll(exchange body) error = %v", err)
-			}
-			outer := gjson.ParseBytes(decodeQoderBodyForTest(t, string(encodedBody)))
-			inner := gjson.Parse(outer.Get("payload").String())
-			if got := inner.Get("securityOauthToken").String(); got != "source-token" {
-				t.Fatalf("securityOauthToken = %q, want %q", got, "source-token")
-			}
-			if got := inner.Get("refreshToken").String(); got != "" {
-				t.Fatalf("refreshToken = %q, want empty string during re-exchange", got)
-			}
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Header:     make(http.Header),
-				Body:       io.NopCloser(strings.NewReader(`{"id":"u1","name":"Qoder User","securityOauthToken":"fresh-session-token","refreshToken":"fresh-refresh-token","userType":"personal_standard"}`)),
-				Request:    req,
-			}, nil
-		case 3:
+			// Browser device tokens rebuild local machine identity without jobToken exchange.
 			if req.Method != http.MethodGet {
 				t.Fatalf("model list retry method = %q, want %q", req.Method, http.MethodGet)
 			}
-			if got := req.Header.Get("Cosy-Machinetoken"); got == "" || got == "stale-machine-token" {
-				t.Fatalf("Cosy-Machinetoken = %q, want refreshed session token", got)
+			if req.URL.String() != qoder.ChatBase+qoder.ModelListPath+"?Encode=1" {
+				t.Fatalf("model list retry url = %q", req.URL.String())
+			}
+			refreshedMachineToken = req.Header.Get("Cosy-Machinetoken")
+			if refreshedMachineToken == "" || refreshedMachineToken == "stale-machine-token" {
+				t.Fatalf("Cosy-Machinetoken = %q, want regenerated machine token", refreshedMachineToken)
 			}
 			encodedResponse := customBase64Encode([]byte(`{"chat":[{"key":"qwen3.7-max","display_name":"Qwen3.7-Max","source":"quota_free"}]}`))
 			return &http.Response{
@@ -715,7 +676,7 @@ func TestQoderExecutorExecute_RefreshesExpiredSessionFromModelList(t *testing.T)
 				Body:       io.NopCloser(strings.NewReader(`{"body":"` + encodedResponse + `"}`)),
 				Request:    req,
 			}, nil
-		case 4:
+		case 3:
 			if req.Method != http.MethodPost {
 				t.Fatalf("chat method = %q, want %q", req.Method, http.MethodPost)
 			}
@@ -724,6 +685,9 @@ func TestQoderExecutorExecute_RefreshesExpiredSessionFromModelList(t *testing.T)
 			}
 			if got := req.Header.Get("x-model-source"); got != "quota_free" {
 				t.Fatalf("x-model-source = %q, want %q", got, "quota_free")
+			}
+			if got := req.Header.Get("Cosy-Machinetoken"); got != refreshedMachineToken {
+				t.Fatalf("chat Cosy-Machinetoken = %q, want %q", got, refreshedMachineToken)
 			}
 			return &http.Response{
 				StatusCode: http.StatusOK,
@@ -740,6 +704,7 @@ func TestQoderExecutorExecute_RefreshesExpiredSessionFromModelList(t *testing.T)
 	auth := &cliproxyauth.Auth{
 		ID: "qoder-auth-refresh",
 		Metadata: map[string]any{
+			"login_method":         "browser",
 			"access_token":         "source-token",
 			"security_oauth_token": "stale-session-token",
 			"refresh_token":        "stale-refresh-token",
@@ -754,6 +719,12 @@ func TestQoderExecutorExecute_RefreshesExpiredSessionFromModelList(t *testing.T)
 	if len(models) != 1 {
 		t.Fatalf("len(models) = %d, want %d", len(models), 1)
 	}
+	if requestCount != 2 {
+		t.Fatalf("requestCount after model list = %d, want 2", requestCount)
+	}
+	if got, _ := auth.Metadata["refresh_token"].(string); got != "stale-refresh-token" {
+		t.Fatalf("browser refresh_token cleared unexpectedly: %q", got)
+	}
 
 	e := NewQoderExecutor(&config.Config{})
 	_, err := e.Execute(ctx, auth, cliproxyexecutor.Request{
@@ -762,6 +733,9 @@ func TestQoderExecutorExecute_RefreshesExpiredSessionFromModelList(t *testing.T)
 	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai")})
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
+	}
+	if requestCount != 3 {
+		t.Fatalf("requestCount = %d, want 3", requestCount)
 	}
 }
 
@@ -780,60 +754,54 @@ func TestQoderExecutorExecute_UsesCachedContractWithoutModelListFetch(t *testing
 	requestCount := 0
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", qoderRoundTripFunc(func(req *http.Request) (*http.Response, error) {
 		requestCount++
-		switch requestCount {
-		case 1:
-			if req.URL.String() != qoder.CenterBase+"/algo/api/v3/user/jobToken?Encode=1" {
-				t.Fatalf("exchange url = %q, want %q", req.URL.String(), qoder.CenterBase+"/algo/api/v3/user/jobToken?Encode=1")
-			}
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Header:     make(http.Header),
-				Body:       io.NopCloser(strings.NewReader(`{"id":"u1","name":"Qoder User","securityOauthToken":"session-token","refreshToken":"refresh-token","userType":"personal_standard"}`)),
-				Request:    req,
-			}, nil
-		case 2:
-			if req.URL.String() != qoder.ChatBase+qoder.ChatPath+"?"+qoder.ChatQueryExtra {
-				t.Fatalf("chat url = %q, want %q", req.URL.String(), qoder.ChatBase+qoder.ChatPath+"?"+qoder.ChatQueryExtra)
-			}
-			if got := req.Header.Get("x-model-source"); got != "quota_free" {
-				t.Fatalf("x-model-source = %q, want %q", got, "quota_free")
-			}
-			encodedBody, err := io.ReadAll(req.Body)
-			if err != nil {
-				t.Fatalf("ReadAll(req.Body) error = %v", err)
-			}
-			decodedBody := decodeQoderBodyForTest(t, string(encodedBody))
-			if got := gjson.GetBytes(decodedBody, "model_config.source").String(); got != "quota_free" {
-				t.Fatalf("model_config.source = %q, want %q", got, "quota_free")
-			}
-			if got := gjson.GetBytes(decodedBody, "model_config.is_reasoning").Bool(); !got {
-				t.Fatal("expected model_config.is_reasoning = true")
-			}
-			if got := gjson.GetBytes(decodedBody, "chat_context.extra.modelConfig.source").String(); got != "quota_free" {
-				t.Fatalf("chat_context.extra.modelConfig.source = %q, want %q", got, "quota_free")
-			}
-			if got := gjson.GetBytes(decodedBody, "chat_context.extra.modelConfig.is_reasoning").Bool(); !got {
-				t.Fatal("expected chat_context.extra.modelConfig.is_reasoning = true")
-			}
-			if got := gjson.GetBytes(decodedBody, "aliyun_user_type").String(); got != "personal_basic" {
-				t.Fatalf("aliyun_user_type = %q, want %q", got, "personal_basic")
-			}
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Header:     make(http.Header),
-				Body:       io.NopCloser(strings.NewReader("data: {\"body\":\"{\\\"choices\\\":[{\\\"delta\\\":{\\\"content\\\":\\\"ok\\\"},\\\"finish_reason\\\":\\\"stop\\\"}]}\"}\n\ndata: [DONE]\n")),
-				Request:    req,
-			}, nil
-		default:
+		// Browser device tokens skip jobToken and go straight to chat.
+		if requestCount != 1 {
 			t.Fatalf("unexpected request %d: %s %s", requestCount, req.Method, req.URL.String())
 			return nil, nil
 		}
+		if req.URL.String() != qoder.ChatBase+qoder.ChatPath+"?"+qoder.ChatQueryExtra {
+			t.Fatalf("chat url = %q, want %q", req.URL.String(), qoder.ChatBase+qoder.ChatPath+"?"+qoder.ChatQueryExtra)
+		}
+		if got := req.Header.Get("x-model-source"); got != "quota_free" {
+			t.Fatalf("x-model-source = %q, want %q", got, "quota_free")
+		}
+		encodedBody, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatalf("ReadAll(req.Body) error = %v", err)
+		}
+		decodedBody := decodeQoderBodyForTest(t, string(encodedBody))
+		if got := gjson.GetBytes(decodedBody, "model_config.source").String(); got != "quota_free" {
+			t.Fatalf("model_config.source = %q, want %q", got, "quota_free")
+		}
+		if got := gjson.GetBytes(decodedBody, "model_config.is_reasoning").Bool(); !got {
+			t.Fatal("expected model_config.is_reasoning = true")
+		}
+		if got := gjson.GetBytes(decodedBody, "chat_context.extra.modelConfig.source").String(); got != "quota_free" {
+			t.Fatalf("chat_context.extra.modelConfig.source = %q, want %q", got, "quota_free")
+		}
+		if got := gjson.GetBytes(decodedBody, "chat_context.extra.modelConfig.is_reasoning").Bool(); !got {
+			t.Fatal("expected chat_context.extra.modelConfig.is_reasoning = true")
+		}
+		if got := gjson.GetBytes(decodedBody, "aliyun_user_type").String(); got != "personal_basic" {
+			t.Fatalf("aliyun_user_type = %q, want %q", got, "personal_basic")
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("data: {\"body\":\"{\\\"choices\\\":[{\\\"delta\\\":{\\\"content\\\":\\\"ok\\\"},\\\"finish_reason\\\":\\\"stop\\\"}]}\"}\n\ndata: [DONE]\n")),
+			Request:    req,
+		}, nil
 	}))
 
 	e := NewQoderExecutor(&config.Config{})
 	_, err := e.Execute(ctx, &cliproxyauth.Auth{
-		ID:       authID,
-		Metadata: map[string]any{"access_token": "token", "uid": "u1", "machine_id": "m1"},
+		ID: authID,
+		Metadata: map[string]any{
+			"login_method": "browser",
+			"access_token": "token",
+			"uid":          "u1",
+			"machine_id":   "m1",
+		},
 	}, cliproxyexecutor.Request{
 		Model:   "qwen3.7-max",
 		Payload: []byte(`{"messages":[{"role":"user","content":"hi"}]}`),
@@ -853,16 +821,6 @@ func TestQoderExecutorExecute_UsesDynamicModelContract(t *testing.T) {
 		requestCount++
 		switch requestCount {
 		case 1:
-			if req.URL.String() != qoder.CenterBase+"/algo/api/v3/user/jobToken?Encode=1" {
-				t.Fatalf("exchange url = %q, want %q", req.URL.String(), qoder.CenterBase+"/algo/api/v3/user/jobToken?Encode=1")
-			}
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Header:     make(http.Header),
-				Body:       io.NopCloser(strings.NewReader(`{"id":"u1","name":"Qoder User","securityOauthToken":"session-token","refreshToken":"refresh-token","userType":"personal_standard"}`)),
-				Request:    req,
-			}, nil
-		case 2:
 			if req.URL.String() != qoder.ChatBase+qoder.ModelListPath+"?Encode=1" {
 				t.Fatalf("model list url = %q, want %q", req.URL.String(), qoder.ChatBase+qoder.ModelListPath+"?Encode=1")
 			}
@@ -873,7 +831,7 @@ func TestQoderExecutorExecute_UsesDynamicModelContract(t *testing.T) {
 				Body:       io.NopCloser(strings.NewReader(`{"body":"` + encodedResponse + `"}`)),
 				Request:    req,
 			}, nil
-		case 3:
+		case 2:
 			if req.URL.String() != qoder.ChatBase+qoder.ChatPath+"?"+qoder.ChatQueryExtra {
 				t.Fatalf("chat url = %q, want %q", req.URL.String(), qoder.ChatBase+qoder.ChatPath+"?"+qoder.ChatQueryExtra)
 			}
@@ -910,8 +868,13 @@ func TestQoderExecutorExecute_UsesDynamicModelContract(t *testing.T) {
 	}))
 
 	auth := &cliproxyauth.Auth{
-		ID:       authID,
-		Metadata: map[string]any{"access_token": "token", "uid": "u1", "machine_id": "m1"},
+		ID: authID,
+		Metadata: map[string]any{
+			"login_method": "browser",
+			"access_token": "token",
+			"uid":          "u1",
+			"machine_id":   "m1",
+		},
 	}
 	models := FetchQoderModels(ctx, auth, &config.Config{})
 	if len(models) != 1 {
@@ -1187,13 +1150,7 @@ func TestQoderExecutorExecute_NonStreamUsesStreamTransportSemantics(t *testing.T
 		requestCount++
 		switch requestCount {
 		case 1:
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Header:     make(http.Header),
-				Body:       io.NopCloser(strings.NewReader(`{"id":"u1","name":"Qoder User","securityOauthToken":"session-token","refreshToken":"refresh-token","userType":"personal_standard"}`)),
-				Request:    req,
-			}, nil
-		case 2:
+			// Browser device token skips jobToken; first call is model list.
 			encodedResponse := customBase64Encode([]byte(`{"chat":[{"key":"qwen3.7-max","display_name":"Qwen3.7-Max"}]}`))
 			return &http.Response{
 				StatusCode: http.StatusOK,
@@ -1201,7 +1158,7 @@ func TestQoderExecutorExecute_NonStreamUsesStreamTransportSemantics(t *testing.T
 				Body:       io.NopCloser(strings.NewReader(`{"body":"` + encodedResponse + `"}`)),
 				Request:    req,
 			}, nil
-		case 3:
+		case 2:
 			if got := req.Header.Get("Accept"); got != "text/event-stream" {
 				t.Fatalf("Accept = %q, want %q", got, "text/event-stream")
 			}
@@ -1241,7 +1198,12 @@ func TestQoderExecutorExecute_NonStreamUsesStreamTransportSemantics(t *testing.T
 
 	e := NewQoderExecutor(&config.Config{})
 	_, err := e.Execute(ctx, &cliproxyauth.Auth{
-		Metadata: map[string]any{"access_token": "token", "uid": "u1", "machine_id": "m1"},
+		Metadata: map[string]any{
+			"login_method": "browser",
+			"access_token": "token",
+			"uid":          "u1",
+			"machine_id":   "m1",
+		},
 	}, cliproxyexecutor.Request{
 		Model:   "qwen3.7-max",
 		Payload: []byte(`{"messages":[{"role":"user","content":"hi"}]}`),
@@ -1512,36 +1474,33 @@ func TestQoderExecutorExecute_PublishesUsageFromSSE(t *testing.T) {
 	requestCount := 0
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", qoderRoundTripFunc(func(req *http.Request) (*http.Response, error) {
 		requestCount++
-		switch requestCount {
-		case 1:
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Header:     make(http.Header),
-				Body:       io.NopCloser(strings.NewReader(`{"id":"u1","name":"Qoder User","securityOauthToken":"session-token","refreshToken":"refresh-token","userType":"personal_standard"}`)),
-				Request:    req,
-			}, nil
-		case 2:
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Header:     make(http.Header),
-				Body: io.NopCloser(strings.NewReader(strings.Join([]string{
-					`data: {"body":"{\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}"}`,
-					`data: {"body":"{\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":3,\"total_tokens\":12}}"}`,
-					`data: {"body":"[DONE]"}`,
-				}, "\n"))),
-				Request: req,
-			}, nil
-		default:
+		// Browser device token skips jobToken; first call is chat SSE.
+		if requestCount != 1 {
 			t.Fatalf("unexpected request %d: %s", requestCount, req.URL.String())
 			return nil, nil
 		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body: io.NopCloser(strings.NewReader(strings.Join([]string{
+				`data: {"body":"{\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}"}`,
+				`data: {"body":"{\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":3,\"total_tokens\":12}}"}`,
+				`data: {"body":"[DONE]"}`,
+			}, "\n"))),
+			Request: req,
+		}, nil
 	}))
 
 	e := NewQoderExecutor(&config.Config{})
 	_, err := e.Execute(ctx, &cliproxyauth.Auth{
 		ID:       "qoder-usage-auth.json",
 		Provider: "qoder",
-		Metadata: map[string]any{"access_token": "token", "uid": "u1", "machine_id": "m1"},
+		Metadata: map[string]any{
+			"login_method": "browser",
+			"access_token": "token",
+			"uid":          "u1",
+			"machine_id":   "m1",
+		},
 	}, cliproxyexecutor.Request{
 		Model:   "qwen3.7-max",
 		Payload: []byte(`{"messages":[{"role":"user","content":"hi"}]}`),
