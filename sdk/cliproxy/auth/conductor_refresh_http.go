@@ -102,7 +102,7 @@ func (m *Manager) queueRefreshReschedule(authID string) {
 }
 
 func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
-	if a == nil {
+	if a == nil || a.Disabled || a.Status == StatusDisabled {
 		return false
 	}
 	if hasUnauthorizedAuthFailure(a) {
@@ -312,7 +312,7 @@ func lookupMetadataTime(meta map[string]any, keys ...string) (time.Time, bool) {
 func (m *Manager) markRefreshPending(id string, now time.Time) bool {
 	m.mu.Lock()
 	auth, ok := m.auths[id]
-	if !ok || auth == nil {
+	if !ok || auth == nil || auth.Disabled || auth.Status == StatusDisabled {
 		m.mu.Unlock()
 		return false
 	}
@@ -336,12 +336,12 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	auth := m.auths[id]
 	var exec ProviderExecutor
 	var cloned *Auth
-	if auth != nil {
+	if auth != nil && !auth.Disabled && auth.Status != StatusDisabled {
 		exec = m.executors[auth.Provider]
 		cloned = auth.Clone()
 	}
 	m.mu.RUnlock()
-	if auth == nil || exec == nil {
+	if cloned == nil || exec == nil {
 		return
 	}
 	updated, err := exec.Refresh(ctx, cloned)
@@ -355,7 +355,7 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 		unauthorized := isUnauthorizedError(err)
 		shouldReschedule := false
 		m.mu.Lock()
-		if current := m.auths[id]; current != nil {
+		if current := m.auths[id]; current != nil && !current.Disabled && current.Status != StatusDisabled {
 			current.LastError = refreshErrorFromError(err)
 			if unauthorized {
 				current.NextRefreshAfter = time.Time{}
@@ -396,7 +396,7 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	if m.shouldRefresh(updated, now) {
 		updated.NextRefreshAfter = now.Add(refreshIneffectiveBackoff)
 	}
-	_, _ = m.Update(ctx, updated)
+	_, _ = m.update(ctx, updated, true)
 }
 
 func (m *Manager) executorFor(provider string) ProviderExecutor {

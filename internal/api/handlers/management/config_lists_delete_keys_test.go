@@ -5,7 +5,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -20,6 +22,53 @@ func writeTestConfigFile(t *testing.T) string {
 		t.Fatalf("failed to write test config: %v", errWrite)
 	}
 	return path
+}
+
+func TestPutCodexKeys_WaitsForRuntimeSyncBeforeResponding(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	h := &Handler{
+		cfg:            &config.Config{},
+		configFilePath: writeTestConfigFile(t),
+	}
+	callbackStarted := make(chan struct{})
+	releaseCallback := make(chan struct{})
+	h.SetOnCodexConfigUpdated(func() {
+		h.mu.Lock()
+		h.mu.Unlock()
+		close(callbackStarted)
+		<-releaseCallback
+	})
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPut, "/v0/management/codex-api-key", strings.NewReader(`[{"api-key":"codex-key","base-url":"https://codex.example.com"}]`))
+	requestDone := make(chan struct{})
+	go func() {
+		h.PutCodexKeys(c)
+		close(requestDone)
+	}()
+
+	select {
+	case <-callbackStarted:
+	case <-time.After(time.Second):
+		t.Fatal("Codex runtime sync callback did not start")
+	}
+	select {
+	case <-requestDone:
+		t.Fatal("handler responded before Codex runtime sync completed")
+	default:
+	}
+
+	close(releaseCallback)
+	select {
+	case <-requestDone:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not respond after Codex runtime sync completed")
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
 }
 
 func TestDeleteGeminiKey_RequiresBaseURLWhenAPIKeyDuplicated(t *testing.T) {

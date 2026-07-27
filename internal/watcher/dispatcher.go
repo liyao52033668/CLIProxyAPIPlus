@@ -163,6 +163,9 @@ func (w *Watcher) dispatchAuthUpdates(updates []AuthUpdate) {
 }
 
 func (w *Watcher) authUpdateKey(update AuthUpdate, ts int64) string {
+	if update.Applied != nil {
+		return fmt.Sprintf("%s:%d", update.ID, ts)
+	}
 	if update.ID != "" {
 		return update.ID
 	}

@@ -74,9 +74,10 @@ const (
 
 // AuthUpdate describes an incremental change to auth configuration.
 type AuthUpdate struct {
-	Action AuthUpdateAction
-	ID     string
-	Auth   *coreauth.Auth
+	Action  AuthUpdateAction
+	ID      string
+	Auth    *coreauth.Auth
+	Applied chan struct{}
 }
 
 // InvalidAuthEntry describes an auth file that could not be loaded into a valid auth entry.
@@ -152,6 +153,42 @@ func (w *Watcher) SetConfig(cfg *config.Config) {
 	defer w.clientsMutex.Unlock()
 	w.config = cfg
 	w.oldConfigYaml, _ = yaml.Marshal(cfg)
+}
+
+// SyncConfig updates the watcher configuration and waits until generated auth changes are applied.
+func (w *Watcher) SyncConfig(cfg *config.Config) {
+	if w == nil || cfg == nil {
+		return
+	}
+	w.configReloadMu.Lock()
+	defer w.configReloadMu.Unlock()
+
+	w.clientsMutex.Lock()
+	w.config = cfg
+	w.oldConfigYaml, _ = yaml.Marshal(cfg)
+	auths := snapshotCoreAuthsFunc(cfg, w.authDir)
+	if len(w.runtimeAuths) > 0 {
+		for _, auth := range w.runtimeAuths {
+			if auth != nil {
+				auths = append(auths, auth.Clone())
+			}
+		}
+	}
+	updates := w.prepareAuthUpdatesLocked(auths, false)
+	w.clientsMutex.Unlock()
+
+	if len(updates) == 0 || w.getAuthQueue() == nil {
+		return
+	}
+	applied := make([]chan struct{}, 0, len(updates))
+	for i := range updates {
+		updates[i].Applied = make(chan struct{})
+		applied = append(applied, updates[i].Applied)
+	}
+	w.dispatchAuthUpdates(updates)
+	for _, done := range applied {
+		<-done
+	}
 }
 
 // SetAuthUpdateQueue sets the queue used to emit auth updates.

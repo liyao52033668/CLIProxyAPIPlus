@@ -41,8 +41,75 @@ type unauthorizedRefreshTestExecutor struct {
 	schedulerProviderTestExecutor
 }
 
+type blockingRefreshTestExecutor struct {
+	schedulerProviderTestExecutor
+	started chan struct{}
+	release chan struct{}
+}
+
+func (e blockingRefreshTestExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	close(e.started)
+	<-e.release
+	updated := auth.Clone()
+	updated.Disabled = false
+	updated.Status = StatusActive
+	return updated, nil
+}
+
 func (e unauthorizedRefreshTestExecutor) Refresh(ctx context.Context, auth *Auth) (*Auth, error) {
 	return nil, errors.New("token refresh failed with status 401: invalid_grant")
+}
+
+func TestManager_RefreshAuthDoesNotReactivateDisabledAuth(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	executor := blockingRefreshTestExecutor{
+		schedulerProviderTestExecutor: schedulerProviderTestExecutor{provider: "blocking-refresh"},
+		started:                       make(chan struct{}),
+		release:                       make(chan struct{}),
+	}
+	manager.RegisterExecutor(executor)
+	auth := &Auth{
+		ID:       "disabled-during-refresh",
+		Provider: "blocking-refresh",
+		Status:   StatusActive,
+		Metadata: map[string]any{"email": "x@example.com"},
+	}
+	if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	refreshDone := make(chan struct{})
+	go func() {
+		manager.refreshAuth(ctx, auth.ID)
+		close(refreshDone)
+	}()
+	select {
+	case <-executor.started:
+	case <-time.After(time.Second):
+		t.Fatal("refresh did not start")
+	}
+
+	disabled := auth.Clone()
+	disabled.Disabled = true
+	disabled.Status = StatusDisabled
+	if _, errUpdate := manager.Update(ctx, disabled); errUpdate != nil {
+		t.Fatalf("disable auth: %v", errUpdate)
+	}
+	close(executor.release)
+	select {
+	case <-refreshDone:
+	case <-time.After(time.Second):
+		t.Fatal("refresh did not finish")
+	}
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok || updated == nil || !updated.Disabled || updated.Status != StatusDisabled {
+		t.Fatalf("in-flight refresh reactivated disabled auth: %+v", updated)
+	}
+	if manager.markRefreshPending(auth.ID, time.Now()) {
+		t.Fatal("disabled auth accepted another refresh job")
+	}
 }
 
 func TestManager_RefreshAuthUnauthorizedFailureStopsAutoRefreshRetry(t *testing.T) {

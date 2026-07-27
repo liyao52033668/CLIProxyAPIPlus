@@ -68,7 +68,11 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	if m.scheduler != nil {
 		m.scheduler.upsertAuth(authClone)
 	}
-	m.queueRefreshReschedule(auth.ID)
+	if authClone.Disabled || authClone.Status == StatusDisabled {
+		m.removeRefreshSchedule(auth.ID)
+	} else {
+		m.queueRefreshReschedule(auth.ID)
+	}
 	_ = m.persist(ctx, auth)
 	m.hook.OnAuthRegistered(ctx, auth.Clone())
 	return auth.Clone(), nil
@@ -76,6 +80,10 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 
 // Update replaces an existing auth entry and notifies hooks.
 func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
+	return m.update(ctx, auth, false)
+}
+
+func (m *Manager) update(ctx context.Context, auth *Auth, requireActive bool) (*Auth, error) {
 	if auth == nil || auth.ID == "" {
 		return nil, nil
 	}
@@ -83,10 +91,14 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	existing, ok := m.auths[auth.ID]
 	if !ok || existing == nil {
 		m.mu.Unlock()
-		if auth.Disabled || auth.Status == StatusDisabled {
+		if requireActive || auth.Disabled || auth.Status == StatusDisabled {
 			return nil, nil
 		}
 		return m.Register(ctx, auth)
+	}
+	if requireActive && (existing.Disabled || existing.Status == StatusDisabled) {
+		m.mu.Unlock()
+		return nil, nil
 	}
 	if !auth.indexAssigned && auth.Index == "" {
 		auth.Index = existing.Index
@@ -108,7 +120,11 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	if m.scheduler != nil {
 		m.scheduler.upsertAuth(authClone)
 	}
-	m.queueRefreshReschedule(auth.ID)
+	if authClone.Disabled || authClone.Status == StatusDisabled {
+		m.removeRefreshSchedule(auth.ID)
+	} else {
+		m.queueRefreshReschedule(auth.ID)
+	}
 	_ = m.persist(ctx, auth)
 	m.hook.OnAuthUpdated(ctx, auth.Clone())
 	return auth.Clone(), nil

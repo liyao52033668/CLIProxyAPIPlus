@@ -48,6 +48,9 @@ type Service struct {
 	// configUpdateMu serializes config updates across watcher + home.
 	configUpdateMu sync.Mutex
 
+	// configSyncMu serializes management-triggered config reconciliation.
+	configSyncMu sync.Mutex
+
 	// configPath is the path to the configuration file.
 	configPath string
 
@@ -212,6 +215,9 @@ func (s *Service) emitAuthUpdate(ctx context.Context, update watcher.AuthUpdate)
 }
 
 func (s *Service) handleAuthUpdate(ctx context.Context, update watcher.AuthUpdate) {
+	if update.Applied != nil {
+		defer close(update.Applied)
+	}
 	if s == nil {
 		return
 	}
@@ -560,6 +566,22 @@ func (s *Service) rebindExecutors() {
 	}
 }
 
+func (s *Service) syncCodexConfig() {
+	if s == nil || s.watcher == nil {
+		return
+	}
+	s.configSyncMu.Lock()
+	defer s.configSyncMu.Unlock()
+
+	newCfg, errLoadConfig := config.LoadConfig(s.configPath)
+	if errLoadConfig != nil {
+		log.Errorf("failed to sync Codex config: %v", errLoadConfig)
+		return
+	}
+	s.applyConfigUpdate(newCfg)
+	s.watcher.SyncConfig(newCfg)
+}
+
 func (s *Service) applyConfigUpdate(newCfg *config.Config) {
 	if s == nil {
 		return
@@ -897,6 +919,7 @@ func (s *Service) Run(ctx context.Context) error {
 	s.server = api.NewServer(s.cfg, s.coreManager, s.accessManager, s.configPath, s.serverOptions...)
 	// Set callback to refresh model registrations when OAuthModelAlias is updated
 	s.server.SetOnOAuthModelAliasUpdated(s.RefreshAllModelRegistrations)
+	s.server.SetOnCodexConfigUpdated(s.syncCodexConfig)
 
 	// Set usage service if database is configured
 	if db := usage.DefaultManager().GetDB(); db != nil {

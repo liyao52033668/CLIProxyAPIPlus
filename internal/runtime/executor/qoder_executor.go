@@ -1533,6 +1533,22 @@ func qoderEnsureSession(ctx context.Context, auth *cliproxyauth.Auth, cfg *confi
 	return qoderEnsureSessionWithUpdater(ctx, auth, cfg, nil)
 }
 
+// EnsureQoderSessionAccessToken establishes a usable Qoder session and returns the
+// security_oauth_token suitable for OpenAPI Bearer auth (quota, models, etc.).
+// PAT credentials are exchanged via center jobToken first; browser device tokens
+// are used directly.
+func EnsureQoderSessionAccessToken(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config) (string, error) {
+	creds, err := qoderEnsureSession(ctx, auth, cfg)
+	if err != nil {
+		return "", err
+	}
+	token := strings.TrimSpace(creds.sessionAccessToken)
+	if token == "" {
+		return "", fmt.Errorf("qoder executor: missing session access token")
+	}
+	return token, nil
+}
+
 func qoderEnsureSessionWithUpdater(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config, updateAuthMetadata func(context.Context, string, map[string]any, []string) error) (qoderCredentials, error) {
 	creds, machineIDChanged := qoderNormalizePATMachineIdentity(qoderCreds(auth))
 	if machineIDChanged && updateAuthMetadata != nil && auth != nil && strings.TrimSpace(auth.ID) != "" {

@@ -332,7 +332,7 @@ func (l *authAutoRefreshLoop) remove(authID string) {
 }
 
 func nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time.Time, bool) {
-	if auth == nil {
+	if auth == nil || auth.Disabled || auth.Status == StatusDisabled {
 		return time.Time{}, false
 	}
 	if hasUnauthorizedAuthFailure(auth) {

@@ -21,6 +21,7 @@ import (
 	cursorauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cursor"
 	geminiAuth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/gemini"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/geminicli"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
@@ -459,8 +460,43 @@ func (h *Handler) resolveTokenForAuth(ctx context.Context, auth *coreauth.Auth) 
 		token, errToken := h.refreshAntigravityOAuthAccessToken(ctx, auth)
 		return token, errToken
 	}
+	if provider == "qoder" {
+		token, errToken := h.resolveQoderSessionToken(ctx, auth)
+		return token, errToken
+	}
 
 	return tokenValueForAuth(auth), nil
+}
+
+// resolveQoderSessionToken returns a Bearer token accepted by Qoder OpenAPI.
+// OAuth device tokens are already usable; PAT credentials are exchanged to
+// security_oauth_token via center jobToken (same path as chat/models).
+func (h *Handler) resolveQoderSessionToken(ctx context.Context, auth *coreauth.Auth) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if auth == nil {
+		return "", nil
+	}
+
+	hadSession := false
+	if auth.Metadata != nil {
+		if v, ok := auth.Metadata["security_oauth_token"].(string); ok && strings.TrimSpace(v) != "" {
+			hadSession = true
+		}
+	}
+
+	token, err := executor.EnsureQoderSessionAccessToken(ctx, auth, h.cfg)
+	if err != nil {
+		return "", err
+	}
+	if !hadSession && h.authManager != nil {
+		now := time.Now()
+		auth.LastRefreshedAt = now
+		auth.UpdatedAt = now
+		_, _ = h.authManager.Update(ctx, auth)
+	}
+	return token, nil
 }
 
 func (h *Handler) refreshGeminiOAuthAccessToken(ctx context.Context, auth *coreauth.Auth) (string, error) {

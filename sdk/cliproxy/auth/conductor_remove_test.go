@@ -58,6 +58,51 @@ func TestManager_Update_MissingAuthIsNoOp(t *testing.T) {
 	}
 }
 
+func TestManager_UpdateDisabled_UnschedulesAutoRefresh(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(nil, nil, nil)
+	loop := newAuthAutoRefreshLoop(manager, time.Second, 1)
+	manager.mu.Lock()
+	manager.refreshLoop = loop
+	manager.mu.Unlock()
+
+	lead := 10 * time.Minute
+	setRefreshLeadFactory(t, "disabled-refresh", func() *time.Duration {
+		d := lead
+		return &d
+	})
+	auth := &Auth{
+		ID:       "disabled-refresh-auth",
+		Provider: "disabled-refresh",
+		Metadata: map[string]any{
+			"email":      "x@example.com",
+			"expires_at": time.Now().Add(time.Hour).Format(time.RFC3339),
+		},
+	}
+	if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	loop.applyDirty(time.Now())
+
+	disabled := auth.Clone()
+	disabled.Disabled = true
+	disabled.Status = StatusDisabled
+	if _, errUpdate := manager.Update(ctx, disabled); errUpdate != nil {
+		t.Fatalf("disable auth: %v", errUpdate)
+	}
+
+	loop.mu.Lock()
+	_, scheduled := loop.index[auth.ID]
+	_, dirty := loop.dirty[auth.ID]
+	loop.mu.Unlock()
+	if scheduled || dirty {
+		t.Fatalf("disabled auth remained scheduled: index=%v dirty=%v", scheduled, dirty)
+	}
+	if manager.shouldRefresh(disabled, time.Now()) {
+		t.Fatal("disabled auth remained refreshable")
+	}
+}
+
 func TestManager_Remove_UnschedulesAutoRefresh(t *testing.T) {
 	ctx := context.Background()
 

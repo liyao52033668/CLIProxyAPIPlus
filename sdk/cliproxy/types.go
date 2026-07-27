@@ -86,11 +86,12 @@ type WatcherWrapper struct {
 	stop  func() error
 
 	setConfig             func(cfg *config.Config)
+	syncConfig            func(cfg *config.Config)
 	snapshotAuths         func() []*coreauth.Auth
 	snapshotInvalidAuths  func() []watcher.InvalidAuthEntry
 	setUpdateQueue        func(queue chan<- watcher.AuthUpdate)
 	dispatchRuntimeUpdate func(update watcher.AuthUpdate) bool
-	notifyTokenRefreshed  func(tokenID, accessToken, refreshToken, expiresAt string) // 方案 A: 后台刷新通知
+	notifyTokenRefreshed  func(tokenID, accessToken, refreshToken, expiresAt string) // Background refresh notification
 }
 
 // Start proxies to the underlying watcher Start implementation.
@@ -115,6 +116,14 @@ func (w *WatcherWrapper) SetConfig(cfg *config.Config) {
 		return
 	}
 	w.setConfig(cfg)
+}
+
+// SyncConfig updates the watcher config and waits for runtime auth reconciliation.
+func (w *WatcherWrapper) SyncConfig(cfg *config.Config) {
+	if w == nil || w.syncConfig == nil {
+		return
+	}
+	w.syncConfig(cfg)
 }
 
 // DispatchRuntimeAuthUpdate forwards runtime auth updates (e.g., websocket providers)
@@ -157,12 +166,9 @@ func (w *WatcherWrapper) SetAuthUpdateQueue(queue chan<- watcher.AuthUpdate) {
 	w.setUpdateQueue(queue)
 }
 
-// NotifyTokenRefreshed 通知 Watcher 后台刷新器已更新 token
-// 这是方案 A 的核心方法，用于解决后台刷新与内存 Auth 对象的时间差问题
-// tokenID: token 文件名（如 kiro-xxx.json）
-// accessToken: 新的 access token
-// refreshToken: 新的 refresh token
-// expiresAt: 新的过期时间（RFC3339 格式）
+// NotifyTokenRefreshed updates watcher state after the background refresher changes a token.
+// tokenID is the token file name, such as kiro-xxx.json.
+// expiresAt uses RFC3339 format.
 func (w *WatcherWrapper) NotifyTokenRefreshed(tokenID, accessToken, refreshToken, expiresAt string) {
 	if w == nil || w.notifyTokenRefreshed == nil {
 		return

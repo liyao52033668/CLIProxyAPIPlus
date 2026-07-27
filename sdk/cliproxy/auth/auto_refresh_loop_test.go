@@ -34,13 +34,6 @@ func setRefreshLeadFactory(t *testing.T, provider string, factory func() *time.D
 
 func TestNextRefreshCheckAt_DisabledUnschedule(t *testing.T) {
 	now := time.Date(2026, 4, 12, 0, 0, 0, 0, time.UTC)
-	expiry := now.Add(time.Hour)
-	lead := 10 * time.Minute
-	setRefreshLeadFactory(t, "disabled-schedule", func() *time.Duration {
-		d := lead
-		return &d
-	})
-
 	auth := &Auth{
 		ID:       "a1",
 		Provider: "disabled-schedule",
@@ -48,17 +41,12 @@ func TestNextRefreshCheckAt_DisabledUnschedule(t *testing.T) {
 		Status:   StatusDisabled,
 		Metadata: map[string]any{
 			"email":      "x@example.com",
-			"expires_at": expiry.Format(time.RFC3339),
+			"expires_at": now.Add(time.Hour).Format(time.RFC3339),
 		},
 	}
 
-	got, ok := nextRefreshCheckAt(now, auth, 15*time.Minute)
-	if !ok {
-		t.Fatalf("nextRefreshCheckAt() ok = false, want true")
-	}
-	want := expiry.Add(-lead)
-	if !got.Equal(want) {
-		t.Fatalf("nextRefreshCheckAt() = %s, want %s", got, want)
+	if _, ok := nextRefreshCheckAt(now, auth, 15*time.Minute); ok {
+		t.Fatal("nextRefreshCheckAt() scheduled a disabled auth")
 	}
 }
 

@@ -70,6 +70,7 @@ type Handler struct {
 	codexInspectionService   CodexInspectionService
 	apiCallResolver          apiCallResolver
 	onOAuthModelAliasUpdated func()
+	onCodexConfigUpdated     func()
 }
 
 // NewHandler creates a new management handler instance.
@@ -97,6 +98,35 @@ func (h *Handler) SetOnOAuthModelAliasUpdated(fn func()) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.onOAuthModelAliasUpdated = fn
+}
+
+// SetOnCodexConfigUpdated sets the callback triggered after Codex API key updates.
+func (h *Handler) SetOnCodexConfigUpdated(fn func()) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.onCodexConfigUpdated = fn
+}
+
+func (h *Handler) updateCodexConfig(c *gin.Context, update func() (int, gin.H)) {
+	h.mu.Lock()
+	status, response := update()
+	if status != 0 {
+		h.mu.Unlock()
+		c.JSON(status, response)
+		return
+	}
+	if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); err != nil {
+		h.mu.Unlock()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
+		return
+	}
+	fn := h.onCodexConfigUpdated
+	h.mu.Unlock()
+
+	if fn != nil {
+		fn()
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
 // startAttemptCleanup launches a background goroutine that periodically
