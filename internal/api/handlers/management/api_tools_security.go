@@ -69,6 +69,9 @@ var apiCallTokenHostsByProvider = map[string]map[string]struct{}{
 	"kimi": {
 		"api.kimi.com": {},
 	},
+	"qoder": {
+		"openapi.qoder.sh": {},
+	},
 	"xai": {
 		"api.x.ai":                {},
 		"cli-chat-proxy.grok.com": {},

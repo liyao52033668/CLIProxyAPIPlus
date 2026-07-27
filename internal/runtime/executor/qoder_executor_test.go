@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -71,13 +72,17 @@ func (f qoderRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error)
 }
 
 func TestFetchQoderModelCatalog_BuildsModelsAndContracts(t *testing.T) {
-	modelsResult := qoderModelArray([]byte(`{"chat":[{"key":" qwen3.7-max ","display_name":"Qwen3.7-Max","source":"quota_free","is_reasoning":true,"aliyun_user_type":"personal_basic"},{"key":"qoder-new","display_name":"Qoder New","source":"quota_paid","is_reasoning":0,"aliyun_user_type":"team_enterprise"}]}`))
+	// enable:false is a UI preference bit from Qoder, not a routing gate — still include the model.
+	modelsResult := qoderModelArray([]byte(`{"chat":[{"key":" qwen3.7-max ","display_name":"Qwen3.7-Max","source":"quota_free","is_reasoning":true,"aliyun_user_type":"personal_basic"},{"key":"qoder-new","display_name":"Qoder New","source":"quota_paid","is_reasoning":0,"aliyun_user_type":"team_enterprise"},{"key":"cmodel","display_name":"Cantus","enable":false,"is_reasoning":true}]}`))
 	catalog := fetchQoderModelCatalog(modelsResult, 123)
-	if len(catalog.Models) != 2 {
-		t.Fatalf("len(catalog.Models) = %d, want %d", len(catalog.Models), 2)
+	if len(catalog.Models) != 3 {
+		t.Fatalf("len(catalog.Models) = %d, want %d", len(catalog.Models), 3)
 	}
-	if len(catalog.Contracts) != 2 {
-		t.Fatalf("len(catalog.Contracts) = %d, want %d", len(catalog.Contracts), 2)
+	if len(catalog.Contracts) != 3 {
+		t.Fatalf("len(catalog.Contracts) = %d, want %d", len(catalog.Contracts), 3)
+	}
+	if catalog.Contracts["cmodel"].IsReasoning != true {
+		t.Fatal("expected cmodel contract to keep is_reasoning even when enable=false")
 	}
 
 	byID := make(map[string]*registry.ModelInfo, len(catalog.Models))
@@ -1424,7 +1429,10 @@ func TestQoderParseSSEToCompletion_PreservesUsage(t *testing.T) {
 		`data: {"body":"{\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18}}"}`,
 		`data: {"body":"[DONE]"}`,
 	}, "\n")
-	out := e.parseQoderSSEToCompletion([]byte(sse), "qwen3.7-max")
+	out, err := e.parseQoderSSEToCompletion([]byte(sse), "qwen3.7-max")
+	if err != nil {
+		t.Fatalf("parseQoderSSEToCompletion error: %v", err)
+	}
 	if got := gjson.GetBytes(out, "choices.0.message.content").String(); got != "hello" {
 		t.Fatalf("content = %q, want %q", got, "hello")
 	}
@@ -1446,7 +1454,10 @@ func TestQoderParseSSEToCompletion_PreservesUsageOnlyChunk(t *testing.T) {
 		`data: {"body":"{\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}"}`,
 		`data: {"body":"[DONE]"}`,
 	}, "\n")
-	out := e.parseQoderSSEToCompletion([]byte(sse), "qwen3.7-max")
+	out, err := e.parseQoderSSEToCompletion([]byte(sse), "qwen3.7-max")
+	if err != nil {
+		t.Fatalf("parseQoderSSEToCompletion error: %v", err)
+	}
 	if got := gjson.GetBytes(out, "usage.total_tokens").Int(); got != 5 {
 		t.Fatalf("usage.total_tokens = %d, want %d, body=%s", got, 5, string(out))
 	}
@@ -1455,7 +1466,10 @@ func TestQoderParseSSEToCompletion_PreservesUsageOnlyChunk(t *testing.T) {
 func TestQoderExtractOpenAIChunkFromSSE_KeepsUsageOnlyChunk(t *testing.T) {
 	e := NewQoderExecutor(&config.Config{})
 	line := []byte(`data: {"body":"{\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":1,\"total_tokens\":5}}"}`)
-	chunk := e.extractOpenAIChunkFromSSE(line, "qwen3.7-max")
+	chunk, err := e.extractOpenAIChunkFromSSE(line, "qwen3.7-max")
+	if err != nil {
+		t.Fatalf("extractOpenAIChunkFromSSE error: %v", err)
+	}
 	if chunk == nil {
 		t.Fatal("expected usage-only chunk to be preserved")
 	}
@@ -1464,6 +1478,44 @@ func TestQoderExtractOpenAIChunkFromSSE_KeepsUsageOnlyChunk(t *testing.T) {
 	}
 	if got := gjson.GetBytes(chunk, "model").String(); got != "qwen3.7-max" {
 		t.Fatalf("model = %q, want %q", got, "qwen3.7-max")
+	}
+}
+
+func TestQoderExtractOpenAIChunkFromSSE_SurfacesWrapperError(t *testing.T) {
+	e := NewQoderExecutor(&config.Config{})
+	line := []byte(`data:{"body":"{\"code\":\"invalid_request_error\",\"message\":\"Failed to route request\",\"details\":\"no model available after scoring\"}","statusCodeValue":400,"statusCode":"BAD_REQUEST"}`)
+	chunk, err := e.extractOpenAIChunkFromSSE(line, "cmodel")
+	if chunk != nil {
+		t.Fatalf("expected nil chunk, got %s", string(chunk))
+	}
+	var se statusErr
+	if !errors.As(err, &se) {
+		t.Fatalf("error type = %T (%v), want statusErr", err, err)
+	}
+	if se.StatusCode() != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", se.StatusCode(), http.StatusBadRequest)
+	}
+	if !strings.Contains(se.Error(), "Failed to route request") {
+		t.Fatalf("error = %q, want route failure message", se.Error())
+	}
+	if !strings.Contains(se.Error(), "no model available after scoring") {
+		t.Fatalf("error = %q, want details", se.Error())
+	}
+}
+
+func TestQoderParseSSEToCompletion_SurfacesWrapperError(t *testing.T) {
+	e := NewQoderExecutor(&config.Config{})
+	sse := `data:{"body":"{\"code\":\"invalid_request_error\",\"message\":\"Failed to route request\",\"details\":\"no model available after scoring\"}","statusCodeValue":400,"statusCode":"BAD_REQUEST"}`
+	out, err := e.parseQoderSSEToCompletion([]byte(sse), "cmodel")
+	if out != nil {
+		t.Fatalf("expected nil completion, got %s", string(out))
+	}
+	var se statusErr
+	if !errors.As(err, &se) {
+		t.Fatalf("error type = %T (%v), want statusErr", err, err)
+	}
+	if se.StatusCode() != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", se.StatusCode(), http.StatusBadRequest)
 	}
 }
 

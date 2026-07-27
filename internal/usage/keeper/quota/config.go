@@ -1,5 +1,7 @@
 package quota
 
+import qoderauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/qoder"
+
 type APICallConfig struct {
 	Method  string
 	URL     string
@@ -14,6 +16,7 @@ type ProviderConfigs struct {
 	ClaudeUsage         APICallConfig
 	ClaudeProfile       APICallConfig
 	Kimi                APICallConfig
+	Qoder               APICallConfig
 }
 
 func DefaultProviderConfigs() ProviderConfigs {
@@ -97,11 +100,20 @@ func DefaultProviderConfigs() ProviderConfigs {
 				"Authorization": "Bearer $TOKEN$",
 			},
 		},
+		Qoder: APICallConfig{
+			Method: "GET",
+			URL:    "https://openapi.qoder.sh/api/v2/quota/usage",
+			Headers: map[string]string{
+				"Authorization": "Bearer $TOKEN$",
+				"Accept":        "application/json",
+				"User-Agent":    "qoder/" + qoderauth.CosyVersion,
+			},
+		},
 	}
 }
 
 func (c ProviderConfigs) APICallTemplates() []APICallConfig {
-	templates := make([]APICallConfig, 0, len(c.Antigravity)+6)
+	templates := make([]APICallConfig, 0, len(c.Antigravity)+7)
 	templates = append(templates, c.Antigravity...)
 	templates = append(templates,
 		c.Codex,
@@ -110,6 +122,7 @@ func (c ProviderConfigs) APICallTemplates() []APICallConfig {
 		c.ClaudeUsage,
 		c.ClaudeProfile,
 		c.Kimi,
+		c.Qoder,
 	)
 	return templates
 }

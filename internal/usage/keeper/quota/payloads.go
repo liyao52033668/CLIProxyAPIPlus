@@ -228,6 +228,33 @@ func parseClaudeProfileOrganization(object map[string]json.RawMessage) *ClaudePr
 	}
 }
 
+func parseQoderUsagePayload(response *apicall.Response) (*QoderUsagePayload, error) {
+	object, err := parseResponseObject(response)
+	if err != nil {
+		return nil, err
+	}
+	payload := &QoderUsagePayload{
+		UserID:               stringField(object, "userId", "user_id"),
+		UserType:             stringField(object, "userType", "user_type"),
+		UsageType:            stringField(object, "usageType", "usage_type"),
+		TotalUsagePercentage: floatField(object, "totalUsagePercentage", "total_usage_percentage"),
+		IsQuotaExceeded:      boolField(object, "isQuotaExceeded", "is_quota_exceeded"),
+		ExpiresAt:            intField(object, "expiresAt", "expires_at"),
+		UpgradeURL:           stringField(object, "upgradeUrl", "upgrade_url"),
+		IsPlanQuotaProrated:  boolField(object, "isPlanQuotaProrated", "is_plan_quota_prorated"),
+	}
+	if userQuota := objectField(object, "userQuota", "user_quota"); userQuota != nil {
+		payload.UserQuota = &QoderUserQuota{
+			Total:      floatField(userQuota, "total"),
+			Used:       floatField(userQuota, "used"),
+			Remaining:  floatField(userQuota, "remaining"),
+			Percentage: floatField(userQuota, "percentage"),
+			Unit:       stringField(userQuota, "unit"),
+		}
+	}
+	return payload, nil
+}
+
 func parseKimiUsagePayload(response *apicall.Response) (*KimiUsagePayload, error) {
 	object, err := parseResponseObject(response)
 	if err != nil {

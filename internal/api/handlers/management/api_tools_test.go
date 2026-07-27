@@ -103,6 +103,17 @@ func TestTrustedAPICallTokenDestination(t *testing.T) {
 			want:   true,
 		},
 		{
+			name:   "qoder openapi host",
+			auth:   &coreauth.Auth{Provider: "qoder"},
+			rawURL: "https://openapi.qoder.sh/api/v2/quota/usage",
+			want:   true,
+		},
+		{
+			name:   "qoder unrelated host not trusted",
+			auth:   &coreauth.Auth{Provider: "qoder"},
+			rawURL: "https://api3.qoder.sh/api/v2/model/list",
+		},
+		{
 			name:   "provider subdomain not trusted",
 			auth:   &coreauth.Auth{Provider: "claude"},
 			rawURL: "https://evil.api.anthropic.com/v1",

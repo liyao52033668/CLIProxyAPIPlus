@@ -45,6 +45,13 @@ func NormalizeQuotaRows(output ProviderOutput) []QuotaRow {
 			return nil
 		}
 		return normalizeKimiQuotaRows(*result)
+	case QoderResult:
+		return normalizeQoderQuotaRows(result)
+	case *QoderResult:
+		if result == nil {
+			return nil
+		}
+		return normalizeQoderQuotaRows(*result)
 	default:
 		return nil
 	}
@@ -237,6 +244,56 @@ func normalizeAntigravityQuotaRows(result AntigravityResult) []QuotaRow {
 		rows = append(rows, row)
 	}
 	return rows
+}
+
+func normalizeQoderQuotaRows(result QoderResult) []QuotaRow {
+	// Official OpenAPI returns one credits bucket; surface used/limit/remaining plus the exceed flag.
+	if result.Usage == nil {
+		return nil
+	}
+	usage := result.Usage
+	metric := firstNonEmpty(usage.UsageType, "credits")
+	row := QuotaRow{
+		Key:          "credits",
+		Label:        "Credits",
+		Scope:        "credits",
+		Metric:       metric,
+		LimitReached: boolPtr(usage.IsQuotaExceeded),
+		Allowed:      boolPtr(!usage.IsQuotaExceeded),
+		ResetAt:      qoderExpiresAtRFC3339(usage.ExpiresAt),
+	}
+	if usage.UserQuota != nil {
+		row.Used = floatPtr(usage.UserQuota.Used)
+		row.Limit = floatPtr(usage.UserQuota.Total)
+		row.Remaining = floatPtr(usage.UserQuota.Remaining)
+		if usage.UserQuota.Unit != "" {
+			row.Metric = usage.UserQuota.Unit
+		}
+		if usage.UserQuota.Percentage != 0 {
+			row.UsedPercent = floatPtr(usage.UserQuota.Percentage)
+		}
+	}
+	if usage.TotalUsagePercentage != 0 || row.UsedPercent == nil {
+		row.UsedPercent = floatPtr(usage.TotalUsagePercentage)
+	}
+	return []QuotaRow{row}
+}
+
+func qoderExpiresAtRFC3339(expiresAt int64) string {
+	if expiresAt <= 0 {
+		return ""
+	}
+	// Official values are epoch milliseconds; accept seconds for defensive compatibility.
+	seconds := expiresAt
+	if expiresAt > 1_000_000_000_000 {
+		seconds = expiresAt / 1000
+	}
+	// Ignore far-future sentinels such as year-9999 placeholders.
+	const maxReasonableUnix = 4102444800 // 2100-01-01 UTC
+	if seconds > maxReasonableUnix {
+		return ""
+	}
+	return time.Unix(seconds, 0).UTC().Format(time.RFC3339)
 }
 
 func normalizeKimiQuotaRows(result KimiResult) []QuotaRow {

@@ -24,6 +24,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -349,7 +350,10 @@ func (e *QoderExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	}
 
 	// Parse SSE response to extract the final completion
-	openAIResp := e.parseQoderSSEToCompletion(data, req.Model)
+	openAIResp, errParse := e.parseQoderSSEToCompletion(data, req.Model)
+	if errParse != nil {
+		return resp, errParse
+	}
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(openAIResp))
 	// Ensure usage is recorded even if upstream omits usage metadata.
 	reporter.EnsurePublished(ctx)
@@ -467,13 +471,18 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		totalSSELines := 0
 		totalOpenAIChunks := 0
 		totalTranslatedPayloads := 0
+		var streamErr error
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			totalSSELines++
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 
 			// Parse Qoder SSE format: data:{...} where body contains inner OpenAI chunk
-			openAIChunk := e.extractOpenAIChunkFromSSE(line, req.Model)
+			openAIChunk, errLine := e.extractOpenAIChunkFromSSE(line, req.Model)
+			if errLine != nil {
+				streamErr = errLine
+				break
+			}
 			if openAIChunk == nil {
 				continue
 			}
@@ -494,15 +503,19 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			}
 		}
 		errScan := scanner.Err()
-		log.Debugf("qoder executor: stream bootstrap diagnostics stage=stream_loop_exit requested_model=%s upstream_model=%s status=%d elapsed_ms=%d sse_lines=%d openai_chunks=%d translated_payloads=%d ctx_err=%s scanner_err=%s", strings.TrimSpace(requestedModel), strings.TrimSpace(req.Model), httpResp.StatusCode, time.Since(streamAttemptStartedAt).Milliseconds(), totalSSELines, totalOpenAIChunks, totalTranslatedPayloads, qoderDiagnosticErrString(ctx.Err()), qoderDiagnosticErrString(errScan))
-		doneChunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param)
-		for i := range doneChunks {
-			out <- cliproxyexecutor.StreamChunk{Payload: doneChunks[i]}
+		if streamErr == nil {
+			streamErr = errScan
 		}
-		if errScan != nil {
-			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+		log.Debugf("qoder executor: stream bootstrap diagnostics stage=stream_loop_exit requested_model=%s upstream_model=%s status=%d elapsed_ms=%d sse_lines=%d openai_chunks=%d translated_payloads=%d ctx_err=%s scanner_err=%s stream_err=%s", strings.TrimSpace(requestedModel), strings.TrimSpace(req.Model), httpResp.StatusCode, time.Since(streamAttemptStartedAt).Milliseconds(), totalSSELines, totalOpenAIChunks, totalTranslatedPayloads, qoderDiagnosticErrString(ctx.Err()), qoderDiagnosticErrString(errScan), qoderDiagnosticErrString(streamErr))
+		if streamErr == nil {
+			doneChunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param)
+			for i := range doneChunks {
+				out <- cliproxyexecutor.StreamChunk{Payload: doneChunks[i]}
+			}
+		} else {
+			helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 			reporter.PublishFailure(ctx)
-			out <- cliproxyexecutor.StreamChunk{Err: errScan}
+			out <- cliproxyexecutor.StreamChunk{Err: streamErr}
 		}
 		// Guarantee a usage record exists even if the stream never emitted usage data.
 		reporter.EnsurePublished(ctx)
@@ -1285,48 +1298,78 @@ func (e *QoderExecutor) buildCosyRequest(ctx context.Context, auth *cliproxyauth
 
 // extractOpenAIChunkFromSSE parses a Qoder SSE line and extracts the inner OpenAI chunk.
 // Chunks that only carry usage (no choices) are preserved so stream usage can be published.
-func (e *QoderExecutor) extractOpenAIChunkFromSSE(line []byte, model string) []byte {
+// Upstream wrapper errors (statusCodeValue != 200 or error-shaped body) are returned as statusErr.
+func (e *QoderExecutor) extractOpenAIChunkFromSSE(line []byte, model string) ([]byte, error) {
 	s := string(line)
 	if !strings.HasPrefix(s, "data:") {
-		return nil
+		return nil, nil
 	}
 	raw := strings.TrimSpace(s[5:])
 	if raw == "" || raw == "[DONE]" {
-		return nil
+		return nil, nil
 	}
+
+	statusCode := qoderSSEStatusCode(raw)
 
 	// Parse the outer SSE envelope
 	outerBody := gjson.Get(raw, "body")
 	if !outerBody.Exists() {
-		return nil
+		if statusCode != 0 && statusCode != http.StatusOK {
+			return nil, newQoderSSEStatusErr(statusCode, raw)
+		}
+		return nil, nil
 	}
 	innerRaw := outerBody.String()
-	if innerRaw == "[DONE]" {
-		return nil
+	switch {
+	case innerRaw == "" || innerRaw == "[DONE]" || innerRaw == "[NOT_EXCEED_QUOTA]":
+		return nil, nil
+	case strings.HasPrefix(innerRaw, "[EXCEED_QUOTA]"):
+		msg := strings.TrimSpace(strings.TrimPrefix(innerRaw, "[EXCEED_QUOTA]"))
+		if msg == "" {
+			msg = "quota exceeded"
+		}
+		code := statusCode
+		if code == 0 || code == http.StatusOK {
+			code = http.StatusTooManyRequests
+		}
+		return nil, statusErr{code: code, msg: msg}
+	case strings.HasPrefix(innerRaw, "[NOTIFICATIONS]"):
+		return nil, nil
+	}
+
+	if statusCode != 0 && statusCode != http.StatusOK {
+		return nil, newQoderSSEStatusErr(statusCode, innerRaw)
 	}
 
 	// Parse inner OpenAI chunk
 	if !gjson.Valid(innerRaw) {
-		return nil
+		return nil, nil
 	}
 	inner := gjson.Parse(innerRaw)
 	hasChoices := inner.Get("choices").Exists()
 	hasUsage := hasOpenAIStyleUsageTokenFields(inner.Get("usage"))
 	if !hasChoices && !hasUsage {
-		return nil
+		if msg := qoderSSEErrorMessage(inner); msg != "" {
+			code := statusCode
+			if code == 0 || code == http.StatusOK {
+				code = http.StatusBadRequest
+			}
+			return nil, statusErr{code: code, msg: msg}
+		}
+		return nil, nil
 	}
 
 	// Override the model name
 	result, err := sjson.Set(innerRaw, "model", model)
 	if err != nil {
-		return []byte(innerRaw)
+		return []byte(innerRaw), nil
 	}
-	return []byte(result)
+	return []byte(result), nil
 }
 
 // parseQoderSSEToCompletion parses the full SSE response and assembles a non-streaming completion.
 // It preserves the last non-empty usage payload from upstream SSE chunks so usage stats work.
-func (e *QoderExecutor) parseQoderSSEToCompletion(data []byte, model string) []byte {
+func (e *QoderExecutor) parseQoderSSEToCompletion(data []byte, model string) ([]byte, error) {
 	var fullContent strings.Builder
 	var contentBuffer translatorcommon.ContentBlockTextBuffer
 	var finishReason string
@@ -1334,27 +1377,14 @@ func (e *QoderExecutor) parseQoderSSEToCompletion(data []byte, model string) []b
 
 	lines := strings.SplitSeq(string(data), "\n")
 	for line := range lines {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "data:") {
+		chunk, errLine := e.extractOpenAIChunkFromSSE([]byte(strings.TrimSpace(line)), model)
+		if errLine != nil {
+			return nil, errLine
+		}
+		if chunk == nil {
 			continue
 		}
-		raw := strings.TrimSpace(line[5:])
-		if raw == "" || raw == "[DONE]" {
-			continue
-		}
-
-		outerBody := gjson.Get(raw, "body")
-		if !outerBody.Exists() {
-			continue
-		}
-		innerRaw := outerBody.String()
-		if innerRaw == "[DONE]" {
-			continue
-		}
-		if !gjson.Valid(innerRaw) {
-			continue
-		}
-		inner := gjson.Parse(innerRaw)
+		inner := gjson.ParseBytes(chunk)
 		if usageNode := inner.Get("usage"); hasOpenAIStyleUsageTokenFields(usageNode) {
 			usageRaw = usageNode.Raw
 		}
@@ -1403,7 +1433,78 @@ func (e *QoderExecutor) parseQoderSSEToCompletion(data []byte, model string) []b
 			out = withUsage
 		}
 	}
-	return out
+	return out, nil
+}
+
+func qoderSSEStatusCode(raw string) int {
+	for _, path := range []string{"statusCodeValue", "status_code_value", "status"} {
+		result := gjson.Get(raw, path)
+		if !result.Exists() {
+			continue
+		}
+		switch result.Type {
+		case gjson.Number:
+			return int(result.Int())
+		default:
+			text := strings.TrimSpace(result.String())
+			if text == "" {
+				continue
+			}
+			if n, err := strconv.Atoi(text); err == nil {
+				return n
+			}
+		}
+	}
+	return 0
+}
+
+func qoderSSEErrorMessage(inner gjson.Result) string {
+	msg := strings.TrimSpace(firstNonEmptyResult(inner,
+		"message",
+		"error.message",
+		"msg",
+		"error",
+		"error_message",
+	))
+	details := strings.TrimSpace(firstNonEmptyResult(inner, "details", "error.details", "detail"))
+	code := strings.TrimSpace(firstNonEmptyResult(inner, "code", "error.code", "type", "error.type"))
+	switch {
+	case msg != "" && details != "" && !strings.Contains(msg, details):
+		if code != "" && !strings.Contains(msg, code) {
+			return fmt.Sprintf("%s: %s (%s)", msg, details, code)
+		}
+		return fmt.Sprintf("%s: %s", msg, details)
+	case msg != "":
+		if code != "" && !strings.Contains(msg, code) {
+			return fmt.Sprintf("%s (%s)", msg, code)
+		}
+		return msg
+	case details != "":
+		if code != "" {
+			return fmt.Sprintf("%s (%s)", details, code)
+		}
+		return details
+	case code != "":
+		return code
+	default:
+		return ""
+	}
+}
+
+func newQoderSSEStatusErr(statusCode int, raw string) statusErr {
+	msg := strings.TrimSpace(raw)
+	if gjson.Valid(raw) {
+		if parsed := qoderSSEErrorMessage(gjson.Parse(raw)); parsed != "" {
+			msg = parsed
+		}
+	}
+	if msg == "" {
+		msg = fmt.Sprintf("qoder upstream status %d", statusCode)
+	}
+	if statusCode <= 0 {
+		statusCode = http.StatusBadGateway
+	}
+	return statusErr{code: statusCode, msg: msg}
 }
 
 // hasOpenAIStyleUsageTokenFields reports whether a usage object has countable token fields.

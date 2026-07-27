@@ -213,6 +213,55 @@ func TestNormalizeKimiQuotaRows(t *testing.T) {
 	assertIntField(t, limit.ResetAfterSeconds, 7200, "limit resetAfterSeconds")
 }
 
+func TestNormalizeQoderQuotaRows(t *testing.T) {
+	rows := quota.NormalizeQuotaRows(quota.ProviderOutput{Provider: "qoder", Result: quota.QoderResult{Usage: &quota.QoderUsagePayload{
+		UsageType:            "credits",
+		TotalUsagePercentage: 42.5,
+		IsQuotaExceeded:      false,
+		ExpiresAt:            1893456000000, // 2030-01-01T00:00:00Z in ms
+		UserQuota: &quota.QoderUserQuota{
+			Total:      300,
+			Used:       127.5,
+			Remaining:  172.5,
+			Percentage: 42.5,
+			Unit:       "credits",
+		},
+	}}})
+
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 quota row, got %#v", rows)
+	}
+	credits := findQuotaRow(t, rows, "credits")
+	assertQuotaText(t, credits, "Credits", "credits", "credits")
+	assertFloatField(t, credits.Used, 127.5, "credits used")
+	assertFloatField(t, credits.Limit, 300, "credits limit")
+	assertFloatField(t, credits.Remaining, 172.5, "credits remaining")
+	assertFloatField(t, credits.UsedPercent, 42.5, "credits usedPercent")
+	assertBoolField(t, credits.LimitReached, false, "credits limitReached")
+	assertBoolField(t, credits.Allowed, true, "credits allowed")
+	if credits.ResetAt != "2030-01-01T00:00:00Z" {
+		t.Fatalf("unexpected credits resetAt: %#v", credits)
+	}
+
+	exhausted := quota.NormalizeQuotaRows(quota.ProviderOutput{Provider: "qoder", Result: quota.QoderResult{Usage: &quota.QoderUsagePayload{
+		UsageType:            "credits",
+		TotalUsagePercentage: 0,
+		IsQuotaExceeded:      true,
+		ExpiresAt:            253402214400000, // far-future sentinel
+		UserQuota:            &quota.QoderUserQuota{Total: 0, Used: 0, Remaining: 0, Percentage: 0, Unit: "credits"},
+	}}})
+	if len(exhausted) != 1 {
+		t.Fatalf("expected 1 exhausted quota row, got %#v", exhausted)
+	}
+	row := findQuotaRow(t, exhausted, "credits")
+	assertBoolField(t, row.LimitReached, true, "exhausted limitReached")
+	assertBoolField(t, row.Allowed, false, "exhausted allowed")
+	assertFloatField(t, row.UsedPercent, 0, "exhausted usedPercent")
+	if row.ResetAt != "" {
+		t.Fatalf("expected empty resetAt for far-future sentinel, got %q", row.ResetAt)
+	}
+}
+
 func findQuotaRow(t *testing.T, rows []quota.QuotaRow, key string) quota.QuotaRow {
 	t.Helper()
 	for _, row := range rows {

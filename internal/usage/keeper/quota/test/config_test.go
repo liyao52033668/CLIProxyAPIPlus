@@ -3,14 +3,15 @@ package test
 import (
 	"testing"
 
+	qoderauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/qoder"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/quota"
 )
 
 func TestDefaultProviderConfigsContainsSevenAPICallTemplates(t *testing.T) {
 	configs := quota.DefaultProviderConfigs()
 	templates := configs.APICallTemplates()
-	if len(templates) != 9 {
-		t.Fatalf("expected 9 api-call templates, got %d", len(templates))
+	if len(templates) != 10 {
+		t.Fatalf("expected 10 api-call templates, got %d", len(templates))
 	}
 	if len(configs.Antigravity) != 3 {
 		t.Fatalf("expected 3 antigravity api-call templates, got %d", len(configs.Antigravity))
@@ -40,6 +41,9 @@ func TestDefaultProviderConfigsContainsSevenAPICallTemplates(t *testing.T) {
 	if configs.Kimi.Method != "GET" || configs.Kimi.URL != "https://api.kimi.com/coding/v1/usages" {
 		t.Fatalf("unexpected kimi config: %+v", configs.Kimi)
 	}
+	if configs.Qoder.Method != "GET" || configs.Qoder.URL != "https://openapi.qoder.sh/api/v2/quota/usage" {
+		t.Fatalf("unexpected qoder config: %+v", configs.Qoder)
+	}
 
 	if configs.Antigravity[0].Headers["Authorization"] != "Bearer $TOKEN$" || configs.Antigravity[0].Headers["Content-Type"] != "application/json" || configs.Antigravity[0].Headers["User-Agent"] != "antigravity/1.11.5 windows/amd64" {
 		t.Fatalf("unexpected antigravity headers: %+v", configs.Antigravity[0].Headers)
@@ -61,5 +65,9 @@ func TestDefaultProviderConfigsContainsSevenAPICallTemplates(t *testing.T) {
 	}
 	if configs.Kimi.Headers["Authorization"] != "Bearer $TOKEN$" {
 		t.Fatalf("unexpected kimi headers: %+v", configs.Kimi.Headers)
+	}
+	wantQoderUA := "qoder/" + qoderauth.CosyVersion
+	if configs.Qoder.Headers["Authorization"] != "Bearer $TOKEN$" || configs.Qoder.Headers["Accept"] != "application/json" || configs.Qoder.Headers["User-Agent"] != wantQoderUA {
+		t.Fatalf("unexpected qoder headers: %+v, want User-Agent %q", configs.Qoder.Headers, wantQoderUA)
 	}
 }

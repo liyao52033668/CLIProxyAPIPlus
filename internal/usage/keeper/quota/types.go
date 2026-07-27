@@ -220,6 +220,30 @@ type KimiResult struct {
 	Usage *KimiUsagePayload `json:"usage"`
 }
 
+type QoderUserQuota struct {
+	Total      float64 `json:"total,omitempty"`
+	Used       float64 `json:"used,omitempty"`
+	Remaining  float64 `json:"remaining,omitempty"`
+	Percentage float64 `json:"percentage,omitempty"`
+	Unit       string  `json:"unit,omitempty"`
+}
+
+type QoderUsagePayload struct {
+	UserID               string          `json:"userId,omitempty"`
+	UserType             string          `json:"userType,omitempty"`
+	UsageType            string          `json:"usageType,omitempty"`
+	TotalUsagePercentage float64         `json:"totalUsagePercentage,omitempty"`
+	IsQuotaExceeded      bool            `json:"isQuotaExceeded,omitempty"`
+	ExpiresAt            int64           `json:"expiresAt,omitempty"`
+	UpgradeURL           string          `json:"upgradeUrl,omitempty"`
+	UserQuota            *QoderUserQuota `json:"userQuota,omitempty"`
+	IsPlanQuotaProrated  bool            `json:"isPlanQuotaProrated,omitempty"`
+}
+
+type QoderResult struct {
+	Usage *QoderUsagePayload `json:"usage"`
+}
+
 type ProviderHandler interface {
 	Check(context.Context, ProviderInput) (ProviderOutput, error)
 }

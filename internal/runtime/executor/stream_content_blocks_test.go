@@ -37,7 +37,10 @@ func TestQoderParseQoderSSEToCompletionBuffersSplitStringifiedTextContentBlocks(
 	}, "\n")
 
 	executor := NewQoderExecutor(&config.Config{})
-	out := executor.parseQoderSSEToCompletion([]byte(raw), "upstream-model")
+	out, err := executor.parseQoderSSEToCompletion([]byte(raw), "upstream-model")
+	if err != nil {
+		t.Fatalf("parseQoderSSEToCompletion error: %v", err)
+	}
 	content := gjson.GetBytes(out, "choices.0.message.content").String()
 	if content != "hello world" {
 		t.Fatalf("content = %q, want hello world; payload=%s", content, string(out))
