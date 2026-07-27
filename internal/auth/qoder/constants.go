@@ -11,8 +11,10 @@ const (
 	ChatBase     = "https://api3.qoder.sh"
 	OpenAPIBase  = "https://openapi.qoder.sh"
 	IDEVersion   = "1.18.0"
-	CosyVersion  = "1.1.5"
-	RedirectURI  = "qoder://aicoding.aicoding-agent/login-success"
+	// CosyVersion is the compile-time fallback qodercli version; the live value
+	// is resolved from the remote channel manifest via GetCosyVersion.
+	CosyVersion = "1.1.5"
+	RedirectURI = "qoder://aicoding.aicoding-agent/login-success"
 )
 
 // SelectAccountsPath is the browser login page path.

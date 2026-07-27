@@ -1156,8 +1156,9 @@ func buildQoderCosyHTTPRequest(ctx context.Context, auth *cliproxyauth.Auth, met
 	info := aesEncryptB64(string(identity), aesKey)
 	key := base64.StdEncoding.EncodeToString(rsaEncrypt([]byte(aesKey)))
 	timestamp := fmt.Sprintf("%d", time.Now().Unix())
+	cosyVersion := qoder.GetCosyVersion()
 	payloadJSON, _ := json.Marshal(map[string]any{
-		"cosyVersion": qoder.CosyVersion,
+		"cosyVersion": cosyVersion,
 		"ideVersion":  qoder.IDEVersion,
 		"info":        info,
 		"requestId":   uuid.NewString(),
@@ -1179,7 +1180,7 @@ func buildQoderCosyHTTPRequest(ctx context.Context, auth *cliproxyauth.Auth, met
 
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept-Encoding", "identity")
-	httpReq.Header.Set("Cosy-Version", qoder.CosyVersion)
+	httpReq.Header.Set("Cosy-Version", cosyVersion)
 	httpReq.Header.Set("Cosy-Machineid", creds.machineID)
 	httpReq.Header.Set("Cosy-Machinetoken", creds.machineToken)
 	httpReq.Header.Set("Cosy-Machinetype", creds.machineType)
@@ -1450,14 +1451,15 @@ func qoderEnsureSessionWithUpdater(ctx context.Context, auth *cliproxyauth.Auth,
 	headers.Set("appcode", qoderAppCode)
 	headers.Set("accept", "application/json")
 	headers.Set("accept-encoding", "identity")
-	headers.Set("cosy-version", qoder.CosyVersion)
+	cosyVersion := qoder.GetCosyVersion()
+	headers.Set("cosy-version", cosyVersion)
 	headers.Set("cosy-clienttype", "5")
 	headers.Set("date", date)
 	headers.Set("signature", signature)
 	headers.Set("content-type", "application/json")
 	headers.Set("cosy-machineid", creds.machineID)
 	// Token acquisition follows the OAuth/OpenAPI convention: User-Agent "qoder/<version>".
-	headers.Set("user-agent", "qoder/"+qoder.CosyVersion)
+	headers.Set("user-agent", "qoder/"+cosyVersion)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, 15*time.Second)
 	_, respBody, _, errDo := helps.DoJSON(ctx, cfg, helps.UpstreamRequest{
