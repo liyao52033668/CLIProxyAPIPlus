@@ -23,6 +23,7 @@ func defaultKiroAliases() []OAuthModelAlias {
 
 func defaultQoderAliases() []OAuthModelAlias {
 	return []OAuthModelAlias{
+		{Name: "cmodel", Alias: "cantus"},
 		{Name: "qmodel_preview", Alias: "qwen3.8-max-preview"},
 		{Name: "qmodel_latest", Alias: "qwen3.7-max"},
 		{Name: "qmodel", Alias: "qwen3.7-plus"},

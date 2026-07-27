@@ -411,6 +411,16 @@ func GetQoderModels() []*ModelInfo {
 			Description: "Qoder Lite tier model",
 		},
 		{
+			ID:          "cmodel",
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     "qoder",
+			Type:        "qoder",
+			DisplayName: "Cantus",
+			Description: "Cantus via Qoder",
+			Thinking:    &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
+		},
+		{
 			ID:          "qmodel_preview",
 			Object:      "model",
 			Created:     now,

@@ -10,8 +10,8 @@ const (
 	CenterBase   = "https://center.qoder.sh"
 	ChatBase     = "https://api3.qoder.sh"
 	OpenAPIBase  = "https://openapi.qoder.sh"
-	IDEVersion   = "1.16.1"
-	CosyVersion  = "1.0.0"
+	IDEVersion   = "1.18.0"
+	CosyVersion  = "1.1.5"
 	RedirectURI  = "qoder://aicoding.aicoding-agent/login-success"
 )
 

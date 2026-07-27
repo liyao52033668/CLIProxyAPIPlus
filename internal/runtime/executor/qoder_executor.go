@@ -1158,7 +1158,7 @@ func buildQoderCosyHTTPRequest(ctx context.Context, auth *cliproxyauth.Auth, met
 	timestamp := fmt.Sprintf("%d", time.Now().Unix())
 	payloadJSON, _ := json.Marshal(map[string]any{
 		"cosyVersion": qoder.CosyVersion,
-		"ideVersion":  "",
+		"ideVersion":  qoder.IDEVersion,
 		"info":        info,
 		"requestId":   uuid.NewString(),
 		"version":     "v1",
@@ -1183,7 +1183,7 @@ func buildQoderCosyHTTPRequest(ctx context.Context, auth *cliproxyauth.Auth, met
 	httpReq.Header.Set("Cosy-Machineid", creds.machineID)
 	httpReq.Header.Set("Cosy-Machinetoken", creds.machineToken)
 	httpReq.Header.Set("Cosy-Machinetype", creds.machineType)
-	httpReq.Header.Set("Cosy-Machineos", "x86_64_windows")
+	httpReq.Header.Set("Cosy-Machineos", "x86_64_linux")
 	httpReq.Header.Set("Cosy-Clienttype", "5")
 	httpReq.Header.Set("Cosy-Clientip", "169.254.198.161")
 	httpReq.Header.Set("Login-Version", "v2")
@@ -1197,7 +1197,9 @@ func buildQoderCosyHTTPRequest(ctx context.Context, auth *cliproxyauth.Auth, met
 	httpReq.Header.Set("Cosy-Organization-Id", "")
 	httpReq.Header.Set("Cosy-Organization-Tags", "")
 	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer COSY.%s.%s", payloadB64, sigMD5))
-	httpReq.Header.Set("User-Agent", "Go-http-client/2.0")
+	// Real qodercli identifies model inference via Cosy-* headers and sends no User-Agent.
+	// Setting it to empty suppresses Go's default "Go-http-client/2.0".
+	httpReq.Header.Set("User-Agent", "")
 	httpReq.Header.Set("X-Request-Id", uuid.NewString())
 	return httpReq, nil
 }
@@ -1454,7 +1456,8 @@ func qoderEnsureSessionWithUpdater(ctx context.Context, auth *cliproxyauth.Auth,
 	headers.Set("signature", signature)
 	headers.Set("content-type", "application/json")
 	headers.Set("cosy-machineid", creds.machineID)
-	headers.Set("user-agent", "Go-http-client/2.0")
+	// Token acquisition follows the OAuth/OpenAPI convention: User-Agent "qoder/<version>".
+	headers.Set("user-agent", "qoder/"+qoder.CosyVersion)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, 15*time.Second)
 	_, respBody, _, errDo := helps.DoJSON(ctx, cfg, helps.UpstreamRequest{
