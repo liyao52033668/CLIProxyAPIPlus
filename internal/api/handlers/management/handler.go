@@ -52,6 +52,7 @@ type Handler struct {
 	cfg                      *config.Config
 	configFilePath           string
 	mu                       sync.Mutex
+	codexUpdateMu            sync.Mutex
 	attemptsMu               sync.Mutex
 	failedAttempts           map[string]*attemptInfo // keyed by client IP
 	authManager              *coreauth.Manager
@@ -70,7 +71,7 @@ type Handler struct {
 	codexInspectionService   CodexInspectionService
 	apiCallResolver          apiCallResolver
 	onOAuthModelAliasUpdated func()
-	onCodexConfigUpdated     func()
+	onCodexConfigUpdated     func() error
 }
 
 // NewHandler creates a new management handler instance.
@@ -101,14 +102,18 @@ func (h *Handler) SetOnOAuthModelAliasUpdated(fn func()) {
 }
 
 // SetOnCodexConfigUpdated sets the callback triggered after Codex API key updates.
-func (h *Handler) SetOnCodexConfigUpdated(fn func()) {
+func (h *Handler) SetOnCodexConfigUpdated(fn func() error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.onCodexConfigUpdated = fn
 }
 
 func (h *Handler) updateCodexConfig(c *gin.Context, update func() (int, gin.H)) {
+	h.codexUpdateMu.Lock()
+	defer h.codexUpdateMu.Unlock()
+
 	h.mu.Lock()
+	previousCodexKeys := cloneCodexKeys(h.cfg.CodexKey)
 	status, response := update()
 	if status != 0 {
 		h.mu.Unlock()
@@ -116,6 +121,7 @@ func (h *Handler) updateCodexConfig(c *gin.Context, update func() (int, gin.H)) 
 		return
 	}
 	if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); err != nil {
+		h.cfg.CodexKey = previousCodexKeys
 		h.mu.Unlock()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
 		return
@@ -123,10 +129,48 @@ func (h *Handler) updateCodexConfig(c *gin.Context, update func() (int, gin.H)) 
 	fn := h.onCodexConfigUpdated
 	h.mu.Unlock()
 
-	if fn != nil {
-		fn()
+	if err := invokeCodexConfigUpdated(fn); err != nil {
+		h.mu.Lock()
+		h.cfg.CodexKey = previousCodexKeys
+		errRollbackSave := config.SaveConfigPreserveComments(h.configFilePath, h.cfg)
+		h.mu.Unlock()
+		errRollbackSync := invokeCodexConfigUpdated(fn)
+		if errRollbackSave != nil || errRollbackSync != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to apply Codex config: %v; rollback save: %v; rollback sync: %v", err, errRollbackSave, errRollbackSync)})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to apply Codex config: %v", err)})
+		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+func invokeCodexConfigUpdated(fn func() error) (err error) {
+	if fn == nil {
+		return nil
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("callback panic: %v", recovered)
+		}
+	}()
+	return fn()
+}
+
+func cloneCodexKeys(keys []config.CodexKey) []config.CodexKey {
+	cloned := make([]config.CodexKey, len(keys))
+	for i := range keys {
+		cloned[i] = keys[i]
+		cloned[i].Models = append([]config.CodexModel(nil), keys[i].Models...)
+		if keys[i].Headers != nil {
+			cloned[i].Headers = make(map[string]string, len(keys[i].Headers))
+			for name, value := range keys[i].Headers {
+				cloned[i].Headers[name] = value
+			}
+		}
+		cloned[i].ExcludedModels = append([]string(nil), keys[i].ExcludedModels...)
+	}
+	return cloned
 }
 
 // startAttemptCleanup launches a background goroutine that periodically

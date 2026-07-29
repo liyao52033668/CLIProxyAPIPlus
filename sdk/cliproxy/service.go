@@ -24,6 +24,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/diff"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/wsrelay"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
@@ -566,20 +567,88 @@ func (s *Service) rebindExecutors() {
 	}
 }
 
-func (s *Service) syncCodexConfig() {
-	if s == nil || s.watcher == nil {
-		return
+func (s *Service) syncCodexConfig() error {
+	if s == nil {
+		return fmt.Errorf("service is nil")
 	}
 	s.configSyncMu.Lock()
 	defer s.configSyncMu.Unlock()
 
 	newCfg, errLoadConfig := config.LoadConfig(s.configPath)
 	if errLoadConfig != nil {
-		log.Errorf("failed to sync Codex config: %v", errLoadConfig)
-		return
+		return fmt.Errorf("load config: %w", errLoadConfig)
 	}
+	s.cfgMu.RLock()
+	if s.cfg != nil && s.cfg.Home.Enabled {
+		newCfg.Home = s.cfg.Home
+	}
+	s.cfgMu.RUnlock()
+	desired, errDesired := synthesizeConfigAuths(newCfg)
+	if errDesired != nil {
+		return errDesired
+	}
+	if s.coreManager == nil {
+		return fmt.Errorf("core auth manager unavailable")
+	}
+
 	s.applyConfigUpdate(newCfg)
-	s.watcher.SyncConfig(newCfg)
+	if s.watcher != nil {
+		s.watcher.SyncConfig(newCfg)
+	} else {
+		s.reconcileConfigAuths(desired)
+	}
+	return s.validateCodexConfigAuths(desired)
+}
+
+func synthesizeConfigAuths(cfg *config.Config) (map[string]*coreauth.Auth, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("config is nil")
+	}
+	ctx := &synthesizer.SynthesisContext{
+		Config:      cfg,
+		AuthDir:     cfg.AuthDir,
+		Now:         time.Now(),
+		IDGenerator: synthesizer.NewStableIDGenerator(),
+	}
+	auths, errSynthesize := synthesizer.NewConfigSynthesizer().Synthesize(ctx)
+	if errSynthesize != nil {
+		return nil, fmt.Errorf("synthesize config auths: %w", errSynthesize)
+	}
+	out := make(map[string]*coreauth.Auth, len(auths))
+	for _, auth := range auths {
+		if auth != nil && strings.HasPrefix(auth.Attributes["source"], "config:") {
+			out[auth.ID] = auth
+		}
+	}
+	return out, nil
+}
+
+func (s *Service) reconcileConfigAuths(desired map[string]*coreauth.Auth) {
+	ctx := coreauth.WithSkipPersist(context.Background())
+	for _, auth := range desired {
+		s.applyCoreAuthAddOrUpdate(ctx, auth)
+	}
+	for _, auth := range s.coreManager.List() {
+		if auth == nil || !strings.HasPrefix(auth.Attributes["source"], "config:") {
+			continue
+		}
+		if _, ok := desired[auth.ID]; !ok {
+			s.applyCoreAuthRemoval(ctx, auth.ID)
+		}
+	}
+}
+
+func (s *Service) validateCodexConfigAuths(desired map[string]*coreauth.Auth) error {
+	for id, expected := range desired {
+		if !strings.EqualFold(strings.TrimSpace(expected.Provider), "codex") {
+			continue
+		}
+		auth, ok := s.coreManager.GetByID(id)
+		if !ok || auth == nil || auth.Disabled || auth.Status == coreauth.StatusDisabled {
+			return fmt.Errorf("Codex auth %s was not applied", id)
+		}
+	}
+	return nil
 }
 
 func (s *Service) applyConfigUpdate(newCfg *config.Config) {

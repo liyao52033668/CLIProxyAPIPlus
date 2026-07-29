@@ -471,6 +471,10 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		totalSSELines := 0
 		totalOpenAIChunks := 0
 		totalTranslatedPayloads := 0
+		totalContentChars := 0
+		totalReasoningChars := 0
+		totalToolCallChunks := 0
+		lastFinishReason := ""
 		var streamErr error
 		for scanner.Scan() {
 			line := scanner.Bytes()
@@ -492,6 +496,18 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				reporter.Publish(ctx, detail)
 			}
 
+			chunkJSON := gjson.ParseBytes(openAIChunk)
+			if delta := chunkJSON.Get("choices.0.delta"); delta.Exists() {
+				totalContentChars += len(delta.Get("content").String())
+				totalReasoningChars += len(delta.Get("reasoning_content").String())
+				if delta.Get("tool_calls").Exists() {
+					totalToolCallChunks++
+				}
+			}
+			if fr := chunkJSON.Get("choices.0.finish_reason").String(); fr != "" && fr != "null" {
+				lastFinishReason = fr
+			}
+
 			// Wrap as SSE line for translator
 			sseLine := append([]byte("data: "), openAIChunk...)
 			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(sseLine), &param)
@@ -506,7 +522,7 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		if streamErr == nil {
 			streamErr = errScan
 		}
-		log.Debugf("qoder executor: stream bootstrap diagnostics stage=stream_loop_exit requested_model=%s upstream_model=%s status=%d elapsed_ms=%d sse_lines=%d openai_chunks=%d translated_payloads=%d ctx_err=%s scanner_err=%s stream_err=%s", strings.TrimSpace(requestedModel), strings.TrimSpace(req.Model), httpResp.StatusCode, time.Since(streamAttemptStartedAt).Milliseconds(), totalSSELines, totalOpenAIChunks, totalTranslatedPayloads, qoderDiagnosticErrString(ctx.Err()), qoderDiagnosticErrString(errScan), qoderDiagnosticErrString(streamErr))
+		log.Debugf("qoder executor: stream bootstrap diagnostics stage=stream_loop_exit requested_model=%s upstream_model=%s status=%d elapsed_ms=%d sse_lines=%d openai_chunks=%d translated_payloads=%d content_chars=%d reasoning_chars=%d tool_call_chunks=%d finish_reason=%s ctx_err=%s scanner_err=%s stream_err=%s", strings.TrimSpace(requestedModel), strings.TrimSpace(req.Model), httpResp.StatusCode, time.Since(streamAttemptStartedAt).Milliseconds(), totalSSELines, totalOpenAIChunks, totalTranslatedPayloads, totalContentChars, totalReasoningChars, totalToolCallChunks, qoderEmptyDiagnosticValue(lastFinishReason), qoderDiagnosticErrString(ctx.Err()), qoderDiagnosticErrString(errScan), qoderDiagnosticErrString(streamErr))
 		if streamErr == nil {
 			doneChunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param)
 			for i := range doneChunks {
@@ -866,6 +882,14 @@ func qoderDiagnosticErrString(err error) string {
 	return strings.TrimSpace(err.Error())
 }
 
+func qoderEmptyDiagnosticValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "none"
+	}
+	return value
+}
+
 func formatQoderRoleCounts(roleCounts map[string]int) string {
 	if len(roleCounts) == 0 {
 		return "none"
@@ -966,19 +990,25 @@ func qoderNormalizeContent(content any) string {
 	case string:
 		return v
 	case []any:
-		parts := make([]string, 0, len(v))
-		for _, item := range v {
-			part := strings.TrimSpace(qoderNormalizeContentPart(item))
-			if part != "" {
-				parts = append(parts, part)
-			}
-		}
-		return strings.Join(parts, "\n\n")
+		return qoderNormalizeContentParts(v)
+	case []map[string]any:
+		return qoderNormalizeContentParts(v)
 	case map[string]any:
 		return qoderNormalizeContentPart(v)
 	default:
 		return ""
 	}
+}
+
+func qoderNormalizeContentParts[T any](items []T) string {
+	parts := make([]string, 0, len(items))
+	for _, item := range items {
+		part := strings.TrimSpace(qoderNormalizeContentPart(item))
+		if part != "" {
+			parts = append(parts, part)
+		}
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 func qoderNormalizeContentPart(item any) string {

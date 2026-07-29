@@ -168,7 +168,9 @@ func TestSyncCodexConfigReconcilesAuthAndModelsBeforeReturning(t *testing.T) {
 	if errSave := config.SaveConfigPreserveComments(configPath, cfg); errSave != nil {
 		t.Fatalf("save Codex config: %v", errSave)
 	}
-	service.syncCodexConfig()
+	if errSync := service.syncCodexConfig(); errSync != nil {
+		t.Fatalf("sync Codex config: %v", errSync)
+	}
 
 	auth, ok := service.coreManager.GetByID(id)
 	if !ok || auth == nil || auth.Disabled {
@@ -198,7 +200,9 @@ func TestSyncCodexConfigReconcilesAuthAndModelsBeforeReturning(t *testing.T) {
 	if errSave := config.SaveConfigPreserveComments(configPath, cfg); errSave != nil {
 		t.Fatalf("save updated Codex config: %v", errSave)
 	}
-	service.syncCodexConfig()
+	if errSync := service.syncCodexConfig(); errSync != nil {
+		t.Fatalf("sync Codex config: %v", errSync)
+	}
 	if ids := modelIDs(); !ids["codex-two"] || ids["codex-one"] {
 		t.Fatalf("updated model IDs = %v, want codex-two without codex-one", ids)
 	}
@@ -207,13 +211,87 @@ func TestSyncCodexConfigReconcilesAuthAndModelsBeforeReturning(t *testing.T) {
 	if errSave := config.SaveConfigPreserveComments(configPath, cfg); errSave != nil {
 		t.Fatalf("save removed Codex config: %v", errSave)
 	}
-	service.syncCodexConfig()
+	if errSync := service.syncCodexConfig(); errSync != nil {
+		t.Fatalf("sync Codex config: %v", errSync)
+	}
 	auth, ok = service.coreManager.GetByID(id)
 	if !ok || auth == nil || !auth.Disabled {
 		t.Fatalf("Codex auth was not disabled when removal sync returned: auth=%+v", auth)
 	}
 	if ids := modelIDs(); len(ids) != 0 {
 		t.Fatalf("models remained after Codex removal: %v", ids)
+	}
+}
+
+func TestSyncCodexConfigWithoutWatcherReconcilesRuntimeAuth(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	if errWrite := os.WriteFile(configPath, []byte("{}\n"), 0o600); errWrite != nil {
+		t.Fatalf("create config file: %v", errWrite)
+	}
+	sharedKey := "shared-key"
+	initialCfg := &config.Config{
+		AuthDir: dir,
+		ClaudeKey: []config.ClaudeKey{{
+			APIKey:  sharedKey,
+			BaseURL: "https://claude.example.com",
+		}},
+	}
+	if errSave := config.SaveConfigPreserveComments(configPath, initialCfg); errSave != nil {
+		t.Fatalf("save initial config: %v", errSave)
+	}
+
+	service := &Service{
+		cfg:         initialCfg,
+		configPath:  configPath,
+		coreManager: coreauth.NewManager(nil, nil, nil),
+	}
+	ctx := &synthesizer.SynthesisContext{
+		Config:      initialCfg,
+		AuthDir:     dir,
+		Now:         time.Now(),
+		IDGenerator: synthesizer.NewStableIDGenerator(),
+	}
+	initialAuths, errSynthesize := synthesizer.NewConfigSynthesizer().Synthesize(ctx)
+	if errSynthesize != nil {
+		t.Fatalf("synthesize initial auths: %v", errSynthesize)
+	}
+	for _, auth := range initialAuths {
+		service.applyCoreAuthAddOrUpdate(context.Background(), auth)
+	}
+
+	updatedCfg := *initialCfg
+	updatedCfg.CodexKey = []config.CodexKey{{
+		APIKey:  sharedKey,
+		BaseURL: "https://codex.example.com",
+	}}
+	if errSave := config.SaveConfigPreserveComments(configPath, &updatedCfg); errSave != nil {
+		t.Fatalf("save updated config: %v", errSave)
+	}
+
+	claudeID, _ := synthesizer.NewStableIDGenerator().Next("claude:apikey", sharedKey, "https://claude.example.com")
+	codexID, _ := synthesizer.NewStableIDGenerator().Next("codex:apikey", sharedKey, "https://codex.example.com")
+	t.Cleanup(func() {
+		GlobalModelRegistry().UnregisterClient(claudeID)
+		GlobalModelRegistry().UnregisterClient(codexID)
+	})
+
+	if errSync := service.syncCodexConfig(); errSync != nil {
+		t.Fatalf("sync Codex config without watcher: %v", errSync)
+	}
+	if auth, ok := service.coreManager.GetByID(claudeID); !ok || auth == nil || auth.Disabled {
+		t.Fatalf("Claude auth was not preserved: auth=%+v", auth)
+	}
+	codexAuth, ok := service.coreManager.GetByID(codexID)
+	if !ok || codexAuth == nil || codexAuth.Disabled {
+		t.Fatalf("Codex auth was not registered: auth=%+v", codexAuth)
+	}
+	if codexAuth.Index == "" {
+		t.Fatal("Codex auth index was empty")
+	}
+	kind, account := codexAuth.AccountInfo()
+	if kind != "api_key" || account != sharedKey {
+		t.Fatalf("Codex account info = %q/%q, want api_key/shared-key", kind, account)
 	}
 }
 

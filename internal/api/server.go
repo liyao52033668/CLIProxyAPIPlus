@@ -2016,7 +2016,7 @@ func (s *Server) SetOnOAuthModelAliasUpdated(fn func()) {
 }
 
 // SetOnCodexConfigUpdated sets the callback invoked after Codex API key updates.
-func (s *Server) SetOnCodexConfigUpdated(fn func()) {
+func (s *Server) SetOnCodexConfigUpdated(fn func() error) {
 	if s == nil || s.mgmt == nil {
 		return
 	}

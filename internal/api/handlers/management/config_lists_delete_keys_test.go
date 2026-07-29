@@ -1,6 +1,7 @@
 package management
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -33,11 +34,12 @@ func TestPutCodexKeys_WaitsForRuntimeSyncBeforeResponding(t *testing.T) {
 	}
 	callbackStarted := make(chan struct{})
 	releaseCallback := make(chan struct{})
-	h.SetOnCodexConfigUpdated(func() {
+	h.SetOnCodexConfigUpdated(func() error {
 		h.mu.Lock()
 		h.mu.Unlock()
 		close(callbackStarted)
 		<-releaseCallback
+		return nil
 	})
 
 	rec := httptest.NewRecorder()
@@ -68,6 +70,86 @@ func TestPutCodexKeys_WaitsForRuntimeSyncBeforeResponding(t *testing.T) {
 	}
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+}
+
+func TestPutCodexKeys_RollsBackWhenRuntimeSyncFails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	configPath := writeTestConfigFile(t)
+	h := &Handler{
+		cfg: &config.Config{CodexKey: []config.CodexKey{{
+			APIKey:  "old-key",
+			BaseURL: "https://old.example.com",
+		}}},
+		configFilePath: configPath,
+	}
+	callbackCalls := 0
+	h.SetOnCodexConfigUpdated(func() error {
+		callbackCalls++
+		if callbackCalls == 1 {
+			return errors.New("sync failed")
+		}
+		return nil
+	})
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPut, "/v0/management/codex-api-key", strings.NewReader(`[{"api-key":"new-key","base-url":"https://new.example.com"}]`))
+
+	h.PutCodexKeys(c)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+	if callbackCalls != 2 {
+		t.Fatalf("callback calls = %d, want 2", callbackCalls)
+	}
+	if len(h.cfg.CodexKey) != 1 || h.cfg.CodexKey[0].APIKey != "old-key" {
+		t.Fatalf("runtime config was not rolled back: %+v", h.cfg.CodexKey)
+	}
+	persisted, errLoad := config.LoadConfig(configPath)
+	if errLoad != nil {
+		t.Fatalf("load rolled back config: %v", errLoad)
+	}
+	if len(persisted.CodexKey) != 1 || persisted.CodexKey[0].APIKey != "old-key" {
+		t.Fatalf("persisted config was not rolled back: %+v", persisted.CodexKey)
+	}
+}
+
+func TestPutCodexKeys_RecoversCallbackPanic(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	h := &Handler{
+		cfg: &config.Config{CodexKey: []config.CodexKey{{
+			APIKey:  "old-key",
+			BaseURL: "https://old.example.com",
+		}}},
+		configFilePath: writeTestConfigFile(t),
+	}
+	callbackCalls := 0
+	h.SetOnCodexConfigUpdated(func() error {
+		callbackCalls++
+		if callbackCalls == 1 {
+			panic("sync panic")
+		}
+		return nil
+	})
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPut, "/v0/management/codex-api-key", strings.NewReader(`[{"api-key":"new-key","base-url":"https://new.example.com"}]`))
+
+	h.PutCodexKeys(c)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "callback panic: sync panic") {
+		t.Fatalf("body = %s, want callback panic", rec.Body.String())
+	}
+	if len(h.cfg.CodexKey) != 1 || h.cfg.CodexKey[0].APIKey != "old-key" {
+		t.Fatalf("runtime config was not rolled back: %+v", h.cfg.CodexKey)
 	}
 }
 
