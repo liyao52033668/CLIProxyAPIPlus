@@ -2116,6 +2116,13 @@ func (g *codexInspectionGatewayAdapter) ListAuthFiles(_ context.Context, provide
 		}
 		displayName := strings.TrimSpace(item.Label)
 		accountType, account := item.AccountInfo()
+		// Inspection probes provider account endpoints, which is only
+		// meaningful for OAuth credentials. Config-synthesized API keys
+		// target third-party endpoints and would fail the probe, causing
+		// the scheduled inspection to auto-delete or disable them.
+		if strings.EqualFold(accountType, "api_key") {
+			continue
+		}
 		if displayName == "" {
 			displayName = strings.TrimSpace(account)
 		}
