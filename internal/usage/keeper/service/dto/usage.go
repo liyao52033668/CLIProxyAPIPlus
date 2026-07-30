@@ -74,6 +74,7 @@ type UsageEventRecord struct {
 	AuthIndex       string    `json:"auth_index"`
 	Failed          bool      `json:"failed"`
 	LatencyMS       int64     `json:"latency_ms"`
+	FirstTokenMS    int64     `json:"first_token_ms"`
 	InputTokens     int64     `json:"input_tokens"`
 	OutputTokens    int64     `json:"output_tokens"`
 	ReasoningTokens int64     `json:"reasoning_tokens"`

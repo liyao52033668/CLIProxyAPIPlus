@@ -28,6 +28,7 @@ const (
 	migrationRemoveUsageIdentityQuotaFields         = "20260510_remove_usage_identity_quota_fields"
 	migrationCreateUsageArchives                    = "20260714_create_usage_archives"
 	migrationNormalizeUsageEventTimestamps          = "20260714_normalize_usage_event_timestamps"
+	migrationAddUsageEventFirstToken                = "20260730_add_usage_event_first_token"
 )
 
 type schemaMigration struct {
@@ -107,6 +108,7 @@ func orderedMigrations() []databaseMigration {
 		{version: migrationRemoveUsageIdentityQuotaFields, run: removeUsageIdentityQuotaFieldsMigration},
 		{version: migrationCreateUsageArchives, run: createUsageArchivesMigration},
 		{version: migrationNormalizeUsageEventTimestamps, run: normalizeUsageEventTimestampsMigration},
+		{version: migrationAddUsageEventFirstToken, run: addUsageEventFirstTokenMigration},
 	}
 }
 

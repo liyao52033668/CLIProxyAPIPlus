@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -45,6 +46,7 @@ type ResponseWriterWrapper struct {
 	headers             map[string][]string        // headers stores the response headers.
 	logOnErrorOnly      bool                       // logOnErrorOnly enables logging only when an error response is detected.
 	firstChunkTimestamp time.Time                  // firstChunkTimestamp captures TTFB for streaming responses.
+	firstChunkNano      atomic.Int64               // firstChunkNano mirrors firstChunkTimestamp for cross-goroutine reads.
 }
 
 // NewResponseWriterWrapper creates and initializes a new ResponseWriterWrapper.
@@ -79,13 +81,10 @@ func (w *ResponseWriterWrapper) Write(data []byte) (int, error) {
 
 	// CRITICAL: Write to client first (zero latency)
 	n, err := w.ResponseWriter.Write(data)
+	w.recordFirstChunkTime()
 
 	// THEN: Handle logging based on response type
 	if w.isStreaming && w.chunkChannel != nil {
-		// Capture TTFB on first chunk (synchronous, before async channel send)
-		if w.firstChunkTimestamp.IsZero() {
-			w.firstChunkTimestamp = time.Now()
-		}
 		// For streaming responses: Send to async logging channel (non-blocking)
 		select {
 		case w.chunkChannel <- append([]byte(nil), data...): // Non-blocking send with copy
@@ -127,13 +126,10 @@ func (w *ResponseWriterWrapper) WriteString(data string) (int, error) {
 
 	// CRITICAL: Write to client first (zero latency)
 	n, err := w.ResponseWriter.WriteString(data)
+	w.recordFirstChunkTime()
 
 	// THEN: Capture for logging
 	if w.isStreaming && w.chunkChannel != nil {
-		// Capture TTFB on first chunk (synchronous, before async channel send)
-		if w.firstChunkTimestamp.IsZero() {
-			w.firstChunkTimestamp = time.Now()
-		}
 		select {
 		case w.chunkChannel <- []byte(data):
 		default:
@@ -145,6 +141,28 @@ func (w *ResponseWriterWrapper) WriteString(data string) (int, error) {
 		w.body.WriteString(data)
 	}
 	return n, err
+}
+
+// recordFirstChunkTime captures the moment the first response byte is written.
+// The atomic mirror lets usage reporting read it from other goroutines.
+func (w *ResponseWriterWrapper) recordFirstChunkTime() {
+	if w.firstChunkNano.Load() != 0 {
+		return
+	}
+	now := time.Now()
+	if w.firstChunkNano.CompareAndSwap(0, now.UnixNano()) {
+		w.firstChunkTimestamp = now
+	}
+}
+
+// FirstChunkTime returns when the first response byte was written, or zero when
+// nothing has been written yet.
+func (w *ResponseWriterWrapper) FirstChunkTime() time.Time {
+	nano := w.firstChunkNano.Load()
+	if nano == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, nano)
 }
 
 // WriteHeader wraps the underlying ResponseWriter's WriteHeader method.

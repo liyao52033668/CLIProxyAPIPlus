@@ -371,6 +371,7 @@ func (s *RequestStatistics) RecordEvent(record coreusage.Record) {
 		AuthIndex:       record.AuthIndex,
 		Failed:          record.Failed,
 		LatencyMS:       record.Latency.Milliseconds(),
+		FirstTokenMS:    record.TTFT.Milliseconds(),
 		InputTokens:     record.Detail.InputTokens,
 		OutputTokens:    record.Detail.OutputTokens,
 		ReasoningTokens: record.Detail.ReasoningTokens,

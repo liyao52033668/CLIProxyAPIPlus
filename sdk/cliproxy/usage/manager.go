@@ -431,6 +431,7 @@ func (p *databasePlugin) HandleUsage(ctx context.Context, record Record) {
 		Timestamp:       timestamp,
 		Failed:          record.Failed,
 		LatencyMS:       record.Latency.Milliseconds(),
+		FirstTokenMS:    record.TTFT.Milliseconds(),
 		InputTokens:     record.Detail.InputTokens,
 		OutputTokens:    record.Detail.OutputTokens,
 		ReasoningTokens: record.Detail.ReasoningTokens,

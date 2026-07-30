@@ -29,6 +29,7 @@ type UsageEventRecord struct {
 	AuthIndex       string
 	Failed          bool
 	LatencyMS       int64
+	FirstTokenMS    int64
 	InputTokens     int64
 	OutputTokens    int64
 	ReasoningTokens int64

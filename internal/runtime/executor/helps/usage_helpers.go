@@ -182,7 +182,31 @@ func (r *UsageReporter) EnsurePublished(ctx context.Context) {
 
 func (r *UsageReporter) publishRecord(ctx context.Context, record usage.Record) {
 	record.ResponseHeaders = internallogging.GetResponseHeaders(ctx)
+	if ttft := r.firstTokenLatency(ctx); ttft > 0 {
+		record.TTFT = ttft
+	}
 	usage.PublishRecord(ctx, record)
+}
+
+// firstTokenLatency derives TTFT from the response writer's first-byte timestamp
+// when available; callers fall back to total latency otherwise.
+func (r *UsageReporter) firstTokenLatency(ctx context.Context) time.Duration {
+	if r == nil || r.requestedAt.IsZero() || ctx == nil {
+		return 0
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil {
+		return 0
+	}
+	timer, ok := ginCtx.Writer.(interface{ FirstChunkTime() time.Time })
+	if !ok {
+		return 0
+	}
+	first := timer.FirstChunkTime()
+	if first.IsZero() || first.Before(r.requestedAt) {
+		return 0
+	}
+	return first.Sub(r.requestedAt)
 }
 
 func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool, failures ...usage.Failure) usage.Record {

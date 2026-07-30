@@ -18,6 +18,7 @@ type UsageEvent struct {
 	AuthIndex       string    `gorm:"index:idx_usage_events_trim_auth_index,expression:TRIM(auth_index);index:idx_usage_events_auth_type_auth_index_id,priority:2"`
 	Failed          bool      `gorm:"index:idx_usage_events_failed"`
 	LatencyMS       int64
+	FirstTokenMS    int64
 	InputTokens     int64
 	OutputTokens    int64
 	ReasoningTokens int64
