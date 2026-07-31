@@ -82,7 +82,7 @@ func (l *authAutoRefreshLoop) worker(ctx context.Context) {
 			if authID == "" {
 				continue
 			}
-			l.manager.refreshAuth(ctx, authID)
+			_, _ = l.manager.refreshAuth(ctx, authID)
 			l.queueReschedule(authID)
 		}
 	}

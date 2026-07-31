@@ -328,7 +328,17 @@ func (m *Manager) markRefreshPending(id string, now time.Time) bool {
 	return true
 }
 
-func (m *Manager) refreshAuth(ctx context.Context, id string) {
+// RefreshAuth synchronously refreshes credentials for one auth and returns the
+// updated auth state. It is the public entry point used by management APIs to
+// trigger a manual credential refresh for a specific auth file.
+func (m *Manager) RefreshAuth(ctx context.Context, authID string) (*Auth, error) {
+	if m == nil {
+		return nil, &Error{Code: "provider_not_found", Message: "auth manager unavailable"}
+	}
+	return m.refreshAuth(ctx, authID)
+}
+
+func (m *Manager) refreshAuth(ctx context.Context, id string) (*Auth, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -342,12 +352,12 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	}
 	m.mu.RUnlock()
 	if cloned == nil || exec == nil {
-		return
+		return nil, &Error{Code: "auth_not_found", Message: "no refreshable auth or executor available for " + id}
 	}
 	updated, err := exec.Refresh(ctx, cloned)
 	if err != nil && errors.Is(err, context.Canceled) {
 		log.Debugf("refresh canceled for %s, %s", auth.Provider, auth.ID)
-		return
+		return nil, err
 	}
 	log.Debugf("refreshed %s, %s, %v", auth.Provider, auth.ID, err)
 	now := time.Now()
@@ -375,7 +385,7 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 		if shouldReschedule {
 			m.queueRefreshReschedule(id)
 		}
-		return
+		return nil, err
 	}
 	if updated == nil {
 		updated = cloned
@@ -396,7 +406,7 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	if m.shouldRefresh(updated, now) {
 		updated.NextRefreshAfter = now.Add(refreshIneffectiveBackoff)
 	}
-	_, _ = m.update(ctx, updated, true)
+	return m.update(ctx, updated, true)
 }
 
 func (m *Manager) executorFor(provider string) ProviderExecutor {
