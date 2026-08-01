@@ -499,14 +499,8 @@ func (p *codexInspectionProber) authByIndex(authIndex string) (*coreauth.Auth, e
 	if p == nil || p.manager == nil {
 		return nil, fmt.Errorf("auth manager unavailable")
 	}
-	for _, item := range p.manager.List() {
-		if item == nil {
-			continue
-		}
-		item.EnsureIndex()
-		if item.Index == authIndex {
-			return item, nil
-		}
+	if auth, ok := p.manager.GetByIndex(authIndex); ok {
+		return auth, nil
 	}
 	return nil, fmt.Errorf("auth not found: %s", authIndex)
 }

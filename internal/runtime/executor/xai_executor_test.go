@@ -96,7 +96,7 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 	}))
 	defer server.Close()
 
-	exec := NewXAIExecutor(&config.Config{})
+	exec := NewXAIExecutor(&config.Config{XAI: config.XAIConfig{InjectXSearch: true}})
 	auth := &cliproxyauth.Auth{
 		ID:       "xai-auth",
 		Provider: "xai",
@@ -646,7 +646,7 @@ func TestPruneXAIOrphanedToolChoice(t *testing.T) {
 func TestXAIExecutorPrepareDropsOrphanedToolChoiceBeforeXSearchInject(t *testing.T) {
 	t.Parallel()
 
-	exec := NewXAIExecutor(&config.Config{})
+	exec := NewXAIExecutor(&config.Config{XAI: config.XAIConfig{InjectXSearch: true}})
 	prepared, err := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
 		Model: "grok-4.5",
 		// image_generation is stripped by normalizeXAITools; without pruning, the
@@ -680,7 +680,7 @@ func TestXAIExecutorPrepareDropsOrphanedToolChoiceBeforeXSearchInject(t *testing
 func TestXAIExecutorPrepareAllowedToolsSyncsInjectedXSearch(t *testing.T) {
 	t.Parallel()
 
-	exec := NewXAIExecutor(&config.Config{})
+	exec := NewXAIExecutor(&config.Config{XAI: config.XAIConfig{InjectXSearch: true}})
 	prepared, err := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
 		Model: "grok-4.5",
 		// Only image_generation remains after client filtering of tool_search-like
@@ -740,6 +740,57 @@ func TestXAIExecutorPrepareAllowedToolsSyncsInjectedXSearch(t *testing.T) {
 		if tool.Get("type").String() == "image_generation" {
 			t.Fatalf("orphaned image_generation choice leaked: %s", prepared.body)
 		}
+	}
+}
+
+func TestXAIExecutorPrepareHonorsInjectXSearchConfig(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		cfg         *config.Config
+		wantXSearch bool
+	}{
+		{name: "default disabled", cfg: &config.Config{}, wantXSearch: false},
+		{name: "explicitly enabled", cfg: &config.Config{XAI: config.XAIConfig{InjectXSearch: true}}, wantXSearch: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			exec := NewXAIExecutor(tt.cfg)
+			prepared, err := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+				Model: "grok-4.5",
+				Payload: []byte(`{
+					"model":"grok-4.5",
+					"input":"search the web",
+					"tools":[{"type":"function","name":"web_search","parameters":{"type":"object"}}],
+					"tool_choice":{"type":"allowed_tools","tools":[{"type":"function","name":"web_search"}]}
+				}`),
+			}, cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FormatOpenAIResponse,
+				Stream:       false,
+			}, false)
+			if err != nil {
+				t.Fatalf("prepareResponsesRequest() error = %v", err)
+			}
+
+			wantXSearchCount := 0
+			if tt.wantXSearch {
+				wantXSearchCount = 1
+			}
+			tools := gjson.GetBytes(prepared.body, "tools").Array()
+			gotXSearchCount := 0
+			for _, tool := range tools {
+				if tool.Get("type").String() == "x_search" {
+					gotXSearchCount++
+				}
+			}
+			if gotXSearchCount != wantXSearchCount {
+				t.Fatalf("x_search count = %d, want %d; body=%s", gotXSearchCount, wantXSearchCount, prepared.body)
+			}
+		})
 	}
 }
 
@@ -1897,7 +1948,7 @@ func TestXAIExecutorExecuteStreamFiltersToolSearchTool(t *testing.T) {
 	}))
 	defer server.Close()
 
-	exec := NewXAIExecutor(&config.Config{})
+	exec := NewXAIExecutor(&config.Config{XAI: config.XAIConfig{InjectXSearch: true}})
 	auth := &cliproxyauth.Auth{
 		Provider:   "xai",
 		Attributes: map[string]string{"base_url": server.URL},

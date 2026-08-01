@@ -871,6 +871,54 @@ func (m *Manager) GetByID(id string) (*Auth, bool) {
 	return auth.Clone(), true
 }
 
+// GetByFileName retrieves an auth entry by its backing file name.
+func (m *Manager) GetByFileName(fileName string) (*Auth, bool) {
+	fileName = strings.TrimSpace(fileName)
+	if fileName == "" || m == nil {
+		return nil, false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, auth := range m.auths {
+		if auth == nil {
+			continue
+		}
+		if strings.TrimSpace(auth.FileName) == fileName {
+			return auth.Clone(), true
+		}
+	}
+	return nil, false
+}
+
+// GetByIndex retrieves an auth entry whose stable index matches the given index.
+func (m *Manager) GetByIndex(index string) (*Auth, bool) {
+	index = strings.TrimSpace(index)
+	if index == "" || m == nil {
+		return nil, false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, auth := range m.auths {
+		if auth == nil {
+			continue
+		}
+		if authIndexMatches(auth, index) {
+			return auth.Clone(), true
+		}
+	}
+	return nil, false
+}
+
+// authIndexMatches reports whether the auth's stable index equals the given
+// index, computing it read-only when the cached value is not yet assigned.
+func authIndexMatches(auth *Auth, index string) bool {
+	if auth.Index != "" {
+		return auth.Index == index
+	}
+	seed := auth.indexSeed()
+	return seed != "" && stableAuthIndex(seed) == index
+}
+
 // GetExecutionSessionAuthByID retrieves a Home runtime auth scoped to an execution session.
 func (m *Manager) GetExecutionSessionAuthByID(sessionID string, authID string) (*Auth, bool) {
 	sessionID = strings.TrimSpace(sessionID)

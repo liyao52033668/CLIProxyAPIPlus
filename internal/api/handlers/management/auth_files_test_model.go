@@ -317,16 +317,24 @@ func (h *Handler) findAuthForModelTest(body authFileTestRequest) *coreauth.Auth 
 	authIndex := strings.TrimSpace(body.AuthIndex)
 
 	if authIndex != "" {
-		if auth := h.authByIndex(authIndex); auth != nil {
+		if auth, ok := h.authManager.GetByIndex(authIndex); ok && auth != nil {
 			return auth
 		}
 	}
+	// The id is checked once against the auth ID; re-checking it later as the
+	// generic key is redundant.
 	if id != "" {
 		if auth, ok := h.authManager.GetByID(id); ok && auth != nil {
 			return auth
 		}
 	}
-
+	// The name may itself be an auth ID, so try it directly before falling back
+	// to file-name and index matches.
+	if name != "" {
+		if auth, ok := h.authManager.GetByID(name); ok && auth != nil {
+			return auth
+		}
+	}
 	key := name
 	if key == "" {
 		key = id
@@ -334,16 +342,11 @@ func (h *Handler) findAuthForModelTest(body authFileTestRequest) *coreauth.Auth 
 	if key == "" {
 		return nil
 	}
-	if auth, ok := h.authManager.GetByID(key); ok && auth != nil {
+	if auth, ok := h.authManager.GetByFileName(key); ok && auth != nil {
 		return auth
 	}
-	for _, auth := range h.authManager.List() {
-		if auth == nil {
-			continue
-		}
-		if auth.FileName == key || auth.ID == key || auth.Index == key {
-			return auth
-		}
+	if auth, ok := h.authManager.GetByIndex(key); ok && auth != nil {
+		return auth
 	}
 	return nil
 }

@@ -364,6 +364,7 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) (*Auth, error) {
 	if err != nil {
 		unauthorized := isUnauthorizedError(err)
 		shouldReschedule := false
+		var failedAuth *Auth
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil && !current.Disabled && current.Status != StatusDisabled {
 			current.LastError = refreshErrorFromError(err)
@@ -376,6 +377,7 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) (*Auth, error) {
 				current.NextRefreshAfter = now.Add(refreshFailureBackoff)
 			}
 			m.auths[id] = current
+			failedAuth = current
 			shouldReschedule = true
 			if m.scheduler != nil {
 				m.scheduler.upsertAuth(current.Clone())
@@ -384,6 +386,13 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) (*Auth, error) {
 		m.mu.Unlock()
 		if shouldReschedule {
 			m.queueRefreshReschedule(id)
+		}
+		// Persist the error state so LastError/Status/Unavailable survive a
+		// restart or config reload instead of re-parsing with stale state.
+		if failedAuth != nil {
+			if perr := m.persist(ctx, failedAuth); perr != nil {
+				log.WithError(perr).WithField("auth_id", id).Warn("failed to persist refresh error state")
+			}
 		}
 		return nil, err
 	}

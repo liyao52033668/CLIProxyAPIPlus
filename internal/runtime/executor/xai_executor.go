@@ -79,9 +79,8 @@ const (
 	xaiUsingAPIAttr = "using_api"
 )
 
-// Always inject native x_search when the client did not declare it so Grok can
-// run X Search server-side. Internal subtool traces are still filtered downstream
-// when this native tool is present (see filterInternalXSearch).
+// xaiXSearchToolJSON is the native X Search tool injected when enabled by config.
+// Internal subtool traces are still filtered downstream when this tool is present.
 var xaiXSearchToolJSON = []byte(`{"type":"x_search"}`)
 
 // XAIExecutor is a stateless executor for xAI Grok's Responses API.
@@ -1017,13 +1016,14 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	// the post-restore (namespace, short-name) shape used by the response filter.
 	clientDeclaredTools := collectXAIClientDeclaredToolKeys(body)
 	body = normalizeXAITools(body)
-	// Drop choices that point at tools removed by normalizeXAITools before we
-	// inject native x_search, so a surviving allowed_tools / forced choice is not
-	// left pointing at a deleted tool once only x_search remains.
+	// Drop choices that point at tools removed by normalizeXAITools before any
+	// configured x_search injection, so no surviving choice references a deleted tool.
 	body = normalizeXAINamespaceToolChoice(body)
 	body = pruneXAIOrphanedToolChoice(body)
 	body = normalizeXAIToolChoiceForTools(body)
-	body = ensureXAINativeXSearchTool(body)
+	if e.cfg != nil && e.cfg.XAI.InjectXSearch {
+		body = ensureXAINativeXSearchTool(body)
+	}
 	var replayScope xaiReasoningReplayScope
 	body, replayScope, err = applyXAIReasoningReplayCacheRequired(ctx, from, req, opts, body)
 	if err != nil {
@@ -1429,9 +1429,9 @@ func sanitizeXAIResponsesBody(body []byte, model string) []byte {
 // ensureXAINativeXSearchTool appends {"type":"x_search"} when the final tools
 // list does not already include native X Search. When tool_choice restricts the
 // model to allowed_tools, x_search is also added there (without duplicates) so
-// Grok can select the injected tool. HTTP and websocket executors both prepare
-// payloads through prepareResponsesRequestTo, so this runs once before the body
-// is submitted upstream.
+// Grok can select the injected tool. When injection is enabled, HTTP and websocket
+// executors both prepare payloads through prepareResponsesRequestTo, so this runs
+// once before the body is submitted upstream.
 func ensureXAINativeXSearchTool(body []byte) []byte {
 	if !gjson.ValidBytes(body) {
 		return body

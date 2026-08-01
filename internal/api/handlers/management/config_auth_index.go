@@ -35,17 +35,18 @@ type openAICompatibilityAPIKeyWithAuthIndex struct {
 }
 
 type openAICompatibilityWithAuthIndex struct {
-	Name          string                                   `json:"name"`
-	Priority      int                                      `json:"priority,omitempty"`
-	Disabled      bool                                     `json:"disabled"`
-	UpdatedAt     *time.Time                               `json:"updated-at,omitempty"`
-	Prefix        string                                   `json:"prefix,omitempty"`
-	BaseURL       string                                   `json:"base-url"`
-	APIKeyEntries []openAICompatibilityAPIKeyWithAuthIndex `json:"api-key-entries,omitempty"`
-	Models        []config.OpenAICompatibilityModel        `json:"models,omitempty"`
-	Headers       map[string]string                        `json:"headers,omitempty"`
-	AuthIndex     string                                   `json:"auth-index,omitempty"`
-	ForceStream   bool                                     `json:"force-stream,omitempty"`
+	Name                  string                                   `json:"name"`
+	Priority              int                                      `json:"priority,omitempty"`
+	Disabled              bool                                     `json:"disabled"`
+	UpdatedAt             *time.Time                               `json:"updated-at,omitempty"`
+	Prefix                string                                   `json:"prefix,omitempty"`
+	BaseURL               string                                   `json:"base-url"`
+	APIKeyEntries         []openAICompatibilityAPIKeyWithAuthIndex `json:"api-key-entries,omitempty"`
+	Models                []config.OpenAICompatibilityModel        `json:"models,omitempty"`
+	Headers               map[string]string                        `json:"headers,omitempty"`
+	SupportPromptCacheKey bool                                     `json:"support-prompt-cache-key,omitempty"`
+	AuthIndex             string                                   `json:"auth-index,omitempty"`
+	ForceStream           bool                                     `json:"force-stream,omitempty"`
 }
 
 func (h *Handler) liveAuthIndexByID() map[string]string {
@@ -217,16 +218,17 @@ func (h *Handler) openAICompatibilityWithAuthIndex() []openAICompatibilityWithAu
 		idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
 
 		response := openAICompatibilityWithAuthIndex{
-			Name:        entry.Name,
-			Priority:    entry.Priority,
-			Disabled:    entry.Disabled,
-			UpdatedAt:   entry.UpdatedAt,
-			Prefix:      entry.Prefix,
-			BaseURL:     entry.BaseURL,
-			Models:      entry.Models,
-			Headers:     entry.Headers,
-			AuthIndex:   "",
-			ForceStream: entry.ForceStream,
+			Name:                  entry.Name,
+			Priority:              entry.Priority,
+			Disabled:              entry.Disabled,
+			UpdatedAt:             entry.UpdatedAt,
+			Prefix:                entry.Prefix,
+			BaseURL:               entry.BaseURL,
+			Models:                entry.Models,
+			Headers:               entry.Headers,
+			SupportPromptCacheKey: entry.SupportPromptCacheKey,
+			AuthIndex:             "",
+			ForceStream:           entry.ForceStream,
 		}
 		if len(entry.APIKeyEntries) == 0 {
 			id, _ := idGen.Next(idKind, entry.BaseURL)

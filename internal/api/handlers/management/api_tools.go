@@ -845,15 +845,8 @@ func (h *Handler) authByIndex(authIndex string) *coreauth.Auth {
 	if authIndex == "" || h == nil || h.authManager == nil {
 		return nil
 	}
-	auths := h.authManager.List()
-	for _, auth := range auths {
-		if auth == nil {
-			continue
-		}
-		auth.EnsureIndex()
-		if auth.Index == authIndex {
-			return auth
-		}
+	if auth, ok := h.authManager.GetByIndex(authIndex); ok {
+		return auth
 	}
 	return nil
 }

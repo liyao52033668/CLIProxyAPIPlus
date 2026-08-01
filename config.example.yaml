@@ -198,6 +198,12 @@ routing:
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: true
 
+# xAI provider behavior.
+xai:
+  # When true, inject the native x_search tool when the request does not declare it.
+  # The injected tool is also added to tool_choice.allowed_tools when applicable.
+  inject-x-search: false
+
 # When true, enable Gemini CLI internal endpoints (/v1internal:*).
 # Default is false for safety.
 enable-gemini-cli-endpoint: false
@@ -356,6 +362,7 @@ nonstream-keepalive-interval: 0
 #     disabled: false # optional: set to true to disable this provider without removing it
 #     prefix: "test" # optional: require calls like "test/kimi-k2" to target this provider's credentials
 #     base-url: "https://openrouter.ai/api/v1" # The base URL of the provider.
+#     support-prompt-cache-key: false # optional: derive prompt_cache_key for requests from all input protocols
 #     disable-cooling: false # optional: per-provider override for auth/model cooldown scheduling
 #     headers:
 #       X-Custom-Header: "custom-value"
