@@ -293,6 +293,11 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 		// remote client spoof localhost to bypass allow-remote-management.
 		clientIP, localClient := managementRequestClientIP(c.Request)
 
+		if !localClient && h.isIPBlacklisted(clientIP) {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "ip_blacklisted"})
+			return
+		}
+
 		// Accept either Authorization: Bearer <key> or X-Management-Key
 		var provided string
 		if ah := c.GetHeader("Authorization"); ah != "" {
@@ -366,6 +371,36 @@ func managementRequestClientIP(r *http.Request) (clientIP string, localClient bo
 		return host, false
 	}
 	return ip.String(), ip.IsLoopback()
+}
+
+// isIPBlacklisted checks whether the given client IP matches any entry in the blacklist.
+func (h *Handler) isIPBlacklisted(clientIP string) bool {
+	if h == nil || clientIP == "" {
+		return false
+	}
+	h.mu.Lock()
+	blacklist := h.cfg.RemoteManagement.IPBlacklist
+	h.mu.Unlock()
+
+	ip := net.ParseIP(clientIP)
+	if ip == nil {
+		return false
+	}
+	for _, entry := range blacklist {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if strings.Contains(entry, "/") {
+			_, cidr, err := net.ParseCIDR(entry)
+			if err == nil && cidr.Contains(ip) {
+				return true
+			}
+		} else if net.ParseIP(entry).Equal(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // AuthenticateManagementKey verifies the provided management key for the given client.

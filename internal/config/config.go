@@ -256,6 +256,9 @@ type RemoteManagement struct {
 	// Empty (default) keeps the previous no-CORS policy for management routes.
 	// Entries accept full origins (http://localhost:5173) or host[:port] (normalized as http://...).
 	CorsAllowedOrigins []string `yaml:"cors-allowed-origins"`
+	// IPBlacklist blocks specific client IPs from accessing management API.
+	// Supports individual IPs and CIDR ranges (e.g. "1.2.3.4", "10.0.0.0/8").
+	IPBlacklist []string `yaml:"ip-blacklist"`
 }
 
 // QuotaExceeded defines the behavior when API quota limits are exceeded.
