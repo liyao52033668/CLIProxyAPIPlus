@@ -6,7 +6,6 @@ import (
 	"context"
 	"crypto/subtle"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/access/guard"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codearts"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/joycode"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
@@ -293,7 +293,7 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 		// remote client spoof localhost to bypass allow-remote-management.
 		clientIP, localClient := managementRequestClientIP(c.Request)
 
-		if !localClient && h.isIPBlacklisted(clientIP) {
+		if !localClient && guard.IsBlacklisted(clientIP) {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "ip_blacklisted"})
 			return
 		}
@@ -357,50 +357,7 @@ func managementRequestClientIP(r *http.Request) (clientIP string, localClient bo
 	if r == nil {
 		return "", false
 	}
-	remoteAddr := strings.TrimSpace(r.RemoteAddr)
-	host, _, err := net.SplitHostPort(remoteAddr)
-	if err != nil {
-		host = remoteAddr
-	}
-	host = strings.TrimSpace(host)
-	if host == "" {
-		return "", false
-	}
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return host, false
-	}
-	return ip.String(), ip.IsLoopback()
-}
-
-// isIPBlacklisted checks whether the given client IP matches any entry in the blacklist.
-func (h *Handler) isIPBlacklisted(clientIP string) bool {
-	if h == nil || clientIP == "" {
-		return false
-	}
-	h.mu.Lock()
-	blacklist := h.cfg.RemoteManagement.IPBlacklist
-	h.mu.Unlock()
-
-	ip := net.ParseIP(clientIP)
-	if ip == nil {
-		return false
-	}
-	for _, entry := range blacklist {
-		entry = strings.TrimSpace(entry)
-		if entry == "" {
-			continue
-		}
-		if strings.Contains(entry, "/") {
-			_, cidr, err := net.ParseCIDR(entry)
-			if err == nil && cidr.Contains(ip) {
-				return true
-			}
-		} else if net.ParseIP(entry).Equal(ip) {
-			return true
-		}
-	}
-	return false
+	return guard.ParseClientIPAndLoopback(r.RemoteAddr)
 }
 
 // AuthenticateManagementKey verifies the provided management key for the given client.

@@ -27,6 +27,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/access"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/access/guard"
 	management "github.com/router-for-me/CLIProxyAPI/v7/internal/api/handlers/management"
 	managementHandlers "github.com/router-for-me/CLIProxyAPI/v7/internal/api/handlers/management"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api/middleware"
@@ -261,6 +262,16 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		engine.Use(mw)
 	}
 
+	// Reject banned and blacklisted client IPs before request logging and authentication.
+	authGuard := guard.InstallGlobal(
+		cfg.RemoteManagement.AuthMaxFailures,
+		time.Duration(cfg.RemoteManagement.AuthBanSeconds)*time.Second,
+		time.Duration(cfg.RemoteManagement.AuthWindowSeconds)*time.Second,
+		cfg.RemoteManagement.AuthEscalationThreshold,
+	)
+	guard.SetBlacklist(cfg.RemoteManagement.IPBlacklist)
+	engine.Use(authGuard.Middleware())
+
 	// Add request logging middleware (positioned after recovery, before auth)
 	// Resolve logs directory relative to the configuration file directory.
 	var requestLogger logging.RequestLogger
@@ -315,6 +326,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	applySignatureCacheConfig(nil, cfg)
 	// Initialize management handler
 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
+	authGuard.SetEscalation(cfg.RemoteManagement.AuthEscalationThreshold, s.mgmt.EscalateIPToBlacklist)
 	if optionState.localPassword != "" {
 		s.mgmt.SetLocalPassword(optionState.localPassword)
 	}
@@ -841,23 +853,16 @@ func (s *Server) AttachWebsocketRoute(path string, handler http.Handler) {
 }
 
 // localOrManagementAuthMiddleware keeps local OAuth setup available while requiring
-// the configured management access policy for non-loopback clients.
+// the configured management access policy for non-loopback clients. It uses the shared
+// guard.RequestClientIP to avoid duplicating IP parsing logic.
 func (s *Server) localOrManagementAuthMiddleware() gin.HandlerFunc {
 	managementMiddleware := s.mgmt.Middleware()
 	return func(c *gin.Context) {
-		remoteAddr := ""
-		if c.Request != nil {
-			remoteAddr = strings.TrimSpace(c.Request.RemoteAddr)
-		}
-		host, _, errSplit := net.SplitHostPort(remoteAddr)
-		if errSplit != nil {
-			host = remoteAddr
-		}
-		if ip := net.ParseIP(strings.TrimSpace(host)); ip != nil && ip.IsLoopback() {
-			c.Next()
+		if guard.RequestClientIP(c.Request) != "" {
+			managementMiddleware(c)
 			return
 		}
-		managementMiddleware(c)
+		c.Next()
 	}
 }
 
@@ -923,6 +928,8 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.DELETE("/auto-model-disabled/:modelKey", s.mgmt.DeleteDisabledAutoModel)
 
 		mgmt.GET("/model-selection-counts", s.mgmt.GetModelSelectionCounts)
+
+		mgmt.GET("/auth-guard", s.mgmt.GetAuthGuardStatus)
 
 		mgmt.POST("/api-call", s.mgmt.APICall)
 
@@ -1828,6 +1835,13 @@ func (s *Server) applyAccessConfig(oldCfg, newCfg *config.Config) {
 	if s == nil || s.accessManager == nil || newCfg == nil {
 		return
 	}
+	guard.Configure(
+		newCfg.RemoteManagement.AuthMaxFailures,
+		time.Duration(newCfg.RemoteManagement.AuthBanSeconds)*time.Second,
+		time.Duration(newCfg.RemoteManagement.AuthWindowSeconds)*time.Second,
+		newCfg.RemoteManagement.AuthEscalationThreshold,
+	)
+	guard.SetBlacklist(newCfg.RemoteManagement.IPBlacklist)
 	if _, err := access.ApplyAccessProviders(s.accessManager, oldCfg, newCfg); err != nil {
 		return
 	}

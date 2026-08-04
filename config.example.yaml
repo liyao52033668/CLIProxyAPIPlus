@@ -44,6 +44,22 @@ remote-management:
   #   - 'http://127.0.0.1:5173'
   #   - 'https://admin.example.com'
 
+  # Client IPs (or CIDR ranges) banned from both API and management endpoints.
+  # Useful for permanently blocking credential-stuffing sources.
+  # ip-blacklist:
+  #   - '1.2.3.4'
+  #   - '10.0.0.0/8'
+
+  # Brute-force protection for API authentication: a client IP is banned for
+  # auth-ban-seconds after auth-max-failures failed attempts within auth-window-seconds.
+  # Defaults: auth-max-failures: 10, auth-ban-seconds: 1800, auth-window-seconds: 300.
+  # auth-max-failures: 10
+  # auth-ban-seconds: 1800
+  # auth-window-seconds: 300
+  # Repeat-offender escalation: after an IP is auto-banned this many times it is
+  # appended to ip-blacklist permanently. Values <= 0 disable escalation.
+  # auth-escalation-threshold: 0
+
 # Authentication directory (supports ~ for home directory)
 auth-dir: '~/.cli-proxy-api'
 

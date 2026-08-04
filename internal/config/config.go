@@ -256,9 +256,20 @@ type RemoteManagement struct {
 	// Empty (default) keeps the previous no-CORS policy for management routes.
 	// Entries accept full origins (http://localhost:5173) or host[:port] (normalized as http://...).
 	CorsAllowedOrigins []string `yaml:"cors-allowed-origins"`
-	// IPBlacklist blocks specific client IPs from accessing management API.
+	// IPBlacklist blocks specific client IPs from accessing the API and management endpoints.
 	// Supports individual IPs and CIDR ranges (e.g. "1.2.3.4", "10.0.0.0/8").
 	IPBlacklist []string `yaml:"ip-blacklist"`
+	// AuthMaxFailures bans a client IP from API endpoints after this many failed
+	// authentication attempts within AuthWindowSeconds. Values <= 0 apply the default (10).
+	AuthMaxFailures int `yaml:"auth-max-failures"`
+	// AuthBanSeconds is how long (in seconds) a banned IP stays blocked. Values <= 0 apply the default (1800).
+	AuthBanSeconds int `yaml:"auth-ban-seconds"`
+	// AuthWindowSeconds is the window (in seconds) for counting failed authentication attempts.
+	// Values <= 0 apply the default (300).
+	AuthWindowSeconds int `yaml:"auth-window-seconds"`
+	// AuthEscalationThreshold permanently appends a client IP to ip-blacklist after
+	// it has been auto-banned this many times. Values <= 0 disable escalation.
+	AuthEscalationThreshold int `yaml:"auth-escalation-threshold"`
 }
 
 // QuotaExceeded defines the behavior when API quota limits are exceeded.

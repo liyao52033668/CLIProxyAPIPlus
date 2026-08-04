@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	configaccess "github.com/router-for-me/CLIProxyAPI/v7/internal/access/config_access"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/access/guard"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	log "github.com/sirupsen/logrus"
@@ -57,7 +58,8 @@ func ReconcileProviders(oldCfg, newCfg *config.Config, existing []sdkaccess.Prov
 			appendChange(&added, providerID)
 			continue
 		}
-		if !providerInstanceEqual(existingProvider, provider) {
+		// Existing providers may be wrapped by the auth guard; compare the unwrapped instances.
+		if !providerInstanceEqual(guard.Unwrap(existingProvider), provider) {
 			appendChange(&updated, providerID)
 		}
 	}
@@ -92,7 +94,9 @@ func ApplyAccessProviders(manager *sdkaccess.Manager, oldCfg, newCfg *config.Con
 		return false, fmt.Errorf("reconciling access providers: %w", err)
 	}
 
-	manager.SetProviders(providers)
+	// Wrap all providers with the brute-force guard so every authentication
+	// failure is tracked regardless of which provider handled the request.
+	manager.SetProviders(guard.WrapProviders(providers, guard.Global()))
 
 	if len(added)+len(updated)+len(removed) > 0 {
 		log.Debugf("auth providers reconciled (added=%d updated=%d removed=%d)", len(added), len(updated), len(removed))

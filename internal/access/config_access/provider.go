@@ -2,6 +2,7 @@ package configaccess
 
 import (
 	"context"
+	"crypto/subtle"
 	"net/http"
 	"strings"
 
@@ -90,10 +91,10 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 		if candidate.value == "" {
 			continue
 		}
-		if _, ok := p.keys[candidate.value]; ok {
+		if matchedKey, ok := matchKey(p.keys, candidate.value); ok {
 			return &sdkaccess.Result{
 				Provider:  p.Identifier(),
-				Principal: candidate.value,
+				Principal: matchedKey,
 				Metadata: map[string]string{
 					"source": candidate.source,
 				},
@@ -102,6 +103,19 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 	}
 
 	return nil, sdkaccess.NewInvalidCredentialError()
+}
+
+// matchKey compares the candidate against every configured key in constant
+// time so response timing does not reveal how much of a key matched.
+func matchKey(keys map[string]struct{}, candidate string) (string, bool) {
+	candidateBytes := []byte(candidate)
+	matched := ""
+	for key := range keys {
+		if subtle.ConstantTimeCompare([]byte(key), candidateBytes) == 1 {
+			matched = key
+		}
+	}
+	return matched, matched != ""
 }
 
 func extractBearerToken(header string) string {

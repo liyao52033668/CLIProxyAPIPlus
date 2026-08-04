@@ -14,6 +14,7 @@ const (
 	AuthErrorCodeInvalidCredential AuthErrorCode = "invalid_credential"
 	AuthErrorCodeNotHandled        AuthErrorCode = "not_handled"
 	AuthErrorCodeInternal          AuthErrorCode = "internal_error"
+	AuthErrorCodeBanned            AuthErrorCode = "banned"
 )
 
 // AuthError carries authentication failure details and HTTP status.
@@ -68,6 +69,12 @@ func NewNoCredentialsError() *AuthError {
 
 func NewInvalidCredentialError() *AuthError {
 	return newAuthError(AuthErrorCodeInvalidCredential, "Invalid API key", http.StatusUnauthorized, nil)
+}
+
+// NewBannedError reports that the client IP is temporarily banned after too
+// many failed authentication attempts.
+func NewBannedError() *AuthError {
+	return newAuthError(AuthErrorCodeBanned, "Too many failed authentication attempts. Temporarily banned.", http.StatusForbidden, nil)
 }
 
 func NewNotHandledError() *AuthError {
