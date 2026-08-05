@@ -443,6 +443,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(make([]byte, 0, 64*1024), streamScannerBuffer)
 		var param any
+		var seenDone bool
 		thinkingState := newOpenAICompatThinkingStreamState()
 		emitTranslated := func(raw []byte) bool {
 			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, raw, &param)
@@ -492,9 +493,16 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 						return
 					}
 				}
+				seenDone = true
 			}
 			if !emitTranslated(thinkingState.Transform(bytes.Clone(trimmedLine))) {
 				return
+			}
+			if seenDone {
+				// OpenAI SSE treats data: [DONE] as the terminal event. Stop here so
+				// trailing non-spec chunks (e.g. cost metadata after DONE) are not
+				// reordered ahead of the handler-emitted terminal marker.
+				break
 			}
 		}
 		if errScan := scanner.Err(); errScan != nil {
@@ -504,7 +512,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
 			case <-ctx.Done():
 			}
-		} else {
+		} else if !seenDone {
 			for _, pending := range thinkingState.Flush() {
 				if !emitTranslated(pending) {
 					return

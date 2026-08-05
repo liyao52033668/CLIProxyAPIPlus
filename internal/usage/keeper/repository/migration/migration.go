@@ -45,6 +45,13 @@ type databaseMigration struct {
 	run     func(*gorm.DB) error
 }
 
+// VersionCount reports how many schema migrations are registered. Fresh
+// databases mark all of them applied, so callers compare against this instead
+// of a hardcoded count.
+func VersionCount() int {
+	return len(orderedMigrations())
+}
+
 func Run(db *gorm.DB) error {
 	if err := createSchemaMigrationsTable(db); err != nil {
 		return err

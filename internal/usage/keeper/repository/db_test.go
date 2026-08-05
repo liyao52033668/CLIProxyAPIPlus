@@ -12,6 +12,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/entities"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/repository/migration"
 	"github.com/sirupsen/logrus"
 	"gorm.io/gorm"
 )
@@ -59,8 +60,8 @@ func TestOpenDatabaseCreatesFreshDatabaseFromCurrentSchemaWithoutRunningMigratio
 	if err := db.Table("schema_migrations").Count(&count).Error; err != nil {
 		t.Fatalf("count schema migrations: %v", err)
 	}
-	if count != 19 {
-		t.Fatalf("expected fresh database to mark 19 migrations applied, got %d", count)
+	if wantCount := int64(migration.VersionCount()); count != wantCount {
+		t.Fatalf("expected fresh database to mark %d migrations applied, got %d", wantCount, count)
 	}
 	if strings.Contains(logs.String(), "schema migration started") {
 		t.Fatalf("expected fresh database creation not to run version migrations, got logs:\n%s", logs.String())

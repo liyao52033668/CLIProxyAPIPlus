@@ -306,6 +306,7 @@ func main() {
 	var noIncognito bool
 	var useIncognito bool
 	var localModel bool
+	var homeClient *home.Client
 
 	// Define command-line flags for different operation modes.
 	flag.BoolVar(&login, "login", false, "Login Google Account")
@@ -547,8 +548,12 @@ func main() {
 		cfg = parsed
 
 		tempHomeClient.Close()
-		homeClient := home.New(homeCfg, parsed.Timeouts.HomeRedisOperationSeconds, parsed.Timeouts.HomeSubscriptionReceiveSeconds)
-		defer homeClient.Close()
+		homeClient = home.New(homeCfg, parsed.Timeouts.HomeRedisOperationSeconds, parsed.Timeouts.HomeSubscriptionReceiveSeconds)
+		defer func() {
+			if homeClient != nil {
+				homeClient.Close()
+			}
+		}()
 
 		// Keep a non-empty config path for downstream components (log paths, management assets, etc),
 		// but do not require the file to exist when loading config from home.
@@ -1005,6 +1010,13 @@ func main() {
 			}
 
 			cmd.StartService(cfg, configFilePath, password)
+
+			if homeClient != nil {
+				// The bootstrap client is not owned by the runtime service. Close it after
+				// the final startup report so it cannot retain an idle RESP connection.
+				homeClient.Close()
+				homeClient = nil
+			}
 		}
 	}
 }

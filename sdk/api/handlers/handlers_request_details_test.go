@@ -78,10 +78,13 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 			wantErr:       true,
 		},
 		{
+			// Global auto tie-break intentionally ignores model "created" and
+			// falls back to modelID ordering (see model_registry.go), so with
+			// only these test registrations the smallest modelID wins.
 			name:          "auto suffix resolved",
 			inputModel:    "auto(high)",
-			wantProviders: []string{"gemini"},
-			wantModel:     "gemini-2.5-pro(high)",
+			wantProviders: []string{"claude"},
+			wantModel:     "claude-sonnet-4-5(high)",
 			wantErr:       false,
 		},
 		{

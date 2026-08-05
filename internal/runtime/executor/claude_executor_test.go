@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -100,7 +101,7 @@ func TestApplyClaudeHeaders_UsesConfiguredBaselineFingerprint(t *testing.T) {
 	}
 
 	req := newClaudeHeaderTestRequest(t, incoming)
-	applyClaudeHeaders(req, auth, "key-baseline", false, nil, cfg, nil)
+	applyClaudeHeaders(req, auth, "key-baseline", false, nil, cfg, nil, nil)
 
 	assertClaudeFingerprint(t, req.Header, "evil-client/9.9", "9.9.9", "v24.5.0", "Linux", "x64")
 	if got := req.Header.Get("X-Stainless-Timeout"); got != "900" {
@@ -136,7 +137,7 @@ func TestApplyClaudeHeaders_TracksHighestClaudeCLIFingerprint(t *testing.T) {
 		"X-Stainless-Os":              []string{"Linux"},
 		"X-Stainless-Arch":            []string{"x64"},
 	})
-	applyClaudeHeaders(firstReq, auth, "key-upgrade", false, nil, cfg, nil)
+	applyClaudeHeaders(firstReq, auth, "key-upgrade", false, nil, cfg, nil, nil)
 	assertClaudeFingerprint(t, firstReq.Header, "claude-cli/2.1.62 (external, cli)", "0.74.0", "v24.3.0", "MacOS", "arm64")
 
 	thirdPartyReq := newClaudeHeaderTestRequest(t, http.Header{
@@ -146,7 +147,7 @@ func TestApplyClaudeHeaders_TracksHighestClaudeCLIFingerprint(t *testing.T) {
 		"X-Stainless-Os":              []string{"Windows"},
 		"X-Stainless-Arch":            []string{"x64"},
 	})
-	applyClaudeHeaders(thirdPartyReq, auth, "key-upgrade", false, nil, cfg, nil)
+	applyClaudeHeaders(thirdPartyReq, auth, "key-upgrade", false, nil, cfg, nil, nil)
 	assertClaudeFingerprint(t, thirdPartyReq.Header, "claude-cli/2.1.62 (external, cli)", "0.74.0", "v24.3.0", "MacOS", "arm64")
 
 	higherReq := newClaudeHeaderTestRequest(t, http.Header{
@@ -156,7 +157,7 @@ func TestApplyClaudeHeaders_TracksHighestClaudeCLIFingerprint(t *testing.T) {
 		"X-Stainless-Os":              []string{"MacOS"},
 		"X-Stainless-Arch":            []string{"arm64"},
 	})
-	applyClaudeHeaders(higherReq, auth, "key-upgrade", false, nil, cfg, nil)
+	applyClaudeHeaders(higherReq, auth, "key-upgrade", false, nil, cfg, nil, nil)
 	assertClaudeFingerprint(t, higherReq.Header, "claude-cli/2.1.63 (external, cli)", "0.75.0", "v24.4.0", "MacOS", "arm64")
 
 	lowerReq := newClaudeHeaderTestRequest(t, http.Header{
@@ -166,7 +167,7 @@ func TestApplyClaudeHeaders_TracksHighestClaudeCLIFingerprint(t *testing.T) {
 		"X-Stainless-Os":              []string{"Windows"},
 		"X-Stainless-Arch":            []string{"x64"},
 	})
-	applyClaudeHeaders(lowerReq, auth, "key-upgrade", false, nil, cfg, nil)
+	applyClaudeHeaders(lowerReq, auth, "key-upgrade", false, nil, cfg, nil, nil)
 	assertClaudeFingerprint(t, lowerReq.Header, "claude-cli/2.1.63 (external, cli)", "0.75.0", "v24.4.0", "MacOS", "arm64")
 }
 
@@ -198,7 +199,7 @@ func TestApplyClaudeHeaders_DoesNotDowngradeConfiguredBaselineOnFirstClaudeClien
 		"X-Stainless-Os":              []string{"Linux"},
 		"X-Stainless-Arch":            []string{"x64"},
 	})
-	applyClaudeHeaders(olderClaudeReq, auth, "key-baseline-floor", false, nil, cfg, nil)
+	applyClaudeHeaders(olderClaudeReq, auth, "key-baseline-floor", false, nil, cfg, nil, nil)
 	assertClaudeFingerprint(t, olderClaudeReq.Header, "claude-cli/2.1.70 (external, cli)", "0.80.0", "v24.5.0", "MacOS", "arm64")
 
 	newerClaudeReq := newClaudeHeaderTestRequest(t, http.Header{
@@ -208,7 +209,7 @@ func TestApplyClaudeHeaders_DoesNotDowngradeConfiguredBaselineOnFirstClaudeClien
 		"X-Stainless-Os":              []string{"Linux"},
 		"X-Stainless-Arch":            []string{"x64"},
 	})
-	applyClaudeHeaders(newerClaudeReq, auth, "key-baseline-floor", false, nil, cfg, nil)
+	applyClaudeHeaders(newerClaudeReq, auth, "key-baseline-floor", false, nil, cfg, nil, nil)
 	assertClaudeFingerprint(t, newerClaudeReq.Header, "claude-cli/2.1.71 (external, cli)", "0.81.0", "v24.6.0", "MacOS", "arm64")
 }
 
@@ -250,7 +251,7 @@ func TestApplyClaudeHeaders_UpgradesCachedSoftwareFingerprintWhenBaselineAdvance
 		"X-Stainless-Os":              []string{"Linux"},
 		"X-Stainless-Arch":            []string{"x64"},
 	})
-	applyClaudeHeaders(officialReq, auth, "key-baseline-reload", false, nil, oldCfg, nil)
+	applyClaudeHeaders(officialReq, auth, "key-baseline-reload", false, nil, oldCfg, nil, nil)
 	assertClaudeFingerprint(t, officialReq.Header, "claude-cli/2.1.71 (external, cli)", "0.81.0", "v24.6.0", "MacOS", "arm64")
 
 	thirdPartyReq := newClaudeHeaderTestRequest(t, http.Header{
@@ -260,7 +261,7 @@ func TestApplyClaudeHeaders_UpgradesCachedSoftwareFingerprintWhenBaselineAdvance
 		"X-Stainless-Os":              []string{"Linux"},
 		"X-Stainless-Arch":            []string{"x64"},
 	})
-	applyClaudeHeaders(thirdPartyReq, auth, "key-baseline-reload", false, nil, newCfg, nil)
+	applyClaudeHeaders(thirdPartyReq, auth, "key-baseline-reload", false, nil, newCfg, nil, nil)
 	assertClaudeFingerprint(t, thirdPartyReq.Header, "claude-cli/2.1.77 (external, cli)", "0.87.0", "v24.8.0", "MacOS", "arm64")
 }
 
@@ -292,7 +293,7 @@ func TestApplyClaudeHeaders_LearnsOfficialFingerprintAfterCustomBaselineFallback
 		"X-Stainless-Os":              []string{"Linux"},
 		"X-Stainless-Arch":            []string{"x64"},
 	})
-	applyClaudeHeaders(thirdPartyReq, auth, "key-custom-baseline-learning", false, nil, cfg, nil)
+	applyClaudeHeaders(thirdPartyReq, auth, "key-custom-baseline-learning", false, nil, cfg, nil, nil)
 	assertClaudeFingerprint(t, thirdPartyReq.Header, "my-gateway/1.0", "custom-pkg", "custom-runtime", "MacOS", "arm64")
 
 	officialReq := newClaudeHeaderTestRequest(t, http.Header{
@@ -302,7 +303,7 @@ func TestApplyClaudeHeaders_LearnsOfficialFingerprintAfterCustomBaselineFallback
 		"X-Stainless-Os":              []string{"Linux"},
 		"X-Stainless-Arch":            []string{"x64"},
 	})
-	applyClaudeHeaders(officialReq, auth, "key-custom-baseline-learning", false, nil, cfg, nil)
+	applyClaudeHeaders(officialReq, auth, "key-custom-baseline-learning", false, nil, cfg, nil, nil)
 	assertClaudeFingerprint(t, officialReq.Header, "claude-cli/2.1.77 (external, cli)", "0.87.0", "v24.8.0", "MacOS", "arm64")
 
 	postLearningThirdPartyReq := newClaudeHeaderTestRequest(t, http.Header{
@@ -312,7 +313,7 @@ func TestApplyClaudeHeaders_LearnsOfficialFingerprintAfterCustomBaselineFallback
 		"X-Stainless-Os":              []string{"Linux"},
 		"X-Stainless-Arch":            []string{"x64"},
 	})
-	applyClaudeHeaders(postLearningThirdPartyReq, auth, "key-custom-baseline-learning", false, nil, cfg, nil)
+	applyClaudeHeaders(postLearningThirdPartyReq, auth, "key-custom-baseline-learning", false, nil, cfg, nil, nil)
 	assertClaudeFingerprint(t, postLearningThirdPartyReq.Header, "claude-cli/2.1.77 (external, cli)", "0.87.0", "v24.8.0", "MacOS", "arm64")
 }
 
@@ -444,7 +445,7 @@ func TestApplyClaudeHeaders_ThirdPartyBaselineThenOfficialUpgradeKeepsPinnedPlat
 		"X-Stainless-Os":              []string{"Linux"},
 		"X-Stainless-Arch":            []string{"x64"},
 	})
-	applyClaudeHeaders(thirdPartyReq, auth, "key-third-party-then-official", false, nil, cfg, nil)
+	applyClaudeHeaders(thirdPartyReq, auth, "key-third-party-then-official", false, nil, cfg, nil, nil)
 	assertClaudeFingerprint(t, thirdPartyReq.Header, "claude-cli/2.1.70 (external, cli)", "0.80.0", "v24.5.0", "MacOS", "arm64")
 
 	officialReq := newClaudeHeaderTestRequest(t, http.Header{
@@ -454,7 +455,7 @@ func TestApplyClaudeHeaders_ThirdPartyBaselineThenOfficialUpgradeKeepsPinnedPlat
 		"X-Stainless-Os":              []string{"Linux"},
 		"X-Stainless-Arch":            []string{"x64"},
 	})
-	applyClaudeHeaders(officialReq, auth, "key-third-party-then-official", false, nil, cfg, nil)
+	applyClaudeHeaders(officialReq, auth, "key-third-party-then-official", false, nil, cfg, nil, nil)
 	assertClaudeFingerprint(t, officialReq.Header, "claude-cli/2.1.77 (external, cli)", "0.87.0", "v24.8.0", "MacOS", "arm64")
 }
 
@@ -486,7 +487,7 @@ func TestApplyClaudeHeaders_DisableDeviceProfileStabilization(t *testing.T) {
 		"X-Stainless-Os":              []string{"Linux"},
 		"X-Stainless-Arch":            []string{"x64"},
 	})
-	applyClaudeHeaders(firstReq, auth, "key-disable-stability", false, nil, cfg, nil)
+	applyClaudeHeaders(firstReq, auth, "key-disable-stability", false, nil, cfg, nil, nil)
 	assertClaudeFingerprint(t, firstReq.Header, "claude-cli/2.1.62 (external, cli)", "0.74.0", "v24.3.0", "Linux", "x64")
 
 	thirdPartyReq := newClaudeHeaderTestRequest(t, http.Header{
@@ -496,7 +497,7 @@ func TestApplyClaudeHeaders_DisableDeviceProfileStabilization(t *testing.T) {
 		"X-Stainless-Os":              []string{"Windows"},
 		"X-Stainless-Arch":            []string{"x64"},
 	})
-	applyClaudeHeaders(thirdPartyReq, auth, "key-disable-stability", false, nil, cfg, nil)
+	applyClaudeHeaders(thirdPartyReq, auth, "key-disable-stability", false, nil, cfg, nil, nil)
 	assertClaudeFingerprint(t, thirdPartyReq.Header, "claude-cli/2.1.60 (external, cli)", "0.10.0", "v18.0.0", "Windows", "x64")
 
 	lowerReq := newClaudeHeaderTestRequest(t, http.Header{
@@ -506,7 +507,7 @@ func TestApplyClaudeHeaders_DisableDeviceProfileStabilization(t *testing.T) {
 		"X-Stainless-Os":              []string{"Windows"},
 		"X-Stainless-Arch":            []string{"x64"},
 	})
-	applyClaudeHeaders(lowerReq, auth, "key-disable-stability", false, nil, cfg, nil)
+	applyClaudeHeaders(lowerReq, auth, "key-disable-stability", false, nil, cfg, nil, nil)
 	assertClaudeFingerprint(t, lowerReq.Header, "claude-cli/2.1.61 (external, cli)", "0.73.0", "v24.2.0", "Windows", "x64")
 }
 
@@ -523,7 +524,7 @@ func TestApplyClaudeHeaders_EnablesGitLabDuoContext1MHeader(t *testing.T) {
 	}
 
 	req := newClaudeHeaderTestRequest(t, http.Header{})
-	applyClaudeHeaders(req, auth, "key-gitlab-1m", false, nil, cfg, nil)
+	applyClaudeHeaders(req, auth, "key-gitlab-1m", false, nil, cfg, nil, nil)
 
 	if got := req.Header.Get("Anthropic-Beta"); !strings.Contains(got, "context-1m-2025-08-07") {
 		t.Fatalf("Anthropic-Beta = %q, want to contain context-1m-2025-08-07", got)
@@ -542,7 +543,7 @@ func TestApplyClaudeHeaders_EnablesGitLabDuoContext1MViaRequestHeader(t *testing
 	}
 
 	req := newClaudeHeaderTestRequest(t, http.Header{textproto.CanonicalMIMEHeaderKey("X-CPA-CLAUDE-1M"): []string{"1"}})
-	applyClaudeHeaders(req, auth, "key-gitlab-1m-header", false, nil, cfg, nil)
+	applyClaudeHeaders(req, auth, "key-gitlab-1m-header", false, nil, cfg, nil, nil)
 
 	if got := req.Header.Get("Anthropic-Beta"); !strings.Contains(got, "context-1m-2025-08-07") {
 		t.Fatalf("Anthropic-Beta = %q, want to contain context-1m-2025-08-07", got)
@@ -576,7 +577,7 @@ func TestApplyClaudeHeaders_LegacyModePreservesConfiguredUserAgentOverrideForCla
 		"X-Stainless-Os":              []string{"Linux"},
 		"X-Stainless-Arch":            []string{"x64"},
 	})
-	applyClaudeHeaders(req, auth, "key-legacy-ua-override", false, nil, cfg, nil)
+	applyClaudeHeaders(req, auth, "key-legacy-ua-override", false, nil, cfg, nil, nil)
 
 	assertClaudeFingerprint(t, req.Header, "config-ua/1.0", "0.74.0", "v24.3.0", "Linux", "x64")
 }
@@ -605,7 +606,7 @@ func TestApplyClaudeHeaders_LegacyModeFallsBackToRuntimeOSArchWhenMissing(t *tes
 	req := newClaudeHeaderTestRequest(t, http.Header{
 		"User-Agent": []string{"curl/8.7.1"},
 	})
-	applyClaudeHeaders(req, auth, "key-legacy-runtime-os-arch", false, nil, cfg, nil)
+	applyClaudeHeaders(req, auth, "key-legacy-runtime-os-arch", false, nil, cfg, nil, nil)
 
 	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.60 (external, cli)", "0.70.0", "v22.0.0", helps.MapStainlessOS(), helps.MapStainlessArch())
 }
@@ -632,7 +633,7 @@ func TestApplyClaudeHeaders_UnsetStabilizationAlsoUsesLegacyRuntimeOSArchFallbac
 	req := newClaudeHeaderTestRequest(t, http.Header{
 		"User-Agent": []string{"curl/8.7.1"},
 	})
-	applyClaudeHeaders(req, auth, "key-unset-runtime-os-arch", false, nil, cfg, nil)
+	applyClaudeHeaders(req, auth, "key-unset-runtime-os-arch", false, nil, cfg, nil, nil)
 
 	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.60 (external, cli)", "0.70.0", "v22.0.0", helps.MapStainlessOS(), helps.MapStainlessArch())
 }
@@ -2079,7 +2080,10 @@ func TestApplyCloaking_PreservesConfiguredStrictModeAndSensitiveWordsWhenModeOmi
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-123"}}
 	payload := []byte(`{"system":"proxy rules","messages":[{"role":"user","content":[{"type":"text","text":"proxy access"}]}]}`)
 
-	out := applyCloaking(context.Background(), cfg, auth, payload, "claude-3-5-sonnet-20241022", "key-123")
+	out, err := applyCloaking(context.Background(), cfg, auth, payload, "claude-3-5-sonnet-20241022", "key-123")
+	if err != nil {
+		t.Fatalf("applyCloaking() error = %v", err)
+	}
 
 	blocks := gjson.GetBytes(out, "system").Array()
 	if len(blocks) != 3 {
@@ -2519,5 +2523,180 @@ func TestPrependToFirstUserMessage_PrependsWhenNoLeadingToolResult(t *testing.T)
 	}
 	if got := blocks.Get("1.text").String(); got != "hello" {
 		t.Fatalf("original block should follow, got %q: %s", got, out)
+	}
+}
+
+func TestPrependToFirstUserMessageBlocks_PreservesBlockBoundaries(t *testing.T) {
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`)
+
+	out := prependToFirstUserMessageBlocks(payload, []string{"first guidance", "second guidance"})
+
+	blocks := gjson.GetBytes(out, "messages.0.content").Array()
+	if len(blocks) != 3 {
+		t.Fatalf("content length = %d, want 3 (two reminders + user text): %s", len(blocks), out)
+	}
+	for idx, want := range []string{"first guidance", "second guidance"} {
+		text := blocks[idx].Get("text").String()
+		if !strings.Contains(text, want) {
+			t.Fatalf("content[%d] text = %q, want to contain %q: %s", idx, text, want, out)
+		}
+	}
+	if got := blocks[2].Get("text").String(); got != "hello" {
+		t.Fatalf("original block should follow, got %q: %s", got, out)
+	}
+}
+
+func TestPrependToFirstUserMessageBlocks_DoesNotDuplicateExistingReminder(t *testing.T) {
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`)
+
+	out := prependToFirstUserMessageBlocks(payload, []string{"guidance"})
+	out = prependToFirstUserMessageBlocks(out, []string{"guidance"})
+
+	blocks := gjson.GetBytes(out, "messages.0.content").Array()
+	if len(blocks) != 2 {
+		t.Fatalf("content length = %d, want 2 (one reminder + user text): %s", len(blocks), out)
+	}
+	if !strings.Contains(blocks[0].Get("text").String(), "guidance") {
+		t.Fatalf("reminder missing after second injection: %s", out)
+	}
+	if got := blocks[1].Get("text").String(); got != "hello" {
+		t.Fatalf("original block should follow, got %q: %s", got, out)
+	}
+}
+
+func TestApplyClaudeHeaders_DropsRedactThinkingWhenThinkingDisplaySet(t *testing.T) {
+	cfg := &config.Config{}
+	auth := &cliproxyauth.Auth{
+		ID:         "auth-beta-display",
+		Attributes: map[string]string{"api_key": "key-beta-display"},
+	}
+	req := newClaudeHeaderTestRequest(t, nil)
+	body := []byte(`{"model":"claude-opus-4-6","thinking":{"type":"adaptive","display":"summarized"}}`)
+	applyClaudeHeaders(req, auth, "key-beta-display", false, nil, cfg, nil, body)
+	if got := req.Header.Get("Anthropic-Beta"); strings.Contains(got, "redact-thinking-2026-02-12") {
+		t.Fatalf("Anthropic-Beta = %q, want no redact-thinking when thinking.display is set", got)
+	}
+}
+
+func TestApplyClaudeHeaders_KeepsRedactThinkingWhenDisplayOmitted(t *testing.T) {
+	cfg := &config.Config{}
+	auth := &cliproxyauth.Auth{
+		ID:         "auth-beta-plain",
+		Attributes: map[string]string{"api_key": "key-beta-plain"},
+	}
+	req := newClaudeHeaderTestRequest(t, nil)
+	body := []byte(`{"model":"claude-opus-4-6","thinking":{"type":"adaptive"}}`)
+	applyClaudeHeaders(req, auth, "key-beta-plain", false, nil, cfg, nil, body)
+	if got := req.Header.Get("Anthropic-Beta"); !strings.Contains(got, "redact-thinking-2026-02-12") {
+		t.Fatalf("Anthropic-Beta = %q, want to contain redact-thinking when thinking.display is omitted", got)
+	}
+}
+
+func TestValidateClaudeCallerSystemBlocksAcceptsTextOnly(t *testing.T) {
+	tests := []struct {
+		name   string
+		system string
+	}{
+		{name: "string", system: `"S1"`},
+		{name: "text blocks", system: `[{"type":"text","text":"S1"},{"type":"text","text":"S2"}]`},
+		{name: "absent", system: ``},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			payload := `{"model":"claude-opus-5"}`
+			if test.system != "" {
+				payload = `{"model":"claude-opus-5","system":` + test.system + `}`
+			}
+			if err := validateClaudeCallerSystemBlocks(gjson.Get(payload, "system")); err != nil {
+				t.Fatalf("validateClaudeCallerSystemBlocks() error = %v, want nil", err)
+			}
+		})
+	}
+}
+
+// Anthropic rejects every non-text block in both system slots, verified live on
+// 2026-08-03: the top-level field answers "system.<i>.type: Input should be
+// 'text'" and a role=system message answers "role 'system' supports text,
+// tool_addition, and tool_removal blocks only". Cloaking has no third slot, so
+// the request has to fail here instead of losing the caller's instructions.
+func TestValidateClaudeCallerSystemBlocksRejectsNonTextBlock(t *testing.T) {
+	tests := []struct {
+		name      string
+		system    string
+		wantIndex string
+		wantType  string
+	}{
+		{
+			name:      "image",
+			system:    `[{"type":"text","text":"S1"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}]`,
+			wantIndex: "system.1.type",
+			wantType:  `"image"`,
+		},
+		{
+			name:      "responses marker",
+			system:    `[{"type":"input_file"}]`,
+			wantIndex: "system.0.type",
+			wantType:  `"input_file"`,
+		},
+		{
+			name:      "missing type",
+			system:    `[{"text":"S1"}]`,
+			wantIndex: "system.0.type",
+			wantType:  `"unknown"`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateClaudeCallerSystemBlocks(gjson.Parse(test.system))
+			if err == nil {
+				t.Fatal("validateClaudeCallerSystemBlocks() error = nil, want rejection")
+			}
+			var statusCoder interface{ StatusCode() int }
+			if !errors.As(err, &statusCoder) || statusCoder.StatusCode() != http.StatusBadRequest {
+				t.Fatalf("error status = %v, want 400", err)
+			}
+			var scoped interface{ IsRequestScoped() bool }
+			if !errors.As(err, &scoped) || !scoped.IsRequestScoped() {
+				t.Fatalf("error %v must be request scoped so no other credential is tried", err)
+			}
+			if got := err.Error(); !strings.Contains(got, test.wantIndex) || !strings.Contains(got, test.wantType) {
+				t.Fatalf("error = %q, want it to name %s and %s", got, test.wantIndex, test.wantType)
+			}
+		})
+	}
+}
+
+func TestApplyCloakingRejectsNonTextCallerSystemBlock(t *testing.T) {
+	cfg := &config.Config{}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-123"}}
+	payload := []byte(`{"model":"claude-opus-5","system":[{"type":"text","text":"S1"},{"type":"input_image"}],"messages":[{"role":"user","content":[{"type":"text","text":"U1"}]}]}`)
+
+	out, errCloaking := applyCloaking(context.Background(), cfg, auth, payload, "claude-opus-5", "key-123")
+	if errCloaking == nil {
+		t.Fatal("applyCloaking() error = nil, want rejection")
+	}
+	if out != nil {
+		t.Fatalf("applyCloaking() payload = %s, want nil", out)
+	}
+}
+
+// Strict mode never forwards caller system prompts, so an unusable block cannot
+// lose information and must not fail the request.
+func TestApplyCloakingStrictModeIgnoresNonTextCallerSystemBlock(t *testing.T) {
+	cfg := &config.Config{
+		ClaudeKey: []config.ClaudeKey{{
+			APIKey: "key-123",
+			Cloak:  &config.CloakConfig{StrictMode: true},
+		}},
+	}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-123"}}
+	payload := []byte(`{"model":"claude-opus-5","system":[{"type":"input_image"}],"messages":[{"role":"user","content":[{"type":"text","text":"U1"}]}]}`)
+
+	out, errCloaking := applyCloaking(context.Background(), cfg, auth, payload, "claude-opus-5", "key-123")
+	if errCloaking != nil {
+		t.Fatalf("applyCloaking() error = %v, want nil", errCloaking)
+	}
+	if got := len(gjson.GetBytes(out, "system").Array()); got != 3 {
+		t.Fatalf("system blocks = %d, want the 3 Claude Code blocks", got)
 	}
 }

@@ -45,6 +45,33 @@ type claudeToResponsesState struct {
 
 var dataTag = []byte("data:")
 
+// ClaudeResponsesRedactedThinkingPrefix marks a Responses reasoning item whose
+// encrypted_content carries an Anthropic redacted_thinking payload instead of a
+// thinking signature. Responses has no redacted reasoning item type, and
+// Anthropic requires redacted_thinking blocks to be replayed verbatim, so the
+// payload rides in encrypted_content behind this marker and is restored on the
+// way back. The marker is not a valid signature for any provider, so a foreign
+// upstream drops the block instead of replaying an unusable value.
+const ClaudeResponsesRedactedThinkingPrefix = "claude-redacted-thinking:"
+
+// claudeReasoningCarrier returns the encrypted_content value for the Responses
+// reasoning item that mirrors a Claude thinking or redacted_thinking block.
+// Streaming thinking blocks usually announce an empty signature and fill it in
+// through signature_delta, so an empty result here is expected and later
+// replaced.
+func claudeReasoningCarrier(contentBlock gjson.Result) string {
+	if contentBlock.Get("type").String() == "redacted_thinking" {
+		if data := contentBlock.Get("data"); data.Exists() && data.String() != "" {
+			return ClaudeResponsesRedactedThinkingPrefix + data.String()
+		}
+		return ""
+	}
+	if signature := contentBlock.Get("signature"); signature.Exists() {
+		return signature.String()
+	}
+	return ""
+}
+
 func pickRequestJSON(originalRequestRawJSON, requestRawJSON []byte) []byte {
 	if len(originalRequestRawJSON) > 0 && gjson.ValidBytes(originalRequestRawJSON) {
 		return originalRequestRawJSON
@@ -161,11 +188,12 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			// record function metadata for aggregation
 			st.FuncCallIDs[idx] = st.CurrentFCID
 			st.FuncNames[idx] = name
-		} else if typ == "thinking" {
+		} else if typ == "thinking" || typ == "redacted_thinking" {
 			// start reasoning item
 			st.ReasoningActive = true
 			st.ReasoningIndex = idx
 			st.ReasoningBuf.Reset()
+			st.ReasoningEnc = claudeReasoningCarrier(cb)
 			st.ReasoningItemID = fmt.Sprintf("rs_%s_%d", st.ResponseID, idx)
 			item := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"reasoning","status":"in_progress","summary":[]}}`)
 			item, _ = sjson.SetBytes(item, "sequence_number", nextSeq())
@@ -382,8 +410,9 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 
 		// Build response.output from aggregated state
 		outputsWrapper := []byte(`{"arr":[]}`)
-		// reasoning item (if any)
-		if st.ReasoningBuf.Len() > 0 || st.ReasoningPartAdded {
+		// reasoning item (if any). A redacted_thinking block carries no text, so
+		// the carrier (signature or redacted marker) alone is enough to include it.
+		if st.ReasoningBuf.Len() > 0 || st.ReasoningPartAdded || st.ReasoningEnc != "" {
 			item := []byte(`{"id":"","type":"reasoning","encrypted_content":"","summary":[{"type":"summary_text","text":""}]}`)
 			item, _ = sjson.SetBytes(item, "id", st.ReasoningItemID)
 			item, _ = sjson.SetBytes(item, "encrypted_content", st.ReasoningEnc)
@@ -443,9 +472,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			completed, _ = sjson.SetBytes(completed, "response.usage.input_tokens", st.InputTokens)
 			completed, _ = sjson.SetBytes(completed, "response.usage.input_tokens_details.cached_tokens", 0)
 			completed, _ = sjson.SetBytes(completed, "response.usage.output_tokens", st.OutputTokens)
-			if reasoningTokens > 0 {
-				completed, _ = sjson.SetBytes(completed, "response.usage.output_tokens_details.reasoning_tokens", reasoningTokens)
-			}
+			completed, _ = sjson.SetBytes(completed, "response.usage.output_tokens_details.reasoning_tokens", reasoningTokens)
 			total := st.InputTokens + st.OutputTokens
 			if total > 0 || st.UsageSeen {
 				completed, _ = sjson.SetBytes(completed, "response.usage.total_tokens", total)
@@ -540,9 +567,10 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 					toolCalls[idx].id = currentFCID
 					toolCalls[idx].name = name
 				}
-			case "thinking":
+			case "thinking", "redacted_thinking":
 				reasoningActive = true
 				reasoningItemID = fmt.Sprintf("rs_%s_%d", responseID, idx)
+				reasoningEnc = claudeReasoningCarrier(cb)
 			}
 
 		case "content_block_delta":
@@ -659,7 +687,7 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 
 	// Build output array
 	outputsWrapper := []byte(`{"arr":[]}`)
-	if reasoningBuf.Len() > 0 {
+	if reasoningBuf.Len() > 0 || reasoningEnc != "" {
 		item := []byte(`{"id":"","type":"reasoning","encrypted_content":"","summary":[{"type":"summary_text","text":""}]}`)
 		item, _ = sjson.SetBytes(item, "id", reasoningItemID)
 		item, _ = sjson.SetBytes(item, "encrypted_content", reasoningEnc)

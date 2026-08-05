@@ -260,7 +260,10 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
 	// based on client type and configuration.
-	body = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
+	body, err = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
+	if err != nil {
+		return resp, err
+	}
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
@@ -304,7 +307,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	url := helps.JoinBaseURL(baseURL, "/v1/messages?beta=true")
 	headers := make(http.Header)
 	tmpReq := (&http.Request{Header: headers}).WithContext(ctx)
-	applyClaudeHeaders(tmpReq, auth, apiKey, false, extraBetas, e.cfg, opts.Headers)
+	applyClaudeHeaders(tmpReq, auth, apiKey, false, extraBetas, e.cfg, opts.Headers, body)
 	headers = tmpReq.Header
 
 	_, data, respHeaders, errDo := helps.DoJSON(ctx, e.cfg, helps.UpstreamRequest{
@@ -386,7 +389,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
 	// based on client type and configuration.
-	body = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
+	body, err = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
+	if err != nil {
+		return nil, err
+	}
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
@@ -426,7 +432,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	url := helps.JoinBaseURL(baseURL, "/v1/messages?beta=true")
 	headers := make(http.Header)
 	tmpReq := (&http.Request{Header: headers}).WithContext(ctx)
-	applyClaudeHeaders(tmpReq, auth, apiKey, true, extraBetas, e.cfg, opts.Headers)
+	applyClaudeHeaders(tmpReq, auth, apiKey, true, extraBetas, e.cfg, opts.Headers, body)
 	headers = tmpReq.Header
 
 	httpResp, errDo := helps.DoStream(ctx, e.cfg, helps.UpstreamRequest{
@@ -617,7 +623,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	url := helps.JoinBaseURL(baseURL, "/v1/messages/count_tokens?beta=true")
 	headers := make(http.Header)
 	tmpReq := (&http.Request{Header: headers}).WithContext(ctx)
-	applyClaudeHeaders(tmpReq, auth, apiKey, false, extraBetas, e.cfg, opts.Headers)
+	applyClaudeHeaders(tmpReq, auth, apiKey, false, extraBetas, e.cfg, opts.Headers, body)
 	headers = tmpReq.Header
 
 	_, data, respHeaders, errDo := helps.DoJSON(ctx, e.cfg, helps.UpstreamRequest{
@@ -878,7 +884,7 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 	return body, nil
 }
 
-func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, cfg *config.Config, incomingHeaders http.Header) {
+func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, cfg *config.Config, incomingHeaders http.Header, body []byte) {
 	hdrDefault := func(cfgVal, fallback string) string {
 		if cfgVal != "" {
 			return cfgVal
@@ -958,6 +964,19 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 			}
 		}
 	}
+	// redact-thinking-2026-02-12 and thinking.display are mutually exclusive
+	// (Claude Code 2.1.220 rule). Sending both makes Anthropic honour the
+	// redaction and return thinking blocks with an empty thinking field, so a
+	// caller asking for reasoning summaries would get a signature and no text.
+	if claudeThinkingDisplaySet(body) {
+		var kept []string
+		for b := range strings.SplitSeq(baseBetas, ",") {
+			if beta := strings.TrimSpace(b); beta != "" && beta != "redact-thinking-2026-02-12" {
+				kept = append(kept, beta)
+			}
+		}
+		baseBetas = strings.Join(kept, ",")
+	}
 	r.Header.Set("Anthropic-Beta", baseBetas)
 
 	misc.EnsureHeader(r.Header, incomingHeaders, "Anthropic-Version", "2023-06-01")
@@ -1007,6 +1026,21 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	if stream {
 		r.Header.Set("Accept-Encoding", "identity")
 	}
+}
+
+// claudeThinkingDisplaySet reports whether the request carries a thinking.display
+// value. Claude Code 2.1.220 and redact-thinking-2026-02-12 are mutually
+// exclusive by construction: the beta is only appended while thinking summaries
+// are off, and the request builder removes it again whenever a display value is
+// attached. Sending both makes Anthropic honour the redaction and return thinking
+// blocks with an empty thinking field, so the caller's summary request would be
+// answered with a signature and no text. Verified on api.anthropic.com with
+// claude-opus-4-8: display=summarized yields thinking text only when the beta is
+// absent, and a native 2.1.220 CLI run with showThinkingSummaries enabled sends
+// display=summarized without the beta.
+func claudeThinkingDisplaySet(body []byte) bool {
+	display := gjson.GetBytes(body, "thinking.display")
+	return display.Type == gjson.String && strings.TrimSpace(display.String()) != ""
 }
 
 func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
@@ -1649,7 +1683,7 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 			system.ForEach(func(_, part gjson.Result) bool {
 				if part.Get("type").String() == "text" {
 					txt := strings.TrimSpace(part.Get("text").String())
-					if txt != "" {
+					if txt != "" && !util.IsClaudeCodeAttributionSystemText(txt) {
 						userSystemParts = append(userSystemParts, txt)
 					}
 				}
@@ -1660,12 +1694,15 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 		}
 
 		if len(userSystemParts) > 0 {
-			combined := strings.Join(userSystemParts, "\n\n")
 			if oauthMode {
-				combined = sanitizeForwardedSystemPrompt(combined)
-			}
-			if strings.TrimSpace(combined) != "" {
-				payload = prependToFirstUserMessage(payload, combined)
+				combined := sanitizeForwardedSystemPrompt(strings.Join(userSystemParts, "\n\n"))
+				if strings.TrimSpace(combined) != "" {
+					payload = prependToFirstUserMessage(payload, combined)
+				}
+			} else {
+				// Preserve each caller system block as its own reminder so the
+				// block boundaries survive the move into the first user message.
+				payload = prependToFirstUserMessageBlocks(payload, userSystemParts)
 			}
 		}
 	}
@@ -1709,6 +1746,17 @@ func buildTextBlock(text string, cacheControl map[string]string) string {
 // This avoids putting non-Claude-Code system instructions in system[] which
 // triggers Anthropic's extra usage billing for OAuth-proxied requests.
 func prependToFirstUserMessage(payload []byte, text string) []byte {
+	return prependToFirstUserMessageBlocks(payload, []string{text})
+}
+
+// prependToFirstUserMessageBlocks prepends each caller system block to the first
+// user message as its own reminder, so the block boundaries from the original
+// system array survive the move. Reminders already present in the message
+// content are not duplicated.
+func prependToFirstUserMessageBlocks(payload []byte, texts []string) []byte {
+	if len(texts) == 0 {
+		return payload
+	}
 	messages := gjson.GetBytes(payload, "messages")
 	if !messages.Exists() || !messages.IsArray() {
 		return payload
@@ -1728,36 +1776,70 @@ func prependToFirstUserMessage(payload []byte, text string) []byte {
 		return payload
 	}
 
-	prefixBlock := fmt.Sprintf(`<system-reminder>
+	buildReminder := func(text string) string {
+		return fmt.Sprintf(`<system-reminder>
 As you answer the user's questions, you can use the following context from the system:
 %s
 
 IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.
 </system-reminder>
 `, text)
+	}
+
+	reminderTexts := make([]string, 0, len(texts))
+	for _, text := range texts {
+		reminderTexts = append(reminderTexts, buildReminder(text))
+	}
 
 	contentPath := fmt.Sprintf("messages.%d.content", firstUserIdx)
 	content := gjson.GetBytes(payload, contentPath)
 
 	if content.IsArray() {
-		newBlock := fmt.Sprintf(`{"type":"text","text":%q}`, prefixBlock)
+		blocks := content.Array()
+		existing := make(map[string]int, len(blocks))
+		for _, block := range blocks {
+			if block.Get("type").String() == "text" {
+				existing[block.Get("text").String()]++
+			}
+		}
+		newBlocks := make([]string, 0, len(reminderTexts))
+		for _, reminderText := range reminderTexts {
+			if existing[reminderText] > 0 {
+				existing[reminderText]--
+				continue
+			}
+			newBlocks = append(newBlocks, fmt.Sprintf(`{"type":"text","text":%q}`, reminderText))
+		}
+		if len(newBlocks) == 0 {
+			return payload
+		}
+
 		var newArray string
 		switch {
 		case content.Raw == "[]" || content.Raw == "":
-			newArray = "[" + newBlock + "]"
+			newArray = "[" + strings.Join(newBlocks, ",") + "]"
 		case contentContainsToolResult(content):
 			// Anthropic requires tool_result blocks to stay ahead of any text in
 			// the user message that answers a tool_use turn. Rebuild the array so
-			// the reminder is always appended, even when content.Raw is pretty-
+			// the reminders are always appended, even when content.Raw is pretty-
 			// printed or otherwise not a compact "[...]".
-			newArray = appendContentBlockJSON(content, newBlock)
+			parts := make([]string, 0, len(blocks)+len(newBlocks))
+			for _, block := range blocks {
+				parts = append(parts, block.Raw)
+			}
+			parts = append(parts, newBlocks...)
+			newArray = "[" + strings.Join(parts, ",") + "]"
 		default:
-			newArray = "[" + newBlock + "," + content.Raw[1:]
+			newArray = "[" + strings.Join(newBlocks, ",") + "," + content.Raw[1:]
 		}
 		payload, _ = sjson.SetRawBytes(payload, contentPath, []byte(newArray))
 	} else if content.Type == gjson.String {
-		newText := prefixBlock + content.String()
-		payload, _ = sjson.SetBytes(payload, contentPath, newText)
+		var sb strings.Builder
+		for _, reminderText := range reminderTexts {
+			sb.WriteString(reminderText)
+		}
+		sb.WriteString(content.String())
+		payload, _ = sjson.SetBytes(payload, contentPath, sb.String())
 	}
 
 	return payload
@@ -1778,20 +1860,58 @@ func contentContainsToolResult(content gjson.Result) bool {
 	return false
 }
 
-// appendContentBlockJSON rebuilds a content array JSON with extraBlock appended.
-func appendContentBlockJSON(content gjson.Result, extraBlock string) string {
-	blocks := content.Array()
-	parts := make([]string, 0, len(blocks)+1)
-	for _, block := range blocks {
-		parts = append(parts, block.Raw)
+// claudeCallerSystemBlockError reports a caller system block that Claude cannot
+// carry in any system slot. It is request-scoped: no other credential or upstream
+// model can accept the same body, so the request must not be retried.
+type claudeCallerSystemBlockError struct {
+	statusErr
+}
+
+func (claudeCallerSystemBlockError) IsRequestScoped() bool {
+	return true
+}
+
+func newClaudeCallerSystemBlockError(index int, blockType string) error {
+	if blockType == "" {
+		blockType = "unknown"
 	}
-	parts = append(parts, extraBlock)
-	return "[" + strings.Join(parts, ",") + "]"
+	return claudeCallerSystemBlockError{statusErr{
+		code: http.StatusBadRequest,
+		msg: fmt.Sprintf("invalid_request_error: system.%d.type: Input should be 'text'. "+
+			"System instructions support text only, but this block has type %q. "+
+			"Move non-text content into a user message.", index, blockType),
+	}}
+}
+
+// validateClaudeCallerSystemBlocks rejects caller system content that cannot keep
+// its operator authority. Verified against api.anthropic.com on 2026-08-03: the
+// top-level system field answers "system.<i>.type: Input should be 'text'" for
+// image, document and unknown block types, and a role=system message answers
+// "role 'system' supports text, tool_addition, and tool_removal blocks only".
+// Cloaking relocates caller blocks into one of those two slots, so a non-text
+// block has no destination. Failing here keeps the caller's instructions from
+// being silently dropped, and costs no upstream attempt.
+func validateClaudeCallerSystemBlocks(system gjson.Result) error {
+	if !system.IsArray() {
+		// A string system prompt is text by definition.
+		return nil
+	}
+	var blockErr error
+	index := 0
+	system.ForEach(func(_, part gjson.Result) bool {
+		if strings.TrimSpace(part.Get("type").String()) != "text" {
+			blockErr = newClaudeCallerSystemBlockError(index, strings.TrimSpace(part.Get("type").String()))
+			return false
+		}
+		index++
+		return true
+	})
+	return blockErr
 }
 
 // applyCloaking applies cloaking transformations to the payload based on config and client.
 // Cloaking includes: system prompt injection, fake user ID, and sensitive word obfuscation.
-func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, payload []byte, model string, apiKey string) []byte {
+func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, payload []byte, model string, apiKey string) ([]byte, error) {
 	clientUserAgent := getClientUserAgent(ctx)
 	// Enable cch signing for OAuth tokens by default (not just experimental flag).
 	oauthToken := isClaudeOAuthToken(apiKey)
@@ -1824,7 +1944,15 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 
 	// Determine if cloaking should be applied
 	if !helps.ShouldCloak(cloakMode, clientUserAgent) {
-		return payload
+		return payload, nil
+	}
+
+	// Strict mode drops caller system prompts entirely, so nothing needs a
+	// destination and an unusable block cannot lose information.
+	if !strictMode {
+		if errSystem := validateClaudeCallerSystemBlocks(gjson.GetBytes(payload, "system")); errSystem != nil {
+			return nil, errSystem
+		}
 	}
 
 	// Skip system instructions for claude-3-5-haiku models
@@ -1844,7 +1972,7 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 		payload = helps.ObfuscateSensitiveWords(payload, matcher)
 	}
 
-	return payload
+	return payload, nil
 }
 
 // ensureCacheControl injects cache_control breakpoints into the payload for optimal prompt caching.

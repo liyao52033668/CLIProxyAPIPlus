@@ -21,10 +21,11 @@ import (
 
 // OAuth configuration constants for OpenAI Codex
 const (
-	AuthURL     = "https://auth.openai.com/oauth/authorize"
-	TokenURL    = "https://auth.openai.com/oauth/token"
-	ClientID    = "app_EMoamEEZ73f0CkXaXp7hrann"
-	RedirectURI = "http://localhost:1455/auth/callback"
+	AuthURL             = "https://auth.openai.com/oauth/authorize"
+	TokenURL            = "https://auth.openai.com/oauth/token"
+	ClientID            = "app_EMoamEEZ73f0CkXaXp7hrann"
+	RedirectURI         = "http://localhost:1455/auth/callback"
+	codexRefreshTimeout = 30 * time.Second
 )
 
 // CodexAuth handles the OpenAI OAuth2 authentication flow.
@@ -187,6 +188,11 @@ func (o *CodexAuth) RefreshTokens(ctx context.Context, refreshToken string) (*Co
 	if refreshToken == "" {
 		return nil, fmt.Errorf("refresh token is required")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	refreshCtx, cancelRefresh := context.WithTimeout(context.WithoutCancel(ctx), codexRefreshTimeout)
+	defer cancelRefresh()
 
 	data := url.Values{
 		"client_id":     {ClientID},
@@ -195,7 +201,7 @@ func (o *CodexAuth) RefreshTokens(ctx context.Context, refreshToken string) (*Co
 		"scope":         {"openid profile email"},
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", TokenURL, strings.NewReader(data.Encode()))
+	req, err := http.NewRequestWithContext(refreshCtx, "POST", TokenURL, strings.NewReader(data.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create refresh request: %w", err)
 	}

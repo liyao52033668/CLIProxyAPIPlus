@@ -767,7 +767,7 @@ func TestCodexWebsocketsExecuteStreamUnexpectedBinaryMessage(t *testing.T) {
 func TestBuildCodexWebsocketRequestBodyShortensOverlongInputItemIDs(t *testing.T) {
 	longCallItemID := strings.Repeat("grok-call-item-", 6)
 	longOutputItemID := strings.Repeat("grok-output-item-", 6)
-	body := []byte(`{"model":"gpt-5-codex","input":[{"type":"function_call","id":"` + longCallItemID + `","call_id":"call-1","name":"lookup"},{"type":"function_call_output","id":"` + longOutputItemID + `","call_id":"call-1","output":"ok"},{"type":"message","id":"msg-1"}]}`)
+	body := []byte(`{"model":"gpt-5-codex","input":[{"type":"function_call","id":"` + longCallItemID + `","call_id":"call-1","name":"lookup"},{"type":"function_call_output","id":"` + longOutputItemID + `","call_id":"call-1","output":"ok"},{"type":"message","id":"item_74ec40c883248ebb4885ec84"}]}`)
 
 	first := buildCodexWebsocketRequestBody(body)
 	second := buildCodexWebsocketRequestBody(body)
@@ -792,8 +792,8 @@ func TestBuildCodexWebsocketRequestBodyShortensOverlongInputItemIDs(t *testing.T
 	if got := gjson.GetBytes(first, "input.1.call_id").String(); got != "call-1" {
 		t.Fatalf("function call output call_id = %q, want call-1", got)
 	}
-	if got := gjson.GetBytes(first, "input.2.id").String(); got != "msg-1" {
-		t.Fatalf("valid input item ID changed: %q", got)
+	if got := gjson.GetBytes(first, "input.2.id").String(); got != "msg_item_74ec40c883248ebb4885ec84" {
+		t.Fatalf("message input item ID was not normalized: %q", got)
 	}
 }
 
