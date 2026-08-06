@@ -817,6 +817,8 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		if rt := m.roundTripperFor(auth); rt != nil {
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 		}
+		// Enrich before auth preparation so prepare-stage usage records observe the client request.
+		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
 		models, pooled := m.preparedExecutionModelsForRequest(auth, routeModel, opts.IsAuto)
 		if len(models) == 0 {
 			continue
