@@ -65,7 +65,7 @@ const (
 	xaiSafeFunctionParameters     = `{"type":"object","properties":{},"additionalProperties":true}`
 	xaiFreeUsageExhaustedCooldown = 24 * time.Hour
 	// Keep in sync with the current Grok CLI client version that chat-proxy expects.
-	xaiClientVersionValue     = "0.2.93"
+	xaiClientVersionValue     = "0.2.120"
 	xaiUserAgentHeader        = "User-Agent"
 	xaiUserAgentValue         = "grok-shell/" + xaiClientVersionValue + " (linux; x86_64)"
 	xaiAuthResponseHeader     = "x-authenticateresponse"
