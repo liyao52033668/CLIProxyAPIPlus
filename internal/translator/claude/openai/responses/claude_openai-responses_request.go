@@ -394,14 +394,17 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 					}
 				}
 
-				asst := []byte(`{"role":"assistant","content":[]}`)
-				asst, _ = sjson.SetRawBytes(asst, "content.-1", toolUse)
-				out, _ = sjson.SetRawBytes(out, "messages.-1", asst)
+				// Append into the active assistant message so consecutive tool
+				// uses share one turn (Claude rejects non-consecutive tool_use).
+				appendAssistantPart(toolUse)
 
 			case "function_call_output", "custom_tool_call_output":
-				// Map to user tool_result
+				// Map to user tool_result. An empty call_id cannot match any
+				// tool_use, so keep it empty instead of minting a random id.
 				callID := item.Get("call_id").String()
-				callID = util.SanitizeClaudeToolID(callID)
+				if callID != "" {
+					callID = util.SanitizeClaudeToolID(callID)
+				}
 				outputStr := item.Get("output").String()
 				toolResult := []byte(`{"type":"tool_result","tool_use_id":"","content":""}`)
 				toolResult, _ = sjson.SetBytes(toolResult, "tool_use_id", callID)
@@ -434,10 +437,13 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 
 	// Responses Lite puts tool definitions in input[].additional_tools. Select
 	// one winner for each final name, while keeping the original order for the
-	// tools that survive conversion.
+	// tools that survive conversion. Compute descriptors/winners once and reuse,
+	// since each call rescans the whole tool graph (top-level tools plus every
+	// additional_tools source).
+	descriptors := responsesToolDescriptors(root)
+	winners := responsesToolWinnersFromDescriptors(descriptors)
 	var toolItems [][]byte
-	winners := responsesToolWinners(root)
-	for _, descriptor := range responsesToolDescriptors(root) {
+	for _, descriptor := range descriptors {
 		winner, ok := winners[descriptor.name]
 		if !ok || winner.order != descriptor.order {
 			continue
@@ -452,7 +458,7 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 		}
 		toolItems = append(toolItems, tJSON)
 	}
-	toolNameMap = responsesToolNameMap(root, includedToolNames)
+	toolNameMap = responsesToolNameMapFromDescriptors(descriptors, winners, includedToolNames)
 	if len(toolItems) > 0 {
 		toolsJSON := []byte("[]")
 		for _, tJSON := range toolItems {
@@ -660,9 +666,9 @@ func responsesToolDescriptorPrecedes(left, right responsesToolDescriptor) bool {
 	return left.order < right.order
 }
 
-func responsesToolWinners(root gjson.Result) map[string]responsesToolDescriptor {
+func responsesToolWinnersFromDescriptors(descriptors []responsesToolDescriptor) map[string]responsesToolDescriptor {
 	winners := map[string]responsesToolDescriptor{}
-	for _, descriptor := range responsesToolDescriptors(root) {
+	for _, descriptor := range descriptors {
 		current, exists := winners[descriptor.name]
 		if !exists || responsesToolDescriptorPrecedes(descriptor, current) {
 			winners[descriptor.name] = descriptor
@@ -671,10 +677,12 @@ func responsesToolWinners(root gjson.Result) map[string]responsesToolDescriptor 
 	return winners
 }
 
-func responsesToolNameMap(root gjson.Result, acceptedToolNames map[string]struct{}) map[string]string {
+func responsesToolWinners(root gjson.Result) map[string]responsesToolDescriptor {
+	return responsesToolWinnersFromDescriptors(responsesToolDescriptors(root))
+}
+
+func responsesToolNameMapFromDescriptors(descriptors []responsesToolDescriptor, winners map[string]responsesToolDescriptor, acceptedToolNames map[string]struct{}) map[string]string {
 	toolNameMap := map[string]string{}
-	descriptors := responsesToolDescriptors(root)
-	winners := responsesToolWinners(root)
 
 	// Direct tool names are canonical aliases and must win over namespace
 	// child aliases, regardless of declaration order.
@@ -705,6 +713,11 @@ func responsesToolNameMap(root gjson.Result, acceptedToolNames map[string]struct
 		toolNameMap[descriptor.childName] = descriptor.name
 	}
 	return toolNameMap
+}
+
+func responsesToolNameMap(root gjson.Result, acceptedToolNames map[string]struct{}) map[string]string {
+	descriptors := responsesToolDescriptors(root)
+	return responsesToolNameMapFromDescriptors(descriptors, responsesToolWinnersFromDescriptors(descriptors), acceptedToolNames)
 }
 
 func responsesCustomToolNames(requestRawJSON []byte) map[string]struct{} {

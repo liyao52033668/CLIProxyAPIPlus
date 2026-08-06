@@ -720,6 +720,12 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		debugLogAuthSelection(entry, auth, provider, req.Model)
 		publishSelectedAuthMetadata(opts.Metadata, auth)
 
+		preparedAuth, errPrepare := m.prepareRequestAuth(ctx, auth, executor)
+		if errPrepare != nil {
+			return cliproxyexecutor.Response{}, errPrepare
+		}
+		auth = preparedAuth
+
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
 		if rt := m.roundTripperFor(auth); rt != nil {
@@ -811,6 +817,12 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, req.Model)
 		publishSelectedAuthMetadata(opts.Metadata, auth)
+
+		preparedAuth, errPrepare := m.prepareRequestAuth(ctx, auth, executor)
+		if errPrepare != nil {
+			return nil, errPrepare
+		}
+		auth = preparedAuth
 
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx

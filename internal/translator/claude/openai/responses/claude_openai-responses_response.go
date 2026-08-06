@@ -26,6 +26,8 @@ type claudeToResponsesState struct {
 	FuncNames   map[int]string // index -> function name
 	FuncCallIDs map[int]string // index -> call id
 	FuncCustom  map[int]bool   // index -> freeform custom tool
+	// tool metadata cached from the request (computed once per stream)
+	CustomToolNames map[string]struct{}
 	// message text aggregation
 	TextBuf        strings.Builder
 	CurrentTextBuf strings.Builder
@@ -100,8 +102,13 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 	}
 	rawJSON = bytes.TrimSpace(rawJSON[5:])
 	root := gjson.ParseBytes(rawJSON)
-	requestForToolMetadata := pickRequestJSON(originalRequestRawJSON, requestRawJSON)
-	customToolNames := responsesCustomToolNames(requestForToolMetadata)
+	// Compute the custom-tool set once per stream and reuse it across chunks;
+	// rescans of the tool graph per chunk are wasted work.
+	if st.CustomToolNames == nil {
+		requestForToolMetadata := pickRequestJSON(originalRequestRawJSON, requestRawJSON)
+		st.CustomToolNames = responsesCustomToolNames(requestForToolMetadata)
+	}
+	customToolNames := st.CustomToolNames
 	ev := root.Get("type").String()
 	var out [][]byte
 
