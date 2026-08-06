@@ -93,6 +93,11 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		changes = append(changes, fmt.Sprintf("quota-exceeded.antigravity-credits: %t -> %t", oldCfg.QuotaExceeded.AntigravityCredits, newCfg.QuotaExceeded.AntigravityCredits))
 	}
 
+	// Antigravity sensitive words
+	if !equalStringSet(oldCfg.Antigravity.SensitiveWords, newCfg.Antigravity.SensitiveWords) {
+		changes = append(changes, fmt.Sprintf("antigravity.sensitive-words: updated (%d -> %d entries)", len(oldCfg.Antigravity.SensitiveWords), len(newCfg.Antigravity.SensitiveWords)))
+	}
+
 	if oldCfg.Routing.Strategy != newCfg.Routing.Strategy {
 		changes = append(changes, fmt.Sprintf("routing.strategy: %s -> %s", oldCfg.Routing.Strategy, newCfg.Routing.Strategy))
 	}

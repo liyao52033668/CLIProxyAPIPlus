@@ -22,6 +22,8 @@ const (
 	xaiVideosEditsAPI       = "/v1/videos/edits"
 	xaiVideosExtensionsAPI  = "/v1/videos/extensions"
 	defaultXAIVideosModel   = "grok-imagine-video"
+	xaiVideos15Model        = "grok-imagine-video-1.5"
+	xaiVideos15PreviewAlias = "grok-imagine-video-1.5-preview"
 	xaiVideosHandlerType    = "openai-video"
 	defaultVideosSeconds    = "4"
 	defaultVideosSize       = "720x1280"
@@ -30,11 +32,12 @@ const (
 )
 
 type xaiVideoCreateMetadata struct {
-	Model     string
-	Prompt    string
-	Seconds   string
-	Size      string
-	CreatedAt int64
+	Model        string
+	RoutingModel string
+	Prompt       string
+	Seconds      string
+	Size         string
+	CreatedAt    int64
 }
 
 func videosModelBase(model string) string {
@@ -42,19 +45,9 @@ func videosModelBase(model string) string {
 	return strings.ToLower(strings.TrimSpace(baseModel))
 }
 
-func isXAIVideosModel(model string) bool {
-	prefix, baseModel := imagesModelParts(model)
-	baseModel = strings.ToLower(strings.TrimSpace(baseModel))
-	if baseModel != defaultXAIVideosModel {
-		return false
-	}
-
-	prefix = strings.ToLower(strings.TrimSpace(prefix))
-	return prefix == "" || prefix == "xai" || prefix == "x-ai" || prefix == "grok"
-}
-
 func isSupportedVideosModel(model string) bool {
-	return isXAIVideosModel(model)
+	base := videosModelBase(model)
+	return base == defaultXAIVideosModel || base == xaiVideos15Model || base == xaiVideos15PreviewAlias
 }
 
 func rejectUnsupportedVideosModel(c *gin.Context, model string) bool {
@@ -86,8 +79,9 @@ func rejectUnsupportedNativeVideosModel(c *gin.Context, model string) bool {
 }
 
 func canonicalXAIVideosModel(model string) string {
-	if videosModelBase(model) == defaultXAIVideosModel {
-		return defaultXAIVideosModel
+	base := videosModelBase(model)
+	if base == xaiVideos15Model || base == xaiVideos15PreviewAlias {
+		return xaiVideos15Model
 	}
 	return defaultXAIVideosModel
 }
@@ -190,8 +184,9 @@ func buildXAIVideosCreateRequest(rawJSON []byte, model string) ([]byte, xaiVideo
 		seconds = "10"
 	}
 
+	canonicalModel := canonicalXAIVideosModel(model)
 	req := []byte(`{}`)
-	req, _ = sjson.SetBytes(req, "model", canonicalXAIVideosModel(model))
+	req, _ = sjson.SetBytes(req, "model", canonicalModel)
 	req, _ = sjson.SetBytes(req, "prompt", prompt)
 	req, _ = sjson.SetRawBytes(req, "duration", []byte(strconv.FormatInt(duration, 10)))
 	req, _ = sjson.SetBytes(req, "aspect_ratio", aspectRatio)
@@ -204,11 +199,12 @@ func buildXAIVideosCreateRequest(rawJSON []byte, model string) ([]byte, xaiVideo
 	}
 
 	meta := xaiVideoCreateMetadata{
-		Model:     defaultXAIVideosModel,
-		Prompt:    prompt,
-		Seconds:   seconds,
-		Size:      size,
-		CreatedAt: time.Now().Unix(),
+		Model:        canonicalModel,
+		RoutingModel: model,
+		Prompt:       prompt,
+		Seconds:      seconds,
+		Size:         size,
+		CreatedAt:    time.Now().Unix(),
 	}
 	return req, meta, nil
 }
@@ -572,7 +568,11 @@ func (h *OpenAIAPIHandler) collectXAIVideosCreate(c *gin.Context, xaiReq []byte,
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
-	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, xaiVideosHandlerType, meta.Model, xaiReq, "")
+	routingModel := meta.RoutingModel
+	if routingModel == "" {
+		routingModel = meta.Model
+	}
+	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, xaiVideosHandlerType, routingModel, xaiReq, "")
 	stopKeepAlive()
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)

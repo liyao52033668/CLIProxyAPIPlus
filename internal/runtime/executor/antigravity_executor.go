@@ -237,7 +237,9 @@ func parseMetaFloat(metadata map[string]any, key string) (float64, bool) {
 
 // AntigravityExecutor proxies requests to the antigravity upstream.
 type AntigravityExecutor struct {
-	cfg *config.Config
+	cfg              *config.Config
+	sensitiveMatcher *helps.SensitiveWordMatcher
+	matcherOnce      sync.Once
 }
 
 // NewAntigravityExecutor creates a new Antigravity executor instance.
@@ -249,6 +251,22 @@ type AntigravityExecutor struct {
 //   - *AntigravityExecutor: A new Antigravity executor instance
 func NewAntigravityExecutor(cfg *config.Config) *AntigravityExecutor {
 	return &AntigravityExecutor{cfg: cfg}
+}
+
+func (e *AntigravityExecutor) obfuscateSensitiveWords(payload []byte) []byte {
+	if e == nil || e.cfg == nil || len(e.cfg.Antigravity.SensitiveWords) == 0 {
+		return payload
+	}
+
+	e.matcherOnce.Do(func() {
+		e.sensitiveMatcher = helps.BuildSensitiveWordMatcher(e.cfg.Antigravity.SensitiveWords)
+	})
+
+	if e.sensitiveMatcher == nil {
+		return payload
+	}
+
+	return helps.ObfuscateSensitiveWordsInSystemInstruction(payload, e.sensitiveMatcher)
 }
 
 // antigravityTransport is a singleton HTTP/1.1 transport shared by all Antigravity requests.
@@ -675,6 +693,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, "antigravity", from.String(), "request", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
+	translated = e.obfuscateSensitiveWords(translated)
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
 	useCredits := cliproxyauth.AntigravityCreditsRequested(ctx) && antigravityCreditsRetryEnabled(e.cfg)
@@ -898,6 +917,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, "antigravity", from.String(), "request", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
+	translated = e.obfuscateSensitiveWords(translated)
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
 	useCredits := cliproxyauth.AntigravityCreditsRequested(ctx) && antigravityCreditsRetryEnabled(e.cfg)
@@ -1379,6 +1399,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, "antigravity", from.String(), "request", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
+	translated = e.obfuscateSensitiveWords(translated)
 	translated, _ = sjson.DeleteBytes(translated, "request.stream")
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
@@ -1726,6 +1747,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	payload = helps.DeleteJSONField(payload, "project")
 	payload = helps.DeleteJSONField(payload, "model")
 	payload = helps.DeleteJSONField(payload, "request.safetySettings")
+	payload = e.obfuscateSensitiveWords(payload)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
