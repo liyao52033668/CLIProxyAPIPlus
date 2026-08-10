@@ -3,6 +3,7 @@ package responses
 import (
 	"fmt"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -11,7 +12,7 @@ import (
 func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte, _ bool) []byte {
 	rawJSON := inputRawJSON
 
-	inputResult := gjson.GetBytes(rawJSON, "input")
+	inputResult := util.GetGJSONBytesNoCopy(rawJSON, "input")
 	if inputResult.Type == gjson.String {
 		input, _ := sjson.SetBytes([]byte(`[{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}]`), "0.content.0.text", inputResult.String())
 		rawJSON, _ = sjson.SetRawBytes(rawJSON, "input", input)
@@ -66,7 +67,7 @@ func applyResponsesCompactionCompatibility(rawJSON []byte) []byte {
 // with role "system" to role "developer". This is necessary because Codex API does not
 // accept "system" role in the input array.
 func convertSystemRoleToDeveloper(rawJSON []byte) []byte {
-	inputResult := gjson.GetBytes(rawJSON, "input")
+	inputResult := util.GetGJSONBytesNoCopy(rawJSON, "input")
 	if !inputResult.IsArray() {
 		return rawJSON
 	}

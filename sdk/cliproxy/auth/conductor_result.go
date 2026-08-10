@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -698,6 +699,13 @@ func isRequestInvalidError(err error) bool {
 	}
 	if isModelSupportError(err) {
 		return false
+	}
+	// Structured upstream error codes/type identifiers (cyber_policy,
+	// context_length_exceeded, invalid_prompt, ...) mark the request itself as the
+	// fault regardless of the transport status, so the credential must not be
+	// rotated or penalized for them.
+	if clienterror.IsRequestFault(0, err) {
+		return true
 	}
 	status := statusCodeFromError(err)
 	switch status {

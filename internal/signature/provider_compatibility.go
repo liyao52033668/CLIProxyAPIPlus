@@ -10,6 +10,16 @@ const (
 	SignatureProviderGemini       SignatureProvider = "gemini"
 	SignatureProviderGeminiBypass SignatureProvider = "gemini_bypass"
 	SignatureProviderGPT          SignatureProvider = "gpt"
+	// SignatureProviderKimi is identified by fixed signature size rather than by
+	// an envelope. See kimi_validation.go for the empirical basis and its limits.
+	SignatureProviderKimi SignatureProvider = "kimi"
+	// SignatureProviderGrok is a target-only family. DetectSignatureProvider never
+	// returns it: xAI emits no envelope, no version byte and no fixed length, and
+	// its ciphertext is statistically indistinguishable from uniform random bytes,
+	// so any positive claim would also capture every other opaque blob. Grok
+	// handling is provenance-first - establish the target from the model or route,
+	// then use InspectGrokEncryptedContent as a replay-safety shape check.
+	SignatureProviderGrok SignatureProvider = "grok"
 )
 
 type SignatureBlockKind string
@@ -59,6 +69,13 @@ func SignatureProviderFromModelName(modelName string) SignatureProvider {
 		strings.HasPrefix(lower, "o3"),
 		strings.HasPrefix(lower, "o4"):
 		return SignatureProviderGPT
+	case strings.Contains(lower, "kimi"),
+		strings.Contains(lower, "moonshot"),
+		strings.HasPrefix(lower, "k2"),
+		strings.HasPrefix(lower, "k3"):
+		return SignatureProviderKimi
+	case strings.Contains(lower, "grok"):
+		return SignatureProviderGrok
 	default:
 		return SignatureProviderUnknown
 	}
@@ -70,6 +87,24 @@ func SignatureProviderFromModelName(modelName string) SignatureProvider {
 // string and can look Claude-like under shallow prefix checks.
 func DetectSignatureProvider(rawSignature string) SignatureProvider {
 	return DetectSignatureProviderForBlock(rawSignature, SignatureBlockKindUnknown)
+}
+
+// selfDescribingSignatureFirstChars are the base64 first characters that a
+// self-describing signature envelope (GPT Fernet, Claude CAIS/protobuf, Gemini
+// Tink) can start with. Kimi's uniformly distributed base64 starts with one of
+// these about 6% of the time, so the envelope pre-filter only gates the envelope
+// probes rather than returning early.
+const selfDescribingSignatureFirstChars = "CERg"
+
+// maybeSelfDescribingSignatureEnvelope reports whether rawSignature starts with
+// a character that a self-describing signature envelope can begin with. It is a
+// cheap pre-filter, not a validator: a positive answer still requires the
+// provider-specific probe to confirm the envelope.
+func maybeSelfDescribingSignatureEnvelope(rawSignature string) bool {
+	if rawSignature == "" {
+		return false
+	}
+	return strings.IndexByte(selfDescribingSignatureFirstChars, rawSignature[0]) >= 0
 }
 
 // DetectSignatureProviderForBlock classifies rawSignature with block-kind
@@ -117,6 +152,14 @@ func DetectSignatureProviderForBlock(rawSignature string, blockKind SignatureBlo
 	}
 	if isRecognizedGeminiProviderSignature(sig, blockKind) {
 		return SignatureProviderGemini
+	}
+	// Kimi carries no self-describing envelope, so it can only be claimed once
+	// every envelope-based probe above has declined. Ordering it last means a
+	// length coincidence can never capture another provider's signature, and a
+	// future drift in Kimi's sizes costs Kimi its own identification rather than
+	// corrupting a neighbouring family.
+	if IsValidKimiThinkingSignature(sig) {
+		return SignatureProviderKimi
 	}
 	return SignatureProviderUnknown
 }
@@ -166,6 +209,21 @@ func DecideSignatureCompatibility(targetProvider SignatureProvider, rawSignature
 	case SignatureProviderGPT:
 		decision.Action = SignatureActionDropBlock
 		decision.Reason = "GPT reasoning encrypted_content cannot be synthesized from another provider signature"
+	case SignatureProviderKimi:
+		// Kimi is the only target that can keep the reasoning text when the
+		// signature does not match. Its Messages endpoint never reads the field
+		// back: a mutated, truncated, non-base64 or absent signature all return
+		// 200, because reasoning continuity there travels in OpenAI-style
+		// reasoning_content instead. Dropping the block would discard recoverable
+		// thinking text for no upstream benefit, so drop only the signature.
+		decision.Action = SignatureActionDropSignature
+		decision.Reason = "Kimi does not validate replayed thinking signatures, so the block survives without one"
+	case SignatureProviderGrok:
+		// xAI decrypts encrypted_content and rejects the request with 400
+		// "Could not decrypt" when the blob is foreign or mutated, so a
+		// non-matching value has to leave with the block.
+		decision.Action = SignatureActionDropBlock
+		decision.Reason = "xAI verifies encrypted_content on replay and rejects foreign or mutated blobs"
 	default:
 		decision.Action = SignatureActionNoCompatibleReplacement
 		decision.Reason = "unknown target provider"
@@ -264,7 +322,12 @@ func signatureProviderMatchesTarget(target, detected SignatureProvider) bool {
 		return detected == SignatureProviderClaude
 	case SignatureProviderGPT:
 		return detected == SignatureProviderGPT
+	case SignatureProviderKimi:
+		return detected == SignatureProviderKimi
 	default:
+		// SignatureProviderGrok is deliberately absent. Detection never yields it,
+		// so a Grok target must decide replay safety from provenance plus
+		// InspectGrokEncryptedContent rather than from a detected-provider match.
 		return false
 	}
 }
@@ -287,6 +350,10 @@ func normalizeCompatibleSignatureForProvider(targetProvider SignatureProvider, r
 		}
 	case SignatureProviderGPT:
 		if IsValidGPTReasoningSignature(payload) {
+			return payload
+		}
+	case SignatureProviderKimi:
+		if IsValidKimiThinkingSignature(payload) {
 			return payload
 		}
 	}

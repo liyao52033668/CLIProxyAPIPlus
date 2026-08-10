@@ -1019,6 +1019,7 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	// Drop choices that point at tools removed by normalizeXAITools before any
 	// configured x_search injection, so no surviving choice references a deleted tool.
 	body = normalizeXAINamespaceToolChoice(body)
+	body = normalizeXAIForcedWebSearchToolChoice(body)
 	body = pruneXAIOrphanedToolChoice(body)
 	body = normalizeXAIToolChoiceForTools(body)
 	if e.cfg != nil && e.cfg.XAI.InjectXSearch {
@@ -1466,6 +1467,26 @@ func ensureXAINativeXSearchAllowedTools(body []byte) []byte {
 	}
 	body, _ = sjson.SetRawBytes(body, "tool_choice.tools.-1", xaiXSearchToolJSON)
 	return body
+}
+
+// normalizeXAIForcedWebSearchToolChoice rewrites Codex's hosted-tool choice
+// into the allowed_tools form accepted by xAI's ModelToolChoice schema.
+func normalizeXAIForcedWebSearchToolChoice(body []byte) []byte {
+	choice := gjson.GetBytes(body, "tool_choice")
+	if !choice.IsObject() || strings.TrimSpace(choice.Get("type").String()) != xaiWebSearchToolType {
+		return body
+	}
+
+	allowedChoice := []byte(`{"type":"allowed_tools","mode":"required","tools":[]}`)
+	allowedChoice, errSetAllowed := sjson.SetRawBytes(allowedChoice, "tools.-1", []byte(choice.Raw))
+	if errSetAllowed != nil {
+		return body
+	}
+	updated, errSetChoice := sjson.SetRawBytes(body, "tool_choice", allowedChoice)
+	if errSetChoice != nil {
+		return body
+	}
+	return updated
 }
 
 // pruneXAIOrphanedToolChoice removes tool_choice entries that no longer match
@@ -2393,13 +2414,47 @@ func xaiFunctionParametersNeedSimplification(tool gjson.Result, namespaceName st
 	return false
 }
 
+// xaiStatusErr normalizes upstream xAI error bodies for conductor behavior:
+//   - credential invalidation (403 bad-credentials) is remapped to 401 so the
+//     existing OAuth refresh-once-and-retry path runs instead of payment cooldown
+//   - free-tier exhaustion (subscription:free-usage-exhausted) carries a 24h
+//     RetryAfter hint for auth cooldown / account rotation
+//
+// Generic 429s stay without an explicit retry hint so conductor backoff still applies.
 func xaiStatusErr(code int, body []byte) statusErr {
 	err := statusErr{code: code, msg: string(body)}
+	if code == http.StatusForbidden && isXAIBadCredentialsBody(body) {
+		// Upstream returns 403 for invalidated OAuth access tokens. Map to 401 so
+		// tryRefreshAfterUnauthorized / MarkResult unauthorized handling applies.
+		err.code = http.StatusUnauthorized
+		return err
+	}
 	if code == http.StatusTooManyRequests && xaiFreeUsageExhausted(body) {
 		d := xaiFreeUsageExhaustedCooldown
 		err.retryAfter = &d
 	}
 	return err
+}
+
+// isXAIBadCredentialsBody reports whether an xAI error body indicates an
+// invalidated/unusable OAuth access token rather than a generic permission or
+// payment failure. HTTP and websocket payloads both use this helper, so nested
+// error.code / error.message shapes are checked as well as flat bodies.
+func isXAIBadCredentialsBody(body []byte) bool {
+	for _, path := range []string{"code", "error.code", "body.error.code"} {
+		if strings.Contains(strings.ToLower(gjson.GetBytes(body, path).String()), "bad-credentials") {
+			return true
+		}
+	}
+	for _, path := range []string{"error", "error.message", "message", "body.error", "body.error.message"} {
+		msg := strings.ToLower(gjson.GetBytes(body, path).String())
+		if strings.Contains(msg, "access token could not be validated") {
+			return true
+		}
+	}
+	raw := strings.ToLower(string(body))
+	return strings.Contains(raw, "bad-credentials") ||
+		strings.Contains(raw, "access token could not be validated")
 }
 
 func xaiFreeUsageExhausted(body []byte) bool {

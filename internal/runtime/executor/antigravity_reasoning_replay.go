@@ -10,6 +10,7 @@ import (
 
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -73,7 +74,7 @@ func antigravityReplaySessionIDFromPayload(payload []byte) string {
 }
 
 func antigravityReasoningReplayPendingModelContentIndex(payload []byte) (contentIndex int, basePartIndex int) {
-	contents := gjson.GetBytes(payload, "request.contents")
+	contents := util.GetGJSONBytesNoCopy(payload, "request.contents")
 	if !contents.IsArray() {
 		return 0, 0
 	}
@@ -95,7 +96,7 @@ func antigravityReasoningReplayPendingModelContentIndex(payload []byte) (content
 }
 
 func antigravityReasoningReplayResolveContentIndex(payload []byte, cached int) int {
-	contents := gjson.GetBytes(payload, "request.contents")
+	contents := util.GetGJSONBytesNoCopy(payload, "request.contents")
 	if !contents.IsArray() {
 		return cached
 	}
@@ -188,7 +189,7 @@ func filterAntigravityReasoningReplayItemsForRequest(payload []byte, items [][]b
 
 func antigravityExistingToolCallKeys(payload []byte) map[string]bool {
 	existing := make(map[string]bool)
-	contents := gjson.GetBytes(payload, "request.contents")
+	contents := util.GetGJSONBytesNoCopy(payload, "request.contents")
 	if !contents.IsArray() {
 		return existing
 	}
@@ -278,7 +279,7 @@ func antigravityFunctionResponseContentIndex(payload []byte, callID string) (int
 	if callID == "" {
 		return -1, false
 	}
-	contents := gjson.GetBytes(payload, "request.contents")
+	contents := util.GetGJSONBytesNoCopy(payload, "request.contents")
 	if !contents.IsArray() {
 		return -1, false
 	}
@@ -307,7 +308,7 @@ func antigravityFunctionCallPartLocation(payload []byte, callID string) (content
 	if callID == "" {
 		return -1, -1, false
 	}
-	contents := gjson.GetBytes(payload, "request.contents")
+	contents := util.GetGJSONBytesNoCopy(payload, "request.contents")
 	if !contents.IsArray() {
 		return -1, -1, false
 	}
@@ -327,7 +328,7 @@ func antigravityFunctionCallPartLocation(payload []byte, callID string) (content
 }
 
 func insertAntigravityModelFunctionCallBeforeContent(payload []byte, beforeIndex int, name, callID, thoughtSig string, args gjson.Result) ([]byte, bool) {
-	contents := gjson.GetBytes(payload, "request.contents")
+	contents := util.GetGJSONBytesNoCopy(payload, "request.contents")
 	if !contents.IsArray() {
 		return payload, false
 	}

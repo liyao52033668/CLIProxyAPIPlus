@@ -244,6 +244,15 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	to := sdktranslator.FromString("claude")
 	// Use streaming translation to preserve function calling, except for claude.
 	stream := from != to
+	var replayScope claudeThinkingReplayScope
+	if claudeThinkingReplayEnabled(auth, req, opts) {
+		req, replayScope = prepareClaudeThinkingReplayRequest(ctx, auth, req, opts)
+	}
+	defer func() {
+		if err != nil && replayScope.replayApplied && shouldClearKimiThinkingReplayAfterError(err) {
+			clearClaudeThinkingReplayContent(ctx, replayScope)
+		}
+	}()
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
@@ -341,6 +350,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	reporter.EnsurePublished(ctx)
 	data = restoreClaudeOAuthToolNamesFromResponse(data, claudeToolPrefix, auth.ToolPrefixDisabled(), oauthToolNamesReverseMap)
 	data = e.restoreResponseModel(data, req.Model)
+	cacheClaudeThinkingReplayResponse(ctx, replayScope, data)
 	var param any
 	out := sdktranslator.TranslateNonStream(
 		ctx,
@@ -373,6 +383,15 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	defer reporter.TrackFailure(ctx, &err)
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("claude")
+	var replayScope claudeThinkingReplayScope
+	if claudeThinkingReplayEnabled(auth, req, opts) {
+		req, replayScope = prepareClaudeThinkingReplayRequest(ctx, auth, req, opts)
+	}
+	defer func() {
+		if err != nil && replayScope.replayApplied && shouldClearKimiThinkingReplayAfterError(err) {
+			clearClaudeThinkingReplayContent(ctx, replayScope)
+		}
+	}()
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
@@ -528,7 +547,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}
 		reporter.EnsurePublished(ctx)
 	}()
-	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+	result := &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}
+	if replayScope.valid() {
+		result = wrapClaudeThinkingReplayStream(ctx, result, replayScope)
+	}
+	return result, nil
 }
 
 func validateClaudeStreamingResponse(data []byte) error {

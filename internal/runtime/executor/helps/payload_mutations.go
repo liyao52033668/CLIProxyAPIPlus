@@ -45,3 +45,20 @@ func SetRawIfDifferent(payload []byte, path string, value []byte) []byte {
 	}
 	return updated
 }
+
+// JoinRawJSONArray joins validated raw JSON array items without re-encoding them.
+func JoinRawJSONArray(items [][]byte) []byte {
+	size := len(items) + 1
+	for _, item := range items {
+		size += len(item)
+	}
+	out := make([]byte, 0, size)
+	out = append(out, '[')
+	for index, item := range items {
+		if index > 0 {
+			out = append(out, ',')
+		}
+		out = append(out, item...)
+	}
+	return append(out, ']')
+}

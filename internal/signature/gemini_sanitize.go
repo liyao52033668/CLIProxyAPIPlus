@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -33,7 +34,7 @@ func SanitizeGeminiRequestThoughtSignatures(payload []byte, contentsPath string)
 		contentsPath = "contents"
 	}
 
-	contents := gjson.GetBytes(payload, contentsPath)
+	contents := util.GetGJSONBytesNoCopy(payload, contentsPath)
 	if !contents.IsArray() {
 		return payload
 	}
