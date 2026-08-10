@@ -733,6 +733,17 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		return
 	}
 	if isRequestScopedResultError(resultErr) {
+		// The request itself is at fault (e.g. cyber_policy, context_length_exceeded,
+		// store=false item miss). The credential stays healthy: do not mark it
+		// unavailable or set a cooldown. Record the client-side fault so management
+		// UIs can distinguish "key is fine, request was rejected" from a bad key.
+		auth.Status = StatusActive
+		auth.Unavailable = false
+		auth.UpdatedAt = now
+		if resultErr != nil && resultErr.Message != "" {
+			auth.StatusMessage = "request fault (client-side): " + resultErr.Message
+			auth.LastError = cloneError(resultErr)
+		}
 		return
 	}
 	disableCooling := quotaCooldownDisabledForAuth(auth)

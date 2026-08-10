@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -992,5 +993,32 @@ func TestManager_RequestScopedNotFoundStopsRetryWithoutSuspendingAuth(t *testing
 	}
 	if state := updatedBad.ModelStates[model]; state != nil {
 		t.Fatalf("expected request-scoped 404 to avoid bad auth model cooldown state, got %#v", state)
+	}
+}
+
+func TestApplyAuthFailureState_RequestScopedRecordsClientFault(t *testing.T) {
+	now := time.Now()
+	auth := &Auth{ID: "aa-request-scoped", Provider: "claude"}
+	resultErr := &Error{
+		Code:       requestScopedErrorCode,
+		Message:    "request rejected: context_length_exceeded",
+		HTTPStatus: http.StatusBadRequest,
+	}
+
+	applyAuthFailureState(auth, resultErr, nil, now)
+
+	// The credential must stay healthy: no cooldown, not unavailable.
+	if auth.Unavailable {
+		t.Fatalf("request-scoped failure marked auth unavailable")
+	}
+	if auth.Status != StatusActive {
+		t.Fatalf("Status = %q, want %q (credential stays healthy)", auth.Status, StatusActive)
+	}
+	if !auth.NextRetryAfter.IsZero() {
+		t.Fatalf("NextRetryAfter = %v, want zero (no cooldown for request fault)", auth.NextRetryAfter)
+	}
+	// The client-side fault must be visible to management UIs.
+	if got := auth.StatusMessage; !strings.HasPrefix(got, "request fault (client-side): ") {
+		t.Fatalf("StatusMessage = %q, want request fault (client-side) prefix", got)
 	}
 }
