@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -127,6 +128,11 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 
 		if parts.Exists() && parts.IsArray() {
 			parts.ForEach(func(_, part gjson.Result) bool {
+				// Skip hidden thought parts to prevent empty/malformed responses
+				if translatorcommon.IsGeminiThoughtPart(part) {
+					return true
+				}
+
 				// Handle text parts
 				if text := part.Get("text"); text.Exists() {
 					contentPart := []byte(`{"type":"text","text":""}`)
@@ -177,9 +183,16 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 			onlyTextContent := true
 			toolCallsWrapper := []byte(`{"arr":[]}`)
 			toolCallsCount := 0
+			droppedThought := false
 
 			if parts.Exists() && parts.IsArray() {
 				parts.ForEach(func(_, part gjson.Result) bool {
+					// Skip hidden thought parts to prevent empty/malformed responses
+					if translatorcommon.IsGeminiThoughtPart(part) {
+						droppedThought = true
+						return true
+					}
+
 					// Handle text parts
 					if text := part.Get("text"); text.Exists() {
 						formattedText := text.String()
@@ -271,6 +284,11 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 			// Set tool calls if any
 			if toolCallsCount > 0 {
 				msg, _ = sjson.SetRawBytes(msg, "tool_calls", []byte(gjson.GetBytes(toolCallsWrapper, "arr").Raw))
+			}
+
+			// Skip empty messages that only contained thought parts
+			if droppedThought && contentPartsCount == 0 && toolCallsCount == 0 {
+				return true
 			}
 
 			out, _ = sjson.SetRawBytes(out, "messages.-1", msg)

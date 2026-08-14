@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -91,6 +92,9 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		arr := sysParts.Array()
 		for i := range arr {
 			p := arr[i]
+			if translatorcommon.IsGeminiThoughtPart(p) {
+				continue
+			}
 			if t := p.Get("text"); t.Exists() {
 				part := []byte(`{}`)
 				part, _ = sjson.SetBytes(part, "type", "input_text")
@@ -121,6 +125,10 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 			parr := parts.Array()
 			for j := range parr {
 				p := parr[j]
+				if translatorcommon.IsGeminiThoughtPart(p) {
+					continue
+				}
+
 				// text part
 				if t := p.Get("text"); t.Exists() {
 					msg := []byte(`{"type":"message","role":"","content":[]}`)
