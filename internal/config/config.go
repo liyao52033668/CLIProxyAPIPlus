@@ -838,6 +838,18 @@ type OpenAICompatibility struct {
 
 	// DisableCooling disables auth/model cooldown scheduling for this provider when true.
 	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+
+	// QuotaEndpoint is the URL used to query the account balance/quota for this provider.
+	// When empty, no quota query is performed.
+	QuotaEndpoint string `yaml:"quota-endpoint,omitempty" json:"quota-endpoint,omitempty"`
+
+	// QuotaToken is the bearer token used for quota queries.
+	// When empty, the api-key-entries are tried in order.
+	QuotaToken string `yaml:"quota-token,omitempty" json:"quota-token,omitempty"`
+
+	// QuotaDivisor converts a raw quota value into the account balance
+	// (e.g. NEW API quota needs dividing by 500000).
+	QuotaDivisor *float64 `yaml:"quota-divisor,omitempty" json:"quota-divisor,omitempty"`
 }
 
 // OpenAICompatibilityAPIKey represents an API key configuration with optional proxy setting.

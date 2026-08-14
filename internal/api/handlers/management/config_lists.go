@@ -475,6 +475,9 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 		Headers               *map[string]string                  `json:"headers"`
 		SupportPromptCacheKey *bool                               `json:"support-prompt-cache-key"`
 		ForceStream           *bool                               `json:"force-stream"`
+		QuotaEndpoint         *string                             `json:"quota-endpoint"`
+		QuotaToken            *string                             `json:"quota-token"`
+		QuotaDivisor          *float64                            `json:"quota-divisor"`
 	}
 	var body struct {
 		Name  *string            `json:"name"`
@@ -540,6 +543,15 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	}
 	if body.Value.ForceStream != nil {
 		entry.ForceStream = *body.Value.ForceStream
+	}
+	if body.Value.QuotaEndpoint != nil {
+		entry.QuotaEndpoint = strings.TrimSpace(*body.Value.QuotaEndpoint)
+	}
+	if body.Value.QuotaToken != nil {
+		entry.QuotaToken = strings.TrimSpace(*body.Value.QuotaToken)
+	}
+	if body.Value.QuotaDivisor != nil {
+		entry.QuotaDivisor = body.Value.QuotaDivisor
 	}
 	normalizeOpenAICompatibilityEntry(&entry)
 	now := time.Now().UTC()

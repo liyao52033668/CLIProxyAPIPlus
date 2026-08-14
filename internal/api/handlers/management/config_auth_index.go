@@ -47,6 +47,9 @@ type openAICompatibilityWithAuthIndex struct {
 	SupportPromptCacheKey bool                                     `json:"support-prompt-cache-key,omitempty"`
 	AuthIndex             string                                   `json:"auth-index,omitempty"`
 	ForceStream           bool                                     `json:"force-stream,omitempty"`
+	QuotaEndpoint         string                                   `json:"quota-endpoint,omitempty"`
+	QuotaToken            string                                   `json:"quota-token,omitempty"`
+	QuotaDivisor          *float64                                 `json:"quota-divisor,omitempty"`
 }
 
 func (h *Handler) liveAuthIndexByID() map[string]string {
@@ -229,6 +232,9 @@ func (h *Handler) openAICompatibilityWithAuthIndex() []openAICompatibilityWithAu
 			SupportPromptCacheKey: entry.SupportPromptCacheKey,
 			AuthIndex:             "",
 			ForceStream:           entry.ForceStream,
+			QuotaEndpoint:         entry.QuotaEndpoint,
+			QuotaToken:            entry.QuotaToken,
+			QuotaDivisor:          entry.QuotaDivisor,
 		}
 		if len(entry.APIKeyEntries) == 0 {
 			id, _ := idGen.Next(idKind, entry.BaseURL)
