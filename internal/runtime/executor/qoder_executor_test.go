@@ -1288,6 +1288,33 @@ func TestQoderExecutorBuildQoderRequestBody_PreservesConversationTurns(t *testin
 	}
 }
 
+func TestQoderExecutorBuildQoderRequestBody_LastUserUsesLatestUserTurn(t *testing.T) {
+	// Baseline: when the latest user message carries text, chat_context.text.text
+	// must reflect that latest turn, not any earlier one.
+	e := NewQoderExecutor(&config.Config{})
+	payload := []byte(`{"messages":[{"role":"user","content":"first question"},{"role":"assistant","content":"first answer"},{"role":"user","content":"second question"}]}`)
+	body := e.buildQoderRequestBody(payload, "qwen3.7-max", qoderModelContract{})
+	data := mustMarshalJSON(t, body)
+	if got := gjson.GetBytes(data, "chat_context.text.text").String(); got != "second question" {
+		t.Fatalf("chat_context.text.text = %q, want the latest user turn %q", got, "second question")
+	}
+}
+
+func TestQoderExecutorBuildQoderRequestBody_LastUserDoesNotFallBackToFirstQuestion(t *testing.T) {
+	// Verifies the "repeats the first question" diagnosis: when the latest user
+	// turn carries no extractable text (empty continuation / tool-result-only turn),
+	// lastUser must NOT silently fall back to the earliest user message, otherwise
+	// Qoder treats the first question as the current prompt and re-answers it.
+	e := NewQoderExecutor(&config.Config{})
+	payload := []byte(`{"messages":[{"role":"user","content":"first question"},{"role":"assistant","content":"first answer"},{"role":"user","content":""}]}`)
+	body := e.buildQoderRequestBody(payload, "qwen3.7-max", qoderModelContract{})
+	data := mustMarshalJSON(t, body)
+	got := gjson.GetBytes(data, "chat_context.text.text").String()
+	if got == "first question" {
+		t.Fatalf("chat_context.text.text = %q: lastUser fell back to the first user message when the latest user turn has no text; want the current turn's content (or empty), not the first question", got)
+	}
+}
+
 func TestQoderExecutorBuildQoderRequestBody_NormalizesArrayUserContent(t *testing.T) {
 	e := NewQoderExecutor(&config.Config{})
 	body := e.buildQoderRequestBody([]byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hello"},{"type":"text","text":"world"}]}]}`), "qwen3.7-max", qoderModelContract{})
@@ -1330,6 +1357,44 @@ func TestQoderExecutorBuildQoderRequestBody_RendersToolResultAsUserWhenToolsDisa
 	}
 	if got := gjson.GetBytes(data, "messages.0.contents.0.text").String(); got != want {
 		t.Fatalf("messages[0].contents[0].text = %q, want %q", got, want)
+	}
+}
+
+func TestQoderExecutorBuildQoderRequestBody_LastUserIgnoresTrailingToolResults(t *testing.T) {
+	// Agentic tool loop: the conversation ends with tool result turns. The
+	// current prompt must remain the user question that opened the loop —
+	// tool results are role:"tool", so the last-user lookup skips them
+	// naturally without any empty-text fallback.
+	e := NewQoderExecutor(&config.Config{})
+	payload := []byte(`{"messages":[{"role":"user","content":"first question"},{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{}"}}]},{"role":"tool","name":"get_weather","tool_call_id":"call_1","content":"sunny"},{"role":"assistant","tool_calls":[{"id":"call_2","type":"function","function":{"name":"read","arguments":"{}"}}]},{"role":"tool","name":"read","tool_call_id":"call_2","content":"file body"}],"tools":[{"type":"function","function":{"name":"get_weather"}},{"type":"function","function":{"name":"read"}}]}`)
+	body := e.buildQoderRequestBody(payload, "qwen3.7-max", qoderModelContract{})
+	data := mustMarshalJSON(t, body)
+	if got := gjson.GetBytes(data, "chat_context.text.text").String(); got != "first question" {
+		t.Fatalf("chat_context.text.text = %q, want the question that opened the tool loop %q", got, "first question")
+	}
+	if got := gjson.GetBytes(data, "business.name").String(); got != "first question" {
+		t.Fatalf("business.name = %q, want %q", got, "first question")
+	}
+}
+
+func TestQoderExecutorBuildQoderRequestBody_SkipsEmptyToolResult(t *testing.T) {
+	e := NewQoderExecutor(&config.Config{})
+	body := e.buildQoderRequestBody([]byte(`{"messages":[{"role":"user","content":"hi"},{"role":"tool","name":"get_weather","tool_call_id":"call_1","content":""}]}`), "qwen3.7-max", qoderModelContract{})
+	data := mustMarshalJSON(t, body)
+	if got := gjson.GetBytes(data, "messages.#").Int(); got != 1 {
+		t.Fatalf("messages count = %d, want %d (empty tool result must be skipped)", got, 1)
+	}
+	if got := gjson.GetBytes(data, "messages.0.contents.0.text").String(); got != "hi" {
+		t.Fatalf("messages[0] text = %q, want %q", got, "hi")
+	}
+}
+
+func TestQoderExecutorBuildQoderRequestBody_SkipsEmptyToolResultWhenToolsEnabled(t *testing.T) {
+	e := NewQoderExecutor(&config.Config{})
+	body := e.buildQoderRequestBody([]byte(`{"messages":[{"role":"user","content":"hi"},{"role":"tool","name":"get_weather","tool_call_id":"call_1","content":""}],"tools":[{"type":"function","function":{"name":"get_weather"}}]}`), "qwen3.7-max", qoderModelContract{})
+	data := mustMarshalJSON(t, body)
+	if got := gjson.GetBytes(data, "messages.#").Int(); got != 1 {
+		t.Fatalf("messages count = %d, want %d (empty tool result must be skipped even when tools are enabled)", got, 1)
 	}
 }
 

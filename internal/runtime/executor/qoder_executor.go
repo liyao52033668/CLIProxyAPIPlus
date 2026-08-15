@@ -672,10 +672,12 @@ func (e *QoderExecutor) buildQoderRequestBody(openaiBody []byte, modelKey string
 		for i := len(messages) - 1; i >= 0; i-- {
 			if m, ok := messages[i].(map[string]any); ok {
 				if role, _ := m["role"].(string); role == "user" {
+					// Use the most recent user turn verbatim, even when empty.
+					// Skipping an empty turn and falling back to an earlier user
+					// message makes Qoder treat that older prompt as the current
+					// question (chat_context.text.text) and re-answer it.
 					lastUser = qoderNormalizeMessageText(m)
-					if strings.TrimSpace(lastUser) != "" {
-						break
-					}
+					break
 				}
 			}
 		}
@@ -696,15 +698,15 @@ func (e *QoderExecutor) buildQoderRequestBody(openaiBody []byte, modelKey string
 				}
 				rebuiltMessages = append(rebuiltMessages, qoderBuildUserMessage(text))
 			case "tool":
-				if !toolsEnabled {
-					text = qoderRenderToolResult(m, text)
-					if strings.TrimSpace(text) == "" {
-						continue
-					}
-					rebuiltMessages = append(rebuiltMessages, qoderBuildUserMessage(text))
+				if strings.TrimSpace(text) == "" {
+					// A tool result with no content carries no information; skip it
+					// rather than emitting a placeholder like "Tool result (name)"
+					// that injects an empty-content turn into the conversation.
 					continue
 				}
-				if strings.TrimSpace(text) == "" {
+				if !toolsEnabled {
+					text = qoderRenderToolResult(m, text)
+					rebuiltMessages = append(rebuiltMessages, qoderBuildUserMessage(text))
 					continue
 				}
 				toolMsg := qoderBuildStructuredMessage(role, text)
