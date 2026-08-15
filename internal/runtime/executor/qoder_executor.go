@@ -669,15 +669,21 @@ func (e *QoderExecutor) buildQoderRequestBody(openaiBody []byte, modelKey string
 	lastUser := ""
 	var rebuiltMessages []any
 	if messages != nil {
+		// Vision conversations carry the image as an "[image] data:..." text
+		// reference inside chat_context.text.text (no separate image field is
+		// sent upstream), so an empty latest user turn may fall back to the
+		// most recent non-empty user turn only when the conversation carries
+		// image content. Text-only conversations stop at the latest user turn
+		// even when it is empty, so an old prompt is never resurrected as the
+		// current question and re-answered.
+		allowLastUserFallback := qoderMessagesHaveImage(messages)
 		for i := len(messages) - 1; i >= 0; i-- {
 			if m, ok := messages[i].(map[string]any); ok {
 				if role, _ := m["role"].(string); role == "user" {
-					// Use the most recent user turn verbatim, even when empty.
-					// Skipping an empty turn and falling back to an earlier user
-					// message makes Qoder treat that older prompt as the current
-					// question (chat_context.text.text) and re-answer it.
 					lastUser = qoderNormalizeMessageText(m)
-					break
+					if strings.TrimSpace(lastUser) != "" || !allowLastUserFallback {
+						break
+					}
 				}
 			}
 		}
@@ -1033,6 +1039,49 @@ func qoderNormalizeContentPart(item any) string {
 		}
 	}
 	return ""
+}
+
+// qoderMessagesHaveImage reports whether any message carries image content,
+// either as a structured image_url/input_image part or as a rendered
+// "[image] ..." text marker produced for flattened tool results.
+func qoderMessagesHaveImage(messages []any) bool {
+	for _, msg := range messages {
+		m, ok := msg.(map[string]any)
+		if !ok {
+			continue
+		}
+		if qoderContentHasImage(m["content"]) || qoderContentHasImage(m["contents"]) {
+			return true
+		}
+	}
+	return false
+}
+
+func qoderContentHasImage(content any) bool {
+	switch v := content.(type) {
+	case string:
+		return strings.Contains(v, "[image] ") || strings.Contains(v, "data:image/")
+	case []any:
+		for _, item := range v {
+			if qoderContentHasImage(item) {
+				return true
+			}
+		}
+	case []map[string]any:
+		for _, item := range v {
+			if qoderContentHasImage(item) {
+				return true
+			}
+		}
+	case map[string]any:
+		if typeName, _ := v["type"].(string); typeName == "image_url" || typeName == "input_image" {
+			return true
+		}
+		if nested, ok := v["content"]; ok {
+			return qoderContentHasImage(nested)
+		}
+	}
+	return false
 }
 
 func qoderRenderToolCalls(toolCalls []any) string {

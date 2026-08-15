@@ -1300,18 +1300,32 @@ func TestQoderExecutorBuildQoderRequestBody_LastUserUsesLatestUserTurn(t *testin
 	}
 }
 
-func TestQoderExecutorBuildQoderRequestBody_LastUserDoesNotFallBackToFirstQuestion(t *testing.T) {
-	// Verifies the "repeats the first question" diagnosis: when the latest user
-	// turn carries no extractable text (empty continuation / tool-result-only turn),
-	// lastUser must NOT silently fall back to the earliest user message, otherwise
-	// Qoder treats the first question as the current prompt and re-answers it.
+func TestQoderExecutorBuildQoderRequestBody_LastUserNoFallbackForTextOnly(t *testing.T) {
+	// Text-only conversations must NOT fall back to an earlier user message when
+	// the latest user turn is empty: reviving an old prompt via
+	// chat_context.text.text makes upstream re-answer it (the "repeats the first
+	// question" symptom on text-only models like glm).
 	e := NewQoderExecutor(&config.Config{})
 	payload := []byte(`{"messages":[{"role":"user","content":"first question"},{"role":"assistant","content":"first answer"},{"role":"user","content":""}]}`)
 	body := e.buildQoderRequestBody(payload, "qwen3.7-max", qoderModelContract{})
 	data := mustMarshalJSON(t, body)
 	got := gjson.GetBytes(data, "chat_context.text.text").String()
 	if got == "first question" {
-		t.Fatalf("chat_context.text.text = %q: lastUser fell back to the first user message when the latest user turn has no text; want the current turn's content (or empty), not the first question", got)
+		t.Fatalf("chat_context.text.text = %q: lastUser fell back to an earlier user turn in a text-only conversation; want no fallback", got)
+	}
+}
+
+func TestQoderExecutorBuildQoderRequestBody_LastUserFallsBackForImageTurn(t *testing.T) {
+	// Vision-carrying fallback: the latest turn is an empty continuation, but an
+	// earlier user turn holds the image reference. chat_context.text.text must keep
+	// that reference so upstream can still see the image.
+	e := NewQoderExecutor(&config.Config{})
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,QUJD"}},{"type":"text","text":"describe this"}]},{"role":"assistant","content":"it shows a cat"},{"role":"user","content":""}]}`)
+	body := e.buildQoderRequestBody(payload, "qwen3.7-max", qoderModelContract{})
+	data := mustMarshalJSON(t, body)
+	got := gjson.GetBytes(data, "chat_context.text.text").String()
+	if !strings.Contains(got, "[image] data:image/png;base64,QUJD") {
+		t.Fatalf("chat_context.text.text = %q, want it to retain the image reference from the most recent non-empty user turn", got)
 	}
 }
 
