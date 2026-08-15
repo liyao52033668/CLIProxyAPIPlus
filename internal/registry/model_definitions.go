@@ -473,6 +473,16 @@ func GetQoderModels() []*ModelInfo {
 			Thinking:    &ThinkingSupport{Levels: []string{"high", "max"}},
 		},
 		{
+			ID:          "gmodel",
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     "qoder",
+			Type:        "qoder",
+			DisplayName: "GLM-5.3",
+			Description: "GLM 5.3 via Qoder",
+			Thinking:    &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
+		},
+		{
 			ID:          "gm51model",
 			Object:      "model",
 			Created:     now,
