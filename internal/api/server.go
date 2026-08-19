@@ -5,6 +5,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"crypto/tls"
@@ -472,24 +473,26 @@ func (s *Server) setupRoutes() {
 	// OpenAI compatible API routes
 	v1 := s.engine.Group("/v1")
 	v1.Use(AuthMiddleware(s.accessManager))
-	{
-		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
-		v1.POST("/chat/completions", openaiHandlers.ChatCompletions)
-		v1.POST("/completions", openaiHandlers.Completions)
-		v1.POST("/images/generations", openaiHandlers.ImagesGenerations)
-		v1.POST("/images/edits", openaiHandlers.ImagesEdits)
-		v1.POST("/videos", openaiHandlers.VideosCreate)
-		v1.POST("/videos/generations", openaiHandlers.XAIVideosGenerations)
-		v1.POST("/videos/edits", openaiHandlers.XAIVideosEdits)
-		v1.POST("/videos/extensions", openaiHandlers.XAIVideosExtensions)
-		v1.GET("/videos/:request_id", openaiHandlers.XAIVideosRetrieve)
-		v1.POST("/messages", claudeCodeHandlers.ClaudeMessages)
-		v1.POST("/messages/count_tokens", claudeCodeHandlers.ClaudeCountTokens)
-		v1.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)
-		v1.POST("/responses", openaiResponsesHandlers.Responses)
-		v1.POST("/responses/compact", openaiResponsesHandlers.Compact)
-		v1.POST("/alpha/search", s.codexAlphaSearch)
-	}
+	v1.Use(s.modelWhitelistMiddleware())
+
+	// Register /v1/models with dual authentication (apikey or management key)
+	s.engine.GET("/v1/models", s.modelsAuthMiddleware(), s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
+
+	v1.POST("/chat/completions", openaiHandlers.ChatCompletions)
+	v1.POST("/completions", openaiHandlers.Completions)
+	v1.POST("/images/generations", openaiHandlers.ImagesGenerations)
+	v1.POST("/images/edits", openaiHandlers.ImagesEdits)
+	v1.POST("/videos", openaiHandlers.VideosCreate)
+	v1.POST("/videos/generations", openaiHandlers.XAIVideosGenerations)
+	v1.POST("/videos/edits", openaiHandlers.XAIVideosEdits)
+	v1.POST("/videos/extensions", openaiHandlers.XAIVideosExtensions)
+	v1.GET("/videos/:request_id", openaiHandlers.XAIVideosRetrieve)
+	v1.POST("/messages", claudeCodeHandlers.ClaudeMessages)
+	v1.POST("/messages/count_tokens", claudeCodeHandlers.ClaudeCountTokens)
+	v1.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)
+	v1.POST("/responses", openaiResponsesHandlers.Responses)
+	v1.POST("/responses/compact", openaiResponsesHandlers.Compact)
+	v1.POST("/alpha/search", s.codexAlphaSearch)
 
 	// Codex CLI direct route aliases (chatgpt_base_url compatible)
 	codexDirect := s.engine.Group("/backend-api/codex")
@@ -945,6 +948,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/api-keys", s.mgmt.PutAPIKeys)
 		mgmt.PATCH("/api-keys", s.mgmt.PatchAPIKeys)
 		mgmt.DELETE("/api-keys", s.mgmt.DeleteAPIKeys)
+		mgmt.PATCH("/api-keys/models", s.mgmt.PatchAPIKeyModels)
 		mgmt.GET("/api-key-usage", s.mgmt.GetAPIKeyUsage)
 		mgmt.GET("/usage-queue", s.mgmt.GetUsageQueue)
 
@@ -1228,11 +1232,27 @@ func (s *Server) watchKeepAlive() {
 // that routes to different handlers based on the User-Agent header.
 // If User-Agent starts with "claude-cli", it routes to Claude handler,
 // otherwise it routes to OpenAI handler.
+// Management keys return all models; apikeys return associated models.
 func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, claudeHandler *claude.ClaudeCodeAPIHandler) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// Check if authenticated with management key
+		isMgmtKey, _ := c.Get("isManagementKey")
+
+		// Determine allowed models based on authentication type
+		var allowedModels []string
+		if isMgmtKey != true {
+			// apikey authentication - get associated models
+			allowedModels = s.getAllowedModelsForKey(c)
+		}
+		// management key returns all models (allowedModels stays nil)
+
 		if _, ok := c.Request.URL.Query()["client_version"]; ok {
 			if s != nil && s.cfg != nil && s.cfg.Home.Enabled {
 				s.handleHomeCodexClientModels(c)
+				return
+			}
+			if allowedModels != nil {
+				s.handleModelsWithFilter(c, openaiHandler, allowedModels, true)
 				return
 			}
 			openaiHandler.OpenAIModels(c)
@@ -1248,12 +1268,136 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 
 		// Route to Claude handler if User-Agent starts with "claude-cli"
 		if strings.HasPrefix(userAgent, "claude-cli") {
-			// log.Debugf("Routing /v1/models to Claude handler for User-Agent: %s", userAgent)
+			if allowedModels != nil {
+				s.handleModelsWithFilter(c, claudeHandler, allowedModels, false)
+				return
+			}
 			claudeHandler.ClaudeModels(c)
 		} else {
-			// log.Debugf("Routing /v1/models to OpenAI handler for User-Agent: %s", userAgent)
+			if allowedModels != nil {
+				s.handleModelsWithFilter(c, openaiHandler, allowedModels, true)
+				return
+			}
 			openaiHandler.OpenAIModels(c)
 		}
+	}
+}
+
+// getAllowedModelsForKey returns the models whitelist for the authenticated API key,
+// or nil if no whitelist is configured (all models allowed).
+func (s *Server) getAllowedModelsForKey(c *gin.Context) []string {
+	if s == nil || s.cfg == nil {
+		return nil
+	}
+	// Get the authenticated API key from context (set by AuthMiddleware)
+	apiKey, exists := c.Get("userApiKey")
+	if !exists {
+		return nil
+	}
+	keyStr, ok := apiKey.(string)
+	if !ok || keyStr == "" {
+		return nil
+	}
+	// Look up the key in config
+	entry := s.cfg.APIKeys.GetEntry(keyStr)
+	if entry == nil || len(entry.Models) == 0 {
+		return nil
+	}
+	return entry.Models
+}
+
+// handleModelsWithFilter returns models filtered by the allowed whitelist.
+// If a model in the whitelist doesn't exist in the handler's model list,
+// it will be added as a basic model entry.
+func (s *Server) handleModelsWithFilter(c *gin.Context, handler interface{}, allowedModels []string, isOpenAI bool) {
+	allowedSet := make(map[string]bool, len(allowedModels))
+	for _, m := range allowedModels {
+		allowedSet[m] = true
+	}
+
+	if isOpenAI {
+		openaiHandler, ok := handler.(*openai.OpenAIAPIHandler)
+		if !ok {
+			return
+		}
+		// Get all models from handler
+		allModels := openaiHandler.Models()
+
+		// Track which allowed models we found in the handler
+		foundModels := make(map[string]bool)
+		filteredModels := make([]map[string]any, 0, len(allowedModels))
+
+		// First pass: find models that exist in handler
+		for _, model := range allModels {
+			if modelID, ok := model["id"].(string); ok && allowedSet[modelID] {
+				filteredModels = append(filteredModels, model)
+				foundModels[modelID] = true
+			}
+		}
+
+		// Second pass: add allowed models that don't exist in handler
+		for _, modelID := range allowedModels {
+			if !foundModels[modelID] {
+				// Create a basic model entry for whitelisted models not in handler
+				filteredModels = append(filteredModels, map[string]any{
+					"id":       modelID,
+					"object":   "model",
+					"owned_by": "whitelist",
+				})
+			}
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"object": "list",
+			"data":   filteredModels,
+		})
+	} else {
+		claudeHandler, ok := handler.(*claude.ClaudeCodeAPIHandler)
+		if !ok {
+			return
+		}
+		// Get all models from handler
+		allModels := claudeHandler.Models()
+
+		// Track which allowed models we found in the handler
+		foundModels := make(map[string]bool)
+		filteredModels := make([]map[string]any, 0, len(allowedModels))
+
+		// First pass: find models that exist in handler
+		for _, model := range allModels {
+			if modelID, ok := model["id"].(string); ok && allowedSet[modelID] {
+				filteredModels = append(filteredModels, model)
+				foundModels[modelID] = true
+			}
+		}
+
+		// Second pass: add allowed models that don't exist in handler
+		for _, modelID := range allowedModels {
+			if !foundModels[modelID] {
+				// Create a basic model entry for whitelisted models not in handler
+				filteredModels = append(filteredModels, map[string]any{
+					"id":         modelID,
+					"display_name": modelID,
+				})
+			}
+		}
+
+		firstID := ""
+		lastID := ""
+		if len(filteredModels) > 0 {
+			if id, ok := filteredModels[0]["id"].(string); ok {
+				firstID = id
+			}
+			if id, ok := filteredModels[len(filteredModels)-1]["id"].(string); ok {
+				lastID = id
+			}
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"data":     filteredModels,
+			"has_more": false,
+			"first_id": firstID,
+			"last_id":  lastID,
+		})
 	}
 }
 
@@ -2209,6 +2353,7 @@ func (g *codexInspectionGatewayAdapter) findAuth(name string) (*auth.Auth, bool)
 // AuthMiddleware returns a Gin middleware handler that authenticates requests
 // using the configured authentication providers. A configured manager with no
 // providers rejects requests by default.
+// AuthMiddleware authenticates requests using the access manager.
 func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if manager == nil {
@@ -2235,6 +2380,136 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 		}
 		c.AbortWithStatusJSON(statusCode, gin.H{"error": err.Message})
 	}
+}
+
+// modelWhitelistMiddleware checks if the requested model is in the API key's whitelist.
+// If the whitelist is empty, all models are allowed.
+func (s *Server) modelWhitelistMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Skip for management key
+		isMgmtKey, _ := c.Get("isManagementKey")
+		if isMgmtKey == true {
+			c.Next()
+			return
+		}
+
+		// Get the authenticated API key
+		apiKey, exists := c.Get("userApiKey")
+		if !exists {
+			c.Next()
+			return
+		}
+		keyStr, ok := apiKey.(string)
+		if !ok || keyStr == "" {
+			c.Next()
+			return
+		}
+
+		// Get the whitelist for this key
+		allowedModels := s.getAllowedModelsForKey(c)
+		if len(allowedModels) == 0 {
+			// No whitelist, all models allowed
+			c.Next()
+			return
+		}
+
+		// Extract model from request body
+		var requestedModel string
+		if c.Request.Method == http.MethodPost {
+			bodyBytes, err := io.ReadAll(c.Request.Body)
+			if err != nil {
+				c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "failed to read request body"})
+				return
+			}
+			c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+
+			var reqBody struct {
+				Model string `json:"model"`
+			}
+			if err := json.Unmarshal(bodyBytes, &reqBody); err == nil {
+				requestedModel = reqBody.Model
+			}
+		}
+
+		if requestedModel == "" {
+			c.Next()
+			return
+		}
+
+		// Check if model is in whitelist
+		allowedSet := make(map[string]bool)
+		for _, m := range allowedModels {
+			allowedSet[m] = true
+		}
+
+		if !allowedSet[requestedModel] {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+				"error": fmt.Sprintf("model '%s' is not in the whitelist for this API key", requestedModel),
+			})
+			return
+		}
+
+		c.Next()
+	}
+}
+
+// modelsAuthMiddleware authenticates /v1/models requests with management key or apikey.
+// Management key returns all models; apikey returns associated models.
+func (s *Server) modelsAuthMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Try management key first (internal use)
+		if s.mgmt != nil {
+			clientIP, localClient := managementRequestClientIP(c.Request)
+
+			var provided string
+			if ah := c.GetHeader("Authorization"); ah != "" {
+				parts := strings.SplitN(ah, " ", 2)
+				if len(parts) == 2 && strings.ToLower(parts[0]) == "bearer" {
+					provided = parts[1]
+				} else {
+					provided = ah
+				}
+			}
+			if provided == "" {
+				provided = c.GetHeader("X-Management-Key")
+			}
+
+			if provided != "" {
+				allowed, _, _ := s.mgmt.AuthenticateManagementKey(clientIP, localClient, provided)
+				if allowed {
+					c.Set("isManagementKey", true)
+					c.Next()
+					return
+				}
+			}
+		}
+
+		// Try apikey (external use)
+		if s.accessManager != nil {
+			result, err := s.accessManager.Authenticate(c.Request.Context(), c.Request)
+			if err == nil {
+				if result != nil {
+					c.Set("userApiKey", result.Principal)
+					c.Set("accessProvider", result.Provider)
+					if len(result.Metadata) > 0 {
+						c.Set("accessMetadata", result.Metadata)
+					}
+				}
+				c.Next()
+				return
+			}
+		}
+
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+	}
+}
+
+// managementRequestClientIP extracts the peer IP from Request.RemoteAddr.
+func managementRequestClientIP(r *http.Request) (clientIP string, localClient bool) {
+	if r == nil {
+		return "", false
+	}
+	return guard.ParseClientIPAndLoopback(r.RemoteAddr)
 }
 
 func configuredSignatureCacheEnabled(cfg *config.Config) bool {

@@ -108,17 +108,93 @@ func (h *Handler) deleteFromStringList(c *gin.Context, target *[]string, after f
 }
 
 // GetAPIKeys returns the list of API keys.
-func (h *Handler) GetAPIKeys(c *gin.Context) { c.JSON(200, gin.H{"api-keys": h.cfg.APIKeys}) }
+func (h *Handler) GetAPIKeys(c *gin.Context) {
+	c.JSON(200, gin.H{"api-keys": h.cfg.APIKeys})
+}
 func (h *Handler) PutAPIKeys(c *gin.Context) {
 	h.putStringList(c, func(v []string) {
-		h.cfg.APIKeys = append([]string(nil), v...)
+		// Convert string list to APIKeyList with no models
+		entries := make(config.APIKeyList, len(v))
+		for i, key := range v {
+			entries[i] = config.APIKeyEntry{Key: key}
+		}
+		h.cfg.APIKeys = entries
 	}, nil)
 }
 func (h *Handler) PatchAPIKeys(c *gin.Context) {
-	h.patchStringList(c, &h.cfg.APIKeys, func() {})
+	// For simple string patch, we need to work with the string representation
+	strList := h.cfg.APIKeys.ToStrings()
+	h.patchStringList(c, &strList, func() {
+		// Convert back to APIKeyList, preserving models for unchanged keys
+		newList := make(config.APIKeyList, len(strList))
+		for i, key := range strList {
+			// Try to find existing entry to preserve models
+			if entry := h.cfg.APIKeys.GetEntry(key); entry != nil {
+				newList[i] = *entry
+			} else {
+				newList[i] = config.APIKeyEntry{Key: key}
+			}
+		}
+		h.cfg.APIKeys = newList
+	})
 }
 func (h *Handler) DeleteAPIKeys(c *gin.Context) {
-	h.deleteFromStringList(c, &h.cfg.APIKeys, func() {})
+	strList := h.cfg.APIKeys.ToStrings()
+	h.deleteFromStringList(c, &strList, func() {
+		// Convert back to APIKeyList
+		newList := make(config.APIKeyList, 0, len(strList))
+		for _, key := range strList {
+			if entry := h.cfg.APIKeys.GetEntry(key); entry != nil {
+				newList = append(newList, *entry)
+			}
+		}
+		h.cfg.APIKeys = newList
+	})
+}
+
+// PatchAPIKeyModels updates the models whitelist for a specific API key.
+// Body: {"key": "sk-xxx", "models": ["model1", "model2"]}
+// If models is empty or null, the key will show all models.
+func (h *Handler) PatchAPIKeyModels(c *gin.Context) {
+	var body struct {
+		Key    string   `json:"key"`
+		Models []string `json:"models"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+	if body.Key == "" {
+		c.JSON(400, gin.H{"error": "key is required"})
+		return
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	// Find the key entry
+	found := false
+	for i := range h.cfg.APIKeys {
+		if h.cfg.APIKeys[i].Key == body.Key {
+			// Normalize models: trim whitespace, filter empty
+			normalized := make([]string, 0, len(body.Models))
+			for _, m := range body.Models {
+				if trimmed := strings.TrimSpace(m); trimmed != "" {
+					normalized = append(normalized, trimmed)
+				}
+			}
+			h.cfg.APIKeys[i].Models = normalized
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		c.JSON(404, gin.H{"error": "api key not found"})
+		return
+	}
+
+	h.persistLocked(c)
 }
 
 // GetGeminiKeys returns the list of Gemini keys.

@@ -4,6 +4,138 @@
 // debug settings, proxy configuration, and API keys.
 package config
 
+import (
+	"encoding/json"
+	"fmt"
+
+	"gopkg.in/yaml.v3"
+)
+
+// APIKeyEntry represents a client API key with optional model filtering.
+type APIKeyEntry struct {
+	// Key is the API key string for authentication.
+	Key string `yaml:"key" json:"key"`
+	// Models is an optional whitelist of model IDs. When set, /v1/models only returns these models.
+	// Empty or nil means all models are visible.
+	Models []string `yaml:"models,omitempty" json:"models,omitempty"`
+}
+
+// APIKeyList is a custom list of API key entries that supports both legacy string format
+// and new object format in YAML/JSON.
+type APIKeyList []APIKeyEntry
+
+// UnmarshalYAML implements custom YAML unmarshaling to support both formats:
+// - Legacy: ["key1", "key2"]
+// - New: [{key: "key1", models: [...]}, "key2"]
+func (l *APIKeyList) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind != yaml.SequenceNode {
+		return fmt.Errorf("api-keys must be a sequence")
+	}
+
+	entries := make([]APIKeyEntry, 0, len(value.Content))
+	for _, node := range value.Content {
+		var entry APIKeyEntry
+		// Try object format first
+		if node.Kind == yaml.MappingNode {
+			if err := node.Decode(&entry); err != nil {
+				return fmt.Errorf("invalid api-key entry: %w", err)
+			}
+			entries = append(entries, entry)
+			continue
+		}
+		// Fall back to string format (legacy)
+		var keyStr string
+		if err := node.Decode(&keyStr); err != nil {
+			return fmt.Errorf("api-key entry must be string or object: %w", err)
+		}
+		entries = append(entries, APIKeyEntry{Key: keyStr})
+	}
+	*l = entries
+	return nil
+}
+
+// MarshalYAML implements custom YAML marshaling.
+func (l APIKeyList) MarshalYAML() (interface{}, error) {
+	// Check if all entries have no models (legacy format)
+	allLegacy := true
+	for _, entry := range l {
+		if len(entry.Models) > 0 {
+			allLegacy = false
+			break
+		}
+	}
+	if allLegacy {
+		// Output as simple string list
+		keys := make([]string, len(l))
+		for i, entry := range l {
+			keys[i] = entry.Key
+		}
+		return keys, nil
+	}
+	// Output as object list
+	return []APIKeyEntry(l), nil
+}
+
+// UnmarshalJSON implements custom JSON unmarshaling.
+func (l *APIKeyList) UnmarshalJSON(data []byte) error {
+	// Try array of strings first (legacy)
+	var strArr []string
+	if err := json.Unmarshal(data, &strArr); err == nil {
+		entries := make([]APIKeyEntry, len(strArr))
+		for i, s := range strArr {
+			entries[i] = APIKeyEntry{Key: s}
+		}
+		*l = entries
+		return nil
+	}
+	// Try array of objects
+	var objArr []APIKeyEntry
+	if err := json.Unmarshal(data, &objArr); err != nil {
+		return fmt.Errorf("api-keys must be array of strings or objects: %w", err)
+	}
+	*l = objArr
+	return nil
+}
+
+// MarshalJSON implements custom JSON marshaling.
+func (l APIKeyList) MarshalJSON() ([]byte, error) {
+	// Check if all entries have no models (legacy format)
+	allLegacy := true
+	for _, entry := range l {
+		if len(entry.Models) > 0 {
+			allLegacy = false
+			break
+		}
+	}
+	if allLegacy {
+		keys := make([]string, len(l))
+		for i, entry := range l {
+			keys[i] = entry.Key
+		}
+		return json.Marshal(keys)
+	}
+	return json.Marshal([]APIKeyEntry(l))
+}
+
+// ToStrings returns a list of key strings (for backward compatibility).
+func (l APIKeyList) ToStrings() []string {
+	keys := make([]string, len(l))
+	for i, entry := range l {
+		keys[i] = entry.Key
+	}
+	return keys
+}
+
+// GetEntry returns the entry for a given key, or nil if not found.
+func (l APIKeyList) GetEntry(key string) *APIKeyEntry {
+	for i := range l {
+		if l[i].Key == key {
+			return &l[i]
+		}
+	}
+	return nil
+}
+
 // SDKConfig represents the application's configuration, loaded from a YAML file.
 type SDKConfig struct {
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
@@ -38,7 +170,9 @@ type SDKConfig struct {
 	RequestLog bool `yaml:"request-log" json:"request-log"`
 
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
-	APIKeys []string `yaml:"api-keys" json:"api-keys"`
+	// Each entry can be a plain string (legacy) or an object with "key" and optional "models" fields.
+	// When "models" is set, the /v1/models endpoint only returns those models for that key.
+	APIKeys APIKeyList `yaml:"api-keys" json:"api-keys"`
 
 	// AllowQueryAPIKey allows API keys in URL query parameters for legacy clients.
 	// It defaults to false because URLs can leak through logs, browser history, and referrers.
