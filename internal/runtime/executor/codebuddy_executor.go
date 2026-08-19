@@ -295,6 +295,7 @@ func (e *CodeBuddyExecutor) CountTokens(_ context.Context, _ *cliproxyauth.Auth,
 
 // applyHeaders sets required headers for CodeBuddy API requests.
 func (e *CodeBuddyExecutor) applyHeaders(req *http.Request, accessToken, userID, domain string) {
+	version := codebuddy.GetIDEVersion()
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
@@ -302,10 +303,10 @@ func (e *CodeBuddyExecutor) applyHeaders(req *http.Request, accessToken, userID,
 	req.Header.Set("X-User-Id", userID)
 	req.Header.Set("X-Domain", domain)
 	req.Header.Set("X-Product", "SaaS")
-	req.Header.Set("X-IDE-Type", "CodeBuddyIDE")
-	req.Header.Set("X-IDE-Name", "CodeBuddyIDE")
-	req.Header.Set("X-IDE-Version", "4.9.7")
-	req.Header.Set("X-Product-Version", "4.9.7")
+	req.Header.Set("X-IDE-Type", "CLI")
+	req.Header.Set("X-IDE-Name", "CodeBuddy")
+	req.Header.Set("X-IDE-Version", version)
+	req.Header.Set("X-Product-Version", version)
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
 }
 
@@ -606,10 +607,10 @@ func FetchCodeBuddyModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *con
 	headers.Set("User-Agent", codebuddy.UserAgent)
 	headers.Set("Accept", "application/json, text/plain, */*")
 	headers.Set("X-Requested-With", "XMLHttpRequest")
-	headers.Set("X-IDE-Type", "CodeBuddyIDE")
-	headers.Set("X-IDE-Name", "CodeBuddyIDE")
-	headers.Set("X-IDE-Version", "4.9.7")
-	headers.Set("X-Product-Version", "4.9.7")
+	headers.Set("X-IDE-Type", "CLI")
+	headers.Set("X-IDE-Name", "CodeBuddy")
+	headers.Set("X-IDE-Version", codebuddy.IDEVersion)
+	headers.Set("X-Product-Version", codebuddy.IDEVersion)
 	headers.Set("X-Env-ID", "production")
 	headers.Set("Authorization", "Bearer "+accessToken)
 	headers.Set("X-User-Id", userID)

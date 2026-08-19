@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codebuddy"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codebuddy_ai"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -272,17 +273,18 @@ func (e *CodeBuddyAIExecutor) CountTokens(_ context.Context, _ *cliproxyauth.Aut
 }
 
 func (e *CodeBuddyAIExecutor) applyHeaders(req *http.Request, accessToken, userID, domain string) {
+	version := codebuddy.GetIDEVersion()
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", codebuddy_ai.UserAgent)
 	req.Header.Set("X-User-Id", userID)
 	req.Header.Set("X-Domain", domain)
-	req.Header.Set("X-IDE-Type", "IDE")
+	req.Header.Set("X-IDE-Type", "CLI")
 	req.Header.Set("X-IDE-Name", "CodeBuddy")
-	req.Header.Set("X-IDE-Version", "1.100.0")
-	req.Header.Set("X-Product", "cloud")
-	req.Header.Set("X-Product-Version", "1.100.0")
+	req.Header.Set("X-IDE-Version", version)
+	req.Header.Set("X-Product", "SaaS")
+	req.Header.Set("X-Product-Version", version)
 }
 
 var codeBuddyAIInternalModelPrefixes = []string{
@@ -322,10 +324,10 @@ func FetchCodeBuddyAIModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 	headers.Set("Authorization", "Bearer "+accessToken)
 	headers.Set("X-User-Id", userID)
 	headers.Set("X-Domain", domain)
-	headers.Set("X-IDE-Type", "CodeBuddyIDE")
-	headers.Set("X-IDE-Name", "CodeBuddyIDE")
-	headers.Set("X-IDE-Version", "4.9.5")
-	headers.Set("X-Product-Version", "4.9.5")
+	headers.Set("X-IDE-Type", "CLI")
+	headers.Set("X-IDE-Name", "CodeBuddy")
+	headers.Set("X-IDE-Version", codebuddy_ai.IDEVersion)
+	headers.Set("X-Product-Version", codebuddy_ai.IDEVersion)
 	headers.Set("X-Env-ID", "production")
 	headers.Set("X-Product", "SaaS")
 
