@@ -22,6 +22,7 @@ import (
 const (
 	BaseURL       = "https://copilot.tencent.com"
 	DefaultDomain = "www.codebuddy.cn"
+	UserAgent     = "CodeBuddyCode/1.0"
 	IDEVersion    = "2.137.1"
 
 	codeBuddyStatePath   = "/v2/plugin/auth/state"
@@ -33,9 +34,9 @@ const (
 	codeSuccess          = 0
 )
 
-// GetUserAgent returns the User-Agent string with the current IDE version
+// GetUserAgent returns the protocol User-Agent expected by CodeBuddy APIs.
 func GetUserAgent() string {
-	return "CodeBuddyCode/" + GetIDEVersion()
+	return UserAgent
 }
 
 type CodeBuddyAuth struct {

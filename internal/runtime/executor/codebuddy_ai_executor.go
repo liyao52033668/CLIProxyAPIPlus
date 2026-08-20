@@ -318,7 +318,7 @@ func FetchCodeBuddyAIModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 	log.Debugf("codebuddy-ai: fetching dynamic models from config API")
 
 	headers := make(http.Header)
-	headers.Set("User-Agent", "CodeBuddyCode/"+codebuddy.GetIDEVersion())
+	headers.Set("User-Agent", codebuddy_ai.GetUserAgent())
 	headers.Set("Accept", "application/json, text/plain, */*")
 	headers.Set("X-Requested-With", "XMLHttpRequest")
 	headers.Set("Authorization", "Bearer "+accessToken)

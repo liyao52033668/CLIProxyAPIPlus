@@ -298,7 +298,7 @@ func (e *CodeBuddyExecutor) applyHeaders(req *http.Request, accessToken, userID,
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "CodeBuddyCode/"+codebuddy.GetIDEVersion())
+	req.Header.Set("User-Agent", codebuddy.GetUserAgent())
 	req.Header.Set("X-User-Id", userID)
 	req.Header.Set("X-Domain", domain)
 	req.Header.Set("X-Product", "SaaS")
@@ -603,7 +603,7 @@ func FetchCodeBuddyModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *con
 	log.Debugf("codebuddy: fetching dynamic models from config API")
 
 	headers := make(http.Header)
-	headers.Set("User-Agent", "CodeBuddyCode/"+codebuddy.GetIDEVersion())
+	headers.Set("User-Agent", codebuddy.GetUserAgent())
 	headers.Set("Accept", "application/json, text/plain, */*")
 	headers.Set("X-Requested-With", "XMLHttpRequest")
 	headers.Set("X-IDE-Type", "CodeBuddyCode")

@@ -16,12 +16,12 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codebuddy"
 )
 
 const (
 	BaseURL       = "https://www.codebuddy.ai"
 	DefaultDomain = "www.codebuddy.ai"
+	UserAgent     = "CodeBuddyCode/1.0"
 	IDEVersion    = "2.137.1"
 
 	authStatePath    = "/v2/plugin/auth/state"
@@ -33,9 +33,9 @@ const (
 	codeSuccess      = 0
 )
 
-// GetUserAgent returns the User-Agent string with the current IDE version
+// GetUserAgent returns the protocol User-Agent expected by CodeBuddy AI APIs.
 func GetUserAgent() string {
-	return "CodeBuddyCode/" + codebuddy.GetIDEVersion()
+	return UserAgent
 }
 
 type CodeBuddyAIAuth struct {
