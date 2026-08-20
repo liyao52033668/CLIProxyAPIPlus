@@ -328,12 +328,17 @@ func extractThinkingConfig(body []byte, provider string) ThinkingConfig {
 		return extractGeminiConfig(body, provider)
 	case "interactions":
 		return extractInteractionsConfig(body)
-	case "openai", "codebuddy", "codebuddy-ai":
+	case "openai":
 		return extractOpenAIConfig(body)
 	case "codex", "xai", "openai-response":
 		return extractCodexConfig(body)
 	case "kimi":
 		return extractKimiConfig(body)
+	case "codebuddy", "codebuddy-ai":
+		// CodeBuddy passes the request thinking configuration through untouched;
+		// the upstream service validates it directly. Returning an empty config
+		// makes ApplyThinking take the "no config found, passthrough" path.
+		return ThinkingConfig{}
 	default:
 		return ThinkingConfig{}
 	}

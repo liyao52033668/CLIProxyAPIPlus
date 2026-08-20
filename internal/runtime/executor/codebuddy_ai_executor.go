@@ -102,8 +102,12 @@ func (e *CodeBuddyAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	translated, _ = sjson.SetBytes(translated, "stream", true)
 	translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
 
-	// CodeBuddy AI thinking configuration is passed through unchanged;
-	// the upstream service validates it directly.
+	// CodeBuddy AI thinking configuration passes through the pipeline unchanged:
+	// extraction yields no config so the body is left as-is for the upstream.
+	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), "codebuddy-ai", e.Identifier())
+	if err != nil {
+		return resp, err
+	}
 
 	url := codebuddy_ai.BaseURL + codeBuddyAIChatPath
 	headers := make(http.Header)
@@ -161,8 +165,12 @@ func (e *CodeBuddyAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel, "")
 
-	// CodeBuddy AI thinking configuration is passed through unchanged;
-	// the upstream service validates it directly.
+	// CodeBuddy AI thinking configuration passes through the pipeline unchanged:
+	// extraction yields no config so the body is left as-is for the upstream.
+	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), "codebuddy-ai", e.Identifier())
+	if err != nil {
+		return nil, err
+	}
 
 	url := codebuddy_ai.BaseURL + codeBuddyAIChatPath
 	headers := make(http.Header)
