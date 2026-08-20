@@ -8,7 +8,10 @@ ENV GOPROXY=https://goproxy.cn,direct
 ENV GOSUMDB=sum.golang.google.cn
 RUN go mod download
 
-RUN apk add --no-cache gcc musl-dev
+# Use a China mirror for apk to avoid slow downloads from dl-cdn.alpinelinux.org
+# (gcc toolchain packages are large and can stall the build).
+RUN sed -i 's#https\?://dl-cdn.alpinelinux.org#https://mirrors.aliyun.com#g' /etc/apk/repositories \
+    && apk add --no-cache gcc musl-dev
 
 COPY . .
 
@@ -21,7 +24,9 @@ RUN CGO_ENABLED=1 GOOS=linux go build -ldflags="-s -w -X 'main.Version=${VERSION
 
 FROM alpine:3.23
 
-RUN apk add --no-cache tzdata libc6-compat
+# Use a China mirror for apk to avoid slow downloads from dl-cdn.alpinelinux.org
+RUN sed -i 's#https\?://dl-cdn.alpinelinux.org#https://mirrors.aliyun.com#g' /etc/apk/repositories \
+    && apk add --no-cache tzdata libc6-compat
 
 RUN mkdir /CLIProxyAPI
 
