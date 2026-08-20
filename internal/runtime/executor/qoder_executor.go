@@ -476,6 +476,10 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		totalToolCallChunks := 0
 		lastFinishReason := ""
 		var streamErr error
+
+		// Stateful thinking content cleaner to track truncated thinking across chunks
+		thinkingCleaner := newQoderThinkingCleaner()
+
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			totalSSELines++
@@ -508,6 +512,10 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				lastFinishReason = fr
 			}
 
+			// Clean thinking artifacts, transferring them to reasoning_content.
+			openAIChunk, reasoningContent := thinkingCleaner.clean(openAIChunk)
+			openAIChunk = qoderMergeReasoningContent(openAIChunk, reasoningContent)
+
 			// Wrap as SSE line for translator
 			sseLine := append([]byte("data: "), openAIChunk...)
 			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(sseLine), &param)
@@ -524,6 +532,26 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		}
 		log.Debugf("qoder executor: stream bootstrap diagnostics stage=stream_loop_exit requested_model=%s upstream_model=%s status=%d elapsed_ms=%d sse_lines=%d openai_chunks=%d translated_payloads=%d content_chars=%d reasoning_chars=%d tool_call_chunks=%d finish_reason=%s ctx_err=%s scanner_err=%s stream_err=%s", strings.TrimSpace(requestedModel), strings.TrimSpace(req.Model), httpResp.StatusCode, time.Since(streamAttemptStartedAt).Milliseconds(), totalSSELines, totalOpenAIChunks, totalTranslatedPayloads, totalContentChars, totalReasoningChars, totalToolCallChunks, qoderEmptyDiagnosticValue(lastFinishReason), qoderDiagnosticErrString(ctx.Err()), qoderDiagnosticErrString(errScan), qoderDiagnosticErrString(streamErr))
 		if streamErr == nil {
+			for _, flushChunk := range thinkingCleaner.flushChunks() {
+				flushLine := append([]byte("data: "), flushChunk...)
+				chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(flushLine), &param)
+				for i := range chunks {
+					if len(chunks[i]) > 0 {
+						totalTranslatedPayloads++
+					}
+					out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
+				}
+			}
+			for _, flushChunk := range thinkingCleaner.flushReasoning() {
+				flushLine := append([]byte("data: "), flushChunk...)
+				chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(flushLine), &param)
+				for i := range chunks {
+					if len(chunks[i]) > 0 {
+						totalTranslatedPayloads++
+					}
+					out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
+				}
+			}
 			doneChunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param)
 			for i := range doneChunks {
 				out <- cliproxyexecutor.StreamChunk{Payload: doneChunks[i]}
@@ -2096,4 +2124,260 @@ func readHTTPRequestBody(req *http.Request) ([]byte, error) {
 		}
 	}
 	return data, nil
+}
+
+// qoderThinkingCleaner tracks state across chunks to detect and transfer thinking content.
+//
+// Some upstream models leak thinking content into the content field. This cleaner
+// removes explicit <think>...</think> blocks while preserving normal Markdown.
+type qoderThinkingCleaner struct {
+	state             qoderThinkingState
+	pendingPrefix     strings.Builder
+	pendingThinkClose strings.Builder
+	thinkingBuffer    strings.Builder
+	firstChunk        bool
+	pendingChunk      []byte
+	pendingPath       string
+}
+
+type qoderThinkingState int
+
+const (
+	qoderStateNormal qoderThinkingState = iota
+	qoderStateInThinkTag
+)
+
+func newQoderThinkingCleaner() *qoderThinkingCleaner {
+	return &qoderThinkingCleaner{
+		state:      qoderStateNormal,
+		firstChunk: true,
+	}
+}
+
+// clean processes a chunk and returns (cleaned_chunk, reasoning_content).
+// The reasoning_content is non-empty when thinking was detected and should be transferred.
+func (c *qoderThinkingCleaner) clean(chunk []byte) ([]byte, string) {
+	if len(chunk) == 0 || !gjson.ValidBytes(chunk) {
+		return chunk, ""
+	}
+
+	contentPath, text, ok := qoderChunkContent(chunk)
+	if !ok || text == "" {
+		return chunk, ""
+	}
+
+	c.firstChunk = false
+	c.thinkingBuffer.Reset()
+	cleaned, emit := c.processContent(text)
+
+	if !emit {
+		result, err := sjson.SetBytes(chunk, contentPath, "")
+		if err != nil {
+			return chunk, ""
+		}
+		c.pendingChunk = bytes.Clone(result)
+		c.pendingPath = contentPath
+		return result, c.thinkingBuffer.String()
+	}
+
+	c.pendingChunk = nil
+	c.pendingPath = ""
+	if cleaned == text {
+		return chunk, c.thinkingBuffer.String()
+	}
+
+	result, err := sjson.SetBytes(chunk, contentPath, cleaned)
+	if err != nil {
+		log.Debugf("qoder executor: thinking cleaner: sjson.SetBytes failed: %v", err)
+		return chunk, ""
+	}
+	if c.pendingPrefix.Len() > 0 {
+		if pendingTemplate, errSet := sjson.SetBytes(result, contentPath, ""); errSet == nil {
+			c.pendingChunk = bytes.Clone(pendingTemplate)
+			c.pendingPath = contentPath
+		}
+	}
+	return result, c.thinkingBuffer.String()
+}
+
+func qoderChunkContent(chunk []byte) (string, string, bool) {
+	contentPath := "choices.0.delta.content"
+	content := gjson.GetBytes(chunk, contentPath)
+	if !content.Exists() || content.Type != gjson.String {
+		contentPath = "choices.0.message.content"
+		content = gjson.GetBytes(chunk, contentPath)
+		if !content.Exists() || content.Type != gjson.String {
+			return "", "", false
+		}
+	}
+	return contentPath, content.String(), true
+}
+
+func qoderMergeReasoningContent(chunk []byte, reasoningContent string) []byte {
+	if reasoningContent == "" || len(chunk) == 0 || !gjson.ValidBytes(chunk) {
+		return chunk
+	}
+
+	path := "choices.0.delta.reasoning_content"
+	if !gjson.GetBytes(chunk, path).Exists() && gjson.GetBytes(chunk, "choices.0.message").Exists() {
+		path = "choices.0.message.reasoning_content"
+	}
+	existing := gjson.GetBytes(chunk, path).String()
+	merged := existing + reasoningContent
+	result, err := sjson.SetBytes(chunk, path, merged)
+	if err != nil {
+		log.Debugf("qoder executor: thinking cleaner: set reasoning_content failed: %v", err)
+		return chunk
+	}
+	return result
+}
+
+// flushChunks emits any normal content held only because the cleaner was waiting
+// for a possible cross-chunk <think> prefix. Real unterminated <think> content is
+// already transferred to reasoning_content as it arrives and is not flushed.
+func (c *qoderThinkingCleaner) flushChunks() [][]byte {
+	if c.state != qoderStateNormal || c.pendingChunk == nil || c.pendingPath == "" {
+		return nil
+	}
+
+	pending := c.pendingPrefix.String()
+	c.pendingPrefix.Reset()
+	if pending == "" {
+		c.pendingChunk = nil
+		c.pendingPath = ""
+		return nil
+	}
+
+	result, err := sjson.SetBytes(c.pendingChunk, c.pendingPath, pending)
+	if err != nil {
+		log.Debugf("qoder executor: thinking cleaner: flush pending content failed: %v", err)
+		return nil
+	}
+	c.pendingChunk = nil
+	c.pendingPath = ""
+	return [][]byte{result}
+}
+
+// flushReasoning emits any trailing </think> prefix that never completed before EOF.
+func (c *qoderThinkingCleaner) flushReasoning() [][]byte {
+	if c.state != qoderStateInThinkTag {
+		return nil
+	}
+	pending := c.pendingThinkClose.String()
+	c.pendingThinkClose.Reset()
+	if pending == "" {
+		return nil
+	}
+
+	payload, err := json.Marshal(map[string]any{
+		"choices": []any{
+			map[string]any{
+				"delta": map[string]any{
+					"reasoning_content": pending,
+				},
+			},
+		},
+	})
+	if err != nil {
+		log.Debugf("qoder executor: thinking cleaner: marshal reasoning flush failed: %v", err)
+		return nil
+	}
+	return [][]byte{payload}
+}
+
+// processContent handles content based on current state, returns (cleaned_text, should_emit).
+func (c *qoderThinkingCleaner) processContent(text string) (string, bool) {
+	switch c.state {
+	case qoderStateNormal:
+		return c.processNormal(text)
+	case qoderStateInThinkTag:
+		return c.processInThink(text)
+	default:
+		return text, true
+	}
+}
+
+// processNormal handles content in normal state.
+func (c *qoderThinkingCleaner) processNormal(text string) (string, bool) {
+	combined := c.pendingPrefix.String() + text
+	c.pendingPrefix.Reset()
+
+	if idx := strings.Index(combined, "<think>"); idx != -1 {
+		if endIdx := strings.Index(combined[idx+len("<think>"):], "</think>"); endIdx != -1 {
+			endIdx += idx + len("<think>")
+			thinkingContent := combined[idx+len("<think>") : endIdx]
+			c.thinkingBuffer.WriteString(thinkingContent)
+			cleaned := combined[:idx] + combined[endIdx+len("</think>"):]
+			return c.processNormal(cleaned)
+		}
+
+		c.state = qoderStateInThinkTag
+		c.pendingThinkClose.Reset()
+		rest := combined[idx+len("<think>"):]
+		cleaned, emit := c.processInThink(rest)
+		if emit {
+			return combined[:idx] + cleaned, idx > 0 || cleaned != ""
+		}
+		return combined[:idx], idx > 0
+	}
+
+	if suffix := qoderPartialThinkPrefixSuffix(combined); suffix != "" {
+		emit := strings.TrimSuffix(combined, suffix)
+		c.pendingPrefix.WriteString(suffix)
+		return emit, emit != ""
+	}
+
+	return combined, true
+}
+
+// processInThink handles content inside <think> tags.
+func (c *qoderThinkingCleaner) processInThink(text string) (string, bool) {
+	combined := c.pendingThinkClose.String() + text
+	c.pendingThinkClose.Reset()
+
+	if idx := strings.Index(combined, "</think>"); idx != -1 {
+		thinkingContent := combined[:idx]
+		c.thinkingBuffer.WriteString(thinkingContent)
+		c.state = qoderStateNormal
+		remaining := combined[idx+len("</think>"):]
+		if remaining == "" {
+			return "", false
+		}
+		return c.processNormal(remaining)
+	}
+
+	if suffix := qoderPartialThinkEndSuffix(combined); suffix != "" {
+		emit := strings.TrimSuffix(combined, suffix)
+		if emit != "" {
+			c.thinkingBuffer.WriteString(emit)
+		}
+		c.pendingThinkClose.WriteString(suffix)
+		return "", false
+	}
+
+	c.thinkingBuffer.WriteString(combined)
+	return "", false
+}
+
+func qoderPartialThinkPrefixSuffix(text string) string {
+	const marker = "<think>"
+	return qoderPartialMarkerSuffix(text, marker)
+}
+
+func qoderPartialThinkEndSuffix(text string) string {
+	const marker = "</think>"
+	return qoderPartialMarkerSuffix(text, marker)
+}
+
+func qoderPartialMarkerSuffix(text, marker string) string {
+	max := len(marker) - 1
+	if len(text) < max {
+		max = len(text)
+	}
+	for n := max; n > 0; n-- {
+		if strings.HasSuffix(text, marker[:n]) {
+			return marker[:n]
+		}
+	}
+	return ""
 }

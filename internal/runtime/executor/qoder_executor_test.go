@@ -1783,3 +1783,186 @@ func decodeQoderBodyForTest(t *testing.T, encoded string) []byte {
 	}
 	return decoded
 }
+
+func qoderTestChunk(content string) []byte {
+	payload, err := json.Marshal(map[string]any{
+		"choices": []any{
+			map[string]any{
+				"delta": map[string]any{
+					"content": content,
+				},
+			},
+		},
+	})
+	if err != nil {
+		panic(err)
+	}
+	return payload
+}
+
+func TestQoderThinkingCleanerPreservesMarkdownBackticks(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+	}{
+		{
+			name: "fenced code only",
+			text: "```go\nfmt.Println(1)\n```",
+		},
+		{
+			name: "inline code starts first chunk",
+			text: "`foo` is the command",
+		},
+		{
+			name: "fenced code with lowercase explanation",
+			text: "```go\nfmt.Println(1)\n```\nthis returns the result",
+		},
+		{
+			name: "inline code ends chunk",
+			text: "Use `foo`",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cleaner := newQoderThinkingCleaner()
+			chunk, reasoning := cleaner.clean(qoderTestChunk(tt.text))
+			if reasoning != "" {
+				t.Fatalf("reasoning = %q, want empty", reasoning)
+			}
+			if got := gjson.GetBytes(chunk, "choices.0.delta.content").String(); got != tt.text {
+				t.Fatalf("content = %q, want %q", got, tt.text)
+			}
+			if flushed := cleaner.flushChunks(); len(flushed) != 0 {
+				t.Fatalf("flushChunks() len = %d, want 0", len(flushed))
+			}
+		})
+	}
+}
+
+func TestQoderThinkingCleanerPreservesLaterFenceChunk(t *testing.T) {
+	cleaner := newQoderThinkingCleaner()
+	first, reasoning := cleaner.clean(qoderTestChunk("Here is code:\n"))
+	if reasoning != "" {
+		t.Fatalf("first reasoning = %q, want empty", reasoning)
+	}
+	if got := gjson.GetBytes(first, "choices.0.delta.content").String(); got != "Here is code:\n" {
+		t.Fatalf("first content = %q", got)
+	}
+
+	second, reasoning := cleaner.clean(qoderTestChunk("```go\nfmt.Println(1)\n```"))
+	if reasoning != "" {
+		t.Fatalf("second reasoning = %q, want empty", reasoning)
+	}
+	if got := gjson.GetBytes(second, "choices.0.delta.content").String(); got != "```go\nfmt.Println(1)\n```" {
+		t.Fatalf("second content = %q", got)
+	}
+}
+
+func TestQoderThinkingCleanerExtractsThinkContentAcrossChunks(t *testing.T) {
+	cleaner := newQoderThinkingCleaner()
+	first, reasoning := cleaner.clean(qoderTestChunk("prefix<think>reasoning step"))
+	if got := gjson.GetBytes(first, "choices.0.delta.content").String(); got != "prefix" {
+		t.Fatalf("first content = %q, want prefix", got)
+	}
+	if reasoning != "reasoning step" {
+		t.Fatalf("first reasoning = %q, want reasoning step", reasoning)
+	}
+
+	second, reasoning := cleaner.clean(qoderTestChunk(" more</think>suffix"))
+	if got := gjson.GetBytes(second, "choices.0.delta.content").String(); got != "suffix" {
+		t.Fatalf("second content = %q, want suffix", got)
+	}
+	if reasoning != " more" {
+		t.Fatalf("second reasoning = %q, want more", reasoning)
+	}
+}
+
+func TestQoderThinkingCleanerDetectsSplitThinkStartTag(t *testing.T) {
+	cleaner := newQoderThinkingCleaner()
+	first, reasoning := cleaner.clean(qoderTestChunk("<thi"))
+	if got := gjson.GetBytes(first, "choices.0.delta.content").String(); got != "" {
+		t.Fatalf("first content = %q, want empty", got)
+	}
+	if reasoning != "" {
+		t.Fatalf("first reasoning = %q, want empty", reasoning)
+	}
+
+	second, reasoning := cleaner.clean(qoderTestChunk("nk>hidden reasoning</think>visible"))
+	if got := gjson.GetBytes(second, "choices.0.delta.content").String(); got != "visible" {
+		t.Fatalf("second content = %q, want visible", got)
+	}
+	if reasoning != "hidden reasoning" {
+		t.Fatalf("second reasoning = %q, want hidden reasoning", reasoning)
+	}
+}
+
+func TestQoderThinkingCleanerFlushesPartialThinkPrefixAtEOF(t *testing.T) {
+	cleaner := newQoderThinkingCleaner()
+	chunk, reasoning := cleaner.clean(qoderTestChunk("literal <thi"))
+	if got := gjson.GetBytes(chunk, "choices.0.delta.content").String(); got != "literal " {
+		t.Fatalf("content = %q, want literal prefix", got)
+	}
+	if reasoning != "" {
+		t.Fatalf("reasoning = %q, want empty", reasoning)
+	}
+
+	flushed := cleaner.flushChunks()
+	if len(flushed) != 1 {
+		t.Fatalf("len(flushed) = %d, want 1", len(flushed))
+	}
+	if got := gjson.GetBytes(flushed[0], "choices.0.delta.content").String(); got != "<thi" {
+		t.Fatalf("flushed content = %q, want <thi", got)
+	}
+}
+
+func TestQoderMergeReasoningContentAppendsExistingDelta(t *testing.T) {
+	chunk := []byte(`{"choices":[{"delta":{"content":"<think>leaked</think>","reasoning_content":"native"}}]}`)
+	cleaner := newQoderThinkingCleaner()
+	cleaned, reasoning := cleaner.clean(chunk)
+	merged := qoderMergeReasoningContent(cleaned, reasoning)
+	if got := gjson.GetBytes(merged, "choices.0.delta.content").String(); got != "" {
+		t.Fatalf("content = %q, want empty", got)
+	}
+	if got := gjson.GetBytes(merged, "choices.0.delta.reasoning_content").String(); got != "nativeleaked" {
+		t.Fatalf("reasoning_content = %q, want nativeleaked", got)
+	}
+}
+
+func TestQoderThinkingCleanerDetectsSplitThinkEndTag(t *testing.T) {
+	cleaner := newQoderThinkingCleaner()
+	first, reasoning := cleaner.clean(qoderTestChunk("<think>hidden</thi"))
+	if got := gjson.GetBytes(first, "choices.0.delta.content").String(); got != "" {
+		t.Fatalf("first content = %q, want empty", got)
+	}
+	if reasoning != "hidden" {
+		t.Fatalf("first reasoning = %q, want hidden", reasoning)
+	}
+
+	second, reasoning := cleaner.clean(qoderTestChunk("nk>visible"))
+	if got := gjson.GetBytes(second, "choices.0.delta.content").String(); got != "visible" {
+		t.Fatalf("second content = %q, want visible", got)
+	}
+	if reasoning != "" {
+		t.Fatalf("second reasoning = %q, want empty", reasoning)
+	}
+}
+
+func TestQoderThinkingCleanerFlushesPartialThinkEndAtEOFAsReasoning(t *testing.T) {
+	cleaner := newQoderThinkingCleaner()
+	chunk, reasoning := cleaner.clean(qoderTestChunk("<think>hidden</thi"))
+	if got := gjson.GetBytes(chunk, "choices.0.delta.content").String(); got != "" {
+		t.Fatalf("content = %q, want empty", got)
+	}
+	if reasoning != "hidden" {
+		t.Fatalf("reasoning = %q, want hidden", reasoning)
+	}
+
+	flushed := cleaner.flushReasoning()
+	if len(flushed) != 1 {
+		t.Fatalf("len(flushed) = %d, want 1", len(flushed))
+	}
+	if got := gjson.GetBytes(flushed[0], "choices.0.delta.reasoning_content").String(); got != "</thi" {
+		t.Fatalf("flushed reasoning = %q, want </thi", got)
+	}
+}
