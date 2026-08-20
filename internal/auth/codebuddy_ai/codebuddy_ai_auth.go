@@ -21,8 +21,8 @@ import (
 const (
 	BaseURL       = "https://www.codebuddy.ai"
 	DefaultDomain = "www.codebuddy.ai"
-	UserAgent     = "CodeBuddyIDE/4.11.1 CodeBuddy/4.11.1"
-	IDEVersion    = "4.11.1"
+	UserAgent     = "CodeBuddyIDE/4.10.4 CodeBuddy/4.10.4"
+	IDEVersion    = "4.10.4"
 
 	authStatePath    = "/v2/plugin/auth/state"
 	authTokenPath    = "/v2/plugin/auth/token"
