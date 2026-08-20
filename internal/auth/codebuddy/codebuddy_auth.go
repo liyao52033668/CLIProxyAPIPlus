@@ -22,7 +22,6 @@ import (
 const (
 	BaseURL       = "https://copilot.tencent.com"
 	DefaultDomain = "www.codebuddy.cn"
-	UserAgent     = "CodeBuddyCode/1.0"
 	IDEVersion    = "2.137.1"
 
 	codeBuddyStatePath   = "/v2/plugin/auth/state"
@@ -33,6 +32,11 @@ const (
 	codeLoginPending     = 11217
 	codeSuccess          = 0
 )
+
+// GetUserAgent returns the User-Agent string with the current IDE version
+func GetUserAgent() string {
+	return "CodeBuddyCode/" + GetIDEVersion()
+}
 
 type CodeBuddyAuth struct {
 	httpClient *http.Client
@@ -74,7 +78,7 @@ func (a *CodeBuddyAuth) FetchAuthState(ctx context.Context) (*AuthState, error) 
 	req.Header.Set("X-No-Enterprise-Id", "true")
 	req.Header.Set("X-No-Department-Info", "true")
 	req.Header.Set("X-Product", "SaaS")
-	req.Header.Set("User-Agent", UserAgent)
+	req.Header.Set("User-Agent", GetUserAgent())
 	req.Header.Set("X-Request-ID", requestID)
 
 	resp, err := a.httpClient.Do(req)
@@ -257,7 +261,7 @@ func (a *CodeBuddyAuth) RefreshToken(ctx context.Context, accessToken, refreshTo
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("X-User-Id", userID)
 	req.Header.Set("X-Product", "SaaS")
-	req.Header.Set("User-Agent", UserAgent)
+	req.Header.Set("User-Agent", GetUserAgent())
 
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
@@ -326,7 +330,7 @@ func (a *CodeBuddyAuth) RefreshToken(ctx context.Context, accessToken, refreshTo
 
 func (a *CodeBuddyAuth) applyPollHeaders(req *http.Request) {
 	req.Header.Set("Accept", "application/json, text/plain, */*")
-	req.Header.Set("User-Agent", UserAgent)
+	req.Header.Set("User-Agent", GetUserAgent())
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
 	req.Header.Set("X-No-Authorization", "true")
 	req.Header.Set("X-No-User-Id", "true")

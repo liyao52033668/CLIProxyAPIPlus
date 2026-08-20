@@ -16,12 +16,12 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codebuddy"
 )
 
 const (
 	BaseURL       = "https://www.codebuddy.ai"
 	DefaultDomain = "www.codebuddy.ai"
-	UserAgent     = "CodeBuddyCode/1.0"
 	IDEVersion    = "2.137.1"
 
 	authStatePath    = "/v2/plugin/auth/state"
@@ -32,6 +32,11 @@ const (
 	codeLoginPending = 11217
 	codeSuccess      = 0
 )
+
+// GetUserAgent returns the User-Agent string with the current IDE version
+func GetUserAgent() string {
+	return "CodeBuddyCode/" + codebuddy.GetIDEVersion()
+}
 
 type CodeBuddyAIAuth struct {
 	httpClient *http.Client
@@ -65,7 +70,7 @@ func (a *CodeBuddyAIAuth) FetchAuthState(ctx context.Context) (*AuthState, error
 	req.Header.Set("X-No-Authorization", "true")
 	req.Header.Set("X-No-User-Id", "true")
 	req.Header.Set("X-No-Enterprise-Id", "true")
-	req.Header.Set("User-Agent", UserAgent)
+	req.Header.Set("User-Agent", GetUserAgent())
 
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
@@ -138,7 +143,7 @@ func (a *CodeBuddyAIAuth) PollForToken(ctx context.Context, state string) (*Code
 		}
 		req.Header.Set("Accept", "application/json")
 		req.Header.Set("X-No-Authorization", "true")
-		req.Header.Set("User-Agent", UserAgent)
+		req.Header.Set("User-Agent", GetUserAgent())
 
 		resp, err := a.httpClient.Do(req)
 		if err != nil {
@@ -224,7 +229,7 @@ func (a *CodeBuddyAIAuth) RefreshToken(ctx context.Context, accessToken, refresh
 	req.Header.Set("X-Auth-Refresh-Source", "ide-main")
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("X-User-Id", userID)
-	req.Header.Set("User-Agent", UserAgent)
+	req.Header.Set("User-Agent", GetUserAgent())
 
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
