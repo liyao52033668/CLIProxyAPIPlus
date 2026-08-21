@@ -45,6 +45,12 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 - `sdk/cliproxy/` — Embeddable SDK entry (service/builder/watchers/pipeline)
 - `test/` — Cross-module integration tests
 
+## Provider Modification Scope (Mandatory)
+- `codebuddy` and `codebuddy_ai` are two **separate providers**, even though their names and implementations look similar.
+  - `codebuddy`: `internal/auth/codebuddy/`, `internal/runtime/executor/codebuddy_executor.go` (upstream: copilot.tencent.com)
+  - `codebuddy_ai`: `internal/auth/codebuddy_ai/`, `internal/runtime/executor/codebuddy_ai_executor.go` (upstream: www.codebuddy.ai)
+- When modifying one provider, **never touch the other**. Apply changes only to the provider named in the request; if the same change seems applicable to both, propose it but do not apply it without an explicit ask.
+
 ## Code Conventions
 - Keep changes small and simple (KISS)
 - Comments in English only

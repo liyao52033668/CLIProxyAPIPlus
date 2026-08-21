@@ -99,18 +99,10 @@ func (e *CodeBuddyAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel, "")
-	// Only Claude-format requests with a top-level system field need this:
-	// the claude->openai translation turns that field into a leading system
-	// message that the CodeBuddy upstream rejects (code 11128).
-	if from == sdktranslator.FormatClaude && gjson.GetBytes(originalPayloadSource, "system").Exists() {
-		translated = helps.MoveOpenAISystemToUserMessage(translated)
-	}
 	translated, _ = sjson.SetBytes(translated, "stream", true)
 	translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
 
-	// CodeBuddy AI thinking configuration passes through the pipeline unchanged:
-	// extraction yields no config so the body is left as-is for the upstream.
-	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), "codebuddy-ai", e.Identifier())
+	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return resp, err
 	}
@@ -138,13 +130,6 @@ func (e *CodeBuddyAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
-	}
-	originalClaudeRequest := opts.OriginalRequest
-	if len(originalClaudeRequest) == 0 {
-		originalClaudeRequest = req.Payload
-	}
-	if shouldStripCodeBuddyReasoning(from, originalClaudeRequest, req.Model) {
-		aggregatedBody = stripOpenAIReasoning(aggregatedBody)
 	}
 	reporter.Publish(ctx, usageDetail)
 	reporter.EnsurePublished(ctx)
@@ -177,16 +162,8 @@ func (e *CodeBuddyAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel, "")
-	// Only Claude-format requests with a top-level system field need this:
-	// the claude->openai translation turns that field into a leading system
-	// message that the CodeBuddy upstream rejects (code 11128).
-	if from == sdktranslator.FormatClaude && gjson.GetBytes(originalPayloadSource, "system").Exists() {
-		translated = helps.MoveOpenAISystemToUserMessage(translated)
-	}
 
-	// CodeBuddy AI thinking configuration passes through the pipeline unchanged:
-	// extraction yields no config so the body is left as-is for the upstream.
-	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), "codebuddy-ai", e.Identifier())
+	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return nil, err
 	}
@@ -212,11 +189,6 @@ func (e *CodeBuddyAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk, 16)
-	originalClaudeRequest := opts.OriginalRequest
-	if len(originalClaudeRequest) == 0 {
-		originalClaudeRequest = req.Payload
-	}
-	stripReasoning := shouldStripCodeBuddyReasoning(from, originalClaudeRequest, req.Model)
 	go func() {
 		defer close(out)
 		defer func() {
@@ -231,9 +203,6 @@ func (e *CodeBuddyAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-			if stripReasoning {
-				line = stripCodeBuddyReasoningLine(line)
-			}
 			if detail, ok := helps.ParseOpenAIStreamUsage(line); ok {
 				reporter.Publish(ctx, detail)
 			}
@@ -306,14 +275,14 @@ func (e *CodeBuddyAIExecutor) applyHeaders(req *http.Request, accessToken, userI
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", codebuddy_ai.GetUserAgent())
+	req.Header.Set("User-Agent", codebuddy_ai.UserAgent)
 	req.Header.Set("X-User-Id", userID)
 	req.Header.Set("X-Domain", domain)
-	req.Header.Set("X-IDE-Type", "CodeBuddyIDE")
-	req.Header.Set("X-IDE-Name", "CodeBuddyIDE")
-	req.Header.Set("X-IDE-Version", codebuddy_ai.IDEVersion)
-	req.Header.Set("X-Product", "SaaS")
-	req.Header.Set("X-Product-Version", codebuddy_ai.IDEVersion)
+	req.Header.Set("X-IDE-Type", "IDE")
+	req.Header.Set("X-IDE-Name", "CodeBuddy")
+	req.Header.Set("X-IDE-Version", "1.100.0")
+	req.Header.Set("X-Product", "cloud")
+	req.Header.Set("X-Product-Version", "1.100.0")
 }
 
 var codeBuddyAIInternalModelPrefixes = []string{
@@ -347,7 +316,7 @@ func FetchCodeBuddyAIModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 	log.Debugf("codebuddy-ai: fetching dynamic models from config API")
 
 	headers := make(http.Header)
-	headers.Set("User-Agent", codebuddy_ai.GetUserAgent())
+	headers.Set("User-Agent", codebuddy_ai.UserAgent)
 	headers.Set("Accept", "application/json, text/plain, */*")
 	headers.Set("X-Requested-With", "XMLHttpRequest")
 	headers.Set("Authorization", "Bearer "+accessToken)
@@ -355,8 +324,8 @@ func FetchCodeBuddyAIModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 	headers.Set("X-Domain", domain)
 	headers.Set("X-IDE-Type", "CodeBuddyIDE")
 	headers.Set("X-IDE-Name", "CodeBuddyIDE")
-	headers.Set("X-IDE-Version", codebuddy_ai.IDEVersion)
-	headers.Set("X-Product-Version", codebuddy_ai.IDEVersion)
+	headers.Set("X-IDE-Version", "4.10.4")
+	headers.Set("X-Product-Version", "4.10.4")
 	headers.Set("X-Env-ID", "production")
 	headers.Set("X-Product", "SaaS")
 

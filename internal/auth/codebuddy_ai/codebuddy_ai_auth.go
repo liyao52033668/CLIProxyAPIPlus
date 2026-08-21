@@ -21,8 +21,7 @@ import (
 const (
 	BaseURL       = "https://www.codebuddy.ai"
 	DefaultDomain = "www.codebuddy.ai"
-	UserAgent     = "CodeBuddyIDE/4.10.4 CodeBuddy/4.10.4"
-	IDEVersion    = "4.10.4"
+	UserAgent     = "CodeBuddy/1.100.0"
 
 	authStatePath    = "/v2/plugin/auth/state"
 	authTokenPath    = "/v2/plugin/auth/token"
@@ -32,11 +31,6 @@ const (
 	codeLoginPending = 11217
 	codeSuccess      = 0
 )
-
-// GetUserAgent returns the protocol User-Agent expected by CodeBuddy AI APIs.
-func GetUserAgent() string {
-	return UserAgent
-}
 
 type CodeBuddyAIAuth struct {
 	httpClient *http.Client
@@ -70,7 +64,7 @@ func (a *CodeBuddyAIAuth) FetchAuthState(ctx context.Context) (*AuthState, error
 	req.Header.Set("X-No-Authorization", "true")
 	req.Header.Set("X-No-User-Id", "true")
 	req.Header.Set("X-No-Enterprise-Id", "true")
-	req.Header.Set("User-Agent", GetUserAgent())
+	req.Header.Set("User-Agent", UserAgent)
 
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
@@ -143,7 +137,7 @@ func (a *CodeBuddyAIAuth) PollForToken(ctx context.Context, state string) (*Code
 		}
 		req.Header.Set("Accept", "application/json")
 		req.Header.Set("X-No-Authorization", "true")
-		req.Header.Set("User-Agent", GetUserAgent())
+		req.Header.Set("User-Agent", UserAgent)
 
 		resp, err := a.httpClient.Do(req)
 		if err != nil {
@@ -229,7 +223,7 @@ func (a *CodeBuddyAIAuth) RefreshToken(ctx context.Context, accessToken, refresh
 	req.Header.Set("X-Auth-Refresh-Source", "ide-main")
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("X-User-Id", userID)
-	req.Header.Set("User-Agent", GetUserAgent())
+	req.Header.Set("User-Agent", UserAgent)
 
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
