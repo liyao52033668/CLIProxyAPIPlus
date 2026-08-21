@@ -99,7 +99,12 @@ func (e *CodeBuddyAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel, "")
-	translated = helps.FlattenOpenAISystemContent(translated)
+	// Only Claude-format requests with a top-level system field need this:
+	// the claude->openai translation turns that field into a leading system
+	// message that the CodeBuddy upstream rejects (code 11128).
+	if from == sdktranslator.FormatClaude && gjson.GetBytes(originalPayloadSource, "system").Exists() {
+		translated = helps.MoveOpenAISystemToUserMessage(translated)
+	}
 	translated, _ = sjson.SetBytes(translated, "stream", true)
 	translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
 
@@ -172,7 +177,12 @@ func (e *CodeBuddyAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel, "")
-	translated = helps.FlattenOpenAISystemContent(translated)
+	// Only Claude-format requests with a top-level system field need this:
+	// the claude->openai translation turns that field into a leading system
+	// message that the CodeBuddy upstream rejects (code 11128).
+	if from == sdktranslator.FormatClaude && gjson.GetBytes(originalPayloadSource, "system").Exists() {
+		translated = helps.MoveOpenAISystemToUserMessage(translated)
+	}
 
 	// CodeBuddy AI thinking configuration passes through the pipeline unchanged:
 	// extraction yields no config so the body is left as-is for the upstream.
