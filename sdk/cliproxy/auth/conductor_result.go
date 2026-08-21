@@ -719,11 +719,10 @@ func isRequestInvalidError(err error) bool {
 		return isRequestScopedNotFoundMessage(err.Error())
 	case http.StatusUnprocessableEntity:
 		return true
-	case http.StatusInternalServerError:
-		msg := err.Error()
-		return strings.Contains(msg, "\"status\":\"UNKNOWN\"") ||
-			strings.Contains(msg, "\"status\": \"UNKNOWN\"")
 	default:
+		// Upstream 5xx internal failures (e.g. Gemini 500 "status":"UNKNOWN")
+		// are not request faults: the request must fall through to the next
+		// credential and the cooldown lands on the (credential, model) pair.
 		return false
 	}
 }

@@ -46,8 +46,13 @@ func videosModelBase(model string) string {
 }
 
 func isSupportedVideosModel(model string) bool {
-	base := videosModelBase(model)
-	return base == defaultXAIVideosModel || base == xaiVideos15Model || base == xaiVideos15PreviewAlias
+	prefix, baseModel := imagesModelParts(model)
+	base := strings.ToLower(strings.TrimSpace(baseModel))
+	if base != defaultXAIVideosModel && base != xaiVideos15Model && base != xaiVideos15PreviewAlias {
+		return false
+	}
+	prefix = strings.ToLower(strings.TrimSpace(prefix))
+	return prefix == "" || prefix == "xai" || prefix == "x-ai" || prefix == "grok"
 }
 
 func rejectUnsupportedVideosModel(c *gin.Context, model string) bool {

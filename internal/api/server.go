@@ -256,6 +256,10 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	}
 
 	// Add middleware
+	// Normalize SSE responses to standard CRLF line termination. Registered
+	// first so the wrapping writer stays the outermost layer around any
+	// writer installed by later middleware (e.g. request logging).
+	engine.Use(middleware.SSELineTerminatorMiddleware())
 	engine.Use(logging.GinLogrusLogger())
 	engine.Use(logging.GinLogrusRecovery())
 	engine.Use(logging.CPATraceIDMiddleware())
@@ -1376,7 +1380,7 @@ func (s *Server) handleModelsWithFilter(c *gin.Context, handler interface{}, all
 			if !foundModels[modelID] {
 				// Create a basic model entry for whitelisted models not in handler
 				filteredModels = append(filteredModels, map[string]any{
-					"id":         modelID,
+					"id":           modelID,
 					"display_name": modelID,
 				})
 			}

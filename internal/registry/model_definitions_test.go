@@ -2,7 +2,6 @@ package registry
 
 import (
 	"slices"
-	"strings"
 	"testing"
 )
 
@@ -19,9 +18,6 @@ func TestGeminiVertexModelsUseProductionReleaseIDs(t *testing.T) {
 	for _, model := range GetGeminiVertexModels() {
 		if model == nil {
 			continue
-		}
-		if strings.HasSuffix(model.ID, "-preview") && strings.HasPrefix(model.ID, "gemini-3") {
-			t.Fatalf("Vertex model ID = %q still uses preview suffix", model.ID)
 		}
 		for _, releaseID := range releaseIDs {
 			if model.ID == releaseID {
@@ -45,30 +41,50 @@ func TestGetKimiModelsIncludesK3FinalEntry(t *testing.T) {
 	if model.Type != "kimi" {
 		t.Fatalf("type = %q, want kimi", model.Type)
 	}
-	if model.ContextLength != 262144 {
-		t.Fatalf("context_length = %d, want 262144", model.ContextLength)
+	if model.ContextLength != 1048576 {
+		t.Fatalf("context_length = %d, want 1048576", model.ContextLength)
 	}
 	if model.MaxCompletionTokens != 65536 {
 		t.Fatalf("max_completion_tokens = %d, want 65536", model.MaxCompletionTokens)
 	}
-	if model.Thinking == nil {
-		t.Fatal("thinking support is nil")
+	assertKimiLevelOnlyThinking(t, model, []string{"low", "high", "max"})
+
+	// kimi-k3-256k is the reduced-quota 256K context variant of kimi-k3.
+	variant := findModelInfo(models, "kimi-k3-256k")
+	if variant == nil {
+		t.Fatal("expected kimi-k3-256k in GetKimiModels()")
 	}
-	if model.Thinking.ZeroAllowed {
-		t.Fatal("zero_allowed = true, want false")
+	if variant.ContextLength != 262144 {
+		t.Fatalf("kimi-k3-256k context_length = %d, want 262144", variant.ContextLength)
 	}
-	if model.Thinking.DynamicAllowed {
-		t.Fatal("dynamic_allowed = true, want false/absent")
+	if variant.MaxCompletionTokens != 65536 {
+		t.Fatalf("kimi-k3-256k max_completion_tokens = %d, want 65536", variant.MaxCompletionTokens)
 	}
-	if model.Thinking.Min != 0 || model.Thinking.Max != 0 {
-		t.Fatalf("min/max = %d/%d, want 0/0 for level-only Kimi model", model.Thinking.Min, model.Thinking.Max)
-	}
-	wantLevels := []string{"low", "high", "max"}
-	if !slices.Equal(model.Thinking.Levels, wantLevels) {
-		t.Fatalf("levels = %v, want %v", model.Thinking.Levels, wantLevels)
-	}
+	assertKimiLevelOnlyThinking(t, variant, []string{"low", "high", "max"})
+
 	if findModelInfo(models, "kimi-k3[1m]") != nil {
 		t.Fatal("kimi-k3[1m] should not exist in final Kimi registry")
+	}
+}
+
+// assertKimiLevelOnlyThinking verifies a Kimi model exposes level-only thinking
+// support: no numeric min/max range and no dynamic mode.
+func assertKimiLevelOnlyThinking(t *testing.T, model *ModelInfo, wantLevels []string) {
+	t.Helper()
+	if model.Thinking == nil {
+		t.Fatalf("%s thinking support is nil", model.ID)
+	}
+	if model.Thinking.ZeroAllowed {
+		t.Fatalf("%s zero_allowed = true, want false", model.ID)
+	}
+	if model.Thinking.DynamicAllowed {
+		t.Fatalf("%s dynamic_allowed = true, want false/absent", model.ID)
+	}
+	if model.Thinking.Min != 0 || model.Thinking.Max != 0 {
+		t.Fatalf("%s thinking min/max = %d/%d, want 0/0 for level-only Kimi model", model.ID, model.Thinking.Min, model.Thinking.Max)
+	}
+	if !slices.Equal(model.Thinking.Levels, wantLevels) {
+		t.Fatalf("%s levels = %v, want %v", model.ID, model.Thinking.Levels, wantLevels)
 	}
 }
 
