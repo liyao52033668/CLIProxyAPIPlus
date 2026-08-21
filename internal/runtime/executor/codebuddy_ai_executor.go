@@ -99,6 +99,7 @@ func (e *CodeBuddyAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel, "")
+	translated = helps.FlattenOpenAISystemContent(translated)
 	translated, _ = sjson.SetBytes(translated, "stream", true)
 	translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
 
@@ -133,6 +134,13 @@ func (e *CodeBuddyAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
+	originalClaudeRequest := opts.OriginalRequest
+	if len(originalClaudeRequest) == 0 {
+		originalClaudeRequest = req.Payload
+	}
+	if shouldStripCodeBuddyReasoning(from, originalClaudeRequest, req.Model) {
+		aggregatedBody = stripOpenAIReasoning(aggregatedBody)
+	}
 	reporter.Publish(ctx, usageDetail)
 	reporter.EnsurePublished(ctx)
 
@@ -164,6 +172,7 @@ func (e *CodeBuddyAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel, "")
+	translated = helps.FlattenOpenAISystemContent(translated)
 
 	// CodeBuddy AI thinking configuration passes through the pipeline unchanged:
 	// extraction yields no config so the body is left as-is for the upstream.
@@ -193,6 +202,11 @@ func (e *CodeBuddyAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk, 16)
+	originalClaudeRequest := opts.OriginalRequest
+	if len(originalClaudeRequest) == 0 {
+		originalClaudeRequest = req.Payload
+	}
+	stripReasoning := shouldStripCodeBuddyReasoning(from, originalClaudeRequest, req.Model)
 	go func() {
 		defer close(out)
 		defer func() {
@@ -207,6 +221,9 @@ func (e *CodeBuddyAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+			if stripReasoning {
+				line = stripCodeBuddyReasoningLine(line)
+			}
 			if detail, ok := helps.ParseOpenAIStreamUsage(line); ok {
 				reporter.Publish(ctx, detail)
 			}

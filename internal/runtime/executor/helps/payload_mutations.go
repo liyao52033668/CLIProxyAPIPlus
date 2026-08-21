@@ -1,6 +1,9 @@
 package helps
 
 import (
+	"strconv"
+	"strings"
+
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -61,4 +64,46 @@ func JoinRawJSONArray(items [][]byte) []byte {
 		out = append(out, item...)
 	}
 	return append(out, ']')
+}
+
+// FlattenOpenAISystemContent rewrites system-role messages whose content is a
+// block array into a plain text string. The CodeBuddy upstream rejects
+// block-array content on system messages while accepting string content.
+func FlattenOpenAISystemContent(payload []byte) []byte {
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.IsArray() {
+		return payload
+	}
+	for index, message := range messages.Array() {
+		if message.Get("role").String() != "system" {
+			continue
+		}
+		text, ok := systemContentText(message.Get("content"))
+		if !ok {
+			continue
+		}
+		updated, errSet := sjson.SetBytes(payload, "messages."+strconv.Itoa(index)+".content", text)
+		if errSet != nil {
+			return payload
+		}
+		payload = updated
+	}
+	return payload
+}
+
+// systemContentText joins the text blocks of a system message content array.
+// The ok result is false when the content is not a block array, leaving the
+// message untouched.
+func systemContentText(content gjson.Result) (string, bool) {
+	if !content.IsArray() || len(content.Array()) == 0 {
+		return "", false
+	}
+	parts := make([]string, 0, len(content.Array()))
+	for _, block := range content.Array() {
+		if block.Get("type").String() != "text" {
+			continue
+		}
+		parts = append(parts, block.Get("text").String())
+	}
+	return strings.Join(parts, "\n\n"), true
 }

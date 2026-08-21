@@ -110,6 +110,7 @@ func (e *CodeBuddyExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel, "")
+	translated = helps.FlattenOpenAISystemContent(translated)
 	translated, _ = sjson.SetBytes(translated, "stream", true)
 	translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
 
@@ -144,6 +145,13 @@ func (e *CodeBuddyExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
+	originalClaudeRequest := opts.OriginalRequest
+	if len(originalClaudeRequest) == 0 {
+		originalClaudeRequest = req.Payload
+	}
+	if shouldStripCodeBuddyReasoning(from, originalClaudeRequest, req.Model) {
+		aggregatedBody = stripOpenAIReasoning(aggregatedBody)
+	}
 	reporter.Publish(ctx, usageDetail)
 	reporter.EnsurePublished(ctx)
 
@@ -176,6 +184,7 @@ func (e *CodeBuddyExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel, "")
+	translated = helps.FlattenOpenAISystemContent(translated)
 
 	// CodeBuddy thinking configuration passes through the pipeline unchanged:
 	// extraction yields no config so the body is left as-is for the upstream.
@@ -205,6 +214,11 @@ func (e *CodeBuddyExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk, 16)
+	originalClaudeRequest := opts.OriginalRequest
+	if len(originalClaudeRequest) == 0 {
+		originalClaudeRequest = req.Payload
+	}
+	stripReasoning := shouldStripCodeBuddyReasoning(from, originalClaudeRequest, req.Model)
 	go func() {
 		defer close(out)
 		defer func() {
@@ -219,6 +233,9 @@ func (e *CodeBuddyExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+			if stripReasoning {
+				line = stripCodeBuddyReasoningLine(line)
+			}
 			if detail, ok := helps.ParseOpenAIStreamUsage(line); ok {
 				reporter.Publish(ctx, detail)
 			}
@@ -555,6 +572,88 @@ func cleanDeltaChunk(raw []byte) []byte {
 		}
 	}
 	return raw
+}
+
+// shouldStripCodeBuddyReasoning reports whether upstream reasoning content
+// should be removed from the response before translation. Only Claude-format
+// requests are affected: when the client did not enable thinking (no thinking
+// config, a disabled config, or a "(none)" model suffix), the upstream
+// reasoning must not surface as thinking blocks in the Claude response.
+func shouldStripCodeBuddyReasoning(from sdktranslator.Format, originalRequest []byte, model string) bool {
+	if from != sdktranslator.FormatClaude {
+		return false
+	}
+	effort := thinking.ExtractReasoningEffort(originalRequest, "claude", model)
+	return effort == "" || effort == string(thinking.LevelNone)
+}
+
+// stripOpenAIReasoning removes reasoning fields from an OpenAI chat completion
+// payload so downstream translation does not surface thinking content. It
+// handles non-streaming messages, streaming deltas, and "reasoning" blocks
+// inside content arrays.
+func stripOpenAIReasoning(payload []byte) []byte {
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return payload
+	}
+	result := payload
+	modified := false
+	for i := range gjson.GetBytes(payload, "choices").Array() {
+		prefix := fmt.Sprintf("choices.%d.", i)
+		for _, field := range []string{"message.reasoning_content", "delta.reasoning_content"} {
+			path := prefix + field
+			if gjson.GetBytes(result, path).Exists() {
+				if out, err := sjson.DeleteBytes(result, path); err == nil {
+					result = out
+					modified = true
+				}
+			}
+		}
+		for _, contentPath := range []string{prefix + "message.content", prefix + "delta.content"} {
+			content := gjson.GetBytes(result, contentPath)
+			if !content.IsArray() {
+				continue
+			}
+			kept := make([]string, 0, len(content.Array()))
+			dropped := false
+			for _, item := range content.Array() {
+				if item.Get("type").String() == "reasoning" {
+					dropped = true
+					continue
+				}
+				kept = append(kept, item.Raw)
+			}
+			if dropped {
+				if out, err := sjson.SetRawBytes(result, contentPath, []byte("["+strings.Join(kept, ",")+"]")); err == nil {
+					result = out
+					modified = true
+				}
+			}
+		}
+	}
+	if !modified {
+		return payload
+	}
+	return result
+}
+
+// stripCodeBuddyReasoningLine removes reasoning fields from an SSE data line.
+// Non-data lines and lines without reasoning are returned unchanged.
+func stripCodeBuddyReasoningLine(line []byte) []byte {
+	trimmed := bytes.TrimSpace(line)
+	if !bytes.HasPrefix(trimmed, []byte("data:")) {
+		return line
+	}
+	payload := bytes.TrimSpace(trimmed[len("data:"):])
+	if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+		return line
+	}
+	stripped := stripOpenAIReasoning(payload)
+	if bytes.Equal(stripped, payload) {
+		return line
+	}
+	out := make([]byte, 0, len(stripped)+len("data: "))
+	out = append(out, "data: "...)
+	return append(out, stripped...)
 }
 
 var codeBuddyInternalModelPrefixes = []string{

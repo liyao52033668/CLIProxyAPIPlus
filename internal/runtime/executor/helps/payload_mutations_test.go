@@ -29,3 +29,36 @@ func TestSetBoolIfDifferent(t *testing.T) {
 		t.Fatalf("expected a=false")
 	}
 }
+
+func TestFlattenOpenAISystemContent(t *testing.T) {
+	payload := []byte(`{"model":"glm-5.3","messages":[` +
+		`{"role":"system","content":[{"type":"text","text":"first"},{"type":"text","text":"second"}]},` +
+		`{"role":"user","content":[{"type":"text","text":"hello"}]},` +
+		`{"role":"system","content":"plain system"}]}`)
+	updated := FlattenOpenAISystemContent(payload)
+	if got := gjson.GetBytes(updated, "messages.0.content").String(); got != "first\n\nsecond" {
+		t.Fatalf("expected joined system text, got %q", got)
+	}
+	if got := gjson.GetBytes(updated, "messages.1.content").Raw; got != `[{"type":"text","text":"hello"}]` {
+		t.Fatalf("user content must stay untouched, got %s", got)
+	}
+	if got := gjson.GetBytes(updated, "messages.2.content").String(); got != "plain system" {
+		t.Fatalf("string system content must stay untouched, got %q", got)
+	}
+}
+
+func TestFlattenOpenAISystemContentKeepsNonTextBlocks(t *testing.T) {
+	payload := []byte(`{"messages":[{"role":"system","content":[{"type":"text","text":"keep"},` +
+		`{"type":"image","source":"data"}]}]}`)
+	updated := FlattenOpenAISystemContent(payload)
+	if got := gjson.GetBytes(updated, "messages.0.content").String(); got != "keep" {
+		t.Fatalf("expected only text blocks joined, got %q", got)
+	}
+}
+
+func TestFlattenOpenAISystemContentNoMessages(t *testing.T) {
+	payload := []byte(`{"model":"glm-5.3"}`)
+	if got := FlattenOpenAISystemContent(payload); string(got) != string(payload) {
+		t.Fatalf("expected payload unchanged, got %s", string(got))
+	}
+}
