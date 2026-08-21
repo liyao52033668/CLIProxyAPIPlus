@@ -789,6 +789,16 @@ func (e *QoderExecutor) buildQoderRequestBody(openaiBody []byte, modelKey string
 		modelSource = "system"
 	}
 	isReasoning := contract.IsReasoning
+	// Forward the thinking effort resolved by ApplyThinking to the upstream
+	// envelope. Qoder accepts a top-level reasoning_effort plus the
+	// enable_thinking parameter; effort "none" also disables reasoning in the
+	// model config. Without an effort the fields are omitted so the upstream
+	// falls back to its own defaults.
+	reasoningEffort := qoderValidateReasoningEffort(gjson.GetBytes(openaiBody, "reasoning_effort").String())
+	thinkingEnabled := reasoningEffort != "" && reasoningEffort != string(thinking.LevelNone)
+	if reasoningEffort == string(thinking.LevelNone) {
+		isReasoning = false
+	}
 	aliyunUserType := contract.AliyunUserType
 	if aliyunUserType == "" {
 		aliyunUserType = "personal_standard"
@@ -860,7 +870,27 @@ func (e *QoderExecutor) buildQoderRequestBody(openaiBody []byte, modelKey string
 			"begin_at": time.Now().UnixMilli(),
 		},
 	}
+	if reasoningEffort != "" {
+		body["reasoning_effort"] = reasoningEffort
+		body["parameters"] = map[string]any{
+			"max_tokens":      32768,
+			"enable_thinking": thinkingEnabled,
+		}
+	}
 	return body
+}
+
+// qoderValidateReasoningEffort returns the effort value when it is one of the
+// discrete levels Qoder understands, otherwise an empty string so no
+// reasoning effort fields are sent upstream.
+func qoderValidateReasoningEffort(effort string) string {
+	normalized := strings.ToLower(strings.TrimSpace(effort))
+	switch normalized {
+	case "low", "medium", "high", "xhigh", "max", string(thinking.LevelNone):
+		return normalized
+	default:
+		return ""
+	}
 }
 
 func logQoderRequestDiagnostics(modelKey string, body map[string]any, bodyJSON []byte) {
@@ -2135,9 +2165,11 @@ type qoderThinkingCleaner struct {
 	pendingPrefix     strings.Builder
 	pendingThinkClose strings.Builder
 	thinkingBuffer    strings.Builder
-	firstChunk        bool
-	pendingChunk      []byte
-	pendingPath       string
+	// firstVisibleHandled records that the stream-start orphan backtick check
+	// already ran on the first visible content, so it applies at most once.
+	firstVisibleHandled bool
+	pendingChunk        []byte
+	pendingPath         string
 }
 
 type qoderThinkingState int
@@ -2149,8 +2181,7 @@ const (
 
 func newQoderThinkingCleaner() *qoderThinkingCleaner {
 	return &qoderThinkingCleaner{
-		state:      qoderStateNormal,
-		firstChunk: true,
+		state: qoderStateNormal,
 	}
 }
 
@@ -2166,7 +2197,6 @@ func (c *qoderThinkingCleaner) clean(chunk []byte) ([]byte, string) {
 		return chunk, ""
 	}
 
-	c.firstChunk = false
 	c.thinkingBuffer.Reset()
 	cleaned, emit := c.processContent(text)
 
@@ -2298,9 +2328,24 @@ func (c *qoderThinkingCleaner) processContent(text string) (string, bool) {
 }
 
 // processNormal handles content in normal state.
-func (c *qoderThinkingCleaner) processNormal(text string) (string, bool) {
+func (c *qoderThinkingCleaner) processNormal(text string) (cleaned string, emit bool) {
 	combined := c.pendingPrefix.String() + text
 	c.pendingPrefix.Reset()
+
+	defer func() {
+		// Runs once, on the first visible output of the stream. Upstream
+		// sometimes splits inline code spans at the thinking/text boundary and
+		// leaks leftover artifacts into the first visible content: a stray
+		// "</think>" closer without an opener and an orphaned "` " from the
+		// split code span. Strip them so answers stop beginning with leaked
+		// thinking markers.
+		if c.firstVisibleHandled || !emit {
+			return
+		}
+		c.firstVisibleHandled = true
+		cleaned = qoderStripLeadingThinkArtifacts(cleaned)
+		emit = cleaned != ""
+	}()
 
 	if idx := strings.Index(combined, "<think>"); idx != -1 {
 		if endIdx := strings.Index(combined[idx+len("<think>"):], "</think>"); endIdx != -1 {
@@ -2357,6 +2402,32 @@ func (c *qoderThinkingCleaner) processInThink(text string) (string, bool) {
 
 	c.thinkingBuffer.WriteString(combined)
 	return "", false
+}
+
+// qoderStripLeadingThinkArtifacts removes leftover thinking artifacts from the
+// start of the first visible content: stray "</think>" closers that arrived
+// without an opener and orphaned "` " remnants of inline code spans split at
+// the thinking/text boundary. Whitespace before the artifacts is dropped along
+// with them; content without artifacts is returned unchanged.
+func qoderStripLeadingThinkArtifacts(text string) string {
+	changed := false
+	for {
+		trimmed := strings.TrimLeft(text, " \t\r\n")
+		if rest, ok := strings.CutPrefix(trimmed, "</think>"); ok {
+			text = rest
+			changed = true
+			continue
+		}
+		if rest, ok := strings.CutPrefix(trimmed, "` "); ok {
+			text = rest
+			changed = true
+			continue
+		}
+		if changed {
+			return trimmed
+		}
+		return text
+	}
 }
 
 func qoderPartialThinkPrefixSuffix(text string) string {

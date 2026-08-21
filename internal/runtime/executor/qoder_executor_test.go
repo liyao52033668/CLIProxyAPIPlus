@@ -938,6 +938,62 @@ func TestQoderExecutorBuildQoderRequestBody_DoesNotSetQoderCLISessionType(t *tes
 	}
 }
 
+func TestQoderExecutorBuildQoderRequestBody_ForwardsReasoningEffort(t *testing.T) {
+	e := NewQoderExecutor(&config.Config{})
+	body := e.buildQoderRequestBody([]byte(`{"messages":[{"role":"user","content":"hi"}],"reasoning_effort":"high"}`), "qwen3.7-max", qoderModelContract{IsReasoning: true})
+	if got := body["reasoning_effort"]; got != "high" {
+		t.Fatalf("reasoning_effort = %#v, want %q", got, "high")
+	}
+	parameters, _ := body["parameters"].(map[string]any)
+	if got, _ := parameters["enable_thinking"].(bool); !got {
+		t.Fatalf("parameters.enable_thinking = %#v, want true", parameters["enable_thinking"])
+	}
+	modelConfig, _ := body["model_config"].(map[string]any)
+	if got, _ := modelConfig["is_reasoning"].(bool); !got {
+		t.Fatalf("model_config.is_reasoning = %#v, want true", modelConfig["is_reasoning"])
+	}
+	extraModelConfig, _ := body["chat_context"].(map[string]any)["extra"].(map[string]any)["modelConfig"].(map[string]any)
+	if got, _ := extraModelConfig["is_reasoning"].(bool); !got {
+		t.Fatalf("chat_context.extra.modelConfig.is_reasoning = %#v, want true", extraModelConfig["is_reasoning"])
+	}
+}
+
+func TestQoderExecutorBuildQoderRequestBody_DisablesThinkingOnNoneEffort(t *testing.T) {
+	e := NewQoderExecutor(&config.Config{})
+	body := e.buildQoderRequestBody([]byte(`{"messages":[{"role":"user","content":"hi"}],"reasoning_effort":"none"}`), "qwen3.7-max", qoderModelContract{IsReasoning: true})
+	if got := body["reasoning_effort"]; got != "none" {
+		t.Fatalf("reasoning_effort = %#v, want %q", got, "none")
+	}
+	parameters, _ := body["parameters"].(map[string]any)
+	if got, _ := parameters["enable_thinking"].(bool); got {
+		t.Fatalf("parameters.enable_thinking = %#v, want false", parameters["enable_thinking"])
+	}
+	modelConfig, _ := body["model_config"].(map[string]any)
+	if got, _ := modelConfig["is_reasoning"].(bool); got {
+		t.Fatalf("model_config.is_reasoning = %#v, want false after none effort", modelConfig["is_reasoning"])
+	}
+	extraModelConfig, _ := body["chat_context"].(map[string]any)["extra"].(map[string]any)["modelConfig"].(map[string]any)
+	if got, _ := extraModelConfig["is_reasoning"].(bool); got {
+		t.Fatalf("chat_context.extra.modelConfig.is_reasoning = %#v, want false after none effort", extraModelConfig["is_reasoning"])
+	}
+}
+
+func TestQoderExecutorBuildQoderRequestBody_OmitsReasoningEffortWhenAbsent(t *testing.T) {
+	e := NewQoderExecutor(&config.Config{})
+	body := e.buildQoderRequestBody([]byte(`{"messages":[{"role":"user","content":"hi"}]}`), "qwen3.7-max", qoderModelContract{IsReasoning: true})
+	if got, ok := body["reasoning_effort"]; ok {
+		t.Fatalf("reasoning_effort = %#v, want field omitted", got)
+	}
+	parameters, _ := body["parameters"].(map[string]any)
+	if got, ok := parameters["enable_thinking"]; ok {
+		t.Fatalf("parameters.enable_thinking = %#v, want field omitted", got)
+	}
+	modelConfig, _ := body["model_config"].(map[string]any)
+	if got, _ := modelConfig["is_reasoning"].(bool); !got {
+		t.Fatalf("model_config.is_reasoning = %#v, want contract value true", modelConfig["is_reasoning"])
+	}
+}
+
 func TestQoderExecutorExecute_LogsRequestDiagnostics(t *testing.T) {
 	var logOutput bytes.Buffer
 	previousLogOutput := log.StandardLogger().Out
@@ -1964,5 +2020,64 @@ func TestQoderThinkingCleanerFlushesPartialThinkEndAtEOFAsReasoning(t *testing.T
 	}
 	if got := gjson.GetBytes(flushed[0], "choices.0.delta.reasoning_content").String(); got != "</thi" {
 		t.Fatalf("flushed reasoning = %q, want </thi", got)
+	}
+}
+
+func TestQoderThinkingCleanerStripsLeadingOrphanBacktick(t *testing.T) {
+	cleaner := newQoderThinkingCleaner()
+	chunk, reasoning := cleaner.clean(qoderTestChunk("` 字段，空或不设置表示显示所有模型"))
+	if reasoning != "" {
+		t.Fatalf("reasoning = %q, want empty", reasoning)
+	}
+	if got := gjson.GetBytes(chunk, "choices.0.delta.content").String(); got != "字段，空或不设置表示显示所有模型" {
+		t.Fatalf("content = %q, want orphan backtick stripped", got)
+	}
+}
+
+func TestQoderThinkingCleanerStripsLeadingOrphanBacktickAfterThinkStrip(t *testing.T) {
+	cleaner := newQoderThinkingCleaner()
+	chunk, reasoning := cleaner.clean(qoderTestChunk("<think>secret</think>` 格式，而不是 JSON 字符串。"))
+	if reasoning != "secret" {
+		t.Fatalf("reasoning = %q, want secret", reasoning)
+	}
+	if got := gjson.GetBytes(chunk, "choices.0.delta.content").String(); got != "格式，而不是 JSON 字符串。" {
+		t.Fatalf("content = %q, want think block and orphan backtick stripped", got)
+	}
+}
+
+func TestQoderThinkingCleanerStripsLeadingStrayThinkClose(t *testing.T) {
+	cleaner := newQoderThinkingCleaner()
+	chunk, reasoning := cleaner.clean(qoderTestChunk("\n</think>\n\n` 标签的内容会被过滤掉。"))
+	if reasoning != "" {
+		t.Fatalf("reasoning = %q, want empty", reasoning)
+	}
+	if got := gjson.GetBytes(chunk, "choices.0.delta.content").String(); got != "标签的内容会被过滤掉。" {
+		t.Fatalf("content = %q, want stray think closer and orphan backtick stripped", got)
+	}
+}
+
+func TestQoderThinkingCleanerKeepsOrphanBacktickOnlyOnce(t *testing.T) {
+	cleaner := newQoderThinkingCleaner()
+	first, _ := cleaner.clean(qoderTestChunk("` stripped"))
+	if got := gjson.GetBytes(first, "choices.0.delta.content").String(); got != "stripped" {
+		t.Fatalf("first content = %q, want stripped", got)
+	}
+	second, reasoning := cleaner.clean(qoderTestChunk("` kept"))
+	if reasoning != "" {
+		t.Fatalf("reasoning = %q, want empty", reasoning)
+	}
+	if got := gjson.GetBytes(second, "choices.0.delta.content").String(); got != "` kept" {
+		t.Fatalf("second content = %q, want unchanged after one-time strip", got)
+	}
+}
+
+func TestQoderThinkingCleanerKeepsNormalInlineCode(t *testing.T) {
+	cleaner := newQoderThinkingCleaner()
+	chunk, reasoning := cleaner.clean(qoderTestChunk("Use `foo` to run"))
+	if reasoning != "" {
+		t.Fatalf("reasoning = %q, want empty", reasoning)
+	}
+	if got := gjson.GetBytes(chunk, "choices.0.delta.content").String(); got != "Use `foo` to run" {
+		t.Fatalf("content = %q, want unchanged", got)
 	}
 }
