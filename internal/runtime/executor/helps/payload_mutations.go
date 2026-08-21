@@ -66,44 +66,104 @@ func JoinRawJSONArray(items [][]byte) []byte {
 	return append(out, ']')
 }
 
-// FlattenOpenAISystemContent rewrites system-role messages whose content is a
-// block array into a plain text string. The CodeBuddy upstream rejects
-// block-array content on system messages while accepting string content.
+// FlattenOpenAISystemContent normalizes system prompts in an OpenAI-format
+// payload for upstreams that only accept plain-string system content. A
+// leftover top-level "system" field is removed and merged into a role=system
+// message; any system-role message whose content is a block array is joined
+// into a single string.
 func FlattenOpenAISystemContent(payload []byte) []byte {
+	topText := ""
+	if topSystem := gjson.GetBytes(payload, "system"); topSystem.Exists() {
+		topText = systemContentText(topSystem)
+		if updated, errDelete := sjson.DeleteBytes(payload, "system"); errDelete == nil {
+			payload = updated
+		}
+	}
+
 	messages := gjson.GetBytes(payload, "messages")
 	if !messages.IsArray() {
-		return payload
+		if topText == "" {
+			return payload
+		}
+		systemMsg := buildSystemMessage(topText)
+		updated, errSet := sjson.SetRawBytes(payload, "messages", JoinRawJSONArray([][]byte{systemMsg}))
+		if errSet != nil {
+			return payload
+		}
+		return updated
 	}
+
+	systemIndex := -1
 	for index, message := range messages.Array() {
 		if message.Get("role").String() != "system" {
 			continue
 		}
-		text, ok := systemContentText(message.Get("content"))
-		if !ok {
+		if systemIndex == -1 {
+			systemIndex = index
+		}
+		content := message.Get("content")
+		if !content.IsArray() || len(content.Array()) == 0 {
 			continue
 		}
-		updated, errSet := sjson.SetBytes(payload, "messages."+strconv.Itoa(index)+".content", text)
+		updated, errSet := sjson.SetBytes(payload, "messages."+strconv.Itoa(index)+".content", systemContentText(content))
 		if errSet != nil {
 			return payload
 		}
 		payload = updated
 	}
-	return payload
+
+	if topText == "" {
+		return payload
+	}
+	if systemIndex >= 0 {
+		path := "messages." + strconv.Itoa(systemIndex) + ".content"
+		merged := topText
+		if existing := gjson.GetBytes(payload, path).String(); existing != "" {
+			merged += "\n\n" + existing
+		}
+		updated, errSet := sjson.SetBytes(payload, path, merged)
+		if errSet != nil {
+			return payload
+		}
+		return updated
+	}
+	items := make([][]byte, 0, len(messages.Array())+1)
+	items = append(items, buildSystemMessage(topText))
+	for _, message := range messages.Array() {
+		items = append(items, []byte(message.Raw))
+	}
+	updated, errSet := sjson.SetRawBytes(payload, "messages", JoinRawJSONArray(items))
+	if errSet != nil {
+		return payload
+	}
+	return updated
 }
 
-// systemContentText joins the text blocks of a system message content array.
-// The ok result is false when the content is not a block array, leaving the
-// message untouched.
-func systemContentText(content gjson.Result) (string, bool) {
-	if !content.IsArray() || len(content.Array()) == 0 {
-		return "", false
-	}
-	parts := make([]string, 0, len(content.Array()))
-	for _, block := range content.Array() {
-		if block.Get("type").String() != "text" {
-			continue
+// buildSystemMessage renders a role=system message carrying plain text.
+func buildSystemMessage(text string) []byte {
+	out := []byte(`{"role":"system","content":""}`)
+	out, _ = sjson.SetBytes(out, "content", text)
+	return out
+}
+
+// systemContentText renders system content (a string or a block array) as a
+// single plain-text string. Non-text blocks are skipped.
+func systemContentText(content gjson.Result) string {
+	switch {
+	case content.Type == gjson.String:
+		return content.String()
+	case content.IsArray():
+		parts := make([]string, 0, len(content.Array()))
+		for _, block := range content.Array() {
+			if block.Get("type").String() != "text" {
+				continue
+			}
+			if text := block.Get("text").String(); text != "" {
+				parts = append(parts, text)
+			}
 		}
-		parts = append(parts, block.Get("text").String())
+		return strings.Join(parts, "\n\n")
+	default:
+		return ""
 	}
-	return strings.Join(parts, "\n\n"), true
 }
