@@ -269,20 +269,18 @@ func (e *AntigravityExecutor) obfuscateSensitiveWords(payload []byte) []byte {
 	return helps.ObfuscateSensitiveWordsInSystemInstruction(payload, e.sensitiveMatcher)
 }
 
-// Antigravity keeps a separate HTTP/1.1 connection pool per credential and proxy scope.
-type antigravityTransportKey struct {
-	credential string
-	proxy      string
-	base       *http.Transport
-}
-
+// Each Antigravity credential gets its own HTTP/1.1 connection pool. Sessions routed
+// to the same auth reuse that pool, while different OAuth identities never share a
+// TCP/TLS connection, matching the native client's one-credential process model.
 var (
 	antigravityBaseTransport = defaultAntigravityBaseTransport()
-	antigravityTransports    sync.Map
-	// Legacy test hooks retained for transport-injection tests.
-	antigravityTransport     *http.Transport
-	antigravityTransportOnce sync.Once
+	antigravityTransports    sync.Map // antigravityTransportKey -> *http.Transport
 )
+
+type antigravityTransportKey struct {
+	credential string
+	base       *http.Transport
+}
 
 func defaultAntigravityBaseTransport() *http.Transport {
 	if transport, ok := http.DefaultTransport.(*http.Transport); ok && transport != nil {
@@ -305,52 +303,101 @@ func cloneTransportWithHTTP11(base *http.Transport) *http.Transport {
 	} else {
 		clone.TLSClientConfig = clone.TLSClientConfig.Clone()
 	}
-	// Do not advertise ALPN; with HTTP/2 disabled this matches the native client.
+	// Native Antigravity sends no ALPN extension. With HTTP/2 disabled above,
+	// an empty NextProtos keeps the wire shape aligned while using HTTP/1.1.
 	clone.TLSClientConfig.NextProtos = nil
 	return clone
 }
 
-// newAntigravityHTTPClient creates an HTTP/1.1 client with a credential-scoped pool.
-func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
-	client := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, timeout)
-	transport, ok := client.Transport.(*http.Transport)
-	if antigravityTransport != nil {
-		client.Transport = antigravityTransport
-		return client
+// antigravityHTTP11Transport returns the HTTP/1.1 pool for one credential and
+// base transport. The base is either the process default, a credential-scoped
+// proxy transport, or a context-provided transport.
+func antigravityHTTP11Transport(auth *cliproxyauth.Auth, base *http.Transport) *http.Transport {
+	if base == nil {
+		return nil
 	}
-	if !ok {
-		if client.Transport != nil {
-			return client
-		}
-		transport = antigravityBaseTransport
-	} else if transport == nil {
-		transport = antigravityBaseTransport
+	credential, shareable := antigravityTransportScope(auth)
+	if !shareable {
+		// Without a stable credential identity there is no safe cache key: pointer
+		// identity is reused once the old auth is collected, which would silently
+		// merge two unrelated OAuth identities onto the same TCP/TLS connections.
+		// Fall back to a private pool instead of risking cross-credential sharing.
+		return cloneTransportWithHTTP11(base)
 	}
-	credential := "anonymous"
-	if auth != nil && strings.TrimSpace(auth.ID) != "" {
-		credential = strings.TrimSpace(auth.ID)
+	key := antigravityTransportKey{
+		credential: credential,
+		base:       base,
 	}
-	proxy := ""
-	if auth != nil {
-		proxy = strings.TrimSpace(auth.ProxyURL)
-	}
-	if proxy == "" && cfg != nil {
-		proxy = strings.TrimSpace(cfg.ProxyURL)
-	}
-	key := antigravityTransportKey{credential: credential, proxy: proxy, base: transport}
 	if cached, ok := antigravityTransports.Load(key); ok {
-		client.Transport = cached.(*http.Transport)
+		return cached.(*http.Transport)
+	}
+	clone := cloneTransportWithHTTP11(base)
+	actual, _ := antigravityTransports.LoadOrStore(key, clone)
+	stored := actual.(*http.Transport)
+	if stored != clone {
+		// Another goroutine won the race; drop the redundant pool.
+		clone.CloseIdleConnections()
+	}
+	return stored
+}
+
+// antigravityTransportScope returns the connection-pool scope for one credential
+// and reports whether that scope is stable enough to share a pool across requests.
+// Runtime auths always carry an ID; incomplete test or plugin auth objects do not
+// and must never be grouped together.
+func antigravityTransportScope(auth *cliproxyauth.Auth) (string, bool) {
+	if auth == nil {
+		return "", false
+	}
+	id := strings.TrimSpace(auth.ID)
+	if id == "" {
+		return "", false
+	}
+	return "id:" + id, true
+}
+
+// newAntigravityHTTPClient creates an HTTP client specifically for Antigravity,
+// enforcing HTTP/1.1 by disabling HTTP/2 to match the native Antigravity client, which
+// negotiates TLS 1.3 without advertising an ALPN protocol and therefore never uses h2.
+// The underlying Transport is always shared so keep-alive connections survive across
+// requests instead of forcing a fresh TCP + TLS handshake every time.
+func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
+	credential, _ := antigravityTransportScope(auth)
+
+	// Native Antigravity reuses one transport across requests. Opt into a
+	// credential-scoped proxy transport only here so other providers keep their
+	// existing lifecycle and different OAuth identities remain isolated.
+	if proxyURL := antigravityProxyURL(cfg, auth); proxyURL != "" {
+		if transport, _, errProxy := helps.SharedProxyTransport(credential, proxyURL); errProxy == nil && transport != nil {
+			return &http.Client{Transport: antigravityHTTP11Transport(auth, transport), Timeout: timeout}
+		}
+	}
+
+	client := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, timeout)
+	// Direct requests share an HTTP/1.1 pool only within the selected credential.
+	if client.Transport == nil {
+		client.Transport = antigravityHTTP11Transport(auth, antigravityBaseTransport)
 		return client
 	}
-	clone := cloneTransportWithHTTP11(transport)
-	actual, _ := antigravityTransports.LoadOrStore(key, clone)
-	if actualTransport, ok := actual.(*http.Transport); ok {
-		if actualTransport != clone {
-			clone.CloseIdleConnections()
-		}
-		client.Transport = actualTransport
+
+	// Preserve a context-provided transport while forcing HTTP/1.1. The cache key
+	// includes credential identity, so sharing the base does not share TLS pools.
+	if transport, ok := client.Transport.(*http.Transport); ok {
+		client.Transport = antigravityHTTP11Transport(auth, transport)
 	}
 	return client
+}
+
+func antigravityProxyURL(cfg *config.Config, auth *cliproxyauth.Auth) string {
+	if auth != nil {
+		if proxyURL := strings.TrimSpace(auth.ProxyURL); proxyURL != "" {
+			return proxyURL
+		}
+	}
+	if cfg != nil {
+		return strings.TrimSpace(cfg.ProxyURL)
+	}
+	return ""
 }
 
 func validateAntigravityRequestSignatures(ctx context.Context, modelName string, from sdktranslator.Format, rawJSON []byte) ([]byte, error) {
@@ -1616,7 +1663,7 @@ attemptLoop:
 				defer close(out)
 				defer func() {
 					if replayAccumulator != nil {
-						replayAccumulator.Flush(ctx)
+						replayAccumulator.Commit(ctx)
 					}
 					if errClose := resp.Body.Close(); errClose != nil {
 						log.Errorf("antigravity executor: close response line error: %v", errClose)
@@ -1804,7 +1851,8 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		}
 
 		headers := make(http.Header)
-		tmpReq := &http.Request{Header: headers, Close: true}
+		// No Close flag: keep the shared Antigravity connection pool usable.
+		tmpReq := &http.Request{Header: headers}
 		tmpReq.Header.Set("Content-Type", "application/json")
 		tmpReq.Header.Set("Authorization", "Bearer "+token)
 		tmpReq.Header.Set("User-Agent", resolveUserAgent(auth))
@@ -2337,7 +2385,10 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	if errReq != nil {
 		return nil, nil, errReq
 	}
-	httpReq.Close = true
+	// Deliberately no httpReq.Close: the native Antigravity client omits the
+	// Connection header and keeps its HTTP/1.1 connections alive, so forcing
+	// "Connection: close" would both deviate from that fingerprint and defeat the
+	// shared connection pool by discarding every established TCP + TLS session.
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
@@ -2363,6 +2414,35 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 // whole document silently mutated that history, so tools lost required argument fields and the
 // model imitated the corrupted examples on later turns.
 func sanitizeAntigravityRequestSchemas(payloadStr string, useAntigravitySchema bool) string {
+	payloadStr = sanitizeAntigravityToolSchemas(payloadStr, useAntigravitySchema)
+	return sanitizeAntigravityGenerationSchemas(payloadStr, useAntigravitySchema)
+}
+
+// sanitizeAntigravityToolSchemas applies the existing declaration rewrites to
+// a small document containing only request.tools, then replaces that subtree
+// once. This preserves rewrite order and bytes without copying the full request
+// for every declaration schema.
+func sanitizeAntigravityToolSchemas(payloadStr string, useAntigravitySchema bool) string {
+	tools := gjson.Get(payloadStr, "request.tools")
+	if !tools.IsArray() {
+		return payloadStr
+	}
+
+	toolDocument := `{"request":{"tools":` + tools.Raw + `}}`
+	toolDocument = sanitizeAntigravityToolSchemaDocument(toolDocument, useAntigravitySchema)
+	cleanedTools := gjson.Get(toolDocument, "request.tools")
+	if !cleanedTools.IsArray() || cleanedTools.Raw == tools.Raw {
+		return payloadStr
+	}
+	updated, errSet := sjson.SetRawBytes([]byte(payloadStr), "request.tools", []byte(cleanedTools.Raw))
+	if errSet != nil {
+		log.Debugf("antigravity: failed to write cleaned request.tools: %v", errSet)
+		return payloadStr
+	}
+	return string(updated)
+}
+
+func sanitizeAntigravityToolSchemaDocument(payloadStr string, useAntigravitySchema bool) string {
 	for _, base := range antigravityFunctionDeclarationPaths(payloadStr) {
 		oldPath := base + ".parametersJsonSchema"
 		if !gjson.Get(payloadStr, oldPath).Exists() {
@@ -2381,19 +2461,71 @@ func sanitizeAntigravityRequestSchemas(payloadStr string, useAntigravitySchema b
 		clean = util.CleanJSONSchemaForAntigravity
 	}
 
-	for _, schemaPath := range antigravitySchemaPaths(payloadStr) {
+	cleanNestedToolSchema := func(schemaRaw string) string {
+		return cleanNestedSchema(clean, schemaRaw)
+	}
+	return cleanAntigravitySchemasAtPaths(payloadStr, antigravitySchemaPaths(payloadStr), cleanNestedToolSchema)
+}
+
+// sanitizeAntigravityGenerationSchemas batches every schema edit within one
+// generation config before replacing that config in the full request.
+func sanitizeAntigravityGenerationSchemas(payloadStr string, useAntigravitySchema bool) string {
+	clean := util.CleanJSONSchemaForGemini
+	if useAntigravitySchema {
+		clean = util.CleanJSONSchemaForAntigravity
+	}
+	for _, container := range antigravityGenerationConfigContainers {
+		generationConfig := gjson.Get(payloadStr, container)
+		if !generationConfig.IsObject() {
+			continue
+		}
+		cleanedConfig := generationConfig.Raw
+		for _, key := range antigravityGenerationSchemaKeys {
+			schema := gjson.Get(cleanedConfig, key)
+			if !schema.IsObject() {
+				continue
+			}
+			cleanedSchema := cleanNestedSchema(clean, schema.Raw)
+			if cleanedSchema == schema.Raw {
+				continue
+			}
+			updated, errSet := sjson.SetRawBytes([]byte(cleanedConfig), key, []byte(cleanedSchema))
+			if errSet != nil {
+				log.Debugf("antigravity: failed to write cleaned schema at %s.%s: %v", container, key, errSet)
+				continue
+			}
+			cleanedConfig = string(updated)
+		}
+		if cleanedConfig == generationConfig.Raw {
+			continue
+		}
+		updated, errSet := sjson.SetRawBytes([]byte(payloadStr), container, []byte(cleanedConfig))
+		if errSet != nil {
+			log.Debugf("antigravity: failed to write cleaned %s: %v", container, errSet)
+			continue
+		}
+		payloadStr = string(updated)
+	}
+	return payloadStr
+}
+
+func cleanAntigravitySchemasAtPaths(payloadStr string, schemaPaths []string, clean func(string) string) string {
+	for _, schemaPath := range schemaPaths {
 		schema := gjson.Get(payloadStr, schemaPath)
 		if !schema.Exists() {
 			continue
 		}
-		updated, errSet := sjson.SetRawBytes([]byte(payloadStr), schemaPath, []byte(cleanNestedSchema(clean, schema.Raw)))
+		cleanedSchema := clean(schema.Raw)
+		if cleanedSchema == schema.Raw {
+			continue
+		}
+		updated, errSet := sjson.SetRawBytes([]byte(payloadStr), schemaPath, []byte(cleanedSchema))
 		if errSet != nil {
 			log.Debugf("antigravity: failed to write cleaned schema at %s: %v", schemaPath, errSet)
 			continue
 		}
 		payloadStr = string(updated)
 	}
-
 	return payloadStr
 }
 
@@ -2945,18 +3077,27 @@ func generateSessionID() string {
 }
 
 func generateStableSessionID(payload []byte) string {
-	contents := gjson.GetBytes(payload, "request.contents")
-	if contents.IsArray() {
-		for _, content := range contents.Array() {
-			if content.Get("role").String() == "user" {
-				text := content.Get("parts.0.text").String()
-				if text != "" {
-					h := sha256.Sum256([]byte(text))
-					n := int64(binary.BigEndian.Uint64(h[:8])) & 0x7FFFFFFFFFFFFFFF
-					return "-" + strconv.FormatInt(n, 10)
-				}
-			}
+	contents := util.GetGJSONBytesNoCopy(payload, "request.contents")
+	if !contents.IsArray() {
+		return generateSessionID()
+	}
+
+	stableID := ""
+	contents.ForEach(func(_, content gjson.Result) bool {
+		if content.Get("role").String() != "user" {
+			return true
 		}
+		text := content.Get("parts.0.text").String()
+		if text == "" {
+			return true
+		}
+		hash := sha256.Sum256([]byte(text))
+		value := int64(binary.BigEndian.Uint64(hash[:8])) & 0x7FFFFFFFFFFFFFFF
+		stableID = "-" + strconv.FormatInt(value, 10)
+		return false
+	})
+	if stableID != "" {
+		return stableID
 	}
 	return generateSessionID()
 }
