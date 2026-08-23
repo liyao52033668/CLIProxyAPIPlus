@@ -269,7 +269,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				toolMessage := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
 				callID := strings.TrimSpace(item.Get("call_id").String())
 				toolMessage, _ = sjson.SetBytes(toolMessage, "tool_call_id", callID)
-				toolMessage, _ = sjson.SetBytes(toolMessage, "content", responsesToolOutputText(item.Get("output")))
+				toolMessage = setCustomToolCallOutputContent(toolMessage, item.Get("output"))
 				out, _ = sjson.SetRawBytes(out, "messages.-1", toolMessage)
 				if callID != "" {
 					delete(awaitingToolOutputs, callID)
@@ -328,6 +328,58 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	}
 
 	return out
+}
+
+func setCustomToolCallOutputContent(toolMessage []byte, output gjson.Result) []byte {
+	structured := output
+	if output.Type == gjson.String && gjson.Valid(output.String()) {
+		structured = gjson.Parse(output.String())
+	}
+
+	if structured.IsArray() {
+		content := []byte(`{"arr":[]}`)
+		hasImage := false
+		structured.ForEach(func(_, part gjson.Result) bool {
+			switch part.Get("type").String() {
+			case "input_text":
+				textPart := []byte(`{"type":"text","text":""}`)
+				textPart, _ = sjson.SetBytes(textPart, "text", part.Get("text").String())
+				content, _ = sjson.SetRawBytes(content, "arr.-1", textPart)
+			case "input_image":
+				imageURL := strings.TrimSpace(part.Get("image_url").String())
+				if imageURL == "" {
+					return true
+				}
+				detail := part.Get("detail").String()
+				if detail == "original" {
+					detail = "high"
+				}
+				imagePart := []byte(`{"type":"image_url","image_url":{"url":"","detail":""}}`)
+				imagePart, _ = sjson.SetBytes(imagePart, "image_url.url", imageURL)
+				if detail != "" {
+					imagePart, _ = sjson.SetBytes(imagePart, "image_url.detail", detail)
+				}
+				content, _ = sjson.SetRawBytes(content, "arr.-1", imagePart)
+				hasImage = true
+			}
+			return true
+		})
+		if hasImage {
+			return setRawToolMessageContent(toolMessage, gjson.GetBytes(content, "arr"))
+		}
+	}
+
+	return setToolMessageTextContent(toolMessage, responsesToolOutputText(output))
+}
+
+func setRawToolMessageContent(toolMessage []byte, content gjson.Result) []byte {
+	toolMessage, _ = sjson.SetRawBytes(toolMessage, "content", []byte(content.Raw))
+	return toolMessage
+}
+
+func setToolMessageTextContent(toolMessage []byte, content string) []byte {
+	toolMessage, _ = sjson.SetBytes(toolMessage, "content", content)
+	return toolMessage
 }
 
 func collectOpenAIResponsesReasoningContent(item gjson.Result) string {

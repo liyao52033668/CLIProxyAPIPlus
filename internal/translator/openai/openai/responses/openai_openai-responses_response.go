@@ -63,6 +63,17 @@ func emitRespEvent(event string, payload []byte) []byte {
 	return translatorcommon.SSEEventData(event, payload)
 }
 
+func incompleteByFinishReason(reason string) ([]byte, bool) {
+	switch reason {
+	case "length", "max_tokens":
+		return []byte(`{"reason":"max_output_tokens"}`), true
+	case "content_filter":
+		return []byte(`{"reason":"content_filter"}`), true
+	default:
+		return nil, false
+	}
+}
+
 func chatCompletionContentText(content gjson.Result) string {
 	if !content.Exists() || content.Type == gjson.Null {
 		return ""
@@ -733,8 +744,19 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 	root := gjson.ParseBytes(rawJSON)
 	requestForNamespace := pickRequestJSON(originalRequestRawJSON, requestRawJSON)
 
+	finishReason := root.Get("choices.0.finish_reason").String()
+	incompleteDetails, isIncomplete := incompleteByFinishReason(finishReason)
+	status := "completed"
+	if isIncomplete {
+		status = "incomplete"
+	}
+
 	// Basic response scaffold
 	resp := []byte(`{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null,"incomplete_details":null}`)
+	resp, _ = sjson.SetBytes(resp, "status", status)
+	if isIncomplete {
+		resp, _ = sjson.SetRawBytes(resp, "incomplete_details", incompleteDetails)
+	}
 
 	// id: use provider id if present, otherwise synthesize
 	id := root.Get("id").String()
@@ -858,8 +880,13 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 					if contentText == "" {
 						return true
 					}
+					itemStatus := "completed"
+					if isIncomplete {
+						itemStatus = "incomplete"
+					}
 					item := []byte(`{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}`)
 					item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("msg_%s_%d", id, int(choice.Get("index").Int())))
+					item, _ = sjson.SetBytes(item, "status", itemStatus)
 					item, _ = sjson.SetBytes(item, "content.0.text", contentText)
 					outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
 				}
@@ -877,16 +904,26 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 						name := tc.Get("function.name").String()
 						args := tc.Get("function.arguments").String()
 						if _, isCustomTool := customToolNames[name]; isCustomTool {
+							toolStatus := "completed"
+							if isIncomplete {
+								toolStatus = "incomplete"
+							}
 							item := []byte(`{"id":"","type":"custom_tool_call","status":"completed","input":"","call_id":"","name":""}`)
 							item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("ctc_%s", callID))
+							item, _ = sjson.SetBytes(item, "status", toolStatus)
 							item, _ = sjson.SetBytes(item, "input", unwrapCustomToolInput(args))
 							item, _ = sjson.SetBytes(item, "call_id", callID)
 							item, _ = sjson.SetBytes(item, "name", name)
 							outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
 							return true
 						}
+						toolStatus := "completed"
+						if isIncomplete {
+							toolStatus = "incomplete"
+						}
 						item := []byte(`{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`)
 						item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("fc_%s", callID))
+						item, _ = sjson.SetBytes(item, "status", toolStatus)
 						item, _ = sjson.SetBytes(item, "arguments", args)
 						item, _ = sjson.SetBytes(item, "call_id", callID)
 						item = applyResponsesFunctionCallNamespaceFields(item, requestForNamespace, name, "")

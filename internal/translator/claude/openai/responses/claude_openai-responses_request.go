@@ -56,6 +56,20 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 
 	root := gjson.ParseBytes(rawJSON)
 
+	lastToolResult := make(map[string]gjson.Result)
+	if input := root.Get("input"); input.Exists() && input.IsArray() {
+		input.ForEach(func(_, item gjson.Result) bool {
+			if typ := item.Get("type").String(); typ == "function_call_output" || typ == "custom_tool_call_output" {
+				rawID := item.Get("call_id").String()
+				if rawID != "" {
+					lastToolResult[util.SanitizeClaudeToolID(rawID)] = item
+				}
+			}
+			return true
+		})
+	}
+	emittedToolResults := make(map[string]struct{})
+
 	appendAssistantPart := func(partJSON []byte) {
 		if len(partJSON) == 0 {
 			return
@@ -401,11 +415,20 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 			case "function_call_output", "custom_tool_call_output":
 				// Map to user tool_result. An empty call_id cannot match any
 				// tool_use, so keep it empty instead of minting a random id.
-				callID := item.Get("call_id").String()
+				rawID := item.Get("call_id").String()
+				callID := rawID
 				if callID != "" {
 					callID = util.SanitizeClaudeToolID(callID)
+					if _, exists := emittedToolResults[callID]; exists {
+						return true
+					}
+					emittedToolResults[callID] = struct{}{}
 				}
-				outputStr := item.Get("output").String()
+				output := item.Get("output")
+				if lastItem, exists := lastToolResult[callID]; rawID != "" && exists {
+					output = lastItem.Get("output")
+				}
+				outputStr := output.String()
 				toolResult := []byte(`{"type":"tool_result","tool_use_id":"","content":""}`)
 				toolResult, _ = sjson.SetBytes(toolResult, "tool_use_id", callID)
 				toolResult, _ = sjson.SetBytes(toolResult, "content", outputStr)

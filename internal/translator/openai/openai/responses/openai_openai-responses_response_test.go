@@ -494,6 +494,21 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_ContentB
 	}
 }
 
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_EmitsIncompleteStatus(t *testing.T) {
+	raw := []byte(`{"id":"chatcmpl_len","object":"chat.completion","created":1773896263,"model":"gpt-5.6","choices":[{"index":0,"message":{"role":"assistant","content":"truncated text"},"finish_reason":"length"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`)
+	out := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "gpt-5.6", nil, nil, raw, nil)
+	data := gjson.ParseBytes(out)
+	if got := data.Get("status").String(); got != "incomplete" {
+		t.Fatalf("status = %q, want incomplete", got)
+	}
+	if got := data.Get("incomplete_details.reason").String(); got != "max_output_tokens" {
+		t.Fatalf("incomplete reason = %q, want max_output_tokens", got)
+	}
+	if got := data.Get("output.0.status").String(); got != "incomplete" {
+		t.Fatalf("output status = %q, want incomplete", got)
+	}
+}
+
 func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_ContentBlocksExtractText(t *testing.T) {
 	request := []byte(`{"model":"gpt-5.4"}`)
 	in := []string{

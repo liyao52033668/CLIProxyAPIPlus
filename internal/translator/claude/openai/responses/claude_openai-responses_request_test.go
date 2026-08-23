@@ -670,6 +670,45 @@ func TestConvertOpenAIResponsesRequestToClaude_ReasoningContentTextRebuildsThink
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToClaude_DeduplicatesToolOutputsUsingLastPayload(t *testing.T) {
+	raw := []byte(`{
+		"model":"claude-test",
+		"input":[
+			{"type":"function_call_output","call_id":"call:one","output":"first payload"},
+			{"type":"custom_tool_call_output","call_id":"custom:id","output":"custom first"},
+			{"type":"function_call_output","call_id":"call:one","output":"last payload"},
+			{"type":"custom_tool_call_output","call_id":"custom:id","output":"custom last"},
+			{"type":"function_call_output","call_id":"","output":"empty one"},
+			{"type":"function_call_output","call_id":"","output":"empty two"}
+		]
+	}`)
+
+	root := gjson.ParseBytes(ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false))
+	messages := root.Get("messages")
+	if got := messages.Get("#").Int(); got != 4 {
+		t.Fatalf("message count = %d, want 4; output=%s", got, root.Raw)
+	}
+
+	if got := messages.Get("0.content.0.tool_use_id").String(); got != "call_one" {
+		t.Fatalf("first tool_use_id = %q, want call_one", got)
+	}
+	if got := messages.Get("0.content.0.content").String(); got != "last payload" {
+		t.Fatalf("deduplicated function output = %q, want last payload", got)
+	}
+	if got := messages.Get("1.content.0.tool_use_id").String(); got != "custom_id" {
+		t.Fatalf("custom tool_use_id = %q, want custom_id", got)
+	}
+	if got := messages.Get("1.content.0.content").String(); got != "custom last" {
+		t.Fatalf("deduplicated custom output = %q, want custom last", got)
+	}
+	if got := messages.Get("2.content.0.content").String(); got != "empty one" {
+		t.Fatalf("first empty-ID output = %q, want empty one", got)
+	}
+	if got := messages.Get("3.content.0.content").String(); got != "empty two" {
+		t.Fatalf("second empty-ID output = %q, want empty two", got)
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToClaude_SummaryWinsOverDuplicatedReasoningContent(t *testing.T) {
 	rawSignature, _ := testClaudeResponsesThinkingSignature(t)
 	raw := []byte(`{

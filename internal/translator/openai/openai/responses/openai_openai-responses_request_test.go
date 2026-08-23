@@ -19,6 +19,29 @@ func prettyJSONForTest(raw []byte) string {
 	return out.String()
 }
 
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_ConvertsStructuredCustomToolImageOutput(t *testing.T) {
+	raw := []byte(`{"input":[{"type":"custom_tool_call","call_id":"call_image","name":"view_image","input":"{}"},{"type":"custom_tool_call_output","call_id":"call_image","output":"[{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64,AA==\",\"detail\":\"original\"}]"}]}`)
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("kimi-k2.6", raw, false)
+	content := gjson.GetBytes(out, "messages.1.content")
+	if !content.IsArray() {
+		t.Fatalf("content should be an array, got %s", content.Raw)
+	}
+	if got := content.Get("0.image_url.url").String(); got != "data:image/png;base64,AA==" {
+		t.Fatalf("image URL = %q", got)
+	}
+	if got := content.Get("0.image_url.detail").String(); got != "high" {
+		t.Fatalf("image detail = %q, want high", got)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_PreservesCustomToolTextOutput(t *testing.T) {
+	raw := []byte(`{"input":[{"type":"custom_tool_call","call_id":"call_text","name":"inspect","input":"{}"},{"type":"custom_tool_call_output","call_id":"call_text","output":"plain output"}]}`)
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("kimi-k2.6", raw, false)
+	if got := gjson.GetBytes(out, "messages.1.content").String(); got != "plain output" {
+		t.Fatalf("custom tool content = %q, want plain output", got)
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_MergeConsecutiveFunctionCalls(t *testing.T) {
 	raw := []byte(`{
 		"input": [
