@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
@@ -490,9 +491,20 @@ func antigravityFunctionPartID(part gjson.Result) string {
 
 func antigravityThoughtSignature(part gjson.Result) string {
 	for _, path := range []string{"thoughtSignature", "thought_signature", "extra_content.google.thought_signature"} {
-		if signature := strings.TrimSpace(part.Get(path).String()); signature != "" {
-			return signature
+		if candidate := interactionsReasoningEncryptedContent(part.Get(path).String()); candidate != "" {
+			return candidate
 		}
 	}
 	return ""
+}
+
+func interactionsReasoningEncryptedContent(rawSignature string) string {
+	candidate := strings.TrimSpace(rawSignature)
+	if candidate == "" {
+		return ""
+	}
+	if _, err := signature.InspectGPTReasoningSignature(candidate); err != nil {
+		return ""
+	}
+	return candidate
 }

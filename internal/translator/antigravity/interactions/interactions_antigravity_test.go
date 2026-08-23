@@ -3,12 +3,30 @@ package interactions
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 )
+
+func TestAntigravityThoughtSignatureAcceptsGPTAndDropsForeign(t *testing.T) {
+	payload := make([]byte, 1+8+16+16+32)
+	payload[0] = 0x80
+	for i := 9; i < len(payload); i++ {
+		payload[i] = byte(i)
+	}
+	valid := base64.RawURLEncoding.EncodeToString(payload)
+
+	part := gjson.Parse(`{"thoughtSignature":"foreign-gemini-signature","thought_signature":"` + valid + `"}`)
+	if got := antigravityThoughtSignature(part); got != valid {
+		t.Fatalf("valid GPT signature = %q, want %q", got, valid)
+	}
+	if got := antigravityThoughtSignature(gjson.Parse(`{"thoughtSignature":"foreign-gemini-signature"}`)); got != "" {
+		t.Fatalf("foreign signature = %q, want empty", got)
+	}
+}
 
 func TestConvertInteractionsRequestToAntigravityWithToolMessagesDirect(t *testing.T) {
 	out := ConvertInteractionsRequestToAntigravity("antigravity-test", []byte(`{"model":"antigravity-test","system_instruction":"be brief","input":[{"type":"user_input","content":[{"type":"text","text":"hi"}]},{"type":"function_call","name":"lookup","call_id":"call_1","arguments":{"q":"x"}},{"type":"function_result","name":"lookup","call_id":"call_1","result":{"ok":true}}],"tools":[{"type":"function","name":"lookup","parameters":{"type":"object","properties":{"q":{"type":"string"}}}}]}`), false)
