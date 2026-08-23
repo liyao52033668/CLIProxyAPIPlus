@@ -726,6 +726,7 @@ attemptLoop:
 					return resp, err
 				}
 			}
+			requestPayload = helps.EnsureGeminiLeadingUserContent(requestPayload, "request.contents")
 
 			httpReq, reqBody, errReq := e.buildRequest(ctx, auth, token, baseModel, requestPayload, false, opts.Alt, baseURL)
 			if errReq != nil {
@@ -942,6 +943,7 @@ attemptLoop:
 					helps.MarkCreditsUsed(ctx)
 				}
 			}
+			requestPayload = helps.EnsureGeminiLeadingUserContent(requestPayload, "request.contents")
 			httpReq, reqBody, errReq := e.buildRequest(ctx, auth, token, baseModel, requestPayload, true, opts.Alt, baseURL)
 			if errReq != nil {
 				err = errReq
@@ -1434,6 +1436,7 @@ attemptLoop:
 					return nil, err
 				}
 			}
+			requestPayload = helps.EnsureGeminiLeadingUserContent(requestPayload, "request.contents")
 			httpReq, reqBody, errReq := e.buildRequest(ctx, auth, token, baseModel, requestPayload, true, opts.Alt, baseURL)
 			if errReq != nil {
 				err = errReq

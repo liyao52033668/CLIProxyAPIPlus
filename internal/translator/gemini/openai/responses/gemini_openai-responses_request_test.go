@@ -475,6 +475,55 @@ func TestConvertOpenAIResponsesRequestToGeminiCleansToolSchemaRequiredFields(t *
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToGemini_FunctionCallOutputParts(t *testing.T) {
+	tests := []struct {
+		name       string
+		output     string
+		wantResult string
+		wantImage  bool
+	}{
+		{
+			name:       "plain string",
+			output:     `"done"`,
+			wantResult: "done",
+		},
+		{
+			name:       "structured text and image",
+			output:     `[{"type":"input_text","text":"done"},{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]`,
+			wantResult: "done",
+			wantImage:  true,
+		},
+		{
+			name:       "stringified array",
+			output:     `"[{\"type\":\"input_text\",\"text\":\"encoded\"}]"`,
+			wantResult: "encoded",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inputJSON := `{"model":"gemini-2.0-flash","input":[{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"},{"type":"function_call_output","call_id":"call_1","output":` + tt.output + `}]}`
+			result := gjson.ParseBytes(ConvertOpenAIResponsesRequestToGemini("gemini-2.0-flash", []byte(inputJSON), false))
+			contents := result.Get("contents").Array()
+			if len(contents) != 2 {
+				t.Fatalf("contents length = %d, want 2. Output: %s", len(contents), result.Raw)
+			}
+			parts := contents[1].Get("parts").Array()
+			if len(parts) == 0 {
+				t.Fatalf("function output parts missing. Output: %s", result.Raw)
+			}
+			if got := parts[0].Get("functionResponse.response.result").String(); got != tt.wantResult {
+				t.Fatalf("function result = %q, want %q. Output: %s", got, tt.wantResult, result.Raw)
+			}
+			if tt.wantImage {
+				if len(parts) != 2 || parts[1].Get("inline_data.mime_type").String() != "image/png" || parts[1].Get("inline_data.data").String() != "AAAA" {
+					t.Fatalf("image part mismatch. Output: %s", result.Raw)
+				}
+			}
+		})
+	}
+}
+
 func validResponsesGPTReasoningSignature() string {
 	raw := make([]byte, 1+8+16+16+32)
 	raw[0] = 0x80
