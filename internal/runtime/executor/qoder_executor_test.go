@@ -2023,25 +2023,48 @@ func TestQoderThinkingCleanerFlushesPartialThinkEndAtEOFAsReasoning(t *testing.T
 	}
 }
 
-func TestQoderThinkingCleanerStripsLeadingOrphanBacktick(t *testing.T) {
+func TestQoderThinkingCleanerFlushesPartialOrphanCloserAtEOF(t *testing.T) {
+	cleaner := newQoderThinkingCleaner()
+	chunk, reasoning := cleaner.clean(qoderTestChunk("literal </thi"))
+	if reasoning != "" {
+		t.Fatalf("reasoning = %q, want empty", reasoning)
+	}
+	if got := gjson.GetBytes(chunk, "choices.0.delta.content").String(); got != "literal " {
+		t.Fatalf("content = %q, want literal prefix", got)
+	}
+
+	flushed := cleaner.flushChunks()
+	if len(flushed) != 1 {
+		t.Fatalf("len(flushed) = %d, want 1", len(flushed))
+	}
+	if got := gjson.GetBytes(flushed[0], "choices.0.delta.content").String(); got != "</thi" {
+		t.Fatalf("flushed content = %q, want </thi", got)
+	}
+}
+
+func TestQoderThinkingCleanerPreservesLeadingBacktick(t *testing.T) {
+	// glm legitimately starts visible content with a backtick when discussing
+	// markup (e.g. "` 字段" meaning "the ` field"). The orphan-backtick strip
+	// was removed because it cleared the first chunk and let later closers leak.
 	cleaner := newQoderThinkingCleaner()
 	chunk, reasoning := cleaner.clean(qoderTestChunk("` 字段，空或不设置表示显示所有模型"))
 	if reasoning != "" {
 		t.Fatalf("reasoning = %q, want empty", reasoning)
 	}
-	if got := gjson.GetBytes(chunk, "choices.0.delta.content").String(); got != "字段，空或不设置表示显示所有模型" {
-		t.Fatalf("content = %q, want orphan backtick stripped", got)
+	if got := gjson.GetBytes(chunk, "choices.0.delta.content").String(); got != "` 字段，空或不设置表示显示所有模型" {
+		t.Fatalf("content = %q, want leading backtick preserved", got)
 	}
 }
 
-func TestQoderThinkingCleanerStripsLeadingOrphanBacktickAfterThinkStrip(t *testing.T) {
+func TestQoderThinkingCleanerStripsThinkBlockPreservesBacktick(t *testing.T) {
+	// A backtick following a stripped think block is legitimate visible content.
 	cleaner := newQoderThinkingCleaner()
 	chunk, reasoning := cleaner.clean(qoderTestChunk("<think>secret</think>` 格式，而不是 JSON 字符串。"))
 	if reasoning != "secret" {
 		t.Fatalf("reasoning = %q, want secret", reasoning)
 	}
-	if got := gjson.GetBytes(chunk, "choices.0.delta.content").String(); got != "格式，而不是 JSON 字符串。" {
-		t.Fatalf("content = %q, want think block and orphan backtick stripped", got)
+	if got := gjson.GetBytes(chunk, "choices.0.delta.content").String(); got != "` 格式，而不是 JSON 字符串。" {
+		t.Fatalf("content = %q, want think block stripped but backtick preserved", got)
 	}
 }
 
@@ -2051,23 +2074,23 @@ func TestQoderThinkingCleanerStripsLeadingStrayThinkClose(t *testing.T) {
 	if reasoning != "" {
 		t.Fatalf("reasoning = %q, want empty", reasoning)
 	}
-	if got := gjson.GetBytes(chunk, "choices.0.delta.content").String(); got != "标签的内容会被过滤掉。" {
-		t.Fatalf("content = %q, want stray think closer and orphan backtick stripped", got)
+	if got := gjson.GetBytes(chunk, "choices.0.delta.content").String(); got != "` 标签的内容会被过滤掉。" {
+		t.Fatalf("content = %q, want stray think closer stripped but backtick preserved", got)
 	}
 }
 
-func TestQoderThinkingCleanerKeepsOrphanBacktickOnlyOnce(t *testing.T) {
+func TestQoderThinkingCleanerKeepsAllBackticks(t *testing.T) {
 	cleaner := newQoderThinkingCleaner()
-	first, _ := cleaner.clean(qoderTestChunk("` stripped"))
-	if got := gjson.GetBytes(first, "choices.0.delta.content").String(); got != "stripped" {
-		t.Fatalf("first content = %q, want stripped", got)
+	first, _ := cleaner.clean(qoderTestChunk("` kept"))
+	if got := gjson.GetBytes(first, "choices.0.delta.content").String(); got != "` kept" {
+		t.Fatalf("first content = %q, want backtick preserved", got)
 	}
-	second, reasoning := cleaner.clean(qoderTestChunk("` kept"))
+	second, reasoning := cleaner.clean(qoderTestChunk("` also kept"))
 	if reasoning != "" {
 		t.Fatalf("reasoning = %q, want empty", reasoning)
 	}
-	if got := gjson.GetBytes(second, "choices.0.delta.content").String(); got != "` kept" {
-		t.Fatalf("second content = %q, want unchanged after one-time strip", got)
+	if got := gjson.GetBytes(second, "choices.0.delta.content").String(); got != "` also kept" {
+		t.Fatalf("second content = %q, want backtick preserved", got)
 	}
 }
 
@@ -2079,5 +2102,105 @@ func TestQoderThinkingCleanerKeepsNormalInlineCode(t *testing.T) {
 	}
 	if got := gjson.GetBytes(chunk, "choices.0.delta.content").String(); got != "Use `foo` to run" {
 		t.Fatalf("content = %q, want unchanged", got)
+	}
+}
+
+func TestQoderThinkingCleanerPreservesLeadingWhitespace(t *testing.T) {
+	// Regression: qoderStripLeadingThinkArtifacts must not strip legitimate
+	// leading whitespace when no stray closer is present.
+	cases := []struct {
+		name  string
+		input string
+	}{
+		{"indented", "  answer"},
+		{"newline_prefix", "\nHello"},
+		{"code_block", "\n```go\ncode\n```"},
+		{"tab_indent", "\tindented"},
+		{"mixed_whitespace", " \n  content"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cleaner := newQoderThinkingCleaner()
+			chunk, reasoning := cleaner.clean(qoderTestChunk(tc.input))
+			if reasoning != "" {
+				t.Fatalf("reasoning = %q, want empty", reasoning)
+			}
+			if got := gjson.GetBytes(chunk, "choices.0.delta.content").String(); got != tc.input {
+				t.Fatalf("content = %q, want %q (leading whitespace preserved)", got, tc.input)
+			}
+		})
+	}
+}
+
+func TestQoderThinkingCleanerRetriesStripOnEmptyFirstChunk(t *testing.T) {
+	// Regression: if first visible chunk becomes empty after stripping
+	// a stray closer, firstVisibleHandled must not be set, so subsequent
+	// chunks still get artifact stripping.
+	cleaner := newQoderThinkingCleaner()
+
+	// First chunk: only a stray closer (becomes empty after strip)
+	first, reasoning := cleaner.clean(qoderTestChunk("</think>"))
+	if reasoning != "" {
+		t.Fatalf("reasoning = %q, want empty", reasoning)
+	}
+	if got := gjson.GetBytes(first, "choices.0.delta.content").String(); got != "" {
+		t.Fatalf("first content = %q, want empty", got)
+	}
+
+	// Second chunk: another stray closer followed by answer
+	second, reasoning := cleaner.clean(qoderTestChunk("</think>answer"))
+	if reasoning != "" {
+		t.Fatalf("reasoning = %q, want empty", reasoning)
+	}
+	if got := gjson.GetBytes(second, "choices.0.delta.content").String(); got != "answer" {
+		t.Fatalf("second content = %q, want 'answer' (stray closer stripped)", got)
+	}
+}
+
+func TestQoderThinkingCleanerStripsSplitOrphanCloserAcrossChunks(t *testing.T) {
+	// Regression: a stray closer split across chunks must be reassembled
+	// and stripped, not leaked into the output.
+	cleaner := newQoderThinkingCleaner()
+
+	// First chunk contains only the partial closer.
+	first, reasoning := cleaner.clean(qoderTestChunk("</thi"))
+	if reasoning != "" {
+		t.Fatalf("reasoning = %q, want empty", reasoning)
+	}
+	if got := gjson.GetBytes(first, "choices.0.delta.content").String(); got != "" {
+		t.Fatalf("first content = %q, want empty", got)
+	}
+
+	// Second chunk completes the split closer and continues with more text.
+	second, reasoning := cleaner.clean(qoderTestChunk("nk>more text"))
+	if reasoning != "" {
+		t.Fatalf("reasoning = %q, want empty", reasoning)
+	}
+	if got := gjson.GetBytes(second, "choices.0.delta.content").String(); got != "more text" {
+		t.Fatalf("second content = %q, want 'more text' (split closer stripped)", got)
+	}
+}
+
+func TestQoderThinkingCleanerWhitespaceOnlyFirstChunkDoesNotConsumeStrip(t *testing.T) {
+	// Regression: whitespace-only first chunk must not consume the
+	// one-shot artifact strip; a later stray closer must still be removed.
+	cleaner := newQoderThinkingCleaner()
+
+	// First chunk: whitespace only (emit=true but no real content)
+	first, reasoning := cleaner.clean(qoderTestChunk("   \n"))
+	if reasoning != "" {
+		t.Fatalf("reasoning = %q, want empty", reasoning)
+	}
+	if got := gjson.GetBytes(first, "choices.0.delta.content").String(); got != "   \n" {
+		t.Fatalf("first content = %q, want whitespace preserved", got)
+	}
+
+	// Second chunk: stray closer followed by answer
+	second, reasoning := cleaner.clean(qoderTestChunk("</think>answer"))
+	if reasoning != "" {
+		t.Fatalf("reasoning = %q, want empty", reasoning)
+	}
+	if got := gjson.GetBytes(second, "choices.0.delta.content").String(); got != "answer" {
+		t.Fatalf("second content = %q, want 'answer' (stray closer stripped)", got)
 	}
 }

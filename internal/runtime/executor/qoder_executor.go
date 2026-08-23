@@ -2165,9 +2165,12 @@ type qoderThinkingCleaner struct {
 	pendingPrefix     strings.Builder
 	pendingThinkClose strings.Builder
 	thinkingBuffer    strings.Builder
-	// firstVisibleHandled records that the stream-start orphan backtick check
-	// already ran on the first visible content, so it applies at most once.
+	// firstVisibleHandled records that the stream-start </think>
+	// artifact check already ran on the first visible content, so it applies at most once.
 	firstVisibleHandled bool
+	// pendingOrphanCloser buffers a partial </think>
+	// suffix in normal state to handle cross-chunk split orphan closers.
+	pendingOrphanCloser strings.Builder
 	pendingChunk        []byte
 	pendingPath         string
 }
@@ -2221,7 +2224,7 @@ func (c *qoderThinkingCleaner) clean(chunk []byte) ([]byte, string) {
 		log.Debugf("qoder executor: thinking cleaner: sjson.SetBytes failed: %v", err)
 		return chunk, ""
 	}
-	if c.pendingPrefix.Len() > 0 {
+	if c.pendingPrefix.Len() > 0 || c.pendingOrphanCloser.Len() > 0 {
 		if pendingTemplate, errSet := sjson.SetBytes(result, contentPath, ""); errSet == nil {
 			c.pendingChunk = bytes.Clone(pendingTemplate)
 			c.pendingPath = contentPath
@@ -2262,16 +2265,17 @@ func qoderMergeReasoningContent(chunk []byte, reasoningContent string) []byte {
 	return result
 }
 
-// flushChunks emits any normal content held only because the cleaner was waiting
-// for a possible cross-chunk <think> prefix. Real unterminated <think> content is
-// already transferred to reasoning_content as it arrives and is not flushed.
+// flushChunks emits normal content held while waiting for a possible
+// cross-chunk marker prefix. Real unterminated <think> content is already
+// transferred to reasoning_content as it arrives and is not flushed.
 func (c *qoderThinkingCleaner) flushChunks() [][]byte {
 	if c.state != qoderStateNormal || c.pendingChunk == nil || c.pendingPath == "" {
 		return nil
 	}
 
-	pending := c.pendingPrefix.String()
+	pending := c.pendingPrefix.String() + c.pendingOrphanCloser.String()
 	c.pendingPrefix.Reset()
+	c.pendingOrphanCloser.Reset()
 	if pending == "" {
 		c.pendingChunk = nil
 		c.pendingPath = ""
@@ -2329,22 +2333,27 @@ func (c *qoderThinkingCleaner) processContent(text string) (string, bool) {
 
 // processNormal handles content in normal state.
 func (c *qoderThinkingCleaner) processNormal(text string) (cleaned string, emit bool) {
-	combined := c.pendingPrefix.String() + text
+	// Prepend any buffered partial orphan closer from previous chunk.
+	orphanPrefix := c.pendingOrphanCloser.String()
+	c.pendingOrphanCloser.Reset()
+	combined := orphanPrefix + c.pendingPrefix.String() + text
 	c.pendingPrefix.Reset()
 
 	defer func() {
 		// Runs once, on the first visible output of the stream. Upstream
-		// sometimes splits inline code spans at the thinking/text boundary and
-		// leaks leftover artifacts into the first visible content: a stray
-		// "</think>" closer without an opener and an orphaned "` " from the
-		// split code span. Strip them so answers stop beginning with leaked
-		// thinking markers.
+		// sometimes leaks a stray "</think>" closer without an opener into
+		// the first visible content. Strip it so answers don't begin with
+		// leaked thinking markers.
 		if c.firstVisibleHandled || !emit {
 			return
 		}
-		c.firstVisibleHandled = true
 		cleaned = qoderStripLeadingThinkArtifacts(cleaned)
 		emit = cleaned != ""
+		// Only mark handled when there is real non-whitespace content;
+		// whitespace-only chunks should not consume the one-shot strip.
+		if emit && strings.TrimSpace(cleaned) != "" {
+			c.firstVisibleHandled = true
+		}
 	}()
 
 	if idx := strings.Index(combined, "<think>"); idx != -1 {
@@ -2366,9 +2375,25 @@ func (c *qoderThinkingCleaner) processNormal(text string) (cleaned string, emit 
 		return combined[:idx], idx > 0
 	}
 
+	// Remove leaked closing markers, including markers completed across chunks.
+	if idx := strings.Index(combined, "</think>"); idx != -1 {
+		cleaned := combined[:idx] + combined[idx+len("</think>"):]
+		if strings.TrimSpace(combined[:idx]) == "" {
+			cleaned = qoderStripLeadingThinkArtifacts(combined)
+		}
+		return c.processNormal(cleaned)
+	}
+
 	if suffix := qoderPartialThinkPrefixSuffix(combined); suffix != "" {
 		emit := strings.TrimSuffix(combined, suffix)
 		c.pendingPrefix.WriteString(suffix)
+		return emit, emit != ""
+	}
+
+	// Buffer a partial </think> suffix that may complete in the next chunk.
+	if suffix := qoderPartialThinkEndSuffix(combined); suffix != "" {
+		emit := strings.TrimSuffix(combined, suffix)
+		c.pendingOrphanCloser.WriteString(suffix)
 		return emit, emit != ""
 	}
 
@@ -2406,27 +2431,22 @@ func (c *qoderThinkingCleaner) processInThink(text string) (string, bool) {
 
 // qoderStripLeadingThinkArtifacts removes leftover thinking artifacts from the
 // start of the first visible content: stray "</think>" closers that arrived
-// without an opener and orphaned "` " remnants of inline code spans split at
-// the thinking/text boundary. Whitespace before the artifacts is dropped along
-// with them; content without artifacts is returned unchanged.
+// without an opener. Whitespace before the artifacts is dropped along with
+// them; content without artifacts is returned unchanged.
 func qoderStripLeadingThinkArtifacts(text string) string {
-	changed := false
+	original := text
 	for {
 		trimmed := strings.TrimLeft(text, " \t\r\n")
 		if rest, ok := strings.CutPrefix(trimmed, "</think>"); ok {
 			text = rest
-			changed = true
 			continue
 		}
-		if rest, ok := strings.CutPrefix(trimmed, "` "); ok {
-			text = rest
-			changed = true
-			continue
+		// No stray "</think>" found — return original text unchanged
+		// to preserve legitimate leading whitespace and backticks.
+		if text == original {
+			return original
 		}
-		if changed {
-			return trimmed
-		}
-		return text
+		return trimmed
 	}
 }
 
