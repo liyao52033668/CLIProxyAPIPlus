@@ -196,6 +196,11 @@ type StreamingConfig struct {
 	// <= 0 disables keep-alives. Default is 0.
 	KeepAliveSeconds int `yaml:"keepalive-seconds,omitempty" json:"keepalive-seconds,omitempty"`
 
+	// CodexStreamBootstrapBuffering holds Codex handshake events until generated output arrives,
+	// allowing embedded overload responses to fail over before downstream headers are committed.
+	// Default is false because buffering can delay headers during long reasoning requests.
+	CodexStreamBootstrapBuffering bool `yaml:"codex-stream-bootstrap-buffering,omitempty" json:"codex-stream-bootstrap-buffering,omitempty"`
+
 	// BootstrapRetries controls how many times the server may retry a streaming request before any bytes are sent,
 	// to allow auth rotation / transient recovery.
 	// <= 0 disables bootstrap retries. Default is 0.

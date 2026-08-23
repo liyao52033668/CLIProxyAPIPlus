@@ -568,19 +568,44 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		var param any
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
+		buffering := e.cfg != nil && e.cfg.Streaming.CodexStreamBootstrapBuffering
+		streamStarted := !buffering
+		bufferedChunks := make([]cliproxyexecutor.StreamChunk, 0, codexBootstrapMaxBufferedEvents)
+		flushBuffered := func() bool {
+			for _, pending := range bufferedChunks {
+				select {
+				case out <- pending:
+				case <-ctx.Done():
+					return false
+				}
+			}
+			bufferedChunks = nil
+			return true
+		}
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			translatedLine := bytes.Clone(line)
 			terminalSuccess := false
+			handshake := !bytes.HasPrefix(line, dataTag)
 
 			if bytes.HasPrefix(line, dataTag) {
 				data := bytes.TrimSpace(line[5:])
 				eventType := gjson.GetBytes(data, "type").String()
-				if terminalErr, _, ok := codexTerminalFailureErr(data); ok {
+				handshake = isCodexHandshakeMetadataEvent(eventType)
+				if terminalErr, terminalBody, ok := codexTerminalFailureErr(data); ok {
+					if buffering && !streamStarted && isCodexOverloadBootstrapFailure(terminalBody) {
+						terminalErr = newCodexStatusErr(http.StatusServiceUnavailable, terminalBody)
+					}
 					clearCodexReasoningReplayOnInvalidSignature(replayScope, data)
 					helps.RecordAPIResponseError(ctx, e.cfg, terminalErr)
 					reporter.PublishFailure(ctx, terminalErr)
+					if buffering && !streamStarted && !isCodexOverloadBootstrapFailure(terminalBody) {
+						streamStarted = true
+						if !flushBuffered() {
+							return
+						}
+					}
 					select {
 					case out <- cliproxyexecutor.StreamChunk{Err: terminalErr}:
 					case <-ctx.Done():
@@ -605,6 +630,22 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			}
 
 			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, body, translatedLine, &param)
+			if buffering && !streamStarted {
+				if handshake {
+					for i := range chunks {
+						if len(bufferedChunks) < codexBootstrapMaxBufferedEvents {
+							bufferedChunks = append(bufferedChunks, cliproxyexecutor.StreamChunk{Payload: chunks[i]})
+						}
+					}
+					if len(bufferedChunks) < codexBootstrapMaxBufferedEvents {
+						continue
+					}
+				}
+				streamStarted = true
+				if !flushBuffered() {
+					return
+				}
+			}
 			for i := range chunks {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
@@ -626,6 +667,12 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		streamErr := newCodexIncompleteStreamError()
 		helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 		reporter.PublishFailure(ctx, streamErr)
+		if buffering && !streamStarted {
+			streamStarted = true
+			if !flushBuffered() {
+				return
+			}
+		}
 		select {
 		case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
 		case <-ctx.Done():
@@ -2020,6 +2067,24 @@ func isCodexModelCapacityError(errorBody []byte) bool {
 		}
 	}
 	return false
+}
+
+const codexBootstrapMaxBufferedEvents = 16
+
+func isCodexHandshakeMetadataEvent(eventType string) bool {
+	switch eventType {
+	case "response.created", "response.in_progress", "codex.rate_limits", "codex.response.metadata":
+		return true
+	default:
+		return false
+	}
+}
+
+func isCodexOverloadBootstrapFailure(body []byte) bool {
+	errorType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.type").String()))
+	errorCode := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.code").String()))
+	return errorType == "service_unavailable_error" || errorCode == "server_is_overloaded" ||
+		errorType == "rate_limit_error" || errorCode == "rate_limit_exceeded"
 }
 
 func parseCodexRetryAfter(statusCode int, errorBody []byte, now time.Time) *time.Duration {
