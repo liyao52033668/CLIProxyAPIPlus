@@ -524,6 +524,37 @@ func TestConvertOpenAIResponsesRequestToGemini_FunctionCallOutputParts(t *testin
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToGemini_NamespaceAndCustomTools(t *testing.T) {
+	inputJSON := `{
+		"tools": [{"type":"namespace","name":"functions","tools":[
+			{"type":"custom","name":"exec","description":"Run a command"},
+			{"type":"function","name":"exec-tool","parameters":{"type":"object","properties":{"value":{"type":"string"}}}}
+		]}],
+		"tool_choice": {"type":"function","namespace":"functions","name":"exec"},
+		"input": [
+			{"type":"custom_tool_call","call_id":"call_custom","namespace":"functions","name":"exec","input":"ls"},
+			{"type":"custom_tool_call_output","call_id":"call_custom","output":"ok"}
+		]
+	}`
+	result := gjson.ParseBytes(ConvertOpenAIResponsesRequestToGemini("gemini-2.0-flash", []byte(inputJSON), false))
+	declaration := result.Get("tools.0.functionDeclarations.#(name==\"functions__exec\")")
+	if !declaration.Exists() {
+		t.Fatalf("namespace custom declaration missing. Output: %s", result.Raw)
+	}
+	if got := declaration.Get("parametersJsonSchema.properties.input.type").String(); got != "string" {
+		t.Fatalf("custom input schema type = %q, want string. Output: %s", got, result.Raw)
+	}
+	if got := result.Get("toolConfig.functionCallingConfig.allowedFunctionNames.0").String(); got != "functions__exec" {
+		t.Fatalf("allowed function name = %q, want functions__exec. Output: %s", got, result.Raw)
+	}
+	if got := result.Get("contents.0.parts.0.functionCall.name").String(); got != "functions__exec" {
+		t.Fatalf("custom function name = %q, want functions__exec. Output: %s", got, result.Raw)
+	}
+	if got := result.Get("contents.0.parts.0.functionCall.args.input").String(); got != "ls" {
+		t.Fatalf("custom function input = %q, want ls. Output: %s", got, result.Raw)
+	}
+}
+
 func validResponsesGPTReasoningSignature() string {
 	raw := make([]byte, 1+8+16+16+32)
 	raw[0] = 0x80

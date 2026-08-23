@@ -25,6 +25,17 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 	out := []byte(`{"contents":[]}`)
 
 	root := gjson.ParseBytes(rawJSON)
+	functionDeclarations, forwardMap, _ := util.BuildGeminiFunctionDeclarations(root)
+	if len(functionDeclarations) > 0 {
+		geminiTools := []byte(`[{"functionDeclarations":[]}]`)
+		geminiTools, _ = sjson.SetRawBytes(geminiTools, "0.functionDeclarations", util.JoinRawArrayBytes(functionDeclarations))
+		out, _ = sjson.SetRawBytes(out, "tools", geminiTools)
+	}
+	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
+		if toolConfig, ok := util.ConvertResponsesToolChoiceToGemini(toolChoice, forwardMap); ok {
+			out, _ = sjson.SetRawBytes(out, "toolConfig.functionCallingConfig", toolConfig)
+		}
+	}
 
 	// Extract system instruction from OpenAI "instructions" field
 	if instructions := root.Get("instructions"); instructions.Exists() {
@@ -293,9 +304,13 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 					out, _ = sjson.SetRawBytes(out, "contents.-1", one)
 				}
 
-			case "function_call":
-				// Handle function calls - convert to model message with functionCall
-				name := util.SanitizeFunctionName(item.Get("name").String())
+			case "function_call", "custom_tool_call":
+				// Handle function calls - convert to model message with functionCall.
+				name := item.Get("name").String()
+				if namespace := item.Get("namespace").String(); namespace != "" {
+					name = util.QualifyResponsesNamespaceToolName(namespace, name)
+				}
+				name = util.MapResponsesToolName(forwardMap, name)
 				arguments := item.Get("arguments").String()
 
 				modelContent := []byte(`{"role":"model","parts":[]}`)
@@ -304,16 +319,29 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				functionCall, _ = sjson.SetBytes(functionCall, "thoughtSignature", geminiResponsesThoughtSignature)
 				functionCall, _ = sjson.SetBytes(functionCall, "functionCall.id", item.Get("call_id").String())
 
-				// Parse arguments JSON string and set as args object
-				if arguments != "" {
+				// Parse function arguments or custom tool input.
+				if itemType == "custom_tool_call" {
+					input := item.Get("input")
+					if input.Exists() {
+						if input.Type == gjson.String {
+							functionCall, _ = sjson.SetBytes(functionCall, "functionCall.args.input", input.String())
+						} else {
+							functionCall, _ = sjson.SetRawBytes(functionCall, "functionCall.args.input", []byte(input.Raw))
+						}
+					}
+				} else if arguments != "" {
 					argsResult := gjson.Parse(arguments)
-					functionCall, _ = sjson.SetRawBytes(functionCall, "functionCall.args", []byte(argsResult.Raw))
+					if argsResult.IsObject() || argsResult.IsArray() {
+						functionCall, _ = sjson.SetRawBytes(functionCall, "functionCall.args", []byte(argsResult.Raw))
+					} else {
+						functionCall, _ = sjson.SetBytes(functionCall, "functionCall.args.arguments", arguments)
+					}
 				}
 
 				modelContent, _ = sjson.SetRawBytes(modelContent, "parts.-1", functionCall)
 				out, _ = sjson.SetRawBytes(out, "contents.-1", modelContent)
 
-			case "function_call_output":
+			case "function_call_output", "custom_tool_call_output":
 				// Handle function call outputs - convert to function message with functionResponse
 				callID := item.Get("call_id").String()
 				functionContent := []byte(`{"role":"function","parts":[]}`)
@@ -325,8 +353,13 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				// We need to look back through the input array to find the matching call
 				if inputArray := root.Get("input"); inputArray.Exists() && inputArray.IsArray() {
 					inputArray.ForEach(func(_, prevItem gjson.Result) bool {
-						if prevItem.Get("type").String() == "function_call" && prevItem.Get("call_id").String() == callID {
+						prevType := prevItem.Get("type").String()
+						if (prevType == "function_call" || prevType == "custom_tool_call") && prevItem.Get("call_id").String() == callID {
 							functionName = prevItem.Get("name").String()
+							if namespace := prevItem.Get("namespace").String(); namespace != "" {
+								functionName = util.QualifyResponsesNamespaceToolName(namespace, functionName)
+							}
+							functionName = util.MapResponsesToolName(forwardMap, functionName)
 							return false // Stop iteration
 						}
 						return true
@@ -369,35 +402,6 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 		arr := contents.Array()
 		if len(arr) > 0 && shouldStripTrailingOpenAIResponsesModelPrefill(arr[len(arr)-1]) {
 			out, _ = sjson.DeleteBytes(out, fmt.Sprintf("contents.%d", len(arr)-1))
-		}
-	}
-
-	// Convert tools to Gemini functionDeclarations format
-	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
-		geminiTools := []byte(`[{"functionDeclarations":[]}]`)
-
-		tools.ForEach(func(_, tool gjson.Result) bool {
-			if tool.Get("type").String() == "function" {
-				funcDecl := []byte(`{"name":"","description":"","parametersJsonSchema":{}}`)
-
-				if name := tool.Get("name"); name.Exists() {
-					funcDecl, _ = sjson.SetBytes(funcDecl, "name", util.SanitizeFunctionName(name.String()))
-				}
-				if desc := tool.Get("description"); desc.Exists() {
-					funcDecl, _ = sjson.SetBytes(funcDecl, "description", desc.String())
-				}
-				if params := tool.Get("parameters"); params.Exists() {
-					funcDecl, _ = sjson.SetRawBytes(funcDecl, "parametersJsonSchema", []byte(util.CleanJSONSchemaForGemini(params.Raw)))
-				}
-
-				geminiTools, _ = sjson.SetRawBytes(geminiTools, "0.functionDeclarations.-1", funcDecl)
-			}
-			return true
-		})
-
-		// Only add tools if there are function declarations
-		if funcDecls := gjson.GetBytes(geminiTools, "0.functionDeclarations"); funcDecls.Exists() && len(funcDecls.Array()) > 0 {
-			out, _ = sjson.SetRawBytes(out, "tools", geminiTools)
 		}
 	}
 
