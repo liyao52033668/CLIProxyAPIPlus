@@ -50,6 +50,9 @@ var apiCallTokenHostsByProvider = map[string]map[string]struct{}{
 	"claude": {
 		"api.anthropic.com": {},
 	},
+	"codebuddy": {
+		"www.codebuddy.cn": {},
+	},
 	"codex": {
 		"api.openai.com": {},
 		"chatgpt.com":    {},
