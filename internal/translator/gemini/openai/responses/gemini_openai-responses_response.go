@@ -45,6 +45,10 @@ type geminiToResponsesState struct {
 	FuncCallIDs      map[int]string
 	FuncDone         map[int]bool
 	SanitizedNameMap map[string]string
+	ToolIdentityMap  map[string]util.ResponsesToolIdentity
+	FuncCustom       map[int]bool
+	FuncNamespaces   map[int]string
+	FuncInputBuf     map[int]string
 }
 
 // responseIDCounter provides a process-wide unique counter for synthesized response identifiers.
@@ -99,6 +103,10 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 			FuncCallIDs:      make(map[int]string),
 			FuncDone:         make(map[int]bool),
 			SanitizedNameMap: util.SanitizedToolNameMap(originalRequestRawJSON),
+			ToolIdentityMap:  util.ResponsesToolReverseIdentityMap(pickRequestJSON(originalRequestRawJSON, requestRawJSON)),
+			FuncCustom:       make(map[int]bool),
+			FuncNamespaces:   make(map[int]string),
+			FuncInputBuf:     make(map[int]string),
 		}
 	}
 	st := (*param).(*geminiToResponsesState)
@@ -116,6 +124,18 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 	}
 	if st.SanitizedNameMap == nil {
 		st.SanitizedNameMap = util.SanitizedToolNameMap(originalRequestRawJSON)
+	}
+	if st.ToolIdentityMap == nil {
+		st.ToolIdentityMap = util.ResponsesToolReverseIdentityMap(pickRequestJSON(originalRequestRawJSON, requestRawJSON))
+	}
+	if st.FuncCustom == nil {
+		st.FuncCustom = make(map[int]bool)
+	}
+	if st.FuncNamespaces == nil {
+		st.FuncNamespaces = make(map[int]string)
+	}
+	if st.FuncInputBuf == nil {
+		st.FuncInputBuf = make(map[int]string)
 	}
 
 	if bytes.HasPrefix(rawJSON, []byte("data:")) {
@@ -321,7 +341,12 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 				// Responses streaming requires message done events before the next output_item.added.
 				finalizeReasoning()
 				finalizeMessage()
-				name := util.RestoreSanitizedToolName(st.SanitizedNameMap, fc.Get("name").String())
+				rawName := fc.Get("name").String()
+				identity, hasIdentity := st.ToolIdentityMap[rawName]
+				if !hasIdentity {
+					identity = util.ResponsesToolIdentity{Name: util.RestoreSanitizedToolName(st.SanitizedNameMap, rawName)}
+				}
+				name := identity.Name
 				idx := st.NextIndex
 				st.NextIndex++
 				// Ensure buffers
@@ -332,6 +357,8 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 					st.FuncCallIDs[idx] = fmt.Sprintf("call_%d_%d", time.Now().UnixNano(), atomic.AddUint64(&funcCallIDCounter, 1))
 				}
 				st.FuncNames[idx] = name
+				st.FuncCustom[idx] = identity.Custom
+				st.FuncNamespaces[idx] = identity.Namespace
 
 				argsJSON := "{}"
 				if args := fc.Get("args"); args.Exists() {
@@ -348,6 +375,14 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 				item, _ = sjson.SetBytes(item, "item.id", fmt.Sprintf("fc_%s", st.FuncCallIDs[idx]))
 				item, _ = sjson.SetBytes(item, "item.call_id", st.FuncCallIDs[idx])
 				item, _ = sjson.SetBytes(item, "item.name", name)
+				if identity.Namespace != "" {
+					item, _ = sjson.SetBytes(item, "item.namespace", identity.Namespace)
+				}
+				if identity.Custom {
+					item, _ = sjson.SetBytes(item, "item.type", "custom_tool_call")
+					item, _ = sjson.DeleteBytes(item, "item.arguments")
+					item, _ = sjson.SetBytes(item, "item.input", util.UnwrapResponsesCustomToolInput(argsJSON))
+				}
 				out = append(out, emitEvent("response.output_item.added", item))
 
 				// Emit arguments delta (full args in one chunk).
@@ -377,6 +412,14 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 					itemDone, _ = sjson.SetBytes(itemDone, "item.arguments", argsJSON)
 					itemDone, _ = sjson.SetBytes(itemDone, "item.call_id", st.FuncCallIDs[idx])
 					itemDone, _ = sjson.SetBytes(itemDone, "item.name", st.FuncNames[idx])
+					if st.FuncNamespaces[idx] != "" {
+						itemDone, _ = sjson.SetBytes(itemDone, "item.namespace", st.FuncNamespaces[idx])
+					}
+					if st.FuncCustom[idx] {
+						itemDone, _ = sjson.SetBytes(itemDone, "item.type", "custom_tool_call")
+						itemDone, _ = sjson.DeleteBytes(itemDone, "item.arguments")
+						itemDone, _ = sjson.SetBytes(itemDone, "item.input", util.UnwrapResponsesCustomToolInput(argsJSON))
+					}
 					out = append(out, emitEvent("response.output_item.done", itemDone))
 
 					st.FuncDone[idx] = true
@@ -710,10 +753,20 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 				return true
 			}
 			if fc := p.Get("functionCall"); fc.Exists() {
-				name := util.RestoreSanitizedToolName(sanitizedNameMap, fc.Get("name").String())
+				rawName := fc.Get("name").String()
+				identity, hasIdentity := util.ResponsesToolReverseIdentityMap(pickRequestJSON(originalRequestRawJSON, requestRawJSON))[rawName]
+				if !hasIdentity {
+					identity = util.ResponsesToolIdentity{Name: util.RestoreSanitizedToolName(sanitizedNameMap, rawName)}
+				}
+				name := identity.Name
 				args := fc.Get("args")
 				callID := fmt.Sprintf("call_%x_%d", time.Now().UnixNano(), atomic.AddUint64(&funcCallIDCounter, 1))
+				itemType := "function_call"
+				if identity.Custom {
+					itemType = "custom_tool_call"
+				}
 				itemJSON := []byte(`{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`)
+				itemJSON, _ = sjson.SetBytes(itemJSON, "type", itemType)
 				itemJSON, _ = sjson.SetBytes(itemJSON, "id", fmt.Sprintf("fc_%s", callID))
 				itemJSON, _ = sjson.SetBytes(itemJSON, "call_id", callID)
 				itemJSON, _ = sjson.SetBytes(itemJSON, "name", name)
@@ -721,7 +774,15 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 				if args.Exists() {
 					argsStr = args.Raw
 				}
-				itemJSON, _ = sjson.SetBytes(itemJSON, "arguments", argsStr)
+				if identity.Custom {
+					itemJSON, _ = sjson.DeleteBytes(itemJSON, "arguments")
+					itemJSON, _ = sjson.SetBytes(itemJSON, "input", util.UnwrapResponsesCustomToolInput(argsStr))
+				} else {
+					itemJSON, _ = sjson.SetBytes(itemJSON, "arguments", argsStr)
+				}
+				if identity.Namespace != "" {
+					itemJSON, _ = sjson.SetBytes(itemJSON, "namespace", identity.Namespace)
+				}
 				appendOutput(itemJSON)
 				return true
 			}

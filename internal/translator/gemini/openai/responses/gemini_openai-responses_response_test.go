@@ -372,3 +372,22 @@ func TestConvertGeminiResponseToOpenAIResponses_StringifiedTextContentBlocksExtr
 		t.Fatalf("content blocks were serialized into text: %q", text)
 	}
 }
+
+func TestConvertGeminiResponseToOpenAIResponses_NonStreamRestoresCustomToolIdentity(t *testing.T) {
+	request := []byte(`{"model":"gemini-2.0-flash","tools":[{"type":"namespace","name":"functions","tools":[{"type":"custom","name":"exec","description":"run"}]}]}`)
+	response := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"functions__exec","args":{"input":"ls"}}}]},"finishReason":"STOP"}]}`)
+	output := ConvertGeminiResponseToOpenAIResponsesNonStream(context.Background(), "gemini-2.0-flash", request, nil, response, nil)
+	item := gjson.GetBytes(output, "output.0")
+	if got := item.Get("type").String(); got != "custom_tool_call" {
+		t.Fatalf("output type = %q, want custom_tool_call. Output: %s", got, output)
+	}
+	if got := item.Get("name").String(); got != "exec" {
+		t.Fatalf("output name = %q, want exec. Output: %s", got, output)
+	}
+	if got := item.Get("namespace").String(); got != "functions" {
+		t.Fatalf("output namespace = %q, want functions. Output: %s", got, output)
+	}
+	if got := item.Get("input").String(); got != "ls" {
+		t.Fatalf("output input = %q, want ls. Output: %s", got, output)
+	}
+}
