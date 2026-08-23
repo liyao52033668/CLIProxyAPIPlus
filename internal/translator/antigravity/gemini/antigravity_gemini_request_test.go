@@ -719,6 +719,45 @@ func TestConvertGeminiRequestToAntigravityMapsSnakeCaseFunctionReferences(t *tes
 	}
 }
 
+func TestCollectFunctionResponsesWithSiblingInlineData_BindsNearestResponse(t *testing.T) {
+	parts := gjson.Parse(`[
+		{"inline_data":{"data":"LEAD"}},
+		{"functionResponse":{"name":"call_a","parts":[]}},
+		{"inlineData":{"mimeType":"image/webp","data":"A"}},
+		{"functionResponse":{"name":"call_b","parts":[{"text":"existing"}]}},
+		{"inline_data":{"mime_type":"image/jpeg","data":"B"}}
+	]`)
+
+	responses := collectFunctionResponsesWithSiblingInlineData(parts)
+	if len(responses) != 2 {
+		t.Fatalf("got %d responses, want 2", len(responses))
+	}
+	firstParts := responses[0].Get("functionResponse.parts").Array()
+	if len(firstParts) != 2 {
+		t.Fatalf("first response has %d parts, want 2", len(firstParts))
+	}
+	if got := firstParts[0].Get("inlineData.data").String(); got != "LEAD" {
+		t.Fatalf("first response leading image = %q, want LEAD", got)
+	}
+	if got := firstParts[1].Get("inlineData.data").String(); got != "A" {
+		t.Fatalf("first response sibling image = %q, want A", got)
+	}
+	if got := firstParts[0].Get("inlineData.mimeType").String(); got != "image/png" {
+		t.Fatalf("leading image mime type = %q, want image/png", got)
+	}
+
+	secondParts := responses[1].Get("functionResponse.parts").Array()
+	if len(secondParts) != 2 {
+		t.Fatalf("second response has %d parts, want 2", len(secondParts))
+	}
+	if got := secondParts[0].Get("text").String(); got != "existing" {
+		t.Fatalf("existing response part = %q, want existing", got)
+	}
+	if got := secondParts[1].Get("inlineData.data").String(); got != "B" {
+		t.Fatalf("second response sibling image = %q, want B", got)
+	}
+}
+
 func TestSanitizeAntigravityClaudeGeminiRequestSignatures_PreservesNumberPrecision(t *testing.T) {
 	inputJSON := []byte(`{
 		"project": "",
