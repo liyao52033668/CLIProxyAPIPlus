@@ -269,13 +269,27 @@ func (e *AntigravityExecutor) obfuscateSensitiveWords(payload []byte) []byte {
 	return helps.ObfuscateSensitiveWordsInSystemInstruction(payload, e.sensitiveMatcher)
 }
 
-// antigravityTransport is a singleton HTTP/1.1 transport shared by all Antigravity requests.
-// It is initialized once via antigravityTransportOnce to avoid leaking a new connection pool
-// (and the goroutines managing it) on every request.
+// Antigravity keeps a separate HTTP/1.1 connection pool per credential and proxy scope.
+type antigravityTransportKey struct {
+	credential string
+	proxy      string
+	base       *http.Transport
+}
+
 var (
+	antigravityBaseTransport = defaultAntigravityBaseTransport()
+	antigravityTransports    sync.Map
+	// Legacy test hooks retained for transport-injection tests.
 	antigravityTransport     *http.Transport
 	antigravityTransportOnce sync.Once
 )
+
+func defaultAntigravityBaseTransport() *http.Transport {
+	if transport, ok := http.DefaultTransport.(*http.Transport); ok && transport != nil {
+		return transport
+	}
+	return &http.Transport{}
+}
 
 func cloneTransportWithHTTP11(base *http.Transport) *http.Transport {
 	if base == nil {
@@ -291,36 +305,50 @@ func cloneTransportWithHTTP11(base *http.Transport) *http.Transport {
 	} else {
 		clone.TLSClientConfig = clone.TLSClientConfig.Clone()
 	}
-	// Actively advertise only HTTP/1.1 in the ALPN handshake.
-	clone.TLSClientConfig.NextProtos = []string{"http/1.1"}
+	// Do not advertise ALPN; with HTTP/2 disabled this matches the native client.
+	clone.TLSClientConfig.NextProtos = nil
 	return clone
 }
 
-// initAntigravityTransport creates the shared HTTP/1.1 transport exactly once.
-func initAntigravityTransport() {
-	base, ok := http.DefaultTransport.(*http.Transport)
-	if !ok {
-		base = &http.Transport{}
-	}
-	antigravityTransport = cloneTransportWithHTTP11(base)
-}
-
-// newAntigravityHTTPClient creates an HTTP client specifically for Antigravity,
-// enforcing HTTP/1.1 by disabling HTTP/2 to perfectly mimic Node.js https defaults.
-// The underlying Transport is a singleton to avoid leaking connection pools.
+// newAntigravityHTTPClient creates an HTTP/1.1 client with a credential-scoped pool.
 func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
-	antigravityTransportOnce.Do(initAntigravityTransport)
-
 	client := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, timeout)
-	// If no transport is set, use the shared HTTP/1.1 transport.
-	if client.Transport == nil {
+	transport, ok := client.Transport.(*http.Transport)
+	if antigravityTransport != nil {
 		client.Transport = antigravityTransport
 		return client
 	}
-
-	// Preserve proxy settings from proxy-aware transports while forcing HTTP/1.1.
-	if transport, ok := client.Transport.(*http.Transport); ok {
-		client.Transport = cloneTransportWithHTTP11(transport)
+	if !ok {
+		if client.Transport != nil {
+			return client
+		}
+		transport = antigravityBaseTransport
+	} else if transport == nil {
+		transport = antigravityBaseTransport
+	}
+	credential := "anonymous"
+	if auth != nil && strings.TrimSpace(auth.ID) != "" {
+		credential = strings.TrimSpace(auth.ID)
+	}
+	proxy := ""
+	if auth != nil {
+		proxy = strings.TrimSpace(auth.ProxyURL)
+	}
+	if proxy == "" && cfg != nil {
+		proxy = strings.TrimSpace(cfg.ProxyURL)
+	}
+	key := antigravityTransportKey{credential: credential, proxy: proxy, base: transport}
+	if cached, ok := antigravityTransports.Load(key); ok {
+		client.Transport = cached.(*http.Transport)
+		return client
+	}
+	clone := cloneTransportWithHTTP11(transport)
+	actual, _ := antigravityTransports.LoadOrStore(key, clone)
+	if actualTransport, ok := actual.(*http.Transport); ok {
+		if actualTransport != clone {
+			clone.CloseIdleConnections()
+		}
+		client.Transport = actualTransport
 	}
 	return client
 }
@@ -457,6 +485,12 @@ func (e *AntigravityExecutor) HttpRequest(ctx context.Context, auth *cliproxyaut
 	}
 	httpReq := req.WithContext(ctx)
 
+	// Connection management is a Request field, not a header, so the header
+	// whitelist below cannot strip it. An inbound "Connection: close" makes Go's
+	// server set Request.Close, and WithContext copies that field verbatim, which
+	// would both leak the downstream header upstream and drain the shared pool.
+	httpReq.Close = false
+
 	// --- Whitelist: save only the headers we need from the original request ---
 	contentType := httpReq.Header.Get("Content-Type")
 
@@ -471,7 +505,6 @@ func (e *AntigravityExecutor) HttpRequest(ctx context.Context, auth *cliproxyaut
 	}
 	// Content-Length is managed automatically by Go's http.Client from the Body
 	httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
-	httpReq.Close = true // sends Connection: close
 
 	// Inject Authorization: Bearer <token>
 	if err := e.PrepareRequest(httpReq, auth); err != nil {
@@ -682,8 +715,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	if updatedAuth != nil {
 		auth = updatedAuth
 	}
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
-	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
+	originalTranslated, translated := helps.TranslateRequestPair(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, req.Payload, false)
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -907,8 +939,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	if updatedAuth != nil {
 		auth = updatedAuth
 	}
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
-	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
+	originalTranslated, translated := helps.TranslateRequestPair(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, req.Payload, true)
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -1390,8 +1421,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		auth = updatedAuth
 	}
 
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
-	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
+	originalTranslated, translated := helps.TranslateRequestPair(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, req.Payload, true)
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
