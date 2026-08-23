@@ -8,6 +8,14 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestMapAnthropicStopReasonToOpenAIContentFilter(t *testing.T) {
+	for _, reason := range []string{"refusal", "sensitive"} {
+		if got := mapAnthropicStopReasonToOpenAI(reason); got != "content_filter" {
+			t.Fatalf("%s maps to %q, want content_filter", reason, got)
+		}
+	}
+}
+
 func TestConvertClaudeResponseToOpenAI_StreamUsageIncludesCachedTokens(t *testing.T) {
 	ctx := context.Background()
 	var param any

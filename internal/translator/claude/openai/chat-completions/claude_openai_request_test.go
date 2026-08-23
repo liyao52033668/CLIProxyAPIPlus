@@ -6,6 +6,18 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestConvertOpenAIRequestToClaude_MaxCompletionTokensFallback(t *testing.T) {
+	result := gjson.ParseBytes(ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(`{"max_completion_tokens":123,"messages":[{"role":"user","content":"hi"}]}`), false))
+	if got := result.Get("max_tokens").Int(); got != 123 {
+		t.Fatalf("max_tokens = %d, want 123", got)
+	}
+
+	both := gjson.ParseBytes(ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(`{"max_tokens":456,"max_completion_tokens":123,"messages":[{"role":"user","content":"hi"}]}`), false))
+	if got := both.Get("max_tokens").Int(); got != 456 {
+		t.Fatalf("max_tokens with both fields = %d, want 456", got)
+	}
+}
+
 func TestConvertOpenAIRequestToClaude_ToolResultTextAndBase64Image(t *testing.T) {
 	inputJSON := `{
 		"model": "gpt-4.1",

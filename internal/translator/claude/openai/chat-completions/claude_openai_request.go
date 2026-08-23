@@ -134,6 +134,8 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	// Max tokens configuration with fallback to default value
 	if maxTokens := root.Get("max_tokens"); maxTokens.Exists() {
 		out, _ = sjson.SetBytes(out, "max_tokens", maxTokens.Int())
+	} else if maxCompletionTokens := root.Get("max_completion_tokens"); maxCompletionTokens.Exists() {
+		out, _ = sjson.SetBytes(out, "max_tokens", maxCompletionTokens.Int())
 	}
 
 	// Temperature setting for controlling response randomness

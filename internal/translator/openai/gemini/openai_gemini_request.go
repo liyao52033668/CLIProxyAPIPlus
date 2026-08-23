@@ -6,9 +6,9 @@
 package gemini
 
 import (
-	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
-	"math/big"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
@@ -27,16 +27,10 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 
 	root := gjson.ParseBytes(rawJSON)
 
-	// Helper for generating tool call IDs in the form: call_<alphanum>
-	genToolCallID := func() string {
-		const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-		var b strings.Builder
-		// 24 chars random suffix
-		for range 24 {
-			n, _ := rand.Int(rand.Reader, big.NewInt(int64(len(letters))))
-			b.WriteByte(letters[n.Int64()])
-		}
-		return "call_" + b.String()
+	// Helper for generating stable tool call IDs in the form: call_<sha256 prefix>.
+	genToolCallID := func(seed string) string {
+		sum := sha256.Sum256([]byte(seed))
+		return "call_" + hex.EncodeToString(sum[:])[:24]
 	}
 
 	// Model mapping
@@ -113,7 +107,8 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	out, _ = sjson.SetBytes(out, "stream", stream)
 
 	// Process contents (Gemini messages) -> OpenAI messages
-	var toolCallIDs []string // Track tool call IDs for matching with tool results
+	toolCallQueues := make(map[string][]string)
+	toolCallOrdinals := make(map[string]int)
 
 	// System instruction -> OpenAI system message
 	// Gemini may provide `systemInstruction` or `system_instruction`; support both keys.
@@ -222,12 +217,25 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 
 					// Handle function calls (Gemini) -> tool calls (OpenAI)
 					if functionCall := part.Get("functionCall"); functionCall.Exists() {
-						toolCallID := genToolCallID()
-						toolCallIDs = append(toolCallIDs, toolCallID)
+						functionName := functionCall.Get("name").String()
+						callID := functionCall.Get("id").String()
+						if callID == "" {
+							callID = functionCall.Get("call_id").String()
+						}
+						if callID == "" {
+							callID = functionCall.Get("callId").String()
+						}
+						ordinal := toolCallOrdinals[functionName]
+						toolCallOrdinals[functionName] = ordinal + 1
+						argsRaw := functionCall.Get("args").Raw
+						if callID == "" {
+							callID = genToolCallID(fmt.Sprintf("%s:%d:%s", functionName, ordinal, argsRaw))
+						}
+						toolCallQueues[functionName] = append(toolCallQueues[functionName], callID)
 
 						toolCall := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
-						toolCall, _ = sjson.SetBytes(toolCall, "id", toolCallID)
-						toolCall, _ = sjson.SetBytes(toolCall, "function.name", functionCall.Get("name").String())
+						toolCall, _ = sjson.SetBytes(toolCall, "id", callID)
+						toolCall, _ = sjson.SetBytes(toolCall, "function.name", functionName)
 
 						// Convert args to arguments JSON string
 						if args := functionCall.Get("args"); args.Exists() {
@@ -255,15 +263,25 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 						}
 
 						// Try to match with previous tool call ID
-						_ = functionResponse.Get("name").String() // functionName not used for now
-						if len(toolCallIDs) > 0 {
-							// Use the last tool call ID (simple matching by function name)
-							// In a real implementation, you might want more sophisticated matching
-							toolMsg, _ = sjson.SetBytes(toolMsg, "tool_call_id", toolCallIDs[len(toolCallIDs)-1])
-						} else {
-							// Generate a tool call ID if none available
-							toolMsg, _ = sjson.SetBytes(toolMsg, "tool_call_id", genToolCallID())
+						functionName := functionResponse.Get("name").String()
+						responseID := functionResponse.Get("id").String()
+						if responseID == "" {
+							responseID = functionResponse.Get("call_id").String()
 						}
+						if responseID == "" {
+							responseID = functionResponse.Get("callId").String()
+						}
+						if responseID == "" {
+							queue := toolCallQueues[functionName]
+							if len(queue) > 0 {
+								responseID = queue[0]
+								toolCallQueues[functionName] = queue[1:]
+							}
+						}
+						if responseID == "" {
+							responseID = genToolCallID("orphan:" + functionName + ":" + functionResponse.Raw)
+						}
+						toolMsg, _ = sjson.SetBytes(toolMsg, "tool_call_id", responseID)
 
 						out, _ = sjson.SetRawBytes(out, "messages.-1", toolMsg)
 					}
