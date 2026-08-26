@@ -10,8 +10,8 @@ import (
 func TestDefaultProviderConfigsContainsSevenAPICallTemplates(t *testing.T) {
 	configs := quota.DefaultProviderConfigs()
 	templates := configs.APICallTemplates()
-	if len(templates) != 10 {
-		t.Fatalf("expected 10 api-call templates, got %d", len(templates))
+	if len(templates) != 11 {
+		t.Fatalf("expected 11 api-call templates, got %d", len(templates))
 	}
 	if len(configs.Antigravity) != 3 {
 		t.Fatalf("expected 3 antigravity api-call templates, got %d", len(configs.Antigravity))

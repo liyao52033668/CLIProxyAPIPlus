@@ -52,6 +52,13 @@ func NormalizeQuotaRows(output ProviderOutput) []QuotaRow {
 			return nil
 		}
 		return normalizeQoderQuotaRows(*result)
+	case CommandCodeResult:
+		return normalizeCommandCodeQuotaRows(result)
+	case *CommandCodeResult:
+		if result == nil {
+			return nil
+		}
+		return normalizeCommandCodeQuotaRows(*result)
 	default:
 		return nil
 	}
@@ -277,6 +284,56 @@ func normalizeQoderQuotaRows(result QoderResult) []QuotaRow {
 		row.UsedPercent = floatPtr(usage.TotalUsagePercentage)
 	}
 	return []QuotaRow{row}
+}
+
+func normalizeCommandCodeQuotaRows(result CommandCodeResult) []QuotaRow {
+	if result.Usage == nil {
+		return nil
+	}
+	u := result.Usage
+	rows := make([]QuotaRow, 0, 4)
+
+	// Summary / Credits Row
+	creditsRow := QuotaRow{
+		Key:    "credits",
+		Label:  "Credits",
+		Scope:  firstNonEmpty(u.PeriodBasis, "billing-period"),
+		Metric: "USD",
+		Used:   floatPtr(u.TotalCredits),
+	}
+	if u.TotalCost > 0 && creditsRow.Used == nil {
+		creditsRow.Used = floatPtr(u.TotalCost)
+	}
+	rows = append(rows, creditsRow)
+
+	// Tokens Row
+	if u.TotalTokens > 0 || u.TotalTokensIn > 0 || u.TotalTokensOut > 0 {
+		tokensRow := QuotaRow{
+			Key:    "tokens",
+			Label:  "Tokens",
+			Scope:  "tokens",
+			Metric: "tokens",
+			Used:   floatPtr(float64(u.TotalTokens)),
+		}
+		rows = append(rows, tokensRow)
+	}
+
+	// Requests Row
+	if u.TotalCount > 0 {
+		reqRow := QuotaRow{
+			Key:    "requests",
+			Label:  "Requests",
+			Scope:  "requests",
+			Metric: "count",
+			Used:   floatPtr(float64(u.TotalCount)),
+		}
+		if u.SuccessRate > 0 {
+			reqRow.UsedPercent = floatPtr(u.SuccessRate)
+		}
+		rows = append(rows, reqRow)
+	}
+
+	return rows
 }
 
 func qoderExpiresAtRFC3339(expiresAt int64) string {

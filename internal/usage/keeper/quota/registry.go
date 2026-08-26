@@ -14,6 +14,7 @@ func NewDefaultProviderRegistry(caller ManagementAPICaller, configs ProviderConf
 		"claude":      NewClaudeProvider(caller, configs.ClaudeUsage, configs.ClaudeProfile),
 		"kimi":        NewKimiProvider(caller, configs.Kimi),
 		"qoder":       NewQoderProvider(caller, configs.Qoder),
+		"commandcode": NewCommandCodeProvider(caller, configs.CommandCode),
 	})
 }
 

@@ -10,4 +10,5 @@ const (
 	FormatCodex          Format = "codex"
 	FormatAntigravity    Format = "antigravity"
 	FormatInteractions   Format = "interactions"
+	FormatCommandCode    Format = "commandcode"
 )

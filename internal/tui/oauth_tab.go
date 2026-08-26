@@ -25,6 +25,7 @@ var oauthProviders = []oauthProvider{
 	{"Antigravity", "antigravity-auth-url", "🟪"},
 	{"Kimi", "kimi-auth-url", "🟫"},
 	{"xAI", "xai-auth-url", "⬛"},
+	{"Command Code", "commandcode-auth-url", "🟨"},
 }
 
 // oauthTabModel handles OAuth login flows.

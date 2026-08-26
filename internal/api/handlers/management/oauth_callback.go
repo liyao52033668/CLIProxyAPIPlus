@@ -94,6 +94,12 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 			}
 			if code == "" {
 				code = strings.TrimSpace(q.Get("code"))
+				if code == "" {
+					code = strings.TrimSpace(q.Get("apiKey"))
+				}
+				if code == "" {
+					code = strings.TrimSpace(q.Get("api_key"))
+				}
 			}
 			if errMsg == "" {
 				errMsg = strings.TrimSpace(q.Get("error"))
@@ -105,6 +111,12 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 				token = strings.TrimSpace(q.Get("token"))
 				if token == "" {
 					token = strings.TrimSpace(q.Get("tokenString"))
+				}
+				if token == "" {
+					token = strings.TrimSpace(q.Get("apiKey"))
+				}
+				if token == "" {
+					token = strings.TrimSpace(q.Get("api_key"))
 				}
 			}
 			if auth == "" {

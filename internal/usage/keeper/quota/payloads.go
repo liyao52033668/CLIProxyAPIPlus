@@ -255,6 +255,30 @@ func parseQoderUsagePayload(response *apicall.Response) (*QoderUsagePayload, err
 	return payload, nil
 }
 
+func parseCommandCodeUsagePayload(response *apicall.Response) (*CommandCodeUsagePayload, error) {
+	object, err := parseResponseObject(response)
+	if err != nil {
+		return nil, err
+	}
+	payload := &CommandCodeUsagePayload{
+		TotalCount:            int64(intField(object, "totalCount", "total_count")),
+		TotalCost:             floatField(object, "totalCost", "total_cost"),
+		AverageCost:           floatField(object, "averageCost", "average_cost"),
+		SuccessRate:           floatField(object, "successRate", "success_rate"),
+		CompletedCount:        int64(intField(object, "completedCount", "completed_count")),
+		FailedCount:           int64(intField(object, "failedCount", "failed_count")),
+		TotalTokensIn:         int64(intField(object, "totalTokensIn", "total_tokens_in")),
+		TotalTokensOut:        int64(intField(object, "totalTokensOut", "total_tokens_out")),
+		TotalTokens:           int64(intField(object, "totalTokens", "total_tokens")),
+		TotalCredits:          floatField(object, "totalCredits", "total_credits"),
+		TotalFreeCredits:      floatField(object, "totalFreeCredits", "total_free_credits"),
+		TotalMonthlyCredits:   floatField(object, "totalMonthlyCredits", "total_monthly_credits"),
+		TotalPurchasedCredits: floatField(object, "totalPurchasedCredits", "total_purchased_credits"),
+		PeriodBasis:           stringField(object, "periodBasis", "period_basis"),
+	}
+	return payload, nil
+}
+
 func parseKimiUsagePayload(response *apicall.Response) (*KimiUsagePayload, error) {
 	object, err := parseResponseObject(response)
 	if err != nil {

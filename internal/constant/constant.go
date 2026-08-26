@@ -39,4 +39,7 @@ const (
 
 	// JoyCode represents the JD JoyCode provider identifier.
 	JoyCode = "joycode"
+
+	// CommandCode represents the Command Code provider identifier.
+	CommandCode = "commandcode"
 )

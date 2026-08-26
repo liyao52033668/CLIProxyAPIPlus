@@ -244,6 +244,27 @@ type QoderResult struct {
 	Usage *QoderUsagePayload `json:"usage"`
 }
 
+type CommandCodeUsagePayload struct {
+	TotalCount            int64   `json:"totalCount,omitempty"`
+	TotalCost             float64 `json:"totalCost,omitempty"`
+	AverageCost           float64 `json:"averageCost,omitempty"`
+	SuccessRate           float64 `json:"successRate,omitempty"`
+	CompletedCount        int64   `json:"completedCount,omitempty"`
+	FailedCount           int64   `json:"failedCount,omitempty"`
+	TotalTokensIn         int64   `json:"totalTokensIn,omitempty"`
+	TotalTokensOut        int64   `json:"totalTokensOut,omitempty"`
+	TotalTokens           int64   `json:"totalTokens,omitempty"`
+	TotalCredits          float64 `json:"totalCredits,omitempty"`
+	TotalFreeCredits      float64 `json:"totalFreeCredits,omitempty"`
+	TotalMonthlyCredits   float64 `json:"totalMonthlyCredits,omitempty"`
+	TotalPurchasedCredits float64 `json:"totalPurchasedCredits,omitempty"`
+	PeriodBasis           string  `json:"periodBasis,omitempty"`
+}
+
+type CommandCodeResult struct {
+	Usage *CommandCodeUsagePayload `json:"usage"`
+}
+
 type ProviderHandler interface {
 	Check(context.Context, ProviderInput) (ProviderOutput, error)
 }

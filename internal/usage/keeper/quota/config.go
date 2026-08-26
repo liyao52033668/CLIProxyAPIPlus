@@ -17,6 +17,7 @@ type ProviderConfigs struct {
 	ClaudeProfile       APICallConfig
 	Kimi                APICallConfig
 	Qoder               APICallConfig
+	CommandCode         APICallConfig
 }
 
 func DefaultProviderConfigs() ProviderConfigs {
@@ -109,11 +110,24 @@ func DefaultProviderConfigs() ProviderConfigs {
 				"User-Agent":    "qoder/" + qoderauth.CosyVersion,
 			},
 		},
+		CommandCode: APICallConfig{
+			Method: "GET",
+			URL:    "https://api.commandcode.ai/internal/usage/summary",
+			Headers: map[string]string{
+				"Cookie":       "__Secure-commandcode_prod_.session_token=$TOKEN$",
+				"Accept":       "*/*",
+				"Content-Type": "application/json",
+				"Origin":       "https://commandcode.ai",
+				"Host":         "api.commandcode.ai",
+				"Connection":   "keep-alive",
+				"User-Agent":   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+			},
+		},
 	}
 }
 
 func (c ProviderConfigs) APICallTemplates() []APICallConfig {
-	templates := make([]APICallConfig, 0, len(c.Antigravity)+7)
+	templates := make([]APICallConfig, 0, len(c.Antigravity)+8)
 	templates = append(templates, c.Antigravity...)
 	templates = append(templates,
 		c.Codex,
@@ -123,6 +137,7 @@ func (c ProviderConfigs) APICallTemplates() []APICallConfig {
 		c.ClaudeProfile,
 		c.Kimi,
 		c.Qoder,
+		c.CommandCode,
 	)
 	return templates
 }

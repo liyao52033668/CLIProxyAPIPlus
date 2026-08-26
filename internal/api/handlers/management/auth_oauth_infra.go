@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -25,13 +26,14 @@ import (
 var lastRefreshKeys = []string{"last_refresh", "lastRefresh", "last_refreshed_at", "lastRefreshedAt"}
 
 const (
-	anthropicCallbackPort = 54545
-	geminiCallbackPort    = 8085
-	codexCallbackPort     = 1455
-	geminiCLIEndpoint     = "https://cloudcode-pa.googleapis.com"
-	geminiCLIVersion      = "v1internal"
-	gitLabLoginModeOAuth  = "oauth"
-	gitLabLoginModePAT    = "pat"
+	anthropicCallbackPort   = 54545
+	geminiCallbackPort      = 8085
+	codexCallbackPort       = 1455
+	commandcodeCallbackPort = 58123
+	geminiCLIEndpoint       = "https://cloudcode-pa.googleapis.com"
+	geminiCLIVersion        = "v1internal"
+	gitLabLoginModeOAuth    = "oauth"
+	gitLabLoginModePAT      = "pat"
 )
 
 type callbackForwarder struct {
@@ -140,6 +142,21 @@ func startCallbackForwarder(port int, provider, targetBase string) (*callbackFor
 	}
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Set CORS headers for web callers (such as commandcode studio auth)
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "*")
+		} else {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+		}
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
 		target := targetBase
 		if raw := r.URL.RawQuery; raw != "" {
 			if strings.Contains(target, "?") {
@@ -148,6 +165,29 @@ func startCallbackForwarder(port int, provider, targetBase string) (*callbackFor
 				target = target + "?" + raw
 			}
 		}
+
+		// If this is a POST request (JSON payload sent by Studio webapp)
+		if r.Method == http.MethodPost {
+			body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+			// Forward the POST request to the local target
+			req, errReq := http.NewRequestWithContext(r.Context(), http.MethodPost, target, strings.NewReader(string(body)))
+			if errReq == nil {
+				req.Header.Set("Content-Type", r.Header.Get("Content-Type"))
+				resp, errDo := http.DefaultClient.Do(req)
+				if errDo == nil {
+					defer resp.Body.Close()
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(resp.StatusCode)
+					_, _ = io.Copy(w, resp.Body)
+					return
+				}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"success":true}`))
+			return
+		}
+
 		w.Header().Set("Cache-Control", "no-store")
 		http.Redirect(w, r, target, http.StatusFound)
 	})

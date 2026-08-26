@@ -114,6 +114,12 @@ var providerMetadata = map[string]ProviderInfo{
 		FlowType:        "device_code",
 		AuthURLEndpoint: "/kilo-auth-url",
 	},
+	"commandcode": {
+		Key:             "commandcode",
+		DisplayName:     "Command Code",
+		FlowType:        "browser_oauth",
+		AuthURLEndpoint: "/commandcode-auth-url",
+	},
 }
 
 func (m *Manager) ListProviders() []ProviderInfo {

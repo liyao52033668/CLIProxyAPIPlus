@@ -85,7 +85,7 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "disabled": *req.Disabled})
 }
 
-// PatchAuthFileFields updates editable fields (prefix, proxy_url, headers, priority, excluded_models, disable_cooling, websockets, using_api, note) of an auth file.
+// PatchAuthFileFields updates editable fields (prefix, proxy_url, headers, priority, excluded_models, disable_cooling, websockets, using_api, note, session_token) of an auth file.
 func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	if h.authManager == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
@@ -103,6 +103,7 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		Websockets     json.RawMessage   `json:"websockets"`
 		UsingAPI       json.RawMessage   `json:"using_api"`
 		Note           *string           `json:"note"`
+		SessionToken   *string           `json:"session_token"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
@@ -241,7 +242,7 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 			changed = true
 		}
 	}
-	if req.Priority != nil || req.ExcludedModels != nil || len(req.DisableCooling) > 0 || len(req.Websockets) > 0 || len(req.UsingAPI) > 0 || req.Note != nil {
+	if req.Priority != nil || req.ExcludedModels != nil || len(req.DisableCooling) > 0 || len(req.Websockets) > 0 || len(req.UsingAPI) > 0 || req.Note != nil || req.SessionToken != nil {
 		if targetAuth.Metadata == nil {
 			targetAuth.Metadata = make(map[string]any)
 		}
@@ -339,6 +340,30 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 			} else {
 				targetAuth.Metadata["note"] = trimmedNote
 				targetAuth.Attributes["note"] = trimmedNote
+			}
+		}
+		if req.SessionToken != nil {
+			// Command Code only: web console session token used for quota querying.
+			trimmedToken := strings.TrimSpace(*req.SessionToken)
+			if trimmedToken == "" {
+				delete(targetAuth.Metadata, "session_token")
+				delete(targetAuth.Metadata, "sessionToken")
+				delete(targetAuth.Attributes, "session_token")
+				delete(targetAuth.Attributes, "sessionToken")
+			} else {
+				targetAuth.Metadata["session_token"] = trimmedToken
+				targetAuth.Metadata["sessionToken"] = trimmedToken
+				targetAuth.Attributes["session_token"] = trimmedToken
+				targetAuth.Attributes["sessionToken"] = trimmedToken
+			}
+			// Also update the Storage's SessionToken field so it persists correctly
+			if targetAuth.Storage != nil {
+				type sessionTokenSetter interface {
+					SetSessionToken(string)
+				}
+				if sts, ok := targetAuth.Storage.(sessionTokenSetter); ok {
+					sts.SetSessionToken(trimmedToken)
+				}
 			}
 		}
 		changed = true

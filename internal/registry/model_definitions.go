@@ -893,6 +893,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetKiroModels()
 	case "kilo":
 		return GetKiloModels()
+	case "commandcode":
+		return GetCommandCodeModels()
 	case "amazonq":
 		return GetAmazonQModels()
 	case "antigravity":
@@ -1011,6 +1013,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		GetGitHubCopilotModels(),
 		GetKiroModels(),
 		GetKiloModels(),
+		GetCommandCodeModels(),
 		GetAmazonQModels(),
 		GetCodeBuddyModels(),
 		GetCodeBuddyAIModels(),
@@ -1221,6 +1224,27 @@ func GetGitHubCopilotAutoModel() *ModelInfo {
 		ContextLength:       128000,
 		MaxCompletionTokens: 64000,
 		SupportedEndpoints:  []string{"/github/chat/threads/{thread_id}/messages"},
+	}
+}
+
+// GetCommandCodeModels returns the minimal Command Code fallback model definitions.
+// The full catalog is fetched dynamically at runtime via FetchCommandCodeModels
+// (GET /provider/v1/models); these entries only serve as fallback metadata when
+// the dynamic fetch fails.
+func GetCommandCodeModels() []*ModelInfo {
+	return []*ModelInfo{
+		{
+			ID:                  "claude-sonnet-5",
+			Object:              "model",
+			Created:             1732752000,
+			OwnedBy:             "commandcode",
+			Type:                "commandcode",
+			DisplayName:         "Claude Sonnet 5",
+			Description:         "Claude Sonnet 5 via Command Code",
+			ContextLength:       1000000,
+			MaxCompletionTokens: 64000,
+			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh", "max"}},
+		},
 	}
 }
 

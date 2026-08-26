@@ -79,6 +79,9 @@ var apiCallTokenHostsByProvider = map[string]map[string]struct{}{
 		"api.x.ai":                {},
 		"cli-chat-proxy.grok.com": {},
 	},
+	"commandcode": {
+		"api.commandcode.ai": {},
+	},
 }
 
 func (h *Handler) apiCallDNSResolver() apiCallResolver {

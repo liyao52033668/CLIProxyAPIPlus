@@ -646,6 +646,50 @@ func (s *Server) setupRoutes() {
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
 	})
 
+	s.engine.GET("/commandcode/callback", func(c *gin.Context) {
+		apiKey := c.Query("apiKey")
+		if apiKey == "" {
+			apiKey = c.Query("api_key")
+		}
+		if apiKey == "" {
+			apiKey = c.Query("token")
+		}
+		state := c.Query("state")
+		errStr := c.Query("error")
+		if errStr == "" {
+			errStr = c.Query("error_description")
+		}
+		if state != "" {
+			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSessionWithAuth(s.cfg.AuthDir, "commandcode", state, apiKey, errStr, apiKey)
+		}
+		c.Header("Content-Type", "text/html; charset=utf-8")
+		c.String(http.StatusOK, oauthCallbackSuccessHTML)
+	})
+
+	s.engine.POST("/commandcode/callback", func(c *gin.Context) {
+		var payload struct {
+			APIKey string `json:"apiKey"`
+			Key    string `json:"api_key"`
+			Token  string `json:"token"`
+			State  string `json:"state"`
+			Error  string `json:"error"`
+		}
+		if err := c.ShouldBindJSON(&payload); err == nil {
+			apiKey := payload.APIKey
+			if apiKey == "" {
+				apiKey = payload.Key
+			}
+			if apiKey == "" {
+				apiKey = payload.Token
+			}
+			if payload.State != "" {
+				_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSessionWithAuth(s.cfg.AuthDir, "commandcode", payload.State, apiKey, payload.Error, apiKey)
+			}
+		}
+		c.Header("Content-Type", "text/html; charset=utf-8")
+		c.String(http.StatusOK, oauthCallbackSuccessHTML)
+	})
+
 	s.engine.GET("/forward", func(c *gin.Context) {
 		rawURL := c.Query("url")
 		rawURL, _ = url.QueryUnescape(rawURL)
@@ -1083,6 +1127,8 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.POST("/bt-auth-url", s.mgmt.RequestBTToken)
 		mgmt.GET("/joycode-auth-url", s.mgmt.GetJoyCodeAuthURL)
 		mgmt.GET("/xai-auth-url", s.mgmt.RequestXAIToken)
+		mgmt.GET("/commandcode-auth-url", s.mgmt.RequestCommandCodeToken)
+		mgmt.POST("/commandcode-auth-url", s.mgmt.RequestCommandCodeToken)
 		mgmt.POST("/oauth-callback", s.mgmt.PostOAuthCallback)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
 	}
