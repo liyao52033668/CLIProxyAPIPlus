@@ -1,7 +1,6 @@
 package responses
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -645,12 +644,10 @@ func buildOpenAIResponsesFunctionResponseParts(functionName string, callID strin
 		if value == "" || value == "null" {
 			return [][]byte{functionResponse}
 		}
-		if parsed := gjson.Parse(value); (parsed.IsArray() || parsed.IsObject()) && json.Valid([]byte(value)) {
-			output = parsed
-		} else {
-			functionResponse, _ = sjson.SetBytes(functionResponse, "functionResponse.response.result", value)
-			return [][]byte{functionResponse}
-		}
+		// Keep it as a string instead of parsing it into JSON.
+		// Parsing it as JSON, similar to reading a JSON file with readFile, may trigger an upstream 400 error.
+		functionResponse, _ = sjson.SetBytes(functionResponse, "functionResponse.response.result", value)
+		return [][]byte{functionResponse}
 	}
 
 	images := make([][]byte, 0)

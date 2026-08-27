@@ -2,6 +2,7 @@
 package util
 
 import (
+	"encoding/json"
 	"fmt"
 	"slices"
 	"sort"
@@ -155,6 +156,135 @@ func removePlaceholderFields(jsonStr string) string {
 	return jsonStr
 }
 
+// InlineLocalRefs resolves JSON Pointer references against the original schema before definition
+// containers are stripped. Each expansion receives its own copy, sibling keywords override the
+// referenced definition, and cycles terminate as a typed hint instead of recursing forever.
+func InlineLocalRefs(jsonStr string) string {
+	return inlineLocalRefs(jsonStr)
+}
+
+// inlineLocalRefs resolves JSON Pointer references against the original schema before definition
+// containers are stripped. Each expansion receives its own copy, sibling keywords override the
+// referenced definition, and cycles terminate as a typed hint instead of recursing forever.
+func inlineLocalRefs(jsonStr string) string {
+	if !strings.Contains(jsonStr, `"$ref"`) {
+		return jsonStr
+	}
+
+	decoder := json.NewDecoder(strings.NewReader(jsonStr))
+	decoder.UseNumber()
+	var root any
+	if err := decoder.Decode(&root); err != nil {
+		return jsonStr
+	}
+
+	resolved := resolveLocalRefs(root, root, make(map[string]bool))
+	out, err := json.Marshal(resolved)
+	if err != nil {
+		return jsonStr
+	}
+	return string(out)
+}
+
+func resolveLocalRefs(root, value any, active map[string]bool) any {
+	switch node := value.(type) {
+	case []any:
+		out := make([]any, len(node))
+		for i, item := range node {
+			out[i] = resolveLocalRefs(root, item, active)
+		}
+		return out
+	case map[string]any:
+		ref, hasRef := node["$ref"].(string)
+		if hasRef && strings.HasPrefix(ref, "#/") {
+			if target, ok := resolveJSONPointer(root, ref); ok {
+				if active[ref] {
+					return cyclicRefFallback(node, target, ref)
+				}
+				active[ref] = true
+				resolvedTarget := resolveLocalRefs(root, target, active)
+				delete(active, ref)
+				if targetMap, okTarget := resolvedTarget.(map[string]any); okTarget {
+					out := make(map[string]any, len(targetMap)+len(node))
+					for key, item := range targetMap {
+						out[key] = item
+					}
+					for key, item := range node {
+						if key == "$ref" {
+							continue
+						}
+						out[key] = resolveLocalRefs(root, item, active)
+					}
+					return out
+				}
+			}
+		}
+
+		out := make(map[string]any, len(node))
+		for key, item := range node {
+			out[key] = resolveLocalRefs(root, item, active)
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+func resolveJSONPointer(root any, ref string) (any, bool) {
+	current := root
+	for _, rawPart := range strings.Split(strings.TrimPrefix(ref, "#/"), "/") {
+		part := strings.ReplaceAll(strings.ReplaceAll(rawPart, "~1", "/"), "~0", "~")
+		switch node := current.(type) {
+		case map[string]any:
+			var ok bool
+			current, ok = node[part]
+			if !ok {
+				return nil, false
+			}
+		case []any:
+			index, err := strconv.Atoi(part)
+			if err != nil || index < 0 || index >= len(node) {
+				return nil, false
+			}
+			current = node[index]
+		default:
+			return nil, false
+		}
+	}
+	return current, true
+}
+
+func cyclicRefFallback(node map[string]any, target any, ref string) map[string]any {
+	out := make(map[string]any, len(node)+2)
+	if targetMap, ok := target.(map[string]any); ok {
+		for _, key := range []string{"type", "nullable", "description"} {
+			if value, exists := targetMap[key]; exists {
+				out[key] = value
+			}
+		}
+	}
+	for key, value := range node {
+		if key != "$ref" {
+			out[key] = value
+		}
+	}
+	name := refName(ref)
+	hint := "See: " + name
+	if description, _ := out["description"].(string); description != "" {
+		out["description"] = mergeHint(description, hint)
+	} else {
+		out["description"] = hint
+	}
+	return out
+}
+
+func refName(ref string) string {
+	if index := strings.LastIndex(ref, "/"); index >= 0 && index+1 < len(ref) {
+		return strings.ReplaceAll(strings.ReplaceAll(ref[index+1:], "~1", "/"), "~0", "~")
+	}
+	return ref
+}
+
 // convertRefsToHints converts $ref to description hints (Lazy Hint strategy).
 func convertRefsToHints(jsonStr string) string {
 	paths := findPaths(jsonStr, "$ref")
@@ -252,7 +382,7 @@ func addAdditionalPropertiesHints(jsonStr string) string {
 
 var unsupportedConstraints = []string{
 	"minLength", "maxLength", "exclusiveMinimum", "exclusiveMaximum",
-	"pattern", "minItems", "maxItems", "uniqueItems", "format",
+	"pattern", "minItems", "maxItems", "uniqueItems", "contains", "format",
 	"default", "examples", // Claude rejects these in VALIDATED mode
 }
 
@@ -262,6 +392,9 @@ func moveConstraintsToDescription(jsonStr string) string {
 		for _, p := range pathsByField[key] {
 			val := gjson.Get(jsonStr, p)
 			if !val.Exists() || val.IsObject() || val.IsArray() {
+				// Object/array-valued constraints (contains, object defaults, example
+				// lists) embed whole schemas or blobs; dumping their raw JSON into the
+				// description bloats the prompt, so they are dropped instead.
 				continue
 			}
 			parentPath := trimSuffix(p, "."+key)
@@ -311,6 +444,26 @@ func mergeAllOf(jsonStr string) string {
 	return jsonStr
 }
 
+// mergeMissingSchemaAtPath recursively fills absent fields without replacing any existing
+// definition. A parent schema is the canonical definition; allOf and conditional branches may
+// enrich gaps in it, but can never replace it with a narrower branch shell.
+func mergeMissingSchemaAtPath(jsonStr, destination string, incoming gjson.Result) string {
+	existing := gjson.Get(jsonStr, destination)
+	if !existing.Exists() {
+		updated, _ := sjson.SetRawBytes([]byte(jsonStr), destination, []byte(incoming.Raw))
+		return string(updated)
+	}
+	if !existing.IsObject() || !incoming.IsObject() {
+		return jsonStr
+	}
+	incoming.ForEach(func(key, value gjson.Result) bool {
+		child := joinPath(destination, escapeGJSONPathKey(key.String()))
+		jsonStr = mergeMissingSchemaAtPath(jsonStr, child, value)
+		return true
+	})
+	return jsonStr
+}
+
 func flattenAnyOfOneOf(jsonStr string) string {
 	for _, key := range []string{"anyOf", "oneOf"} {
 		paths := findPaths(jsonStr, key)
@@ -323,9 +476,39 @@ func flattenAnyOfOneOf(jsonStr string) string {
 			}
 
 			parentPath := trimSuffix(p, "."+key)
-			parentDesc := gjson.Get(jsonStr, descriptionPath(parentPath)).String()
+			parent := gjson.Get(jsonStr, parentPath)
+			if parentPath == "" {
+				parent = gjson.Parse(jsonStr)
+			}
 
 			items := arr.Array()
+
+			// If the parent already defines properties (e.g. an object schema with anyOf/oneOf constraints),
+			// do not replace the parent with a single branch. Instead, merge any branch properties
+			// into the parent and delete the union keyword.
+			if parentProps := parent.Get("properties"); parentProps.IsObject() {
+				hasNull := false
+				for _, item := range items {
+					if item.Get("type").String() == "null" {
+						hasNull = true
+					}
+					if branchProps := item.Get("properties"); branchProps.IsObject() {
+						branchProps.ForEach(func(propKey, propVal gjson.Result) bool {
+							destPath := joinPath(parentPath, "properties."+escapeGJSONPathKey(propKey.String()))
+							jsonStr = mergeMissingSchemaAtPath(jsonStr, destPath, propVal)
+							return true
+						})
+					}
+				}
+				if hasNull {
+					updated, _ := sjson.SetBytes([]byte(jsonStr), joinPath(parentPath, "nullable"), true)
+					jsonStr = string(updated)
+				}
+				jsonStr, _ = sjson.Delete(jsonStr, p)
+				continue
+			}
+
+			parentDesc := gjson.Get(jsonStr, descriptionPath(parentPath)).String()
 			bestIdx, allTypes := selectBest(items)
 			selected := items[bestIdx].Raw
 
@@ -358,7 +541,9 @@ func selectBest(items []gjson.Result) (bestIdx int, types []string) {
 		case t != "" && t != "null":
 			score = 1
 		default:
-			t = orDefault(t, "null")
+			// A typeless branch is treated as the nullable case: it still yields the
+			// "null" hint so union flattening keeps its Accepts annotation.
+			score, t = 0, orDefault(t, "null")
 		}
 
 		if t != "" {
@@ -523,6 +708,9 @@ func cleanupRequiredFields(jsonStr string) string {
 		req := gjson.Get(jsonStr, p)
 		props := gjson.Get(jsonStr, propsPath)
 		if !req.IsArray() || !props.IsObject() {
+			// Without an inline properties map there is nothing to validate the
+			// requirements against (e.g. a $ref/definition-shaped schema), so keep
+			// the required list intact.
 			continue
 		}
 

@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	log "github.com/sirupsen/logrus"
+
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -40,10 +42,27 @@ type claudeToResponsesState struct {
 	ReasoningEnc       string
 	ReasoningPartAdded bool
 	ReasoningIndex     int
+	// server-side web search state: a Claude server_tool_use block and its
+	// web_search_tool_result block fold into one Responses web_search_call item.
+	WebSearchByBlock  map[int]*claudeResponsesWebSearchItem
+	WebSearchByToolID map[string]*claudeResponsesWebSearchItem
+	WebSearchItems    []*claudeResponsesWebSearchItem
 	// usage aggregation
 	InputTokens  int64
 	OutputTokens int64
 	UsageSeen    bool
+}
+
+type claudeResponsesWebSearchItem struct {
+	ToolUseID   string
+	OutputIndex int
+	InputBuf    strings.Builder
+	Results     []byte
+	Emitted     bool
+}
+
+func (item *claudeResponsesWebSearchItem) render() []byte {
+	return buildResponsesWebSearchCallItem(item.ToolUseID, claudeWebSearchQuery(item.InputBuf.String()), item.Results)
 }
 
 var dataTag = []byte("data:")
@@ -89,10 +108,35 @@ func emitEvent(event string, payload []byte) []byte {
 	return translatorcommon.SSEEventData(event, payload)
 }
 
+// startWebSearch opens the Responses item that stands for a Claude server-side
+// search block. output_index is the Claude content block index, matching how the
+// other item types are indexed in this translator.
+func (st *claudeToResponsesState) startWebSearch(blockIndex int, toolUseID string) *claudeResponsesWebSearchItem {
+	item := &claudeResponsesWebSearchItem{ToolUseID: toolUseID, OutputIndex: blockIndex}
+	st.WebSearchByBlock[blockIndex] = item
+	st.WebSearchByToolID[toolUseID] = item
+	st.WebSearchItems = append(st.WebSearchItems, item)
+	return item
+}
+
+// finalizeWebSearch emits output_item.done once the result block has been seen,
+// or at message_stop when the turn ended without one.
+func (st *claudeToResponsesState) finalizeWebSearch(item *claudeResponsesWebSearchItem, nextSeq func() int) [][]byte {
+	if item == nil || item.Emitted {
+		return nil
+	}
+	item.Emitted = true
+	done := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{}}`)
+	done, _ = sjson.SetBytes(done, "sequence_number", nextSeq())
+	done, _ = sjson.SetBytes(done, "output_index", item.OutputIndex)
+	done, _ = sjson.SetRawBytes(done, "item", item.render())
+	return [][]byte{emitEvent("response.output_item.done", done)}
+}
+
 // ConvertClaudeResponseToOpenAIResponses converts Claude SSE to OpenAI Responses SSE events.
 func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
 	if *param == nil {
-		*param = &claudeToResponsesState{FuncArgsBuf: make(map[int]*strings.Builder), FuncNames: make(map[int]string), FuncCallIDs: make(map[int]string), FuncCustom: make(map[int]bool)}
+		*param = &claudeToResponsesState{FuncArgsBuf: make(map[int]*strings.Builder), FuncNames: make(map[int]string), FuncCallIDs: make(map[int]string), FuncCustom: make(map[int]bool), WebSearchByBlock: make(map[int]*claudeResponsesWebSearchItem), WebSearchByToolID: make(map[string]*claudeResponsesWebSearchItem)}
 	}
 	st := (*param).(*claudeToResponsesState)
 
@@ -135,6 +179,9 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			st.FuncNames = make(map[int]string)
 			st.FuncCallIDs = make(map[int]string)
 			st.FuncCustom = make(map[int]bool)
+			st.WebSearchByBlock = make(map[int]*claudeResponsesWebSearchItem)
+			st.WebSearchByToolID = make(map[string]*claudeResponsesWebSearchItem)
+			st.WebSearchItems = nil
 			st.InputTokens = 0
 			st.OutputTokens = 0
 			st.UsageSeen = false
@@ -212,6 +259,29 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			// record function metadata for aggregation
 			st.FuncCallIDs[idx] = st.CurrentFCID
 			st.FuncNames[idx] = name
+		} else if typ == "server_tool_use" {
+			if name := cb.Get("name").String(); name != claudeWebSearchToolName {
+				// Reachability guard: only web_search can be enabled on Claude by
+				// this translator, so anything else means a new upstream tool.
+				log.Debugf("claude->responses: unmapped server_tool_use %q at block %d", name, idx)
+			} else {
+				item := st.startWebSearch(idx, cb.Get("id").String())
+				added := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"web_search_call","status":"in_progress","action":{"type":"search","query":""}}}`)
+				added, _ = sjson.SetBytes(added, "sequence_number", nextSeq())
+				added, _ = sjson.SetBytes(added, "output_index", item.OutputIndex)
+				added, _ = sjson.SetBytes(added, "item.id", responsesWebSearchCallID(item.ToolUseID))
+				out = append(out, emitEvent("response.output_item.added", added))
+			}
+		} else if typ == "web_search_tool_result" {
+			// Unlike text or tool_use blocks, a result block carries its full
+			// content up front and has no deltas, so the item is closed here
+			// rather than at content_block_stop.
+			if item := st.WebSearchByToolID[cb.Get("tool_use_id").String()]; item != nil {
+				item.Results = claudeWebSearchResultsToResponses(cb.Get("content"))
+				out = append(out, st.finalizeWebSearch(item, nextSeq)...)
+			} else {
+				log.Debugf("claude->responses: web_search_tool_result without matching server_tool_use at block %d", idx)
+			}
 		} else if typ == "thinking" || typ == "redacted_thinking" {
 			// start reasoning item
 			st.ReasoningActive = true
@@ -251,6 +321,12 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 				st.CurrentTextBuf.WriteString(text)
 			}
 		} else if dt == "input_json_delta" {
+			if item := st.WebSearchByBlock[int(root.Get("index").Int())]; item != nil {
+				if pj := d.Get("partial_json"); pj.Exists() {
+					item.InputBuf.WriteString(pj.String())
+				}
+				return [][]byte{}
+			}
 			idx := int(root.Get("index").Int())
 			if pj := d.Get("partial_json"); pj.Exists() {
 				if st.FuncArgsBuf[idx] == nil {
@@ -385,6 +461,11 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			}
 		}
 	case "message_stop":
+		// Close any web search items whose result block never arrived; the client
+		// must not be left with a dangling in_progress item.
+		for _, item := range st.WebSearchItems {
+			out = append(out, st.finalizeWebSearch(item, nextSeq)...)
+		}
 
 		completed := []byte(`{"type":"response.completed","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null}}`)
 		completed, _ = sjson.SetBytes(completed, "sequence_number", nextSeq())
@@ -475,11 +556,19 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			item, _ = sjson.SetBytes(item, "content.0.text", st.TextBuf.String())
 			outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
 		}
-		// function_call items (in ascending index order for determinism)
-		if len(st.FuncArgsBuf) > 0 {
+		// web_search_call and function/custom_tool_call items, interleaved by
+		// Claude content-block index to match the non-stream aggregation order.
+		idxSet := make(map[int]bool, len(st.FuncArgsBuf)+len(st.WebSearchByBlock))
+		for idx := range st.FuncArgsBuf {
+			idxSet[idx] = true
+		}
+		for idx := range st.WebSearchByBlock {
+			idxSet[idx] = true
+		}
+		if len(idxSet) > 0 {
 			// collect indices
-			idxs := make([]int, 0, len(st.FuncArgsBuf))
-			for idx := range st.FuncArgsBuf {
+			idxs := make([]int, 0, len(idxSet))
+			for idx := range idxSet {
 				idxs = append(idxs, idx)
 			}
 			// simple sort (small N), avoid adding new imports
@@ -491,6 +580,10 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 				}
 			}
 			for _, idx := range idxs {
+				if ws := st.WebSearchByBlock[idx]; ws != nil {
+					outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", ws.render())
+					continue
+				}
 				args := ""
 				if b := st.FuncArgsBuf[idx]; b != nil {
 					args = b.String()
@@ -585,11 +678,14 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 
 	// Per-index tool call aggregation
 	type toolState struct {
-		id   string
-		name string
-		args strings.Builder
+		id       string
+		name     string
+		args     strings.Builder
+		itemType string
+		results  []byte
 	}
 	toolCalls := make(map[int]*toolState)
+	webSearchByToolID := make(map[string]*toolState)
 
 	// Walk through SSE chunks to fill state
 	for _, ch := range chunks {
@@ -624,6 +720,25 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 				} else {
 					toolCalls[idx].id = currentFCID
 					toolCalls[idx].name = name
+				}
+			case "server_tool_use":
+				name := cb.Get("name").String()
+				if name != claudeWebSearchToolName {
+					log.Debugf("claude->responses: unmapped server_tool_use %q at block %d", name, idx)
+					continue
+				}
+				toolUseID := cb.Get("id").String()
+				state := &toolState{id: toolUseID, name: name, itemType: "web_search_call"}
+				toolCalls[idx] = state
+				webSearchByToolID[toolUseID] = state
+				if input := cb.Get("input"); input.IsObject() && claudeWebSearchQuery(input.Raw) != "" {
+					state.args.WriteString(input.Raw)
+				}
+			case "web_search_tool_result":
+				if state := webSearchByToolID[cb.Get("tool_use_id").String()]; state != nil {
+					state.results = claudeWebSearchResultsToResponses(cb.Get("content"))
+				} else {
+					log.Debugf("claude->responses: web_search_tool_result without matching server_tool_use at block %d", idx)
 				}
 			case "thinking", "redacted_thinking":
 				reasoningActive = true
@@ -774,6 +889,11 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 		}
 		for _, i := range idxs {
 			st := toolCalls[i]
+			if st.itemType == "web_search_call" {
+				item := buildResponsesWebSearchCallItem(st.id, claudeWebSearchQuery(st.args.String()), st.results)
+				outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
+				continue
+			}
 			args := st.args.String()
 			_, isCustom := customToolNames[st.name]
 			if !isCustom && args == "" {

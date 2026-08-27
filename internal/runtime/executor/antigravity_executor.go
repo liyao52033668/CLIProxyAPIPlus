@@ -1702,14 +1702,6 @@ attemptLoop:
 						}
 					}
 				}
-				tail := sdktranslator.TranslateStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, []byte("[DONE]"), &param)
-				for i := range tail {
-					select {
-					case out <- cliproxyexecutor.StreamChunk{Payload: tail[i]}:
-					case <-ctx.Done():
-						return
-					}
-				}
 				if errScan := scanner.Err(); errScan != nil {
 					helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 					reporter.PublishFailure(ctx, errScan)
@@ -1718,6 +1710,17 @@ attemptLoop:
 					case <-ctx.Done():
 					}
 				} else {
+					// Only a clean end of stream may produce a synthetic terminal event.
+					// Translating [DONE] after a read error would report a truncated
+					// stream as a successful completion.
+					tail := sdktranslator.TranslateStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, []byte("[DONE]"), &param)
+					for i := range tail {
+						select {
+						case out <- cliproxyexecutor.StreamChunk{Payload: tail[i]}:
+						case <-ctx.Done():
+							return
+						}
+					}
 					reporter.EnsurePublished(ctx)
 				}
 			}(httpResp)

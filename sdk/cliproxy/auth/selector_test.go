@@ -392,14 +392,14 @@ func TestRoundRobinSelectorPick_CursorKeyCap(t *testing.T) {
 	selector.mu.Lock()
 	defer selector.mu.Unlock()
 
-	if selector.cursors == nil {
-		t.Fatalf("selector.cursors = nil")
+	if selector.lastPicked == nil {
+		t.Fatalf("selector.lastPicked = nil")
 	}
-	if len(selector.cursors) != 1 {
-		t.Fatalf("len(selector.cursors) = %d, want %d", len(selector.cursors), 1)
+	if len(selector.lastPicked) != 1 {
+		t.Fatalf("len(selector.lastPicked) = %d, want %d", len(selector.lastPicked), 1)
 	}
-	if _, ok := selector.cursors["gemini:m3"]; !ok {
-		t.Fatalf("selector.cursors missing key %q", "gemini:m3")
+	if _, ok := selector.lastPicked["gemini:m3"]; !ok {
+		t.Fatalf("selector.lastPicked missing key %q", "gemini:m3")
 	}
 }
 

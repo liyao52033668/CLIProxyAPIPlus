@@ -494,9 +494,9 @@ func TestConvertOpenAIResponsesRequestToGemini_FunctionCallOutputParts(t *testin
 			wantImage:  true,
 		},
 		{
-			name:       "stringified array",
+			name:       "stringified array kept as string",
 			output:     `"[{\"type\":\"input_text\",\"text\":\"encoded\"}]"`,
-			wantResult: "encoded",
+			wantResult: `[{"type":"input_text","text":"encoded"}]`,
 		},
 	}
 

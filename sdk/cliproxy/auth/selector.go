@@ -25,10 +25,17 @@ import (
 )
 
 // RoundRobinSelector provides a simple provider scoped round-robin selection strategy.
+//
+// The flat rotation continues from the identity of the previous pick rather than from a
+// numeric index. Candidate slices shrink whenever a retry excludes already tried
+// credentials or a credential enters cooldown, and indexing a monotonic counter into a
+// shrinking slice silently re-seats the rotation, which starves some credentials and
+// hammers others.
 type RoundRobinSelector struct {
-	mu      sync.Mutex
-	cursors map[string]int
-	maxKeys int
+	mu         sync.Mutex
+	cursors    map[string]int
+	lastPicked map[string]string
+	maxKeys    int
 }
 
 // FillFirstSelector selects the first available credential (deterministic ordering).
@@ -263,6 +270,9 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 	if s.cursors == nil {
 		s.cursors = make(map[string]int)
 	}
+	if s.lastPicked == nil {
+		s.lastPicked = make(map[string]string)
+	}
 	limit := s.maxKeys
 	if limit <= 0 {
 		limit = 4096
@@ -300,15 +310,28 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 		return group[innerIndex%len(group)], nil
 	}
 
-	// Flat round-robin for non-grouped auths (original behavior).
-	s.ensureCursorKey(key, limit)
-	index := s.cursors[key]
-	if index >= 2_147_483_640 {
-		index = 0
-	}
-	s.cursors[key] = index + 1
+	// Flat round-robin for non-grouped auths. Rotation resumes from the identity of the
+	// previous pick so a shrinking candidate set (retries, cooldowns) does not re-seat it.
+	s.ensureRotationKey(key, limit)
+	picked := available[successorIndex(available, s.lastPicked[key])]
+	s.lastPicked[key] = picked.ID
 	s.mu.Unlock()
-	return available[index%len(available)], nil
+	return picked, nil
+}
+
+// successorIndex returns the index of the first candidate ordered after lastID, wrapping to
+// the start of the ring. Candidates arrive sorted by ID, so this resumes the rotation at the
+// credential that follows the previous pick even when candidates were filtered out in
+// between. An empty lastID starts at the head.
+func successorIndex(available []*Auth, lastID string) int {
+	if lastID == "" {
+		return 0
+	}
+	index := sort.Search(len(available), func(i int) bool { return available[i].ID > lastID })
+	if index >= len(available) {
+		return 0
+	}
+	return index
 }
 
 // ensureCursorKey ensures the cursor map has capacity for the given key.
@@ -316,6 +339,14 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 func (s *RoundRobinSelector) ensureCursorKey(key string, limit int) {
 	if _, ok := s.cursors[key]; !ok && len(s.cursors) >= limit {
 		s.cursors = make(map[string]int)
+	}
+}
+
+// ensureRotationKey ensures the rotation map has capacity for the given key.
+// Must be called with s.mu held.
+func (s *RoundRobinSelector) ensureRotationKey(key string, limit int) {
+	if _, ok := s.lastPicked[key]; !ok && len(s.lastPicked) >= limit {
+		s.lastPicked = make(map[string]string)
 	}
 }
 

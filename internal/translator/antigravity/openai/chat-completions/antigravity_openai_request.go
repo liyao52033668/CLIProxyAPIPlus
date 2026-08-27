@@ -323,15 +323,9 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							if resp == "" {
 								resp = "{}"
 							}
-							// Handle non-JSON output gracefully (matches dev branch approach)
-							if resp != "null" {
-								parsed := gjson.Parse(resp)
-								if parsed.Type == gjson.JSON {
-									toolNode, _ = sjson.SetRawBytes(toolNode, "parts."+itoa(pp)+".functionResponse.response.result", []byte(parsed.Raw))
-								} else {
-									toolNode, _ = sjson.SetBytes(toolNode, "parts."+itoa(pp)+".functionResponse.response.result", resp)
-								}
-							}
+							// Keep it as a string instead of parsing it into JSON.
+							// Parsing it as JSON, similar to reading a JSON file with readFile, may trigger an upstream 400 error.
+							toolNode, _ = sjson.SetBytes(toolNode, "parts."+itoa(pp)+".functionResponse.response.result", resp)
 							pp++
 						}
 					}

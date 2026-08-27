@@ -1021,8 +1021,9 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	body = normalizeXAINamespaceToolChoice(body)
 	body = normalizeXAIForcedWebSearchToolChoice(body)
 	body = pruneXAIOrphanedToolChoice(body)
+	body = normalizeXAIForcedImageGenerationToolChoice(body)
 	body = normalizeXAIToolChoiceForTools(body)
-	if e.cfg != nil && e.cfg.XAI.InjectXSearch {
+	if e.cfg != nil && e.cfg.XAI.InjectXSearch && !xaiToolChoiceRequiresImageGenerationOnly(body) {
 		body = ensureXAINativeXSearchTool(body)
 	}
 	var replayScope xaiReasoningReplayScope
@@ -1489,6 +1490,109 @@ func normalizeXAIForcedWebSearchToolChoice(body []byte) []byte {
 	return updated
 }
 
+// normalizeXAIForcedImageGenerationToolChoice rewrites image_generation choices
+// into a ModelToolChoice variant accepted by xAI chat-proxy. `{type: image_generation}`
+// becomes the string "required" and the tools list is reduced to image_generation
+// so later x_search injection cannot broaden the restriction. An allowed_tools
+// list that only names that hosted tool becomes the original mode ("auto" or
+// "required") and is likewise reduced to image_generation. Mixed lists drop the
+// image_generation entry so the remaining hosted/function choices can still
+// deserialize.
+func normalizeXAIForcedImageGenerationToolChoice(body []byte) []byte {
+	choice := gjson.GetBytes(body, "tool_choice")
+	if !choice.IsObject() {
+		return body
+	}
+	choiceType := strings.TrimSpace(choice.Get("type").String())
+	if choiceType == xaiImageGenerationToolType {
+		body = xaiKeepOnlyImageGenerationTools(body)
+		return xaiSetToolChoiceString(body, "required")
+	}
+	if choiceType != "allowed_tools" {
+		return body
+	}
+	allowed := choice.Get("tools")
+	if !allowed.IsArray() {
+		return body
+	}
+	filtered := make([][]byte, 0, len(allowed.Array()))
+	stripped := false
+	for _, tool := range allowed.Array() {
+		if strings.TrimSpace(tool.Get("type").String()) == xaiImageGenerationToolType {
+			stripped = true
+			continue
+		}
+		filtered = append(filtered, []byte(tool.Raw))
+	}
+	if !stripped {
+		return body
+	}
+	if len(filtered) == 0 {
+		mode := strings.TrimSpace(choice.Get("mode").String())
+		if mode != "auto" {
+			mode = "required"
+		}
+		body = xaiKeepOnlyImageGenerationTools(body)
+		return xaiSetToolChoiceString(body, mode)
+	}
+	updated, errSet := sjson.SetRawBytes(body, "tool_choice.tools", helps.JoinRawJSONArray(filtered))
+	if errSet != nil {
+		return body
+	}
+	return updated
+}
+
+func xaiSetToolChoiceString(body []byte, value string) []byte {
+	updated, errSet := sjson.SetBytes(body, "tool_choice", value)
+	if errSet != nil {
+		return body
+	}
+	return updated
+}
+
+func xaiKeepOnlyImageGenerationTools(body []byte) []byte {
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.IsArray() {
+		return body
+	}
+	kept := make([][]byte, 0, 1)
+	for _, tool := range tools.Array() {
+		if strings.TrimSpace(tool.Get("type").String()) == xaiImageGenerationToolType {
+			kept = append(kept, []byte(tool.Raw))
+		}
+	}
+	if len(kept) == 0 || len(kept) == len(tools.Array()) {
+		return body
+	}
+	updated, errSet := sjson.SetRawBytes(body, "tools", helps.JoinRawJSONArray(kept))
+	if errSet != nil {
+		return body
+	}
+	return updated
+}
+
+func xaiToolChoiceRequiresImageGenerationOnly(body []byte) bool {
+	choice := gjson.GetBytes(body, "tool_choice")
+	if choice.Type != gjson.String {
+		return false
+	}
+	switch choice.String() {
+	case "required", "auto":
+	default:
+		return false
+	}
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.IsArray() || len(tools.Array()) == 0 {
+		return false
+	}
+	for _, tool := range tools.Array() {
+		if strings.TrimSpace(tool.Get("type").String()) != xaiImageGenerationToolType {
+			return false
+		}
+	}
+	return true
+}
+
 // pruneXAIOrphanedToolChoice removes tool_choice entries that no longer match
 // any remaining tool after normalizeXAITools filtering. Forced choices that
 // reference a deleted tool are dropped entirely; allowed_tools lists keep only
@@ -1612,17 +1716,103 @@ func xaiToolChoiceMatchesAvailable(choice gjson.Result, available map[xaiToolCho
 	return ok
 }
 
+// xaiGrokImageGenerationMinVersion is the first Grok line that accepts xAI's
+// native Responses image_generation tool. Older conversation models still
+// reject that hosted type, so the executor keeps stripping it there.
+var xaiGrokImageGenerationMinVersion = xaiGrokVersion{major: 4, minor: 6}
+
+type xaiGrokVersion struct {
+	major int
+	minor int
+}
+
+// xaiSupportsNativeImageGeneration reports whether the Grok model accepts
+// xAI's native Responses image_generation tool. grok-4.20-* is an older
+// product line whose dotted minor is not comparable to grok-4.6.
+func xaiSupportsNativeImageGeneration(model string) bool {
+	name := strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(model).ModelName))
+	if idx := strings.LastIndex(name, "/"); idx >= 0 {
+		name = name[idx+1:]
+	}
+	if name == "" || !strings.HasPrefix(name, "grok-") {
+		return false
+	}
+	rest := strings.TrimPrefix(name, "grok-")
+	if rest == "4.20" || strings.HasPrefix(rest, "4.20-") {
+		return false
+	}
+	ver, ok := xaiParseGrokVersionPrefix(rest)
+	if !ok {
+		return false
+	}
+	return xaiCompareGrokVersion(ver, xaiGrokImageGenerationMinVersion) >= 0
+}
+
+func xaiParseGrokVersionPrefix(rest string) (xaiGrokVersion, bool) {
+	i := 0
+	for i < len(rest) && rest[i] >= '0' && rest[i] <= '9' {
+		i++
+	}
+	if i == 0 {
+		return xaiGrokVersion{}, false
+	}
+	major, err := strconv.Atoi(rest[:i])
+	if err != nil {
+		return xaiGrokVersion{}, false
+	}
+	if i == len(rest) || rest[i] != '.' {
+		return xaiGrokVersion{major: major, minor: -1}, true
+	}
+	j := i + 1
+	for j < len(rest) && rest[j] >= '0' && rest[j] <= '9' {
+		j++
+	}
+	if j == i+1 {
+		return xaiGrokVersion{major: major, minor: -1}, true
+	}
+	minor, err := strconv.Atoi(rest[i+1 : j])
+	if err != nil {
+		return xaiGrokVersion{}, false
+	}
+	return xaiGrokVersion{major: major, minor: minor}, true
+}
+
+func xaiCompareGrokVersion(a, b xaiGrokVersion) int {
+	if a.major != b.major {
+		if a.major < b.major {
+			return -1
+		}
+		return 1
+	}
+	aMinor := a.minor
+	if aMinor < 0 {
+		aMinor = 0
+	}
+	bMinor := b.minor
+	if bMinor < 0 {
+		bMinor = 0
+	}
+	if aMinor < bMinor {
+		return -1
+	}
+	if aMinor > bMinor {
+		return 1
+	}
+	return 0
+}
+
 func normalizeXAITools(body []byte) []byte {
 	if !gjson.ValidBytes(body) {
 		return body
 	}
+	keepImageGeneration := xaiSupportsNativeImageGeneration(gjson.GetBytes(body, "model").String())
 	original := body
 	normalizeAtPath := func(path string) bool {
 		tools := gjson.GetBytes(body, path)
 		if !tools.Exists() || !tools.IsArray() {
 			return true
 		}
-		filtered, changed, ok := normalizeXAIToolArray(tools)
+		filtered, changed, ok := normalizeXAIToolArray(tools, keepImageGeneration)
 		if !ok {
 			return false
 		}
@@ -1654,7 +1844,7 @@ func normalizeXAITools(body []byte) []byte {
 	return body
 }
 
-func normalizeXAIToolArray(tools gjson.Result) ([]byte, bool, bool) {
+func normalizeXAIToolArray(tools gjson.Result, keepImageGeneration bool) ([]byte, bool, bool) {
 	changed := false
 	filtered := []byte(`[]`)
 	for _, tool := range tools.Array() {
@@ -1664,7 +1854,7 @@ func normalizeXAIToolArray(tools gjson.Result) ([]byte, bool, bool) {
 			namespaceName := tool.Get("name").String()
 			if namespaceTools := tool.Get("tools"); namespaceTools.IsArray() {
 				for _, nestedTool := range namespaceTools.Array() {
-					nestedRaw, nestedChanged, ok := normalizeXAITool(nestedTool, namespaceName)
+					nestedRaw, nestedChanged, ok := normalizeXAITool(nestedTool, namespaceName, keepImageGeneration)
 					if !ok {
 						return nil, false, false
 					}
@@ -1681,7 +1871,7 @@ func normalizeXAIToolArray(tools gjson.Result) ([]byte, bool, bool) {
 			}
 			continue
 		}
-		raw, toolChanged, ok := normalizeXAITool(tool, "")
+		raw, toolChanged, ok := normalizeXAITool(tool, "", keepImageGeneration)
 		if !ok {
 			return nil, false, false
 		}
@@ -1777,10 +1967,10 @@ func normalizeXAINamespaceToolChoice(body []byte) []byte {
 	return body
 }
 
-func normalizeXAITool(tool gjson.Result, namespaceName string) ([]byte, bool, bool) {
+func normalizeXAITool(tool gjson.Result, namespaceName string, keepImageGeneration bool) ([]byte, bool, bool) {
 	toolType := tool.Get("type").String()
 	changed := false
-	if toolType == xaiToolSearchType || toolType == xaiImageGenerationToolType {
+	if toolType == xaiToolSearchType || (toolType == xaiImageGenerationToolType && !keepImageGeneration) {
 		return nil, true, true
 	}
 	if toolType == xaiCustomToolType && tool.Get("name").String() == "apply_patch" {
@@ -1790,6 +1980,25 @@ func normalizeXAITool(tool gjson.Result, namespaceName string) ([]byte, bool, bo
 	raw := []byte(tool.Raw)
 	schemaTool := tool
 	if toolType == xaiFunctionToolType || toolType == xaiCustomToolType {
+		if rawParams := schemaTool.Get("parameters"); rawParams.Exists() {
+			inlinedParams := util.InlineLocalRefs(rawParams.Raw)
+			// Only rewrite when every local $ref resolved. A leftover $ref points
+			// outside the parameters subtree (e.g. #/components/...), and stripping
+			// $defs/definitions then leaves a dangling reference behind.
+			if inlinedParams != rawParams.Raw && !strings.Contains(inlinedParams, `"$ref"`) {
+				if updated, errSet := sjson.SetRawBytes(raw, "parameters", []byte(inlinedParams)); errSet == nil {
+					if inlinedDefs := gjson.GetBytes(updated, "parameters.$defs"); inlinedDefs.Exists() {
+						updated, _ = sjson.DeleteBytes(updated, "parameters.$defs")
+					}
+					if inlinedDefinitions := gjson.GetBytes(updated, "parameters.definitions"); inlinedDefinitions.Exists() {
+						updated, _ = sjson.DeleteBytes(updated, "parameters.definitions")
+					}
+					raw = updated
+					schemaTool = gjson.ParseBytes(raw)
+					changed = true
+				}
+			}
+		}
 		updatedTool, schemaChanged, ok := normalizeXAIObjectRootUnionBranchTypes(raw)
 		if !ok {
 			return nil, false, false
@@ -2348,7 +2557,7 @@ func normalizeXAIObjectRootUnionBranchTypes(tool []byte) ([]byte, bool, bool) {
 			continue
 		}
 		for index, branch := range union.Array() {
-			if !branch.IsObject() || branch.Get("type").Exists() {
+			if !branch.IsObject() || branch.Get("type").Exists() || branch.Get("$ref").Exists() {
 				continue
 			}
 			updated, errSet := sjson.SetBytes(tool, fmt.Sprintf("parameters.%s.%d.type", unionName, index), "object")
@@ -2381,6 +2590,18 @@ func xaiSchemaTypeIsObjectOnly(schemaType gjson.Result) bool {
 	return true
 }
 
+func isXAICodexAppAutomationUpdate(toolName, namespaceName string) bool {
+	cleanNamespace := strings.TrimPrefix(strings.TrimSpace(namespaceName), "mcp__")
+	cleanTool := strings.TrimPrefix(strings.TrimSpace(toolName), "mcp__")
+	if strings.EqualFold(cleanTool, xaiAutomationUpdateToolName) && (strings.EqualFold(cleanNamespace, xaiCodexAppNamespaceName) || strings.EqualFold(cleanNamespace, "codex_apps")) {
+		return true
+	}
+	if strings.EqualFold(cleanTool, xaiCodexAppNamespaceName+"__"+xaiAutomationUpdateToolName) || strings.EqualFold(cleanTool, "codex_apps__"+xaiAutomationUpdateToolName) {
+		return true
+	}
+	return false
+}
+
 // xaiFunctionParametersNeedSimplification reports whether a function schema
 // contains a root union shape that xAI cannot safely process.
 func xaiFunctionParametersNeedSimplification(tool gjson.Result, namespaceName string) bool {
@@ -2392,10 +2613,7 @@ func xaiFunctionParametersNeedSimplification(tool gjson.Result, namespaceName st
 	}
 
 	toolName := strings.TrimSpace(tool.Get("name").String())
-	qualifiedAutomationName := xaiCodexAppNamespaceName + "__" + xaiAutomationUpdateToolName
-	if isFunction && (strings.EqualFold(toolName, qualifiedAutomationName) ||
-		(strings.EqualFold(strings.TrimSpace(namespaceName), xaiCodexAppNamespaceName) &&
-			strings.EqualFold(toolName, xaiAutomationUpdateToolName))) {
+	if isFunction && isXAICodexAppAutomationUpdate(toolName, namespaceName) {
 		return true
 	}
 
@@ -2406,7 +2624,7 @@ func xaiFunctionParametersNeedSimplification(tool gjson.Result, namespaceName st
 			continue
 		}
 		for _, branch := range union.Array() {
-			if !xaiSchemaTypeIsObjectOnly(branch.Get("type")) {
+			if branch.Get("$ref").Exists() || !xaiSchemaTypeIsObjectOnly(branch.Get("type")) {
 				return true
 			}
 		}

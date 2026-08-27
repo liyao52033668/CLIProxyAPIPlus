@@ -103,6 +103,10 @@ type Result struct {
 	Error *Error
 	// IsAuto indicates this was an auto-resolved model (from "auto" model selection).
 	IsAuto bool
+	// SkipQuotaObservation reports that this result must not replace the last
+	// observed watermark. Count-tokens requests reuse the credential but are not
+	// generation traffic; their response headers are not a generation snapshot.
+	SkipQuotaObservation bool
 }
 
 func newErrorFromExecution(err error) *Error {
