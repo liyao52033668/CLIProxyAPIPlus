@@ -501,6 +501,7 @@ func FetchCommandCodeModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 			Type:          "commandcode",
 			Object:        "model",
 			Created:       now,
+			Thinking:      registry.CommandCodeThinkingSupport(),
 		})
 		return true
 	})

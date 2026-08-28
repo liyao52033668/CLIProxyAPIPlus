@@ -7,6 +7,7 @@ import (
 
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cc "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/commandcode"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/translator"
 	"github.com/tidwall/gjson"
@@ -44,10 +45,23 @@ func ConvertClaudeToCommandCodeRequest(modelName string, inputRawJSON []byte, st
 		v := t.Float()
 		params.Temperature = &v
 	}
+	// Carry the client's thinking config into the wire envelope. The thinking
+	// pipeline re-extracts it from params.reasoning_effort, validates it against
+	// the model's ThinkingSupport, and applies the final value (suffix wins).
 	if re := root.Get("reasoning_effort"); re.Exists() && re.String() != "" {
 		params.ReasoningEffort = re.String()
-	} else if th := root.Get("thinking.budget_tokens"); th.Exists() && th.Int() > 0 {
-		params.ReasoningEffort = "high"
+	} else if tt := root.Get("thinking.type").String(); tt == "disabled" {
+		params.ReasoningEffort = "none"
+	} else if th := root.Get("thinking.budget_tokens"); th.Exists() {
+		if level, ok := thinking.ConvertBudgetToLevel(int(th.Int())); ok {
+			params.ReasoningEffort = level
+		}
+	} else if tt := root.Get("thinking.type").String(); tt == "enabled" {
+		params.ReasoningEffort = "auto"
+	} else if tt := root.Get("thinking.type").String(); tt == "adaptive" {
+		if effort := root.Get("output_config.effort").String(); effort != "" {
+			params.ReasoningEffort = effort
+		}
 	}
 
 	req := cc.WireRequest{

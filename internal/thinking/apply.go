@@ -20,6 +20,7 @@ var providerAppliers = map[string]ProviderApplier{
 	"kimi":         nil,
 	"codebuddy":    nil,
 	"codebuddy-ai": nil,
+	"commandcode":  nil,
 	"xai":          nil,
 }
 
@@ -334,6 +335,8 @@ func extractThinkingConfig(body []byte, provider string) ThinkingConfig {
 		return extractCodexConfig(body)
 	case "kimi":
 		return extractKimiConfig(body)
+	case "commandcode":
+		return extractCommandCodeConfig(body)
 	default:
 		return ThinkingConfig{}
 	}
@@ -586,6 +589,27 @@ func extractOpenAIConfig(body []byte) ThinkingConfig {
 	}
 
 	return ThinkingConfig{}
+}
+
+// extractCommandCodeConfig extracts thinking configuration from a translated
+// Command Code wire envelope. The request translators carry the client's
+// thinking config into params.reasoning_effort before this runs.
+func extractCommandCodeConfig(body []byte) ThinkingConfig {
+	effort := gjson.GetBytes(body, "params.reasoning_effort")
+	if !effort.Exists() {
+		return ThinkingConfig{}
+	}
+	value := strings.ToLower(strings.TrimSpace(effort.String()))
+	switch value {
+	case "":
+		return ThinkingConfig{}
+	case "none":
+		return ThinkingConfig{Mode: ModeNone, Budget: 0}
+	case "auto":
+		return ThinkingConfig{Mode: ModeAuto, Budget: -1}
+	default:
+		return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
+	}
 }
 
 // extractKimiConfig extracts Kimi's native thinking object while retaining

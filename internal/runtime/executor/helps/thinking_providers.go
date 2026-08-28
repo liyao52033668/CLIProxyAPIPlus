@@ -6,6 +6,7 @@ import (
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/codearts"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/codebuddy"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/codex"
+	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/commandcode"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/gemini"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/geminicli"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/kimi"

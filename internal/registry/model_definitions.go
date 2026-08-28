@@ -1227,6 +1227,15 @@ func GetGitHubCopilotAutoModel() *ModelInfo {
 	}
 }
 
+// CommandCodeThinkingSupport returns the reasoning effort levels supported by
+// Command Code models. Used for both the static fallback definitions and the
+// dynamically fetched model catalog so thinking config validation is uniform.
+func CommandCodeThinkingSupport() *ThinkingSupport {
+	return &ThinkingSupport{
+		Levels: []string{"low", "medium", "high", "xhigh", "max"},
+	}
+}
+
 // GetCommandCodeModels returns the minimal Command Code fallback model definitions.
 // The full catalog is fetched dynamically at runtime via FetchCommandCodeModels
 // (GET /provider/v1/models); these entries only serve as fallback metadata when
@@ -1243,7 +1252,7 @@ func GetCommandCodeModels() []*ModelInfo {
 			Description:         "Claude Sonnet 5 via Command Code",
 			ContextLength:       1000000,
 			MaxCompletionTokens: 64000,
-			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh", "max"}},
+			Thinking:            CommandCodeThinkingSupport(),
 		},
 	}
 }
