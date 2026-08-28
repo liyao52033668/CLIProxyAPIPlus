@@ -125,12 +125,13 @@ func (e *CommandCodeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	}()
 
 	var allChunks bytes.Buffer
+	var streamErr error
 	scanner := bufio.NewScanner(httpResp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), streamScannerBuffer)
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-		if len(line) == 0 {
+		if len(bytes.TrimSpace(line)) == 0 {
 			continue
 		}
 		if allChunks.Len() > 0 {
@@ -138,16 +139,34 @@ func (e *CommandCodeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 		}
 		allChunks.Write(line)
 		eventType := gjson.GetBytes(line, "type").String()
-		if eventType == "finish" {
+		switch eventType {
+		case "finish":
 			if detail := parseWireUsage(line); detail.InputTokens > 0 || detail.OutputTokens > 0 {
 				reporter.Publish(ctx, detail)
 			}
+		case ccwire.EventError, ccwire.EventAbort:
+			// Terminal failure events must surface instead of translating to an
+			// empty message.
+			msg := commandCodeStreamErrorMessage(line)
+			log.Warnf("commandcode: upstream stream %s event: %s", eventType, msg)
+			streamErr = fmt.Errorf("commandcode: upstream stream %s: %s", eventType, msg)
+		}
+		if streamErr != nil {
+			break
 		}
 	}
 	if errScan := scanner.Err(); errScan != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 		reporter.PublishFailure(ctx)
 		return resp, errScan
+	}
+	if streamErr != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
+		return resp, streamErr
+	}
+	if allChunks.Len() == 0 {
+		log.Warnf("commandcode: upstream returned an empty response body (status=%d)", httpResp.StatusCode)
+		return resp, fmt.Errorf("commandcode: empty upstream response")
 	}
 	reporter.EnsurePublished(ctx)
 
@@ -216,13 +235,31 @@ func (e *CommandCodeExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(make([]byte, 0, 64*1024), streamScannerBuffer)
 		var param any
+		var bodyExcerpt bytes.Buffer
+		emitted := false
 		for scanner.Scan() {
 			line := bytes.Clone(scanner.Bytes())
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-			if len(line) == 0 {
+			if len(bytes.TrimSpace(line)) == 0 {
 				continue
 			}
+			if bodyExcerpt.Len() < commandCodeBodyLogLimit {
+				if bodyExcerpt.Len() > 0 {
+					bodyExcerpt.WriteByte('\n')
+				}
+				bodyExcerpt.Write(line)
+			}
 			eventType := gjson.GetBytes(line, "type").String()
+			if eventType == ccwire.EventError || eventType == ccwire.EventAbort {
+				// Terminal failure events must surface instead of being dropped,
+				// otherwise the stream closes silently and the client only sees
+				// a generic empty_stream error.
+				msg := commandCodeStreamErrorMessage(line)
+				log.Warnf("commandcode: upstream stream %s event: %s", eventType, msg)
+				reporter.PublishFailure(ctx)
+				out <- cliproxyexecutor.StreamChunk{Err: fmt.Errorf("commandcode: upstream stream %s: %s", eventType, msg)}
+				return
+			}
 			if eventType == "finish" {
 				if detail := parseWireUsage(line); detail.InputTokens > 0 || detail.OutputTokens > 0 {
 					reporter.Publish(ctx, detail)
@@ -235,14 +272,20 @@ func (e *CommandCodeExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 					continue
 				}
 				out <- cliproxyexecutor.StreamChunk{Payload: payload}
+				emitted = true
 			}
 		}
 		if errScan := scanner.Err(); errScan != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.PublishFailure(ctx)
 			out <- cliproxyexecutor.StreamChunk{Err: errScan}
-		} else if from == sdktranslator.FromString("openai") || from.String() == "openai" {
-			out <- cliproxyexecutor.StreamChunk{Payload: []byte(`data: [DONE]`)}
+		} else {
+			if !emitted {
+				log.Warnf("commandcode: upstream stream closed without payload (status=%d, content_type=%s, body=%q)", httpResp.StatusCode, httpResp.Header.Get("Content-Type"), bodyExcerpt.String())
+			}
+			if from == sdktranslator.FromString("openai") || from.String() == "openai" {
+				out <- cliproxyexecutor.StreamChunk{Payload: []byte(`data: [DONE]`)}
+			}
 		}
 		reporter.EnsurePublished(ctx)
 	}()
@@ -378,6 +421,22 @@ func parseWireUsage(body []byte) usage.Detail {
 		CacheReadTokens:     finish.Get("inputTokenDetails.cacheReadTokens").Int(),
 		CacheCreationTokens: finish.Get("inputTokenDetails.cacheWriteTokens").Int(),
 	}
+}
+
+// commandCodeBodyLogLimit caps how many raw upstream body bytes are kept for
+// the no-payload diagnostic log.
+const commandCodeBodyLogLimit = 8 * 1024
+
+// commandCodeStreamErrorMessage extracts a human-readable message from a wire
+// error/abort event line. The exact event schema is not documented, so several
+// common field layouts are probed.
+func commandCodeStreamErrorMessage(line []byte) string {
+	for _, path := range []string{"error.message", "message", "error", "reason"} {
+		if v := strings.TrimSpace(gjson.GetBytes(line, path).String()); v != "" {
+			return v
+		}
+	}
+	return "unknown upstream error"
 }
 
 // FetchCommandCodeModels fetches models dynamically from the Command Code API.
