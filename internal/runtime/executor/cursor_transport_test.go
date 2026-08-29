@@ -182,6 +182,66 @@ func TestCursorMergeModelParamsPrecedence(t *testing.T) {
 	}
 }
 
+func TestCursorBaseAliasAndWireId(t *testing.T) {
+	cursorSetParamOptions("grok-4.6", map[string][]string{
+		"effort": {"low", "medium", "high", "xhigh"},
+	})
+	defer cursorModelParamOptions.Delete("grok-4.6")
+
+	// The agent usable list names grok with a cursor- prefix and expands
+	// variants; the picker exposes the bare base id.
+	usable := []*registry.ModelInfo{
+		{ID: "cursor-grok-4.6-low"},
+		{ID: "cursor-grok-4.6-high"},
+		{ID: "cursor-grok-4.6-xhigh"},
+	}
+	cursorDeriveBaseAliases(usable)
+
+	if alias, ok := cursorBaseAlias("grok-4.6"); !ok || alias != "cursor-grok-4.6" {
+		t.Fatalf("alias = %q (%v), want cursor-grok-4.6", alias, ok)
+	}
+
+	// Agent-prefixed variant ids decompose back to the clean picker base.
+	base, params, ok := cursorDecomposeVariantId("cursor-grok-4.6-xhigh")
+	if !ok || base != "grok-4.6" || params["effort"] != "xhigh" {
+		t.Fatalf("decompose = (%q, %v, %v), want grok-4.6 + effort:xhigh", base, params, ok)
+	}
+
+	// Wire id: grok-4.6 + effort=high rebuilds the exact usable flat id.
+	if got := cursorWireModelId("grok-4.6", map[string]string{"effort": "high"}); got != "cursor-grok-4.6-high" {
+		t.Fatalf("wire id = %q, want cursor-grok-4.6-high", got)
+	}
+	// Combination the usable list never published: bare agent base + params.
+	if got := cursorWireModelId("grok-4.6", map[string]string{"thinking": "true"}); got != "cursor-grok-4.6" {
+		t.Fatalf("wire id = %q, want bare cursor-grok-4.6", got)
+	}
+	// No params: bare agent base.
+	if got := cursorWireModelId("grok-4.6", nil); got != "cursor-grok-4.6" {
+		t.Fatalf("wire id = %q, want cursor-grok-4.6", got)
+	}
+}
+
+func TestCursorCleanCatalogFilterHidesAgentPrefixedVariants(t *testing.T) {
+	cursorSetParamOptions("grok-4.6", map[string][]string{
+		"effort": {"low", "medium", "high", "xhigh"},
+	})
+	defer cursorModelParamOptions.Delete("grok-4.6")
+	cursorDeriveBaseAliases([]*registry.ModelInfo{
+		{ID: "cursor-grok-4.6-low"},
+		{ID: "cursor-grok-4.6-high"},
+	})
+
+	models := []*registry.ModelInfo{
+		{ID: "grok-4.6"},
+		{ID: "cursor-grok-4.6-low"},
+		{ID: "cursor-grok-4.6-high"},
+	}
+	filtered := cursorCleanCatalogFilter(models)
+	if len(filtered) != 1 || filtered[0].ID != "grok-4.6" {
+		t.Fatalf("filtered = %d entries, want only grok-4.6", len(filtered))
+	}
+}
+
 func TestCursorModelParamsFor(t *testing.T) {
 	cursorSetParamOptions("grok-test", map[string][]string{
 		"thinking": {"true", "false"},

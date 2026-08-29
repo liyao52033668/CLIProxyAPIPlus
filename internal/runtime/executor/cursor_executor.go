@@ -1848,14 +1848,17 @@ func parseDataURL(url string) *cursorproto.ImageData {
 
 // buildRunRequestParams assembles the Run request. idParams carries the
 // parameters decoded from a variant-style model id; explicit request
-// parameters (parsed.ThinkingEffort) override them.
+// parameters (parsed.ThinkingEffort) override them. The outbound model id is
+// reconstructed into the agent-native flat form when the requested parameter
+// combination matches an id the usable list published.
 func buildRunRequestParams(requestModel string, parsed *parsedOpenAIRequest, conversationId string, idParams map[string]string) *cursorproto.RunRequestParams {
 	modelID := strings.TrimSpace(requestModel)
 	if modelID == "" {
 		modelID = parsed.Model
 	}
+	modelParams := cursorMergeModelParams(modelID, idParams, parsed.ThinkingEffort)
 	params := &cursorproto.RunRequestParams{
-		ModelId:        modelID,
+		ModelId:        cursorWireModelId(modelID, modelParams),
 		SystemPrompt:   parsed.SystemPrompt,
 		UserText:       parsed.UserText,
 		MessageId:      uuid.New().String(),
@@ -1863,7 +1866,7 @@ func buildRunRequestParams(requestModel string, parsed *parsedOpenAIRequest, con
 		Images:         parsed.Images,
 		Turns:          parsed.Turns,
 		BlobStore:      make(map[string][]byte),
-		ModelParams:    cursorMergeModelParams(modelID, idParams, parsed.ThinkingEffort),
+		ModelParams:    modelParams,
 	}
 
 	// Convert OpenAI tools to McpToolDefs
@@ -1917,6 +1920,129 @@ func cursorThinkingEffortFromPayload(payload []byte) string {
 // Cursor rejects parameter ids or values a model does not declare, so request
 // parameters are gated against this table.
 var cursorModelParamOptions sync.Map
+
+// cursorBaseAliasStore maps a picker base id to the agent-side base id when
+// the two services name the model differently (e.g. grok-4.6 →
+// cursor-grok-4.6: the agent usable list only carries the prefixed form).
+var cursorBaseAliasStore atomic.Value // map[string]string
+
+// cursorUsableIdStore caches every id the agent usable list published; the
+// wire model id prefers forms from this set because they are guaranteed
+// accepted by the Run stream.
+var cursorUsableIdStore atomic.Value // map[string]bool
+
+func cursorBaseAlias(pickerBase string) (string, bool) {
+	v := cursorBaseAliasStore.Load()
+	if v == nil {
+		return "", false
+	}
+	m, _ := v.(map[string]string)
+	a, ok := m[pickerBase]
+	return a, ok
+}
+
+func cursorUsableIdExists(id string) bool {
+	v := cursorUsableIdStore.Load()
+	if v == nil {
+		return false
+	}
+	m, _ := v.(map[string]bool)
+	return m[id]
+}
+
+// cursorDeriveBaseAliases derives the picker→agent base aliases and the
+// usable-id set from the GetUsableModels response. Usable ids are variant
+// expansions of a base ({base}[-thinking]-{effort}[-fast]); stripping those
+// trailing parameter tokens yields the agent-side base, which aliases a
+// picker base when it merely carries an extra naming prefix.
+func cursorDeriveBaseAliases(usable []*registry.ModelInfo) {
+	genericTokens := map[string]bool{
+		"thinking": true, "fast": true, "none": true,
+		"minimal": true, "low": true, "medium": true,
+		"high": true, "xhigh": true, "max": true,
+	}
+	pickerBases := map[string]bool{}
+	cursorModelParamOptions.Range(func(k, _ any) bool {
+		if s, ok := k.(string); ok {
+			pickerBases[s] = true
+		}
+		return true
+	})
+	usableIds := make(map[string]bool, len(usable))
+	aliases := map[string]string{}
+	for _, m := range usable {
+		if m == nil || m.ID == "" {
+			continue
+		}
+		id := strings.ToLower(m.ID)
+		usableIds[id] = true
+		if pickerBases[id] {
+			continue
+		}
+		tokens := strings.Split(id, "-")
+		stripped := 0
+		for len(tokens) > 1 && genericTokens[tokens[len(tokens)-1]] {
+			tokens = tokens[:len(tokens)-1]
+			stripped++
+		}
+		if stripped == 0 {
+			continue
+		}
+		agentBase := strings.Join(tokens, "-")
+		if pickerBases[agentBase] {
+			continue
+		}
+		// Match the longest picker base the agent base ends with, so nested
+		// names (gpt-5.4-mini vs gpt-5.4) resolve deterministically.
+		best := ""
+		for pb := range pickerBases {
+			if strings.HasSuffix(agentBase, "-"+pb) && len(pb) > len(best) {
+				best = pb
+			}
+		}
+		if best != "" {
+			aliases[best] = agentBase
+		}
+	}
+	cursorBaseAliasStore.Store(aliases)
+	cursorUsableIdStore.Store(usableIds)
+}
+
+// cursorWireModelId returns the model id to send upstream. A parameter
+// combination that the agent usable list publishes as a flat id is
+// reconstructed exactly (e.g. grok-4.6 + effort=high → cursor-grok-4.6-high,
+// the form the Run stream is known to accept); otherwise the agent-side base
+// id is sent and the parameters carry the variant knobs.
+func cursorWireModelId(base string, params map[string]string) string {
+	agentBase := base
+	if a, ok := cursorBaseAlias(base); ok && a != "" {
+		agentBase = a
+	}
+	if len(params) == 0 {
+		return agentBase
+	}
+	var parts []string
+	if params["thinking"] == "true" {
+		parts = append(parts, "thinking")
+	}
+	effort := params["effort"]
+	if effort == "" {
+		effort = params["reasoning"]
+	}
+	if effort != "" {
+		parts = append(parts, effort)
+	}
+	if params["fast"] == "true" {
+		parts = append(parts, "fast")
+	}
+	if len(parts) > 0 {
+		candidate := agentBase + "-" + strings.Join(parts, "-")
+		if cursorUsableIdExists(candidate) {
+			return candidate
+		}
+	}
+	return agentBase
+}
 
 func cursorSetParamOptions(modelId string, options map[string][]string) {
 	if modelId != "" && len(options) > 0 {
@@ -2053,13 +2179,23 @@ func cursorDecomposeVariantId(id string) (string, map[string]string, bool) {
 	})
 	sort.Slice(bases, func(i, j int) bool { return len(bases[i]) > len(bases[j]) })
 	for _, base := range bases {
-		if !strings.HasPrefix(idLower, base+"-") {
-			continue
+		options := map[string][]string{}
+		if raw, _ := cursorModelParamOptions.Load(base); raw != nil {
+			options, _ = raw.(map[string][]string)
 		}
-		raw, _ := cursorModelParamOptions.Load(base)
-		options, _ := raw.(map[string][]string)
-		if params, ok := cursorTokensToParams(options, strings.Split(idLower[len(base)+1:], "-")); ok {
-			return base, params, true
+		// The agent side may name the base differently (e.g. cursor-grok-4.6
+		// for picker id grok-4.6); variant ids under both spellings fold back.
+		prefixes := []string{base + "-"}
+		if a, ok := cursorBaseAlias(base); ok && a != "" {
+			prefixes = append(prefixes, a+"-")
+		}
+		for _, prefix := range prefixes {
+			if !strings.HasPrefix(idLower, prefix) {
+				continue
+			}
+			if params, ok := cursorTokensToParams(options, strings.Split(idLower[len(prefix):], "-")); ok {
+				return base, params, true
+			}
 		}
 	}
 	return "", nil, false
@@ -2349,6 +2485,14 @@ func FetchCursorModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config
 
 	base := fetchUsableModelsCatalog(ctx, client, accessToken)
 	rich := fetchAvailableModelsCatalog(ctx, client, accessToken)
+
+	// Derive agent-base aliases (e.g. grok-4.6 → cursor-grok-4.6) and the
+	// usable-id set from the usable list; both feed request-time variant
+	// decomposition and wire-id reconstruction. Requires the picker options
+	// cache, so only meaningful once the rich catalog was parsed.
+	if len(rich) > 0 {
+		cursorDeriveBaseAliases(base)
+	}
 
 	var merged []*registry.ModelInfo
 	switch {
