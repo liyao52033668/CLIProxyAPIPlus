@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -68,6 +69,7 @@ type cursorSession struct {
 	authID       string                                     // auth file ID that created this session (for multi-account isolation)
 	toolResultCh chan []toolResultInfo                      // receives tool results from the next HTTP request
 	resumeOutCh  chan cliproxyexecutor.StreamChunk          // output channel for resumed response
+	parked       *atomic.Bool                               // set when the current HTTP response ended via an MCP tool-call park
 	switchOutput func(ch chan cliproxyexecutor.StreamChunk) // callback to switch output channel
 }
 
@@ -296,6 +298,7 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 
 	parsed := parseOpenAIRequest(payload)
+	resolvedModel := helps.ResolveCursorModelID(req.Model, cursorModelCatalog())
 	modelName := strings.TrimSpace(parsed.Model)
 	if modelName == "" {
 		modelName = req.Model
@@ -305,7 +308,7 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	ccSessId := extractClaudeCodeSessionId(req.Payload)
 	conversationId := deriveConversationId(helps.APIKeyFromContext(ctx), ccSessId, parsed.SystemPrompt)
-	params := buildRunRequestParams(req.Model, parsed, conversationId)
+	params := buildRunRequestParams(resolvedModel, parsed, conversationId)
 
 	requestBytes, errEncode := cursorproto.EncodeRunRequest(params)
 	if errEncode != nil {
@@ -351,8 +354,8 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	id := "chatcmpl-" + uuid.New().String()[:28]
 	created := time.Now().Unix()
-	openaiResp := fmt.Sprintf(`{"id":"%s","object":"chat.completion","created":%d,"model":"%s","choices":[{"index":0,"message":{"role":"assistant","content":%s},"finish_reason":"stop"}],"usage":{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d}}`,
-		id, created, parsed.Model, jsonString(fullText.String()), inputTok, outputTok, inputTok+outputTok)
+	openaiResp := fmt.Sprintf(`{"id":"%s","object":"chat.completion","created":%d,"model":%s,"choices":[{"index":0,"message":{"role":"assistant","content":%s},"finish_reason":"stop"}],"usage":{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d}}`,
+		id, created, jsonString(parsed.Model), jsonString(fullText.String()), inputTok, outputTok, inputTok+outputTok)
 
 	// Translate response back to source format if needed
 	result := []byte(openaiResp)
@@ -408,6 +411,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	parsed := parseOpenAIRequest(payload)
 	log.Debugf("cursor: parsed request: model=%s userText=%d chars, turns=%d, tools=%d, toolResults=%d",
 		parsed.Model, len(parsed.UserText), len(parsed.Turns), len(parsed.Tools), len(parsed.ToolResults))
+	resolvedModel := helps.ResolveCursorModelID(req.Model, cursorModelCatalog())
 
 	conversationId := deriveConversationId(helps.APIKeyFromContext(ctx), ccSessionId, parsed.SystemPrompt)
 	authID := auth.ID // e.g. "cursor.json" or "cursor-account2.json"
@@ -473,7 +477,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	saved, hasCheckpoint := e.checkpoints[checkpointKey]
 	e.mu.Unlock()
 
-	params := buildRunRequestParams(req.Model, parsed, conversationId)
+	params := buildRunRequestParams(resolvedModel, parsed, conversationId)
 
 	if hasCheckpoint && saved.data != nil && saved.authID == authID {
 		// Same auth — use checkpoint normally
@@ -497,7 +501,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		e.mu.Unlock()
 		if len(parsed.ToolResults) > 0 || len(parsed.Turns) > 0 {
 			flattenConversationIntoUserText(parsed)
-			params = buildRunRequestParams(req.Model, parsed, conversationId)
+			params = buildRunRequestParams(resolvedModel, parsed, conversationId)
 		}
 	} else if len(parsed.ToolResults) > 0 || len(parsed.Turns) > 0 {
 		// Fallback: no checkpoint available (cold resume / proxy restart).
@@ -505,7 +509,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		// Cursor's turns encoding is not reliably read by the model, but userText always works.
 		log.Debugf("cursor: no checkpoint, flattening %d turns + %d tool results into userText", len(parsed.Turns), len(parsed.ToolResults))
 		flattenConversationIntoUserText(parsed)
-		params = buildRunRequestParams(req.Model, parsed, conversationId)
+		params = buildRunRequestParams(resolvedModel, parsed, conversationId)
 	}
 	requestBytes, errEncode := cursorproto.EncodeRunRequest(params)
 	if errEncode != nil {
@@ -536,6 +540,24 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	sessionCtx, sessionCancel := context.WithCancel(context.Background())
 	go cursorH2Heartbeat(sessionCtx, stream)
 
+	// Abort the upstream session when the HTTP client disconnects mid-stream.
+	// The MCP park path sets mcpParked BEFORE closing the output channel, so a
+	// normal tool-call handoff (response ends, session parked for resume) is
+	// never mistaken for a disconnect. Without this, the worker goroutine blocks
+	// forever on the output channel and the H2 connection stays open.
+	var mcpParked atomic.Bool
+	go func() {
+		select {
+		case <-ctx.Done():
+			if !mcpParked.Load() {
+				log.Infof("cursor: client disconnected mid-stream (conv=%s), aborting upstream session", conversationId)
+				sessionCancel()
+				stream.Close()
+			}
+		case <-sessionCtx.Done():
+		}
+	}()
+
 	chunks := make(chan cliproxyexecutor.StreamChunk, 64)
 	chatId := "chatcmpl-" + uuid.New().String()[:28]
 	created := time.Now().Unix()
@@ -557,8 +579,14 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		outMu.Lock()
 		out := currentOut
 		outMu.Unlock()
-		if out != nil {
-			out <- chunk
+		if out == nil {
+			return
+		}
+		select {
+		case out <- chunk:
+		case <-sessionCtx.Done():
+			// Session aborted (e.g. client disconnect watchdog) — drop the chunk
+			// so the frame loop can reach its ctx.Done exit instead of blocking.
 		}
 	}
 
@@ -568,8 +596,8 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		if finishReason != "" {
 			fr = finishReason
 		}
-		openaiJSON := fmt.Sprintf(`{"id":"%s","object":"chat.completion.chunk","created":%d,"model":"%s","choices":[{"index":0,"delta":%s,"finish_reason":%s}]}`,
-			chatId, created, parsed.Model, delta, fr)
+		openaiJSON := fmt.Sprintf(`{"id":"%s","object":"chat.completion.chunk","created":%d,"model":%s,"choices":[{"index":0,"delta":%s,"finish_reason":%s}]}`,
+			chatId, created, jsonString(parsed.Model), delta, fr)
 		sseLine := []byte("data: " + openaiJSON + "\n")
 
 		if needsTranslate {
@@ -633,12 +661,18 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				}
 			},
 			func(exec pendingMcpExec) {
+				// Mark the park BEFORE closing the output channel: the watchdog
+				// fires on request ctx end and must see the park to not treat a
+				// normal tool-call handoff as a client disconnect.
+				mcpParked.Store(true)
 				if thinkingActive {
 					thinkingActive = false
 					sendChunkSwitchable(`{"content":"</think>"}`, "")
 				}
-				toolCallJSON := fmt.Sprintf(`{"tool_calls":[{"index":%d,"id":"%s","type":"function","function":{"name":"%s","arguments":%s}}]}`,
-					toolCallIndex, exec.ToolCallId, exec.ToolName, jsonString(exec.Args))
+				// ToolCallId/ToolName come from upstream unvalidated; control
+				// characters there would split the SSE data line mid-JSON.
+				toolCallJSON := fmt.Sprintf(`{"tool_calls":[{"index":%d,"id":%s,"type":"function","function":{"name":%s,"arguments":%s}}]}`,
+					toolCallIndex, jsonString(exec.ToolCallId), jsonString(exec.ToolName), jsonString(exec.Args))
 				toolCallIndex++
 				sendChunkSwitchable(toolCallJSON, "")
 				sendChunkSwitchable(`{}`, `"tool_calls"`)
@@ -666,6 +700,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 					authID:       authID,
 					toolResultCh: toolResultCh, // reuse same channel across rounds
 					resumeOutCh:  resumeOut,
+					parked:       &mcpParked,
 					switchOutput: func(ch chan cliproxyexecutor.StreamChunk) {
 						outMu.Lock()
 						currentOut = ch
@@ -731,8 +766,8 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		inputTok, outputTok := tokenUsage.get()
 		// Build the stop chunk with usage embedded in the choices array level
 		fr := `"stop"`
-		openaiJSON := fmt.Sprintf(`{"id":"%s","object":"chat.completion.chunk","created":%d,"model":"%s","choices":[{"index":0,"delta":{},"finish_reason":%s}],"usage":{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d}}`,
-			chatId, created, parsed.Model, fr, inputTok, outputTok, inputTok+outputTok)
+		openaiJSON := fmt.Sprintf(`{"id":"%s","object":"chat.completion.chunk","created":%d,"model":%s,"choices":[{"index":0,"delta":{},"finish_reason":%s}],"usage":{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d}}`,
+			chatId, created, jsonString(parsed.Model), fr, inputTok, outputTok, inputTok+outputTok)
 		sseLine := []byte("data: " + openaiJSON + "\n")
 		if needsTranslate {
 			translated := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, payload, sseLine, &streamParam)
@@ -807,6 +842,24 @@ func (e *CursorExecutor) resumeWithToolResults(
 	// to the resumeOutCh which the new HTTP handler is reading from.
 	if session.switchOutput != nil {
 		session.switchOutput(session.resumeOutCh)
+	}
+
+	// Re-arm disconnect detection for this resume response: reset the park flag
+	// and watch the new request's context. A second tool call re-parks the
+	// session (flag set again in onMcpExec); a mid-resume client disconnect
+	// tears the upstream session down instead of blocking forever.
+	if session.parked != nil {
+		session.parked.Store(false)
+		if session.cancel != nil && session.stream != nil {
+			go func() {
+				<-ctx.Done()
+				if !session.parked.Load() {
+					log.Infof("cursor: client disconnected during resume, aborting upstream session")
+					session.cancel()
+					session.stream.Close()
+				}
+			}()
+		}
 	}
 
 	// Inject tool results — this unblocks the waiting processH2SessionFrames
@@ -1023,7 +1076,7 @@ func processH2SessionFrames(
 						if toolCallId == "" {
 							toolCallId = uuid.New().String()
 						}
-						log.Debugf("cursor: received mcpArgs from server: execMsgId=%d execId=%q toolName=%s toolCallId=%s",
+						log.Debugf("cursor: received mcpArgs from server: execMsgId=%d execId=%q toolName=%q toolCallId=%q",
 							msg.ExecMsgId, msg.ExecId, msg.McpToolName, toolCallId)
 						pending := pendingMcpExec{
 							ExecMsgId:  msg.ExecMsgId,
@@ -1408,6 +1461,20 @@ func buildRunRequestParams(requestModel string, parsed *parsedOpenAIRequest, con
 
 // --- Helpers ---
 
+// cursorModelCatalog lists the currently registered Cursor model IDs for
+// request-time model resolution (see helps.ResolveCursorModelID). Empty when
+// nothing is registered yet — resolution then passes names through unchanged.
+func cursorModelCatalog() []string {
+	infos := registry.GetGlobalRegistry().GetAvailableModelsByProvider(cursorAuthType)
+	ids := make([]string, 0, len(infos))
+	for _, info := range infos {
+		if info != nil && info.ID != "" {
+			ids = append(ids, info.ID)
+		}
+	}
+	return ids
+}
+
 func cursorAccessToken(auth *cliproxyauth.Auth) string {
 	if auth == nil || auth.Metadata == nil {
 		return ""
@@ -1566,8 +1633,8 @@ func sseChunk(id string, created int64, model string, delta string, finishReason
 	}
 	// Note: the framework's WriteChunk adds "data: " prefix and "\n\n" suffix,
 	// so we only output the raw JSON here.
-	data := fmt.Sprintf(`{"id":"%s","object":"chat.completion.chunk","created":%d,"model":"%s","choices":[{"index":0,"delta":%s,"finish_reason":%s}]}`,
-		id, created, model, delta, fr)
+	data := fmt.Sprintf(`{"id":"%s","object":"chat.completion.chunk","created":%d,"model":%s,"choices":[{"index":0,"delta":%s,"finish_reason":%s}]}`,
+		id, created, jsonString(model), delta, fr)
 	return cliproxyexecutor.StreamChunk{
 		Payload: []byte(data),
 	}

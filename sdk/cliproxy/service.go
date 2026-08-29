@@ -19,6 +19,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	keeperapp "github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/app"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/service"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -1391,6 +1392,9 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		models = executor.FetchCursorModels(ctx, a, s.cfg)
+		// Advertise Anthropic-style aliases (claude-sonnet-4-6, ...) for the
+		// claude-family models Cursor actually offers, before exclusions apply.
+		models = helps.ExpandCursorModelAliases(models)
 		models = applyExcludedModels(models, excluded)
 	case "github-copilot":
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
