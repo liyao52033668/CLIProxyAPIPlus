@@ -247,8 +247,12 @@ func ConvertCommandCodeNonStreamToClaude(_ context.Context, modelName string, or
 
 // --- SSE building helpers ---
 
+// sseEvent builds one Claude SSE frame. The trailing blank line is required:
+// the Claude handler writes chunks verbatim, so each frame must carry its own
+// event separator (matching the AppendSSEEventBytes(..., 2) convention used by
+// the other upstream-to-Claude translators).
 func sseEvent(name string, data []byte) []byte {
-	return []byte("event: " + name + "\ndata: " + string(data))
+	return []byte("event: " + name + "\ndata: " + string(data) + "\n\n")
 }
 
 func mustJSON(v any) []byte {

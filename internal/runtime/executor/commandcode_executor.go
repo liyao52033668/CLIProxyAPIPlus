@@ -283,9 +283,8 @@ func (e *CommandCodeExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			if !emitted {
 				log.Warnf("commandcode: upstream stream closed without payload (status=%d, content_type=%s, body=%q)", httpResp.StatusCode, httpResp.Header.Get("Content-Type"), bodyExcerpt.String())
 			}
-			if from == sdktranslator.FromString("openai") || from.String() == "openai" {
-				out <- cliproxyexecutor.StreamChunk{Payload: []byte(`data: [DONE]`)}
-			}
+			// The handler layer owns the SSE terminator ([DONE]); emitting a
+			// prefixed one here would be re-wrapped into "data: data: [DONE]".
 		}
 		reporter.EnsurePublished(ctx)
 	}()
@@ -493,15 +492,16 @@ func FetchCommandCodeModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 			displayName = id
 		}
 		dynamicModels = append(dynamicModels, &registry.ModelInfo{
-			ID:            id,
-			Name:          id,
-			DisplayName:   displayName,
-			ContextLength: int(contextLength),
-			OwnedBy:       "commandcode",
-			Type:          "commandcode",
-			Object:        "model",
-			Created:       now,
-			Thinking:      registry.CommandCodeThinkingSupport(),
+			ID:                 id,
+			Name:               id,
+			DisplayName:        displayName,
+			ContextLength:      int(contextLength),
+			OwnedBy:            "commandcode",
+			Type:               "commandcode",
+			Object:             "model",
+			Created:            now,
+			Thinking:           registry.CommandCodeThinkingSupport(),
+			SupportedEndpoints: []string{"/chat/completions"},
 		})
 		return true
 	})

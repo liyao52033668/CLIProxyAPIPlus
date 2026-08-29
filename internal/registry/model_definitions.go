@@ -1253,6 +1253,7 @@ func GetCommandCodeModels() []*ModelInfo {
 			ContextLength:       1000000,
 			MaxCompletionTokens: 64000,
 			Thinking:            CommandCodeThinkingSupport(),
+			SupportedEndpoints:  []string{"/chat/completions"},
 		},
 	}
 }

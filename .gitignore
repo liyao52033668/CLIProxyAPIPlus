@@ -79,3 +79,4 @@ cpa-usage-keeper-main/*
 cpa-usage-keeper-main/.env.example
 /.commandcode
 .mimosa
+/.zcode/plans
