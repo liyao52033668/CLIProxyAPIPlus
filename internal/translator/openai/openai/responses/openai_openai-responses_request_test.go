@@ -212,3 +212,23 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_OmitsResponseForma
 		t.Fatalf("response_format should be omitted, got %s; output=%s", got.Raw, out)
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_MapsReasoningEffort(t *testing.T) {
+	raw := []byte(`{"input":"hi","reasoning":{"effort":"high"}}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5.5", raw, false)
+
+	if got := gjson.GetBytes(out, "reasoning_effort").String(); got != "high" {
+		t.Fatalf("reasoning_effort = %q, want high; output=%s", got, out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_OmitsReasoningEffortWithoutReasoning(t *testing.T) {
+	raw := []byte(`{"input":"hi"}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5.5", raw, false)
+
+	if got := gjson.GetBytes(out, "reasoning_effort"); got.Exists() {
+		t.Fatalf("reasoning_effort should be omitted, got %s; output=%s", got.Raw, out)
+	}
+}

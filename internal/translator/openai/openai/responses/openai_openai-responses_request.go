@@ -55,6 +55,13 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		out, _ = sjson.SetBytes(out, "parallel_tool_calls", parallelToolCalls.Bool())
 	}
 
+	// Map Responses reasoning effort to Chat Completions reasoning_effort so
+	// downstream executors (and the shared thinking pipeline) see the caller's
+	// thinking intensity instead of dropping it at the bridge.
+	if effort := root.Get("reasoning.effort"); effort.Exists() {
+		out, _ = sjson.SetBytes(out, "reasoning_effort", effort.String())
+	}
+
 	// Convert instructions to system message
 	if instructions := root.Get("instructions"); instructions.Exists() {
 		systemMessage := []byte(`{"role":"system","content":""}`)

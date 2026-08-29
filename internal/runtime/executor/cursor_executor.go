@@ -312,6 +312,14 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 
 	clientType, requestModel := splitCursorClientType(req.Model)
+	// Variant-style ids ("...-thinking-max-fast") fold back into the base
+	// model plus encoded parameters so the clean catalog stays authoritative;
+	// explicit body parameters override the id-embedded ones.
+	idParams := map[string]string{}
+	if base, variantParams, ok := cursorDecomposeVariantId(requestModel); ok {
+		requestModel = base
+		idParams = variantParams
+	}
 	parsed := parseOpenAIRequest(payload)
 	resolvedModel := helps.ResolveCursorModelID(requestModel, cursorModelCatalog())
 	modelName := strings.TrimSpace(parsed.Model)
@@ -323,7 +331,7 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	ccSessId := extractClaudeCodeSessionId(req.Payload)
 	conversationId := deriveConversationId(helps.APIKeyFromContext(ctx), ccSessId, parsed.SystemPrompt)
-	params := buildRunRequestParams(resolvedModel, parsed, conversationId)
+	params := buildRunRequestParams(resolvedModel, parsed, conversationId, idParams)
 
 	requestBytes, errEncode := cursorproto.EncodeRunRequest(params)
 	if errEncode != nil {
@@ -435,6 +443,14 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	// A model-name prefix (sand/, bot/, grokbot/, cli/) selects the upstream
 	// client identity — i.e. the usage pool — before model resolution.
 	clientType, requestModel := splitCursorClientType(req.Model)
+	// Variant-style ids ("...-thinking-max-fast") fold back into the base
+	// model plus encoded parameters so the clean catalog stays authoritative;
+	// explicit body parameters override the id-embedded ones.
+	idParams := map[string]string{}
+	if base, variantParams, ok := cursorDecomposeVariantId(requestModel); ok {
+		requestModel = base
+		idParams = variantParams
+	}
 	parsed := parseOpenAIRequest(payload)
 	log.Debugf("cursor: parsed request: model=%s userText=%d chars, turns=%d, tools=%d, toolResults=%d",
 		parsed.Model, len(parsed.UserText), len(parsed.Turns), len(parsed.Tools), len(parsed.ToolResults))
@@ -507,7 +523,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	saved, hasCheckpoint := e.checkpoints[checkpointKey]
 	e.mu.Unlock()
 
-	params := buildRunRequestParams(resolvedModel, parsed, conversationId)
+	params := buildRunRequestParams(resolvedModel, parsed, conversationId, idParams)
 
 	if hasCheckpoint && saved.data != nil && saved.authID == authID {
 		// Same auth — use checkpoint normally
@@ -531,7 +547,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		e.mu.Unlock()
 		if len(parsed.ToolResults) > 0 || len(parsed.Turns) > 0 {
 			flattenConversationIntoUserText(parsed)
-			params = buildRunRequestParams(resolvedModel, parsed, conversationId)
+			params = buildRunRequestParams(resolvedModel, parsed, conversationId, idParams)
 		}
 	} else if len(parsed.ToolResults) > 0 || len(parsed.Turns) > 0 {
 		// Fallback: no checkpoint available (cold resume / proxy restart).
@@ -539,7 +555,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		// Cursor's turns encoding is not reliably read by the model, but userText always works.
 		log.Debugf("cursor: no checkpoint, flattening %d turns + %d tool results into userText", len(parsed.Turns), len(parsed.ToolResults))
 		flattenConversationIntoUserText(parsed)
-		params = buildRunRequestParams(resolvedModel, parsed, conversationId)
+		params = buildRunRequestParams(resolvedModel, parsed, conversationId, idParams)
 	}
 	requestBytes, errEncode := cursorproto.EncodeRunRequest(params)
 	if errEncode != nil {
@@ -1523,7 +1539,7 @@ func parseOpenAIRequest(payload []byte) *parsedOpenAIRequest {
 	p := &parsedOpenAIRequest{
 		Model:          gjson.GetBytes(payload, "model").String(),
 		Stream:         gjson.GetBytes(payload, "stream").Bool(),
-		ThinkingEffort: strings.TrimSpace(gjson.GetBytes(payload, "reasoning_effort").String()),
+		ThinkingEffort: cursorThinkingEffortFromPayload(payload),
 	}
 
 	messages := gjson.GetBytes(payload, "messages").Array()
@@ -1830,7 +1846,10 @@ func parseDataURL(url string) *cursorproto.ImageData {
 	}
 }
 
-func buildRunRequestParams(requestModel string, parsed *parsedOpenAIRequest, conversationId string) *cursorproto.RunRequestParams {
+// buildRunRequestParams assembles the Run request. idParams carries the
+// parameters decoded from a variant-style model id; explicit request
+// parameters (parsed.ThinkingEffort) override them.
+func buildRunRequestParams(requestModel string, parsed *parsedOpenAIRequest, conversationId string, idParams map[string]string) *cursorproto.RunRequestParams {
 	modelID := strings.TrimSpace(requestModel)
 	if modelID == "" {
 		modelID = parsed.Model
@@ -1844,7 +1863,7 @@ func buildRunRequestParams(requestModel string, parsed *parsedOpenAIRequest, con
 		Images:         parsed.Images,
 		Turns:          parsed.Turns,
 		BlobStore:      make(map[string][]byte),
-		ModelParams:    cursorModelParamsFor(modelID, parsed.ThinkingEffort),
+		ModelParams:    cursorMergeModelParams(modelID, idParams, parsed.ThinkingEffort),
 	}
 
 	// Convert OpenAI tools to McpToolDefs
@@ -1858,6 +1877,39 @@ func buildRunRequestParams(requestModel string, parsed *parsedOpenAIRequest, con
 	}
 
 	return params
+}
+
+// cursorThinkingEffortFromPayload extracts the requested reasoning level from
+// any of the three client styles on the OpenAI-shaped payload:
+//   - Chat Completions: reasoning_effort ("high");
+//   - Responses API:    reasoning.effort ("high");
+//   - Anthropic:        thinking.budget_tokens (converted via the shared
+//     budget→level ladder; thinking.type "disabled" maps to none).
+//
+// Normally the format translators have already normalized the first two into
+// reasoning_effort; the extra lookups are belt-and-braces for clients that
+// mix styles or translator paths that do not carry the fields. Empty when the
+// client expressed no preference (upstream defaults apply).
+func cursorThinkingEffortFromPayload(payload []byte) string {
+	if v := gjson.GetBytes(payload, "reasoning_effort"); v.Exists() {
+		return strings.TrimSpace(v.String())
+	}
+	if v := gjson.GetBytes(payload, "reasoning.effort"); v.Exists() {
+		return strings.TrimSpace(v.String())
+	}
+	if v := gjson.GetBytes(payload, "thinking"); v.Exists() && v.IsObject() {
+		switch strings.ToLower(strings.TrimSpace(v.Get("type").String())) {
+		case "disabled":
+			return string(thinking.LevelNone)
+		case "enabled":
+			if b := v.Get("budget_tokens"); b.Exists() {
+				if level, ok := thinking.ConvertBudgetToLevel(int(b.Int())); ok {
+					return level
+				}
+			}
+		}
+	}
+	return ""
 }
 
 // cursorModelParamOptions caches per-model parameter definitions from the
@@ -1955,6 +2007,117 @@ func cursorModelParamsFor(modelId, effort string) map[string]string {
 		return nil
 	}
 	return params
+}
+
+// cursorMergeModelParams combines the parameters decoded from a variant-style
+// model id with the explicitly requested reasoning level. The explicit
+// request wins: its effort/thinking choices replace the id-embedded ones,
+// while unrelated id parameters (e.g. fast) survive.
+func cursorMergeModelParams(modelId string, idParams map[string]string, bodyEffort string) map[string]string {
+	merged := make(map[string]string, len(idParams)+2)
+	for k, v := range idParams {
+		merged[k] = v
+	}
+	if bodyEffort != "" {
+		delete(merged, "effort")
+		delete(merged, "reasoning")
+		delete(merged, "thinking")
+		for k, v := range cursorModelParamsFor(modelId, bodyEffort) {
+			merged[k] = v
+		}
+	}
+	if len(merged) == 0 {
+		return nil
+	}
+	return merged
+}
+
+// cursorDecomposeVariantId folds a variant-expanded model id (e.g.
+// "claude-opus-5-thinking-max-fast") back into its base id and encoded
+// RequestedModel parameters. The candidate base must be a known picker
+// catalog id and every remaining token must map to a parameter value the
+// base declares; otherwise the id is not a recognized variant and is
+// returned unchanged. Longest base wins so "gpt-5.4-mini-none" decomposes
+// against "gpt-5.4-mini" rather than "gpt-5.4".
+func cursorDecomposeVariantId(id string) (string, map[string]string, bool) {
+	idLower := strings.ToLower(strings.TrimSpace(id))
+	if idLower == "" {
+		return "", nil, false
+	}
+	bases := make([]string, 0, 16)
+	cursorModelParamOptions.Range(func(k, _ any) bool {
+		if s, ok := k.(string); ok && len(s) > 0 && len(s) < len(idLower) {
+			bases = append(bases, s)
+		}
+		return true
+	})
+	sort.Slice(bases, func(i, j int) bool { return len(bases[i]) > len(bases[j]) })
+	for _, base := range bases {
+		if !strings.HasPrefix(idLower, base+"-") {
+			continue
+		}
+		raw, _ := cursorModelParamOptions.Load(base)
+		options, _ := raw.(map[string][]string)
+		if params, ok := cursorTokensToParams(options, strings.Split(idLower[len(base)+1:], "-")); ok {
+			return base, params, true
+		}
+	}
+	return "", nil, false
+}
+
+// cursorTokensToParams maps the dash-separated suffix tokens of a variant id
+// onto RequestedModel parameters, validated against the base model's declared
+// options. Any unrecognized token fails the whole decomposition.
+func cursorTokensToParams(options map[string][]string, tokens []string) (map[string]string, bool) {
+	if len(options) == 0 || len(tokens) == 0 {
+		return nil, false
+	}
+	params := make(map[string]string, len(tokens))
+	for _, tok := range tokens {
+		switch {
+		case tok == "thinking" && slices.Contains(options["thinking"], "true"):
+			params["thinking"] = "true"
+		case tok == "fast":
+			// The fast/max-mode switch is not published as a parameter
+			// definition; it is accepted unconditionally (matches the ids
+			// the agent usable list itself hands out).
+			params["fast"] = "true"
+		default:
+			matched := false
+			for _, pid := range []string{"effort", "reasoning"} {
+				if values, ok := options[pid]; ok && slices.Contains(values, tok) {
+					params[pid] = tok
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return nil, false
+			}
+		}
+	}
+	if len(params) == 0 {
+		return nil, false
+	}
+	return params, true
+}
+
+// cursorCleanCatalogFilter hides variant-expanded ids from the exposed model
+// list, keeping clean base ids and non-variant special ids (e.g. "default").
+// Hidden variant ids remain routable: request-time decomposition folds them
+// back into base + parameters.
+func cursorCleanCatalogFilter(models []*registry.ModelInfo) []*registry.ModelInfo {
+	out := make([]*registry.ModelInfo, 0, len(models))
+	for _, info := range models {
+		if info == nil || info.ID == "" {
+			continue
+		}
+		if _, _, ok := cursorDecomposeVariantId(info.ID); ok {
+			continue
+		}
+		out = append(out, info)
+	}
+	return out
 }
 
 // --- Helpers ---
@@ -2199,6 +2362,9 @@ func FetchCursorModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config
 		logCursorCatalogDiff(base, rich)
 		merged = mergeCursorModels(base, rich)
 	}
+	// Expose only clean ids: variant expansions stay routable via request-time
+	// decomposition but are hidden from the model list.
+	merged = cursorCleanCatalogFilter(merged)
 	if len(merged) == 0 {
 		return GetCursorFallbackModels()
 	}

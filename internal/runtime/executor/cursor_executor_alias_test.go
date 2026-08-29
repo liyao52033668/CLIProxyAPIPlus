@@ -7,7 +7,7 @@ func TestCursorRunRequestParamsUseNormalizedRequestModel(t *testing.T) {
 	payload := []byte(`{"model":"cursor-auto","messages":[{"role":"user","content":"hello"}]}`)
 
 	parsed := parseOpenAIRequest(payload)
-	params := buildRunRequestParams(reqModel, parsed, "conv-1")
+	params := buildRunRequestParams(reqModel, parsed, "conv-1", nil)
 
 	if params.ModelId != reqModel {
 		t.Fatalf("params.ModelId = %q, want normalized request model %q", params.ModelId, reqModel)
