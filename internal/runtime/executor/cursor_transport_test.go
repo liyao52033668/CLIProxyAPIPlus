@@ -242,6 +242,46 @@ func TestCursorCleanCatalogFilterHidesAgentPrefixedVariants(t *testing.T) {
 	}
 }
 
+func TestCursorCleanCatalogFilterHidesLegacyVariants(t *testing.T) {
+	// Legacy-generation bases (claude-4.6-opus, gpt-5.2) are absent from the
+	// picker, but their variant expansions end in parameter tokens — hidden.
+	cursorSetParamOptions("grok-4.6", map[string][]string{
+		"effort": {"low", "medium", "high", "xhigh"},
+	})
+	defer cursorModelParamOptions.Delete("grok-4.6")
+	cursorDeriveBaseAliases([]*registry.ModelInfo{
+		{ID: "cursor-grok-4.6-low"},
+		{ID: "cursor-grok-4.6-high"},
+	})
+	cursorPickerIdStore.Store(map[string]bool{"grok-4.6": true, "claude-sonnet-5": true})
+
+	models := []*registry.ModelInfo{
+		{ID: "default"},
+		{ID: "grok-4.6"},
+		{ID: "claude-sonnet-5"},
+		{ID: "claude-4-sonnet"},              // clean legacy id: kept
+		{ID: "claude-4-sonnet-thinking"},     // legacy variant: hidden
+		{ID: "claude-4.6-opus-max-thinking"}, // legacy variant: hidden
+		{ID: "gpt-5.2-xhigh-fast"},           // legacy variant: hidden
+		{ID: "gpt-5.5-extra-high"},           // hidden ("high" tail token)
+		{ID: "gpt-5.3-codex-xhigh-fast"},     // hidden ("fast" tail token)
+	}
+	filtered := cursorCleanCatalogFilter(models)
+	ids := make([]string, 0, len(filtered))
+	for _, m := range filtered {
+		ids = append(ids, m.ID)
+	}
+	want := []string{"default", "grok-4.6", "claude-sonnet-5", "claude-4-sonnet"}
+	if len(filtered) != len(want) {
+		t.Fatalf("filtered ids = %v, want %v", ids, want)
+	}
+	for _, w := range want {
+		if !slices.Contains(ids, w) {
+			t.Errorf("filtered ids %v missing %q", ids, w)
+		}
+	}
+}
+
 func TestCursorModelParamsFor(t *testing.T) {
 	cursorSetParamOptions("grok-test", map[string][]string{
 		"thinking": {"true", "false"},

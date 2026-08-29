@@ -1931,6 +1931,27 @@ var cursorBaseAliasStore atomic.Value // map[string]string
 // accepted by the Run stream.
 var cursorUsableIdStore atomic.Value // map[string]bool
 
+// cursorPickerIdStore caches every id the AvailableModels picker catalog
+// published; those are the "clean" ids the model list should expose.
+var cursorPickerIdStore atomic.Value // map[string]bool
+
+func cursorPickerIdExists(id string) bool {
+	v := cursorPickerIdStore.Load()
+	if v == nil {
+		return false
+	}
+	m, _ := v.(map[string]bool)
+	return m[id]
+}
+
+// cursorGenericParamTokens are the dash-segments a variant expansion may end
+// with, across all model families.
+var cursorGenericParamTokens = map[string]bool{
+	"thinking": true, "fast": true, "none": true,
+	"minimal": true, "low": true, "medium": true,
+	"high": true, "xhigh": true, "max": true,
+}
+
 func cursorBaseAlias(pickerBase string) (string, bool) {
 	v := cursorBaseAliasStore.Load()
 	if v == nil {
@@ -2251,6 +2272,17 @@ func cursorCleanCatalogFilter(models []*registry.ModelInfo) []*registry.ModelInf
 		if _, _, ok := cursorDecomposeVariantId(info.ID); ok {
 			continue
 		}
+		// Legacy-generation variant ids whose base predates the current
+		// picker naming (e.g. claude-4.5-opus-high, gpt-5.2-xhigh-fast) end
+		// in a parameter token too — hide them as well. Clean ids (no
+		// parameter-token tail) and picker ids always survive.
+		idLower := strings.ToLower(info.ID)
+		if !cursorPickerIdExists(idLower) {
+			tokens := strings.Split(idLower, "-")
+			if len(tokens) > 1 && cursorGenericParamTokens[tokens[len(tokens)-1]] {
+				continue
+			}
+		}
 		out = append(out, info)
 	}
 	return out
@@ -2492,6 +2524,13 @@ func FetchCursorModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config
 	// cache, so only meaningful once the rich catalog was parsed.
 	if len(rich) > 0 {
 		cursorDeriveBaseAliases(base)
+		pickerIds := make(map[string]bool, len(rich))
+		for _, m := range rich {
+			if m != nil && m.ID != "" {
+				pickerIds[strings.ToLower(m.ID)] = true
+			}
+		}
+		cursorPickerIdStore.Store(pickerIds)
 	}
 
 	var merged []*registry.ModelInfo
