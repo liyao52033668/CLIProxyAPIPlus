@@ -3,10 +3,12 @@ package executor
 import (
 	"bytes"
 	"compress/gzip"
+	"slices"
 	"testing"
 	"time"
 
 	cursorproto "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cursor/proto"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 )
 
 func TestSplitCursorClientType(t *testing.T) {
@@ -180,10 +182,54 @@ func TestParseAvailableModelsResponse(t *testing.T) {
 	}
 }
 
-func TestParseAvailableModelsResponseSkipsDefault(t *testing.T) {
+func TestParseAvailableModelsResponseKeepsDefault(t *testing.T) {
+	// "default" is a valid account-level id; it must survive parsing.
 	response := tlen(2, ts(1, "default"))
-	if models := parseAvailableModelsResponse(response); len(models) != 0 {
-		t.Fatalf("default entry not filtered: %d models", len(models))
+	models := parseAvailableModelsResponse(response)
+	if len(models) != 1 || models[0].ID != "default" {
+		t.Fatalf("default entry lost: %d models", len(models))
+	}
+}
+
+func TestMergeCursorModels(t *testing.T) {
+	base := []*registry.ModelInfo{
+		{ID: "default", ContextLength: 0},
+		{ID: "composer-2", ContextLength: 200000, Thinking: &registry.ThinkingSupport{Max: 50000, DynamicAllowed: true}},
+	}
+	rich := []*registry.ModelInfo{
+		// Overlapping id: enriches the base entry in place.
+		{ID: "composer-2", ContextLength: 300000, Thinking: &registry.ThinkingSupport{
+			Max: 50000, DynamicAllowed: true, ZeroAllowed: true, Levels: []string{"low", "high"},
+		}},
+		// Picker-only id: appended.
+		{ID: "claude-fable-5", ContextLength: 300000},
+	}
+
+	merged := mergeCursorModels(base, rich)
+	if len(merged) != 3 {
+		t.Fatalf("merged %d models, want 3", len(merged))
+	}
+	ids := make([]string, 0, len(merged))
+	for _, m := range merged {
+		ids = append(ids, m.ID)
+	}
+	for _, want := range []string{"default", "composer-2", "claude-fable-5"} {
+		if !slices.Contains(ids, want) {
+			t.Errorf("merged ids %v missing %q", ids, want)
+		}
+	}
+
+	var composer *registry.ModelInfo
+	for _, m := range merged {
+		if m.ID == "composer-2" {
+			composer = m
+		}
+	}
+	if composer.ContextLength != 300000 {
+		t.Errorf("composer-2 context = %d, want enriched 300000", composer.ContextLength)
+	}
+	if composer.Thinking == nil || !composer.Thinking.ZeroAllowed || len(composer.Thinking.Levels) != 2 {
+		t.Errorf("composer-2 thinking = %+v, want enriched levels/zeroAllowed", composer.Thinking)
 	}
 }
 

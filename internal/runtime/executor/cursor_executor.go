@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -2167,50 +2168,138 @@ func decodeMcpArgsToJSON(args map[string][]byte) string {
 
 // --- Model Discovery ---
 
-// FetchCursorModels retrieves available models from Cursor's API. The rich
-// AvailableModels catalog (real context limits, thinking/effort parameter
-// definitions) is tried first; the legacy GetUsableModels RPC and the static
-// fallback remain as degradation paths.
+// FetchCursorModels retrieves available models from Cursor's API.
+// The account's usable ids (GetUsableModels, including special ids like
+// "default") stay the base catalog; the richer AvailableModels catalog
+// contributes real context limits, thinking/effort parameter definitions and
+// any additional picker ids, so nothing that used to be listed disappears.
 func FetchCursorModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config) []*registry.ModelInfo {
 	accessToken := cursorAccessToken(auth)
 	if accessToken == "" {
 		return GetCursorFallbackModels()
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	client := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, 0)
 
-	// Rich catalog first: real context limits + per-model parameters.
-	status, body, err := doCursorUnary(ctx, client, cursorAPIURL+cursorAvailableModelsPath, accessToken, availableModelsRequestBody(), "application/proto")
-	if err == nil && status >= 200 && status < 300 {
-		if models := parseAvailableModelsResponse(body); len(models) > 0 {
-			return models
-		}
-		log.Debugf("cursor: AvailableModels response had no usable models")
-	} else if err != nil {
-		log.Debugf("cursor: AvailableModels request failed: %v", err)
-	} else {
-		log.Debugf("cursor: AvailableModels request returned status %d", status)
-	}
+	base := fetchUsableModelsCatalog(ctx, client, accessToken)
+	rich := fetchAvailableModelsCatalog(ctx, client, accessToken)
 
-	// Legacy catalog (GetUsableModels is a unary RPC call, not streaming).
-	status, body, err = doCursorUnary(ctx, client, cursorAPIURL+cursorModelsPath, accessToken, nil, "application/proto")
+	var merged []*registry.ModelInfo
+	switch {
+	case len(base) == 0 && len(rich) == 0:
+		return GetCursorFallbackModels()
+	case len(base) == 0:
+		merged = rich
+	case len(rich) == 0:
+		merged = base
+	default:
+		logCursorCatalogDiff(base, rich)
+		merged = mergeCursorModels(base, rich)
+	}
+	if len(merged) == 0 {
+		return GetCursorFallbackModels()
+	}
+	return merged
+}
+
+// logCursorCatalogDiff dumps the id-level difference between the agent usable
+// list and the picker catalog, so a deploy can settle which side actually
+// carries the extra ids for this account.
+func logCursorCatalogDiff(base, rich []*registry.ModelInfo) {
+	if !log.IsLevelEnabled(log.DebugLevel) {
+		return
+	}
+	idOf := func(models []*registry.ModelInfo) map[string]bool {
+		ids := make(map[string]bool, len(models))
+		for _, m := range models {
+			if m != nil && m.ID != "" {
+				ids[m.ID] = true
+			}
+		}
+		return ids
+	}
+	baseIds, richIds := idOf(base), idOf(rich)
+	var onlyUsable, onlyPicker []string
+	for id := range baseIds {
+		if !richIds[id] {
+			onlyUsable = append(onlyUsable, id)
+		}
+	}
+	for id := range richIds {
+		if !baseIds[id] {
+			onlyPicker = append(onlyPicker, id)
+		}
+	}
+	sort.Strings(onlyUsable)
+	sort.Strings(onlyPicker)
+	log.Debugf("cursor: catalog diff: usable=%d picker=%d only-in-usable=%v only-in-picker=%v",
+		len(baseIds), len(richIds), onlyUsable, onlyPicker)
+}
+
+// fetchUsableModelsCatalog queries agent.v1.AgentService/GetUsableModels.
+func fetchUsableModelsCatalog(ctx context.Context, client *http.Client, accessToken string) []*registry.ModelInfo {
+	status, body, err := doCursorUnary(ctx, client, cursorAPIURL+cursorModelsPath, accessToken, nil, "application/proto")
 	if err != nil {
 		log.Debugf("cursor: models request failed: %v", err)
-		return GetCursorFallbackModels()
+		return nil
 	}
 	if status < 200 || status >= 300 {
 		log.Debugf("cursor: models request returned status %d", status)
-		return GetCursorFallbackModels()
+		return nil
 	}
+	return parseModelsResponse(body)
+}
 
-	models := parseModelsResponse(body)
-	if len(models) == 0 {
-		return GetCursorFallbackModels()
+// fetchAvailableModelsCatalog queries aiserver.v1.AiService/AvailableModels.
+func fetchAvailableModelsCatalog(ctx context.Context, client *http.Client, accessToken string) []*registry.ModelInfo {
+	status, body, err := doCursorUnary(ctx, client, cursorAPIURL+cursorAvailableModelsPath, accessToken, availableModelsRequestBody(), "application/proto")
+	if err != nil {
+		log.Debugf("cursor: AvailableModels request failed: %v", err)
+		return nil
 	}
-	return models
+	if status < 200 || status >= 300 {
+		log.Debugf("cursor: AvailableModels request returned status %d", status)
+		return nil
+	}
+	return parseAvailableModelsResponse(body)
+}
+
+// mergeCursorModels keeps every base entry and enriches it with the picker
+// catalog's metadata; ids only present in the picker catalog are appended.
+func mergeCursorModels(base, rich []*registry.ModelInfo) []*registry.ModelInfo {
+	merged := make([]*registry.ModelInfo, 0, len(base)+len(rich))
+	byId := make(map[string]*registry.ModelInfo, len(base)+len(rich))
+	for _, info := range base {
+		if info == nil || info.ID == "" {
+			continue
+		}
+		if _, exists := byId[info.ID]; exists {
+			continue
+		}
+		byId[info.ID] = info
+		merged = append(merged, info)
+	}
+	for _, info := range rich {
+		if info == nil || info.ID == "" {
+			continue
+		}
+		if existing, exists := byId[info.ID]; exists {
+			// Enrich the usable-list entry with picker metadata.
+			if info.ContextLength > 0 {
+				existing.ContextLength = info.ContextLength
+			}
+			if info.Thinking != nil {
+				existing.Thinking = info.Thinking
+			}
+			continue
+		}
+		byId[info.ID] = info
+		merged = append(merged, info)
+	}
+	return merged
 }
 
 const cursorAvailableModelsPath = "/aiserver.v1.AiService/AvailableModels"
@@ -2313,9 +2402,10 @@ func parseAvailableModelEntry(data []byte) *registry.ModelInfo {
 		}
 	}
 
-	// Hidden internal entries and the account's "default" alias carry no
-	// usable identity of their own.
-	if name == "" || name == "default" {
+	// Entries without a routable id carry no identity of their own. Note:
+	// "default" is a valid account-level id and must survive here; the merge
+	// dedupes it against the usable-list entry.
+	if name == "" {
 		return nil
 	}
 	if displayName == "" {
