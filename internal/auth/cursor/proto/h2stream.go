@@ -1,10 +1,14 @@
 package proto
 
 import (
+	"bufio"
 	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,7 +20,28 @@ import (
 const (
 	defaultInitialWindowSize = 65535 // HTTP/2 default
 	maxFramePayload          = 16384 // HTTP/2 default max frame size
+	// connectHandshakeTimeout bounds only the HTTP CONNECT tunnel setup with an
+	// egress proxy, before the upstream TLS connection exists. Zero afterwards.
+	connectHandshakeTimeout = 30 * time.Second
 )
+
+// H2Conn is a TLS+HTTP/2 connection that has completed the client preface and
+// SETTINGS handshake but carries no stream yet. One stream is opened per
+// connection (OpenStream), mirroring Cursor's per-turn stream lifecycle; the
+// executor pool caches pre-warmed H2Conns to skip the handshake RTT.
+type H2Conn struct {
+	framer *http2.Framer
+	conn   net.Conn
+	host   string
+
+	// Server's send-window state, captured during the handshake.
+	serverInitialWindowSize int32
+	connWindowSize          int32
+
+	createdAt time.Time
+	openMu    sync.Mutex
+	opened    bool
+}
 
 // H2Stream provides bidirectional HTTP/2 streaming for the Connect protocol.
 // Go's net/http does not support full-duplex HTTP/2, so we use the low-level framer.
@@ -49,13 +74,98 @@ func (s *H2Stream) FrameNum() int64 {
 	return s.frameNum
 }
 
-// DialH2Stream establishes a TLS+HTTP/2 connection and opens a new stream.
-func DialH2Stream(host string, headers map[string]string) (*H2Stream, error) {
-	tlsConn, err := tls.Dial("tcp", host+":443", &tls.Config{
+// dialTunnel opens a TCP connection to host:443, tunneled through an HTTP
+// CONNECT proxy when proxyURL is non-empty (http/https proxy schemes).
+func dialTunnel(host, proxyURL string) (net.Conn, error) {
+	if strings.TrimSpace(proxyURL) == "" {
+		return net.Dial("tcp", host+":443")
+	}
+	if !strings.Contains(proxyURL, "://") {
+		proxyURL = "http://" + proxyURL
+	}
+	u, err := url.Parse(proxyURL)
+	if err != nil {
+		return nil, fmt.Errorf("h2: invalid proxy URL: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, fmt.Errorf("h2: unsupported proxy scheme %q", u.Scheme)
+	}
+	proxyPort := u.Port()
+	if proxyPort == "" {
+		if u.Scheme == "https" {
+			proxyPort = "443"
+		} else {
+			proxyPort = "80"
+		}
+	}
+	var raw net.Conn
+	if u.Scheme == "https" {
+		raw, err = tls.Dial("tcp", net.JoinHostPort(u.Hostname(), proxyPort), &tls.Config{ServerName: u.Hostname()})
+	} else {
+		raw, err = net.Dial("tcp", net.JoinHostPort(u.Hostname(), proxyPort))
+	}
+	if err != nil {
+		return nil, fmt.Errorf("h2: proxy dial failed: %w", err)
+	}
+	// Bound only the CONNECT handshake; the deadline is cleared once the
+	// tunnel is established and before TLS.
+	_ = raw.SetDeadline(time.Now().Add(connectHandshakeTimeout))
+	req := &http.Request{
+		Method: http.MethodConnect,
+		URL:    &url.URL{Scheme: "https", Host: host},
+		Host:   host,
+		Header: make(http.Header),
+	}
+	if u.User != nil {
+		pass, _ := u.User.Password()
+		req.SetBasicAuth(u.User.Username(), pass)
+	}
+	if err := req.Write(raw); err != nil {
+		raw.Close()
+		return nil, fmt.Errorf("h2: proxy CONNECT write failed: %w", err)
+	}
+	br := bufio.NewReader(raw)
+	resp, err := http.ReadResponse(br, req)
+	if err != nil {
+		raw.Close()
+		return nil, fmt.Errorf("h2: proxy CONNECT read failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		raw.Close()
+		return nil, fmt.Errorf("h2: proxy CONNECT failed: %s", resp.Status)
+	}
+	_ = raw.SetDeadline(time.Time{})
+	if br.Buffered() > 0 {
+		// The reader may have buffered the first bytes of the TLS stream.
+		return &bufferedConn{Conn: raw, r: br}, nil
+	}
+	return raw, nil
+}
+
+// bufferedConn serves buffered bytes before the underlying connection, so
+// TLS can read a response the CONNECT reader already pulled in.
+type bufferedConn struct {
+	net.Conn
+	r *bufio.Reader
+}
+
+func (c *bufferedConn) Read(p []byte) (int, error) { return c.r.Read(p) }
+
+// DialH2Conn establishes a TLS+HTTP/2 connection (optionally through an HTTP
+// CONNECT proxy) and completes the client preface + SETTINGS handshake.
+func DialH2Conn(host, proxyURL string) (*H2Conn, error) {
+	raw, err := dialTunnel(host, proxyURL)
+	if err != nil {
+		return nil, err
+	}
+	tlsConn := tls.Client(raw, &tls.Config{
+		ServerName: host,
 		NextProtos: []string{"h2"},
 	})
-	if err != nil {
-		return nil, fmt.Errorf("h2: TLS dial failed: %w", err)
+	if err := tlsConn.Handshake(); err != nil {
+		raw.Close()
+		return nil, fmt.Errorf("h2: TLS handshake failed: %w", err)
 	}
 	if tlsConn.ConnectionState().NegotiatedProtocol != "h2" {
 		tlsConn.Close()
@@ -120,13 +230,33 @@ func DialH2Stream(host string, headers map[string]string) (*H2Stream, error) {
 	}
 handshakeDone:
 
-	// Build HEADERS
+	return &H2Conn{
+		framer:                  framer,
+		conn:                    tlsConn,
+		host:                    host,
+		serverInitialWindowSize: serverInitialWindowSize,
+		connWindowSize:          connWindowSize,
+		createdAt:               time.Now(),
+	}, nil
+}
+
+// OpenStream writes the request HEADERS on the connection's single stream and
+// starts the frame read loop. It returns an error if a stream was already
+// opened on this connection.
+func (c *H2Conn) OpenStream(headers map[string]string) (*H2Stream, error) {
+	c.openMu.Lock()
+	defer c.openMu.Unlock()
+	if c.opened {
+		return nil, fmt.Errorf("h2: stream already opened on this connection")
+	}
+	c.opened = true
+
 	streamID := uint32(1)
 	var hdrBuf []byte
 	enc := hpack.NewEncoder(&sliceWriter{buf: &hdrBuf})
 	enc.WriteField(hpack.HeaderField{Name: ":method", Value: "POST"})
 	enc.WriteField(hpack.HeaderField{Name: ":scheme", Value: "https"})
-	enc.WriteField(hpack.HeaderField{Name: ":authority", Value: host})
+	enc.WriteField(hpack.HeaderField{Name: ":authority", Value: c.host})
 	if p, ok := headers[":path"]; ok {
 		enc.WriteField(hpack.HeaderField{Name: ":path", Value: p})
 	}
@@ -137,30 +267,53 @@ handshakeDone:
 		enc.WriteField(hpack.HeaderField{Name: k, Value: v})
 	}
 
-	if err := framer.WriteHeaders(http2.HeadersFrameParam{
+	if err := c.framer.WriteHeaders(http2.HeadersFrameParam{
 		StreamID:      streamID,
 		BlockFragment: hdrBuf,
 		EndStream:     false,
 		EndHeaders:    true,
 	}); err != nil {
-		tlsConn.Close()
 		return nil, fmt.Errorf("h2: headers write failed: %w", err)
 	}
 
 	s := &H2Stream{
-		framer:     framer,
-		conn:       tlsConn,
+		framer:     c.framer,
+		conn:       c.conn,
 		streamID:   streamID,
 		dataCh:     make(chan []byte, 256),
 		doneCh:     make(chan struct{}),
 		id:         fmt.Sprintf("%d-%s", streamID, time.Now().Format("150405.000")),
 		frameNum:   0,
-		sendWindow: serverInitialWindowSize,
-		connWindow: connWindowSize,
+		sendWindow: c.serverInitialWindowSize,
+		connWindow: c.connWindowSize,
 	}
 	s.windowCond = sync.NewCond(&s.windowMu)
 	go s.readLoop()
 	return s, nil
+}
+
+// Close tears the connection down.
+func (c *H2Conn) Close() {
+	c.conn.Close()
+}
+
+// CreatedAt reports when the connection finished its handshake; the pool uses
+// it to expire idle connections.
+func (c *H2Conn) CreatedAt() time.Time { return c.createdAt }
+
+// DialH2Stream establishes a TLS+HTTP/2 connection (optionally through an
+// HTTP CONNECT proxy), opens a stream and writes the request HEADERS.
+func DialH2Stream(host, proxyURL string, headers map[string]string) (*H2Stream, error) {
+	conn, err := DialH2Conn(host, proxyURL)
+	if err != nil {
+		return nil, err
+	}
+	stream, err := conn.OpenStream(headers)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return stream, nil
 }
 
 // Write sends a DATA frame on the stream, respecting flow control.

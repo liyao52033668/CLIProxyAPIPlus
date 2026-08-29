@@ -32,6 +32,7 @@ const (
 	ServerMsgExecBgShellSpawn                      // Rejected: background shell
 	ServerMsgExecWriteShellStdin                   // Rejected: write shell stdin
 	ServerMsgExecOther                             // Other exec types (respond with empty)
+	ServerMsgInteractionQuery                      // Server asks for approval (e.g. web search)
 	ServerMsgTurnEnded                             // Turn has ended (no more output)
 	ServerMsgHeartbeat                             // Server heartbeat
 	ServerMsgTokenDelta                            // Token usage delta
@@ -70,6 +71,20 @@ type DecodedServerMessage struct {
 
 	// For TokenDeltaUpdate
 	TokenDelta int64
+
+	// For InteractionQuery (server-initiated approval prompts, e.g. web search)
+	InteractionQueryId        uint32
+	InteractionQueryWebSearch bool
+
+	// For TurnEndedUpdate token counters. Newer upstream generations report
+	// real per-turn usage here; the embedded descriptor generation does not,
+	// so counters stay zero and callers must treat zero as "not reported".
+	HasTurnTokens        bool
+	TurnInputTokens      int64
+	TurnOutputTokens     int64
+	TurnCacheReadTokens  int64
+	TurnCacheWriteTokens int64
+	TurnReasoningTokens  int64
 
 	// For conversation checkpoint update (raw bytes, not decoded)
 	CheckpointData []byte
@@ -111,6 +126,8 @@ func DecodeAgentServerMessage(data []byte) (*DecodedServerMessage, error) {
 				msg.Type = ServerMsgCheckpoint
 				msg.CheckpointData = append([]byte(nil), val...) // copy raw bytes
 				log.Debugf("DecodeAgentServerMessage: captured checkpoint %d bytes", len(val))
+			case ASM_InteractionQuery:
+				decodeInteractionQuery(val, msg)
 			}
 
 		case protowire.VarintType:
@@ -180,9 +197,17 @@ func decodeInteractionUpdate(data []byte, msg *DecodedServerMessage) {
 				// heartbeat from server
 				msg.Type = ServerMsgHeartbeat
 			case 14:
-				// turn_ended - critical: model finished generating
+				// turn_ended - critical: model finished generating. Newer
+				// generations embed real token counters in the payload.
 				msg.Type = ServerMsgTurnEnded
-				log.Debugf("decodeInteractionUpdate: TurnEndedUpdate - stream should end")
+				msg.HasTurnTokens = true
+				msg.TurnInputTokens = decodeVarintField(val, TEU_InputTokens)
+				msg.TurnOutputTokens = decodeVarintField(val, TEU_OutputTokens)
+				msg.TurnCacheReadTokens = decodeVarintField(val, TEU_CacheRead)
+				msg.TurnCacheWriteTokens = decodeVarintField(val, TEU_CacheWrite)
+				msg.TurnReasoningTokens = decodeVarintField(val, TEU_ReasoningTokens)
+				log.Debugf("decodeInteractionUpdate: TurnEndedUpdate in=%d out=%d cacheRead=%d cacheWrite=%d reasoning=%d",
+					msg.TurnInputTokens, msg.TurnOutputTokens, msg.TurnCacheReadTokens, msg.TurnCacheWriteTokens, msg.TurnReasoningTokens)
 			case 16:
 				// step_started - ignore
 				log.Debugf("decodeInteractionUpdate: StepStartedUpdate (ignored)")
@@ -193,6 +218,48 @@ func decodeInteractionUpdate(data []byte, msg *DecodedServerMessage) {
 				log.Debugf("decodeInteractionUpdate: unknown field %d", num)
 			}
 		} else {
+			n := protowire.ConsumeFieldValue(num, typ, data)
+			if n < 0 {
+				return
+			}
+			data = data[n:]
+		}
+	}
+}
+
+func decodeInteractionQuery(data []byte, msg *DecodedServerMessage) {
+	for len(data) > 0 {
+		num, typ, n := protowire.ConsumeTag(data)
+		if n < 0 {
+			return
+		}
+		data = data[n:]
+
+		switch typ {
+		case protowire.VarintType:
+			val, n := protowire.ConsumeVarint(data)
+			if n < 0 {
+				return
+			}
+			data = data[n:]
+			if num == IQ_Id {
+				msg.InteractionQueryId = uint32(val)
+			}
+
+		case protowire.BytesType:
+			_, n := protowire.ConsumeBytes(data)
+			if n < 0 {
+				return
+			}
+			data = data[n:]
+			if num == IQ_WebSearch {
+				// Presence of the query is enough to answer it; the args
+				// (search terms) are chosen server-side.
+				msg.Type = ServerMsgInteractionQuery
+				msg.InteractionQueryWebSearch = true
+			}
+
+		default:
 			n := protowire.ConsumeFieldValue(num, typ, data)
 			if n < 0 {
 				return

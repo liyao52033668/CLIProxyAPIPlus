@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,6 +24,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
@@ -36,7 +38,6 @@ const (
 	cursorAPIURL            = "https://api2.cursor.sh"
 	cursorRunPath           = "/agent.v1.AgentService/Run"
 	cursorModelsPath        = "/agent.v1.AgentService/GetUsableModels"
-	cursorClientVersion     = "cli-2026.02.13-41ac335"
 	cursorAuthType          = "cursor"
 	cursorHeartbeatInterval = 5 * time.Second
 	cursorSessionTTL        = 5 * time.Minute
@@ -71,6 +72,7 @@ type cursorSession struct {
 	resumeOutCh  chan cliproxyexecutor.StreamChunk          // output channel for resumed response
 	parked       *atomic.Bool                               // set when the current HTTP response ended via an MCP tool-call park
 	switchOutput func(ch chan cliproxyexecutor.StreamChunk) // callback to switch output channel
+	tokenUsage   *cursorTokenUsage                          // shared with the stream goroutine; updated on each resume round
 }
 
 type pendingMcpExec struct {
@@ -89,6 +91,7 @@ func NewCursorExecutor(cfg *config.Config) *CursorExecutor {
 		checkpoints: make(map[string]*savedCheckpoint),
 	}
 	go e.cleanupLoop()
+	go e.prewarmCursorH2Pool()
 	return e
 }
 
@@ -297,8 +300,19 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		payload = sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(payload), false)
 	}
 
+	// Apply the shared thinking pipeline: the cursor applier normalizes the
+	// canonical config into reasoning_effort on this OpenAI-shaped payload;
+	// buildRunRequestParams later maps it onto RequestedModel parameters
+	// gated by the account's model catalog.
+	if applied, errApply := thinking.ApplyThinking(payload, req.Model, "openai", "openai", cursorAuthType); errApply == nil {
+		payload = applied
+	} else {
+		log.Warnf("cursor: apply thinking: %v (using unmodified payload)", errApply)
+	}
+
+	clientType, requestModel := splitCursorClientType(req.Model)
 	parsed := parseOpenAIRequest(payload)
-	resolvedModel := helps.ResolveCursorModelID(req.Model, cursorModelCatalog())
+	resolvedModel := helps.ResolveCursorModelID(requestModel, cursorModelCatalog())
 	modelName := strings.TrimSpace(parsed.Model)
 	if modelName == "" {
 		modelName = req.Model
@@ -316,7 +330,7 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 	framedRequest := cursorproto.FrameConnectMessage(requestBytes, 0)
 
-	stream, err := openCursorH2Stream(accessToken)
+	stream, err := openCursorH2Stream(e, auth, accessToken, clientType)
 	if err != nil {
 		return resp, err
 	}
@@ -408,19 +422,34 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		log.Debugf("cursor: translated payload len=%d", len(payload))
 	}
 
+	// Apply the shared thinking pipeline (see Execute): the cursor applier
+	// normalizes the canonical config into reasoning_effort on this
+	// OpenAI-shaped payload.
+	if applied, errApply := thinking.ApplyThinking(payload, req.Model, "openai", "openai", cursorAuthType); errApply == nil {
+		payload = applied
+	} else {
+		log.Warnf("cursor: apply thinking: %v (using unmodified payload)", errApply)
+	}
+
+	// A model-name prefix (sand/, bot/, grokbot/, cli/) selects the upstream
+	// client identity — i.e. the usage pool — before model resolution.
+	clientType, requestModel := splitCursorClientType(req.Model)
 	parsed := parseOpenAIRequest(payload)
 	log.Debugf("cursor: parsed request: model=%s userText=%d chars, turns=%d, tools=%d, toolResults=%d",
 		parsed.Model, len(parsed.UserText), len(parsed.Turns), len(parsed.Tools), len(parsed.ToolResults))
-	resolvedModel := helps.ResolveCursorModelID(req.Model, cursorModelCatalog())
+	resolvedModel := helps.ResolveCursorModelID(requestModel, cursorModelCatalog())
 
 	conversationId := deriveConversationId(helps.APIKeyFromContext(ctx), ccSessionId, parsed.SystemPrompt)
 	authID := auth.ID // e.g. "cursor.json" or "cursor-account2.json"
-	log.Debugf("cursor: conversationId=%s authID=%s", conversationId, authID)
+	log.Debugf("cursor: conversationId=%s authID=%s clientType=%s", conversationId, authID, clientType)
 
-	// Session key includes authID (H2 stream is auth-specific, not transferable).
-	// Checkpoint key uses conversationId only — allows detecting auth migration.
-	sessionKey := authID + ":" + conversationId
-	checkpointKey := conversationId
+	// Session key includes authID (H2 stream is auth-specific, not
+	// transferable) and clientType (a parked stream keeps the usage pool it
+	// was opened against, so it may only be resumed with the same identity).
+	sessionKey := authID + ":" + clientType + ":" + conversationId
+	// Checkpoint key: conversation + identity — a checkpoint captured under
+	// one client identity is not reused under another.
+	checkpointKey := conversationId + ":" + clientType
 	needsTranslate := from.String() != "" && from.String() != "openai"
 
 	// Check if we can resume an existing session with tool results
@@ -524,7 +553,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), modelName, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
-	stream, err := openCursorH2Stream(accessToken)
+	stream, err := openCursorH2Stream(e, auth, accessToken, clientType)
 	if err != nil {
 		return nil, err
 	}
@@ -621,6 +650,36 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}
 	}
 
+	// sendStreamErrorSwitchable reports an upstream failure on an
+	// already-started SSE response: OpenAI clients receive an error data line
+	// followed by [DONE]; Claude-format clients receive the terminal
+	// Anthropic error event.
+	sendStreamErrorSwitchable := func(streamErr error) {
+		errType := "api_error"
+		var statusErr cursorStatusErr
+		if errors.As(classifyCursorError(streamErr), &statusErr) {
+			switch statusErr.code {
+			case 429:
+				errType = "rate_limit_error"
+			case 401:
+				errType = "authentication_error"
+			case 403:
+				errType = "permission_error"
+			}
+		}
+		errMsg := streamErr.Error()
+		if len(errMsg) > 500 {
+			errMsg = errMsg[:500]
+		}
+		errJSON := fmt.Sprintf(`{"error":{"type":%s,"message":%s}}`, jsonString(errType), jsonString(errMsg))
+		if needsTranslate {
+			emitToOut(cliproxyexecutor.StreamChunk{Payload: []byte("event: error\ndata: " + errJSON + "\n\n")})
+			return
+		}
+		emitToOut(cliproxyexecutor.StreamChunk{Payload: []byte("data: " + errJSON + "\n")})
+		sendDoneSwitchable()
+	}
+
 	// Pre-response error detection for transparent failover:
 	// If the stream fails before any chunk is emitted (e.g. quota exceeded),
 	// ExecuteStream returns an error so the conductor retries with a different auth.
@@ -701,6 +760,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 					toolResultCh: toolResultCh, // reuse same channel across rounds
 					resumeOutCh:  resumeOut,
 					parked:       &mcpParked,
+					tokenUsage:   tokenUsage,
 					switchOutput: func(ch chan cliproxyexecutor.StreamChunk) {
 						outMu.Lock()
 						currentOut = ch
@@ -710,6 +770,8 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 						// New response needs its own message ID
 						chatId = "chatcmpl-" + uuid.New().String()[:28]
 						created = time.Now().Unix()
+						// tool_call indices restart within each HTTP response
+						toolCallIndex = 0
 						outMu.Unlock()
 					},
 				}
@@ -737,12 +799,14 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 		// processH2SessionFrames returned — stream is done.
 		// Check if error happened before any chunks were emitted.
+		midStreamErr := false
 		if streamErr != nil {
 			select {
 			case <-firstChunkSent:
 				// Chunks were already sent to client — can't transparently retry.
 				// Next request will failover via conductor's cooldown mechanism.
 				log.Warnf("cursor: stream error after data sent (auth=%s conv=%s): %v", authID, conversationId, streamErr)
+				midStreamErr = true
 			default:
 				// No data sent yet — propagate error for transparent conductor retry.
 				log.Warnf("cursor: stream error before data sent (auth=%s conv=%s): %v — signaling retry", authID, conversationId, streamErr)
@@ -762,29 +826,40 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		if thinkingActive {
 			sendChunkSwitchable(`{"content":"</think>"}`, "")
 		}
-		// Include token usage in the final stop chunk and publish to usage manager.
-		inputTok, outputTok := tokenUsage.get()
-		// Build the stop chunk with usage embedded in the choices array level
-		fr := `"stop"`
-		openaiJSON := fmt.Sprintf(`{"id":"%s","object":"chat.completion.chunk","created":%d,"model":%s,"choices":[{"index":0,"delta":{},"finish_reason":%s}],"usage":{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d}}`,
-			chatId, created, jsonString(parsed.Model), fr, inputTok, outputTok, inputTok+outputTok)
-		sseLine := []byte("data: " + openaiJSON + "\n")
-		if needsTranslate {
-			translated := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, payload, sseLine, &streamParam)
-			for _, t := range translated {
-				emitToOut(cliproxyexecutor.StreamChunk{Payload: bytes.Clone(t)})
-			}
+
+		if midStreamErr {
+			// Tell the client the turn failed: a normal stop chunk would make
+			// truncated output look like a complete answer.
+			sendStreamErrorSwitchable(streamErr)
 		} else {
-			emitToOut(cliproxyexecutor.StreamChunk{Payload: []byte(openaiJSON)})
+			// Include token usage in the final stop chunk and publish to usage manager.
+			inputTok, outputTok, cacheRead := tokenUsage.clientUsage()
+			usageJSON := fmt.Sprintf(`{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d}`, inputTok, outputTok, inputTok+outputTok)
+			if cacheRead > 0 {
+				usageJSON = fmt.Sprintf(`{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d,"prompt_tokens_details":{"cached_tokens":%d}}`, inputTok, outputTok, inputTok+outputTok, cacheRead)
+			}
+			// Build the stop chunk with usage embedded in the choices array level
+			openaiJSON := fmt.Sprintf(`{"id":"%s","object":"chat.completion.chunk","created":%d,"model":%s,"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":%s}`,
+				chatId, created, jsonString(parsed.Model), usageJSON)
+			sseLine := []byte("data: " + openaiJSON + "\n")
+			if needsTranslate {
+				translated := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, payload, sseLine, &streamParam)
+				for _, t := range translated {
+					emitToOut(cliproxyexecutor.StreamChunk{Payload: bytes.Clone(t)})
+				}
+			} else {
+				emitToOut(cliproxyexecutor.StreamChunk{Payload: []byte(openaiJSON)})
+			}
+			sendDoneSwitchable()
 		}
-		sendDoneSwitchable()
 
 		// Publish usage for management stats. Stream responses previously only
 		// embedded usage in the SSE payload and never reached the usage manager.
-		if streamErr != nil && inputTok == 0 && outputTok == 0 {
+		reportedUsage := tokenUsage.detail()
+		if streamErr != nil && reportedUsage.InputTokens == 0 && reportedUsage.OutputTokens == 0 {
 			reporter.PublishFailure(ctx, streamErr)
 		} else {
-			reporter.Publish(ctx, tokenUsage.detail())
+			reporter.Publish(ctx, reportedUsage)
 			reporter.EnsurePublished(ctx)
 		}
 
@@ -862,6 +937,16 @@ func (e *CursorExecutor) resumeWithToolResults(
 		}
 	}
 
+	// Extend the input-token estimate for this round: the tool results become
+	// part of the upstream conversation context.
+	if session.tokenUsage != nil {
+		resultBytes := 0
+		for _, tr := range parsed.ToolResults {
+			resultBytes += len(tr.Content)
+		}
+		session.tokenUsage.addInputEstimate(resultBytes)
+	}
+
 	// Inject tool results — this unblocks the waiting processH2SessionFrames
 	session.toolResultCh <- parsed.ToolResults
 
@@ -871,19 +956,42 @@ func (e *CursorExecutor) resumeWithToolResults(
 
 // --- H2Stream helpers ---
 
-func openCursorH2Stream(accessToken string) (*cursorproto.H2Stream, error) {
+// openCursorH2Stream acquires a Run stream: a pre-warmed pooled connection
+// when available, else a fresh TLS+HTTP/2 dial (optionally through the
+// configured HTTP CONNECT proxy). The announced client identity selects the
+// upstream usage pool ("cli" = plan pools, "sand" = Grok Bot weekly pool).
+func openCursorH2Stream(e *CursorExecutor, auth *cliproxyauth.Auth, accessToken, clientType string) (*cursorproto.H2Stream, error) {
+	requestId := uuid.New().String()
 	headers := map[string]string{
 		":path":                    cursorRunPath,
 		"content-type":             "application/connect+proto",
 		"connect-protocol-version": "1",
+		"connect-accept-encoding":  "gzip",
+		"user-agent":               "connect-es/1.6.1",
 		"te":                       "trailers",
 		"authorization":            "Bearer " + accessToken,
-		"x-ghost-mode":             "true",
-		"x-cursor-client-version":  cursorClientVersion,
-		"x-cursor-client-type":     "cli",
-		"x-request-id":             uuid.New().String(),
+		"x-ghost-mode":             cursorGhostModeSetting(),
+		"x-cursor-client-version":  cursorClientVersionValue(),
+		"x-cursor-client-type":     clientType,
+		"x-request-id":             requestId,
+		"x-original-request-id":    requestId,
 	}
-	return cursorproto.DialH2Stream("api2.cursor.sh", headers)
+	if clientType == "sand" {
+		headers["x-sand-box-namespace"] = "prod"
+	}
+	host := cursorAgentHostSetting()
+	proxy := resolveCursorProxy(e.cfg, auth)
+	// A stale pooled connection (server GOAWAY during idle) fails at
+	// OpenStream and falls through to a fresh dial.
+	if cursorH2PoolSizeSetting() > 0 {
+		if conn, err := acquireCursorH2Conn(host, proxy); err == nil {
+			if stream, openErr := conn.OpenStream(headers); openErr == nil {
+				return stream, nil
+			}
+			conn.Close()
+		}
+	}
+	return cursorproto.DialH2Stream(host, proxy, headers)
 }
 
 func cursorH2Heartbeat(ctx context.Context, stream *cursorproto.H2Stream) {
@@ -909,11 +1017,21 @@ func cursorH2Heartbeat(ctx context.Context, stream *cursorproto.H2Stream) {
 
 // --- Response processing ---
 
-// cursorTokenUsage tracks token counts from Cursor's TokenDeltaUpdate messages.
+// cursorTokenUsage tracks token usage for one upstream turn. Output tokens
+// stream in via TokenDeltaUpdate messages and input is estimated from payload
+// size until the authoritative turn_ended counters arrive (once, at the end of
+// the whole upstream turn — spanning every parked tool-call round).
 type cursorTokenUsage struct {
 	mu             sync.Mutex
 	outputTokens   int64
-	inputTokensEst int64 // estimated from request payload size
+	inputTokensEst int64 // estimated from request payload sizes
+
+	hasTurnTotals        bool
+	turnInputTokens      int64
+	turnOutputTokens     int64
+	turnCacheReadTokens  int64
+	turnCacheWriteTokens int64
+	turnReasoningTokens  int64
 }
 
 func (u *cursorTokenUsage) addOutput(delta int64) {
@@ -929,10 +1047,67 @@ func (u *cursorTokenUsage) setInputEstimate(payloadBytes int) {
 	u.inputTokensEst = max(int64(payloadBytes/4), 1)
 }
 
+// addInputEstimate extends the estimate for a resumed round (tool results
+// injected into the same upstream turn).
+func (u *cursorTokenUsage) addInputEstimate(payloadBytes int) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.inputTokensEst += max(int64(payloadBytes/4), 1)
+}
+
+// setTurnTotals records the authoritative turn_ended counters. Callers treat
+// zero counters as "not reported" and keep using the estimates.
+func (u *cursorTokenUsage) setTurnTotals(input, output, cacheRead, cacheWrite, reasoning int64) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.hasTurnTotals = true
+	u.turnInputTokens = input
+	u.turnOutputTokens = output
+	u.turnCacheReadTokens = cacheRead
+	u.turnCacheWriteTokens = cacheWrite
+	u.turnReasoningTokens = reasoning
+}
+
+// get returns the accounting totals: real turn_ended counters when the
+// upstream reported them, estimates otherwise.
 func (u *cursorTokenUsage) get() (input, output int64) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	return u.inputTokensEst, u.outputTokens
+	input, output = u.inputTokensEst, u.outputTokens
+	if u.hasTurnTotals {
+		if u.turnInputTokens > 0 {
+			input = u.turnInputTokens
+		}
+		if u.turnOutputTokens > 0 {
+			output = u.turnOutputTokens
+		}
+	}
+	return input, output
+}
+
+// clientUsage returns per-request usage for the final SSE chunk. Cursor's
+// turn_ended counters span the whole upstream turn (every parked tool-call
+// round), so reporting them verbatim makes agentic clients think the context
+// window is nearly exhausted; the input side is therefore clamped to this
+// turn chain's estimated prompt size. Cache reads are reported separately as
+// an OpenAI-style breakdown (prompt_tokens stays the full clamped input).
+func (u *cursorTokenUsage) clientUsage() (input, output, cacheRead int64) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	input, output = u.inputTokensEst, u.outputTokens
+	if u.hasTurnTotals {
+		if u.turnOutputTokens > 0 {
+			output = u.turnOutputTokens
+		}
+		if u.turnInputTokens > 0 && u.turnInputTokens < input {
+			input = u.turnInputTokens
+		}
+	}
+	cacheRead = u.turnCacheReadTokens
+	if cacheRead > input {
+		cacheRead = input
+	}
+	return input, output, cacheRead
 }
 
 func (u *cursorTokenUsage) detail() usage.Detail {
@@ -944,6 +1119,22 @@ func (u *cursorTokenUsage) detail() usage.Detail {
 		InputTokens:  input,
 		OutputTokens: output,
 		TotalTokens:  input + output,
+	}
+}
+
+// pendingExecFromMsg converts a decoded ExecMcpArgs server message into a
+// pending MCP tool call for client delivery.
+func pendingExecFromMsg(msg *cursorproto.DecodedServerMessage) pendingMcpExec {
+	toolCallId := msg.McpToolCallId
+	if toolCallId == "" {
+		toolCallId = uuid.New().String()
+	}
+	return pendingMcpExec{
+		ExecMsgId:  msg.ExecMsgId,
+		ExecId:     msg.ExecId,
+		ToolCallId: toolCallId,
+		ToolName:   msg.McpToolName,
+		Args:       decodeMcpArgsToJSON(msg.McpArgs),
 	}
 }
 
@@ -970,9 +1161,39 @@ func processH2SessionFrames(
 		}
 		return nil
 	}
+	// answerInteractionQuery grants server-initiated approval queries
+	// (currently web search) so the upstream stream proceeds instead of
+	// waiting forever on an unanswered prompt.
+	answerInteractionQuery := func(q *cursorproto.DecodedServerMessage) error {
+		if !q.InteractionQueryWebSearch {
+			return nil
+		}
+		log.Debugf("cursor: approving interaction query id=%d (web search)", q.InteractionQueryId)
+		return writeEncoded(cursorproto.EncodeInteractionQueryResponse(q.InteractionQueryId))
+	}
 	log.Debugf("cursor: processH2SessionFrames started for streamID=%s, waiting for data...", stream.ID())
+	// Upstream liveness guards (see cursorLiveness): checked before every
+	// wait. Only the main loop checks — parked tool-result waits are exempt,
+	// since the client may legitimately take minutes to execute its tools.
+	liveness := newCursorLiveness()
+	livenessTimer := time.NewTimer(time.Hour)
+	defer livenessTimer.Stop()
 	for {
+		if remaining, err := liveness.check(); err != nil {
+			return err
+		} else if remaining >= 0 {
+			if !livenessTimer.Stop() {
+				select {
+				case <-livenessTimer.C:
+				default:
+				}
+			}
+			livenessTimer.Reset(remaining)
+		}
 		select {
+		case <-livenessTimer.C:
+			// The loop top re-checks and reports the guard that fired.
+			continue
 		case <-ctx.Done():
 			log.Debugf("cursor: processH2SessionFrames exiting: context done")
 			return ctx.Err()
@@ -981,6 +1202,7 @@ func processH2SessionFrames(
 				log.Debugf("cursor: processH2SessionFrames[%s]: exiting: stream data channel closed", stream.ID())
 				return stream.Err() // may be RST_STREAM, GOAWAY, or nil for clean close
 			}
+			liveness.markFrame()
 			// Log first 20 bytes of raw data for debugging
 			previewLen := min(20, len(data))
 			log.Debugf("cursor: processH2SessionFrames[%s]: received %d bytes from dataCh, first bytes: %x (%q)", stream.ID(), len(data), data[:previewLen], string(data[:previewLen]))
@@ -1011,6 +1233,15 @@ func processH2SessionFrames(
 					continue
 				}
 
+				// The stream advertises connect-accept-encoding: gzip; a
+				// compressed message carries the compression flag.
+				decompressed, gzErr := cursorproto.DecompressConnectPayload(flags, payload)
+				if gzErr != nil {
+					log.Warnf("cursor: decompress connect payload: %v", gzErr)
+					continue
+				}
+				payload = decompressed
+
 				msg, err := cursorproto.DecodeAgentServerMessage(payload)
 				if err != nil {
 					log.Debugf("cursor: failed to decode server message: %v", err)
@@ -1021,10 +1252,12 @@ func processH2SessionFrames(
 				switch msg.Type {
 				case cursorproto.ServerMsgTextDelta:
 					if msg.Text != "" && onText != nil {
+						liveness.markOutput()
 						onText(msg.Text, false)
 					}
 				case cursorproto.ServerMsgThinkingDelta:
 					if msg.Text != "" && onText != nil {
+						liveness.markOutput()
 						onText(msg.Text, true)
 					}
 				case cursorproto.ServerMsgThinkingCompleted:
@@ -1032,10 +1265,20 @@ func processH2SessionFrames(
 
 				case cursorproto.ServerMsgTurnEnded:
 					log.Debugf("cursor: TurnEnded received, stream will finish")
+					if tokenUsage != nil && msg.HasTurnTokens {
+						tokenUsage.setTurnTotals(msg.TurnInputTokens, msg.TurnOutputTokens,
+							msg.TurnCacheReadTokens, msg.TurnCacheWriteTokens, msg.TurnReasoningTokens)
+					}
 					return nil // clean completion
 
 				case cursorproto.ServerMsgHeartbeat:
 					// Server heartbeat, ignore silently
+					continue
+
+				case cursorproto.ServerMsgInteractionQuery:
+					if err := answerInteractionQuery(msg); err != nil {
+						return err
+					}
 					continue
 
 				case cursorproto.ServerMsgCheckpoint:
@@ -1071,100 +1314,133 @@ func processH2SessionFrames(
 
 				case cursorproto.ServerMsgExecMcpArgs:
 					if onMcpExec != nil {
-						decodedArgs := decodeMcpArgsToJSON(msg.McpArgs)
-						toolCallId := msg.McpToolCallId
-						if toolCallId == "" {
-							toolCallId = uuid.New().String()
-						}
-						log.Debugf("cursor: received mcpArgs from server: execMsgId=%d execId=%q toolName=%q toolCallId=%q",
-							msg.ExecMsgId, msg.ExecId, msg.McpToolName, toolCallId)
-						pending := pendingMcpExec{
-							ExecMsgId:  msg.ExecMsgId,
-							ExecId:     msg.ExecId,
-							ToolCallId: toolCallId,
-							ToolName:   msg.McpToolName,
-							Args:       decodedArgs,
-						}
-						onMcpExec(pending)
+						// A tool call is user-visible output: it satisfies the
+						// first-output clock.
+						liveness.markOutput()
+						// Parallel tool calls arrive as several ExecMcpArgs
+						// frames, often inside the same read. Every call must
+						// reach the client and be answered — frames decoded
+						// while parked used to be dropped, leaving the upstream
+						// waiting on a result that never came.
+						var lateQueue []pendingMcpExec
 
-						if toolResultCh == nil {
-							return nil
+						// waitForToolResults blocks until tool results are
+						// injected, servicing KV/context/checkpoint frames in
+						// the meantime. ExecMcpArgs frames that arrive while
+						// parked are queued and delivered after this call.
+						waitForToolResults := func() ([]toolResultInfo, error) {
+							for {
+								select {
+								case <-ctx.Done():
+									return nil, ctx.Err()
+								case results, ok := <-toolResultCh:
+									if !ok {
+										return nil, nil
+									}
+									return results, nil
+								case waitData, ok := <-stream.Data():
+									if !ok {
+										return nil, stream.Err()
+									}
+									liveness.markFrame()
+									buf.Write(waitData)
+									for {
+										cb := buf.Bytes()
+										if len(cb) == 0 {
+											break
+										}
+										wf, wp, wc, wok := cursorproto.ParseConnectFrame(cb)
+										if !wok {
+											break
+										}
+										buf.Next(wc)
+										if wf&cursorproto.ConnectEndStreamFlag != 0 {
+											continue
+										}
+										if wp, gzErr = cursorproto.DecompressConnectPayload(wf, wp); gzErr != nil {
+											log.Warnf("cursor: decompress connect payload: %v", gzErr)
+											continue
+										}
+										wmsg, werr := cursorproto.DecodeAgentServerMessage(wp)
+										if werr != nil {
+											continue
+										}
+										switch wmsg.Type {
+										case cursorproto.ServerMsgKvGetBlob:
+											blobKey := cursorproto.BlobIdHex(wmsg.BlobId)
+											d := blobStore[blobKey]
+											if err := writeEncoded(cursorproto.EncodeKvGetBlobResult(wmsg.KvId, d)); err != nil {
+												return nil, err
+											}
+										case cursorproto.ServerMsgKvSetBlob:
+											blobKey := cursorproto.BlobIdHex(wmsg.BlobId)
+											blobStore[blobKey] = append([]byte(nil), wmsg.BlobData...)
+											if err := writeEncoded(cursorproto.EncodeKvSetBlobResult(wmsg.KvId)); err != nil {
+												return nil, err
+											}
+										case cursorproto.ServerMsgExecRequestCtx:
+											if err := writeEncoded(cursorproto.EncodeExecRequestContextResult(wmsg.ExecMsgId, wmsg.ExecId, mcpTools)); err != nil {
+												return nil, err
+											}
+										case cursorproto.ServerMsgCheckpoint:
+											if onCheckpoint != nil && len(wmsg.CheckpointData) > 0 {
+												onCheckpoint(wmsg.CheckpointData)
+											}
+										case cursorproto.ServerMsgInteractionQuery:
+											if err := answerInteractionQuery(wmsg); err != nil {
+												return nil, err
+											}
+										case cursorproto.ServerMsgExecMcpArgs:
+											lateQueue = append(lateQueue, pendingExecFromMsg(wmsg))
+											log.Debugf("cursor: queued parallel mcpArgs while parked: tool=%q callId=%q (queue=%d)", wmsg.McpToolName, wmsg.McpToolCallId, len(lateQueue))
+										}
+									}
+								case <-stream.Done():
+									return nil, stream.Err()
+								}
+							}
 						}
 
-						// Inline mode: wait for tool result while handling KV/heartbeat
-						log.Debugf("cursor: waiting for tool result on channel (inline mode)...")
-						var toolResults []toolResultInfo
-					waitLoop:
+						exec := pendingExecFromMsg(msg)
 						for {
-							select {
-							case <-ctx.Done():
-								return ctx.Err()
-							case results, ok := <-toolResultCh:
-								if !ok {
-									return nil
-								}
-								toolResults = results
-								break waitLoop
-							case waitData, ok := <-stream.Data():
-								if !ok {
-									return stream.Err()
-								}
-								buf.Write(waitData)
-								for {
-									cb := buf.Bytes()
-									if len(cb) == 0 {
-										break
-									}
-									wf, wp, wc, wok := cursorproto.ParseConnectFrame(cb)
-									if !wok {
-										break
-									}
-									buf.Next(wc)
-									if wf&cursorproto.ConnectEndStreamFlag != 0 {
-										continue
-									}
-									wmsg, werr := cursorproto.DecodeAgentServerMessage(wp)
-									if werr != nil {
-										continue
-									}
-									switch wmsg.Type {
-									case cursorproto.ServerMsgKvGetBlob:
-										blobKey := cursorproto.BlobIdHex(wmsg.BlobId)
-										d := blobStore[blobKey]
-										if err := writeEncoded(cursorproto.EncodeKvGetBlobResult(wmsg.KvId, d)); err != nil {
-											return err
-										}
-									case cursorproto.ServerMsgKvSetBlob:
-										blobKey := cursorproto.BlobIdHex(wmsg.BlobId)
-										blobStore[blobKey] = append([]byte(nil), wmsg.BlobData...)
-										if err := writeEncoded(cursorproto.EncodeKvSetBlobResult(wmsg.KvId)); err != nil {
-											return err
-										}
-									case cursorproto.ServerMsgExecRequestCtx:
-										if err := writeEncoded(cursorproto.EncodeExecRequestContextResult(wmsg.ExecMsgId, wmsg.ExecId, mcpTools)); err != nil {
-											return err
-										}
-									case cursorproto.ServerMsgCheckpoint:
-										if onCheckpoint != nil && len(wmsg.CheckpointData) > 0 {
-											onCheckpoint(wmsg.CheckpointData)
-										}
-									}
-								}
-							case <-stream.Done():
-								return stream.Err()
+							onMcpExec(exec)
+							if toolResultCh == nil {
+								return nil
 							}
-						}
-
-						// Send MCP result. Matching must never silently fail: a
-						// client that normalizes tool-call ids (upstream ids have
-						// been observed to contain newlines) would otherwise leave
-						// the upstream waiting for a result forever.
-						tr, ok := matchToolResult(toolResults, pending.ToolCallId)
-						if ok {
-							log.Debugf("cursor: sending inline MCP result for tool=%s (call id %q)", pending.ToolName, pending.ToolCallId)
-							if err := writeEncoded(cursorproto.EncodeExecMcpResult(pending.ExecMsgId, pending.ExecId, tr.Content, false)); err != nil {
-								return err
+							log.Debugf("cursor: waiting for tool result on channel (inline mode)...")
+							toolResults, errWait := waitForToolResults()
+							if errWait != nil {
+								return errWait
 							}
+							if toolResults == nil {
+								return nil // result channel closed: session teardown
+							}
+							// Send MCP result. Matching must never silently
+							// fail: a client that normalizes tool-call ids
+							// (upstream ids have been observed to contain
+							// newlines) would otherwise leave the upstream
+							// waiting for a result forever. An unmatched call
+							// is answered with an error result so the turn
+							// cannot stall either.
+							if tr, ok := matchToolResult(toolResults, exec.ToolCallId); ok {
+								log.Debugf("cursor: sending inline MCP result for tool=%s (call id %q)", exec.ToolName, exec.ToolCallId)
+								if err := writeEncoded(cursorproto.EncodeExecMcpResult(exec.ExecMsgId, exec.ExecId, tr.Content, false)); err != nil {
+									return err
+								}
+							} else {
+								log.Warnf("cursor: answering unmatched tool call %q with an error result to avoid stalling the upstream", exec.ToolCallId)
+								if err := writeEncoded(cursorproto.EncodeExecMcpError(exec.ExecMsgId, exec.ExecId, "no tool result was provided for this call")); err != nil {
+									return err
+								}
+							}
+							if len(lateQueue) == 0 {
+								break
+							}
+							// Deliver the next parked parallel call through the
+							// resumed output; its results arrive on a follow-up
+							// request.
+							exec = lateQueue[0]
+							lateQueue = lateQueue[1:]
 						}
 						continue
 					}
@@ -1231,6 +1507,10 @@ type parsedOpenAIRequest struct {
 	Images       []cursorproto.ImageData
 	Turns        []cursorproto.TurnData
 	ToolResults  []toolResultInfo
+	// ThinkingEffort is the normalized effort request ("", "none", or a
+	// level). The thinking applier writes it as reasoning_effort on the
+	// OpenAI-shaped payload; RequestedModel parameters are derived from it.
+	ThinkingEffort string
 }
 
 type toolResultInfo struct {
@@ -1240,8 +1520,9 @@ type toolResultInfo struct {
 
 func parseOpenAIRequest(payload []byte) *parsedOpenAIRequest {
 	p := &parsedOpenAIRequest{
-		Model:  gjson.GetBytes(payload, "model").String(),
-		Stream: gjson.GetBytes(payload, "stream").Bool(),
+		Model:          gjson.GetBytes(payload, "model").String(),
+		Stream:         gjson.GetBytes(payload, "stream").Bool(),
+		ThinkingEffort: strings.TrimSpace(gjson.GetBytes(payload, "reasoning_effort").String()),
 	}
 
 	messages := gjson.GetBytes(payload, "messages").Array()
@@ -1473,6 +1754,50 @@ func extractImages(content gjson.Result) []cursorproto.ImageData {
 	return images
 }
 
+// imageSize decodes pixel dimensions from PNG/GIF/JPEG/WEBP headers. Some
+// upstream models silently drop attachments without dimensions, so callers
+// should include them whenever they can be recovered. Returns (0, 0) when the
+// format is unknown or the header is malformed.
+func imageSize(data []byte) (width, height int) {
+	switch {
+	case len(data) > 24 && string(data[:8]) == "\x89PNG\r\n\x1a\n":
+		// IHDR: width/height are big-endian uint32 at offset 16.
+		return int(uint32(data[16])<<24 | uint32(data[17])<<16 | uint32(data[18])<<8 | uint32(data[19])),
+			int(uint32(data[20])<<24 | uint32(data[21])<<16 | uint32(data[22])<<8 | uint32(data[23]))
+	case len(data) > 10 && (string(data[:6]) == "GIF87a" || string(data[:6]) == "GIF89a"):
+		return int(uint16(data[6]) | uint16(data[7])<<8), int(uint16(data[8]) | uint16(data[9])<<8)
+	case len(data) > 29 && string(data[:4]) == "RIFF" && string(data[8:12]) == "WEBP" && string(data[12:16]) == "VP8X":
+		// VP8X stores canvas size minus one in 24-bit little-endian fields.
+		return int(uint32(data[24])|uint32(data[25])<<8|uint32(data[26])<<16) + 1,
+			int(uint32(data[27])|uint32(data[28])<<8|uint32(data[29])<<16) + 1
+	case len(data) > 9 && data[0] == 0xFF && data[1] == 0xD8:
+		// JPEG: scan markers for the first SOF0-SOF15 frame (skipping DHT/JPG/DAC).
+		for i := 2; i+9 < len(data); {
+			if data[i] != 0xFF {
+				i++
+				continue
+			}
+			marker := data[i+1]
+			if marker == 0xD8 || marker == 0x01 || (marker >= 0xD0 && marker <= 0xD7) {
+				i += 2
+				continue
+			}
+			segLen := int(uint16(data[i+2])<<8 | uint16(data[i+3]))
+			if marker >= 0xC0 && marker <= 0xCF && marker != 0xC4 && marker != 0xC8 && marker != 0xCC {
+				if i+9 < len(data) {
+					return int(uint16(data[i+7])<<8 | uint16(data[i+8])), int(uint16(data[i+5])<<8 | uint16(data[i+6]))
+				}
+				return 0, 0
+			}
+			if segLen < 2 {
+				return 0, 0
+			}
+			i += 2 + segLen
+		}
+	}
+	return 0, 0
+}
+
 func parseDataURL(url string) *cursorproto.ImageData {
 	// data:image/png;base64,...
 	if !strings.HasPrefix(url, "data:") {
@@ -1495,9 +1820,12 @@ func parseDataURL(url string) *cursorproto.ImageData {
 			return nil
 		}
 	}
+	w, h := imageSize(data)
 	return &cursorproto.ImageData{
 		MimeType: mimeType,
 		Data:     data,
+		Width:    w,
+		Height:   h,
 	}
 }
 
@@ -1515,6 +1843,7 @@ func buildRunRequestParams(requestModel string, parsed *parsedOpenAIRequest, con
 		Images:         parsed.Images,
 		Turns:          parsed.Turns,
 		BlobStore:      make(map[string][]byte),
+		ModelParams:    cursorModelParamsFor(modelID, parsed.ThinkingEffort),
 	}
 
 	// Convert OpenAI tools to McpToolDefs
@@ -1527,6 +1856,103 @@ func buildRunRequestParams(requestModel string, parsed *parsedOpenAIRequest, con
 		})
 	}
 
+	return params
+}
+
+// cursorModelParamOptions caches per-model parameter definitions from the
+// AvailableModels catalog: model id -> {parameter id -> allowed values}.
+// Cursor rejects parameter ids or values a model does not declare, so request
+// parameters are gated against this table.
+var cursorModelParamOptions sync.Map
+
+func cursorSetParamOptions(modelId string, options map[string][]string) {
+	if modelId != "" && len(options) > 0 {
+		cursorModelParamOptions.Store(modelId, options)
+	}
+}
+
+// cursorEffortLadder orders reasoning levels weakest to strongest.
+var cursorEffortLadder = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+
+// cursorNearestEffort clamps a requested level onto the values the model
+// actually publishes; empty when nothing maps.
+func cursorNearestEffort(level string, allowed []string) string {
+	switch level {
+	case "minimal":
+		level = "low"
+	case "default":
+		level = "medium"
+	case "highest":
+		level = "max"
+	}
+	want := -1
+	for i, l := range cursorEffortLadder {
+		if l == level {
+			want = i
+			break
+		}
+	}
+	if want < 0 {
+		return ""
+	}
+	best, bestDist := "", len(cursorEffortLadder)+1
+	for _, a := range allowed {
+		idx := -1
+		for i, l := range cursorEffortLadder {
+			if l == a {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			continue
+		}
+		dist := idx - want
+		if dist < 0 {
+			dist = -dist
+		}
+		if dist < bestDist {
+			bestDist, best = dist, a
+		}
+	}
+	return best
+}
+
+// cursorModelParamsFor translates a requested effort level into
+// RequestedModel parameters ("thinking"/"effort"/"reasoning"), gated on the
+// model's declared options from the account catalog.
+func cursorModelParamsFor(modelId, effort string) map[string]string {
+	if modelId == "" || effort == "" {
+		return nil
+	}
+	raw, ok := cursorModelParamOptions.Load(modelId)
+	if !ok {
+		return nil
+	}
+	options, _ := raw.(map[string][]string)
+	params := make(map[string]string)
+	if values, ok := options["thinking"]; ok {
+		if effort == "none" {
+			if slices.Contains(values, "false") {
+				params["thinking"] = "false"
+			}
+		} else if slices.Contains(values, "true") {
+			params["thinking"] = "true"
+		}
+	}
+	if effort != "none" {
+		for _, pid := range []string{"effort", "reasoning"} {
+			if values, ok := options[pid]; ok {
+				if clamped := cursorNearestEffort(effort, values); clamped != "" {
+					params[pid] = clamped
+				}
+				break
+			}
+		}
+	}
+	if len(params) == 0 {
+		return nil
+	}
 	return params
 }
 
@@ -1571,8 +1997,8 @@ func applyCursorHeaders(req *http.Request, accessToken string) {
 	req.Header.Set("Connect-Protocol-Version", "1")
 	req.Header.Set("Te", "trailers")
 	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("X-Ghost-Mode", "true")
-	req.Header.Set("X-Cursor-Client-Version", cursorClientVersion)
+	req.Header.Set("X-Ghost-Mode", cursorGhostModeSetting())
+	req.Header.Set("X-Cursor-Client-Version", cursorClientVersionValue())
 	req.Header.Set("X-Cursor-Client-Type", "cli")
 	req.Header.Set("X-Request-Id", uuid.New().String())
 }
@@ -1601,8 +2027,8 @@ func doCursorUnary(ctx context.Context, client *http.Client, requestURL, accessT
 	h2Req.Header.Set("Content-Type", contentType)
 	h2Req.Header.Set("Te", "trailers")
 	h2Req.Header.Set("Authorization", "Bearer "+accessToken)
-	h2Req.Header.Set("X-Ghost-Mode", "true")
-	h2Req.Header.Set("X-Cursor-Client-Version", cursorClientVersion)
+	h2Req.Header.Set("X-Ghost-Mode", cursorGhostModeSetting())
+	h2Req.Header.Set("X-Cursor-Client-Version", cursorClientVersionValue())
 	h2Req.Header.Set("X-Cursor-Client-Type", "cli")
 
 	resp, err := client.Do(h2Req)
@@ -1741,18 +2167,36 @@ func decodeMcpArgsToJSON(args map[string][]byte) string {
 
 // --- Model Discovery ---
 
-// FetchCursorModels retrieves available models from Cursor's API.
+// FetchCursorModels retrieves available models from Cursor's API. The rich
+// AvailableModels catalog (real context limits, thinking/effort parameter
+// definitions) is tried first; the legacy GetUsableModels RPC and the static
+// fallback remain as degradation paths.
 func FetchCursorModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config) []*registry.ModelInfo {
 	accessToken := cursorAccessToken(auth)
 	if accessToken == "" {
 		return GetCursorFallbackModels()
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 
-	// GetUsableModels is a unary RPC call (not streaming).
-	status, body, err := doCursorUnary(ctx, newH2Client(), cursorAPIURL+cursorModelsPath, accessToken, nil, "application/proto")
+	client := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, 0)
+
+	// Rich catalog first: real context limits + per-model parameters.
+	status, body, err := doCursorUnary(ctx, client, cursorAPIURL+cursorAvailableModelsPath, accessToken, availableModelsRequestBody(), "application/proto")
+	if err == nil && status >= 200 && status < 300 {
+		if models := parseAvailableModelsResponse(body); len(models) > 0 {
+			return models
+		}
+		log.Debugf("cursor: AvailableModels response had no usable models")
+	} else if err != nil {
+		log.Debugf("cursor: AvailableModels request failed: %v", err)
+	} else {
+		log.Debugf("cursor: AvailableModels request returned status %d", status)
+	}
+
+	// Legacy catalog (GetUsableModels is a unary RPC call, not streaming).
+	status, body, err = doCursorUnary(ctx, client, cursorAPIURL+cursorModelsPath, accessToken, nil, "application/proto")
 	if err != nil {
 		log.Debugf("cursor: models request failed: %v", err)
 		return GetCursorFallbackModels()
@@ -1767,6 +2211,265 @@ func FetchCursorModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config
 		return GetCursorFallbackModels()
 	}
 	return models
+}
+
+const cursorAvailableModelsPath = "/aiserver.v1.AiService/AvailableModels"
+
+// availableModelsRequestBody builds AvailableModelsRequest:
+// 2 include_long_context_models=true, 5 use_model_parameters=true,
+// 7 do_not_use_markdown=true.
+func availableModelsRequestBody() []byte {
+	return []byte{0x10, 0x01, 0x28, 0x01, 0x38, 0x01}
+}
+
+// parseAvailableModelsResponse walks AvailableModelsResponse{2: repeated AvailableModel}.
+func parseAvailableModelsResponse(data []byte) []*registry.ModelInfo {
+	// Strip Connect framing when the unary response arrives framed.
+	if _, payload, _, ok := cursorproto.ParseConnectFrame(data); ok {
+		data = payload
+	}
+	var models []*registry.ModelInfo
+	for len(data) > 0 {
+		num, typ, n := consumeTag(data)
+		if n < 0 {
+			break
+		}
+		data = data[n:]
+		if typ != 2 { // BytesType
+			n = consumeFieldValue(num, typ, data)
+			if n < 0 {
+				break
+			}
+			data = data[n:]
+			continue
+		}
+		val, n := consumeBytes(data)
+		if n < 0 {
+			break
+		}
+		data = data[n:]
+		if num != 2 {
+			continue
+		}
+		if info := parseAvailableModelEntry(val); info != nil {
+			models = append(models, info)
+		}
+	}
+	return models
+}
+
+// parseAvailableModelEntry decodes one AvailableModel:
+// 1 name, 9 supports_thinking, 15 context_token_limit, 17 client_display_name,
+// 29 parameter_definitions, 35 is_hidden. ParameterDefinition: 1 id,
+// 4 values (bool_options / enum_options groups of option{1: value}).
+func parseAvailableModelEntry(data []byte) *registry.ModelInfo {
+	var name, displayName string
+	var context int64
+	var supportsThinking bool
+	var options map[string][]string
+
+	for len(data) > 0 {
+		num, typ, n := consumeTag(data)
+		if n < 0 {
+			return nil
+		}
+		data = data[n:]
+		switch typ {
+		case 0: // VarintType
+			val, n := consumeVarint(data)
+			if n < 0 {
+				return nil
+			}
+			data = data[n:]
+			switch num {
+			case 9:
+				supportsThinking = val != 0
+			case 15:
+				context = int64(val)
+			}
+		case 2: // BytesType
+			val, n := consumeBytes(data)
+			if n < 0 {
+				return nil
+			}
+			data = data[n:]
+			switch num {
+			case 1:
+				name = string(val)
+			case 17:
+				displayName = string(val)
+			case 29:
+				if options == nil {
+					options = make(map[string][]string)
+				}
+				mergeParamDefinition(options, val)
+			}
+		default:
+			n := consumeFieldValue(num, typ, data)
+			if n < 0 {
+				return nil
+			}
+			data = data[n:]
+		}
+	}
+
+	// Hidden internal entries and the account's "default" alias carry no
+	// usable identity of their own.
+	if name == "" || name == "default" {
+		return nil
+	}
+	if displayName == "" {
+		displayName = name
+	}
+	if context <= 0 {
+		context = 200000
+	}
+
+	info := &registry.ModelInfo{
+		ID:                  name,
+		Object:              "model",
+		Created:             time.Now().Unix(),
+		OwnedBy:             "cursor",
+		Type:                cursorAuthType,
+		DisplayName:         displayName,
+		ContextLength:       int(context),
+		MaxCompletionTokens: 64000,
+	}
+	// Expose only the thinking capability the model declares, so the shared
+	// thinking pipeline validates requests against real parameters.
+	thinkingValues := options["thinking"]
+	effortValues := options["effort"]
+	if len(effortValues) == 0 {
+		effortValues = options["reasoning"]
+	}
+	if supportsThinking || len(thinkingValues) > 0 || len(effortValues) > 0 {
+		info.Thinking = &registry.ThinkingSupport{Max: 50000, DynamicAllowed: true}
+		if slices.Contains(thinkingValues, "false") {
+			info.Thinking.ZeroAllowed = true
+		}
+		info.Thinking.Levels = effortValues
+	}
+	if len(options) > 0 {
+		cursorSetParamOptions(name, options)
+	}
+	return info
+}
+
+// mergeParamDefinition decodes one ParameterDefinition into the options table:
+// 1 id, 4 values — ParameterValues with bool_options(1)/enum_options(2)
+// groups, each holding repeated option{1: value}.
+func mergeParamDefinition(options map[string][]string, data []byte) {
+	var id string
+	var values []string
+	for len(data) > 0 {
+		num, typ, n := consumeTag(data)
+		if n < 0 {
+			return
+		}
+		data = data[n:]
+		if typ != 2 {
+			n = consumeFieldValue(num, typ, data)
+			if n < 0 {
+				return
+			}
+			data = data[n:]
+			continue
+		}
+		val, n := consumeBytes(data)
+		if n < 0 {
+			return
+		}
+		data = data[n:]
+		switch num {
+		case 1:
+			id = string(val)
+		case 4:
+			values = appendParamValues(values, val)
+		}
+	}
+	if id != "" && len(values) > 0 {
+		options[id] = append(options[id], values...)
+	}
+}
+
+func appendParamValues(dst []string, blob []byte) []string {
+	for len(blob) > 0 {
+		num, typ, n := consumeTag(blob)
+		if n < 0 {
+			return dst
+		}
+		blob = blob[n:]
+		if typ != 2 {
+			n = consumeFieldValue(num, typ, blob)
+			if n < 0 {
+				return dst
+			}
+			blob = blob[n:]
+			continue
+		}
+		group, n := consumeBytes(blob)
+		if n < 0 {
+			return dst
+		}
+		blob = blob[n:]
+		if num != 1 && num != 2 {
+			continue
+		}
+		// Each group holds repeated option submessages whose field 1 is the value.
+		for len(group) > 0 {
+			gnum, gtyp, gn := consumeTag(group)
+			if gn < 0 {
+				return dst
+			}
+			group = group[gn:]
+			if gtyp != 2 {
+				gn = consumeFieldValue(gnum, gtyp, group)
+				if gn < 0 {
+					return dst
+				}
+				group = group[gn:]
+				continue
+			}
+			opt, gn := consumeBytes(group)
+			if gn < 0 {
+				return dst
+			}
+			group = group[gn:]
+			if v := firstStringField(opt, 1); v != "" {
+				dst = append(dst, v)
+			}
+		}
+	}
+	return dst
+}
+
+// firstStringField returns the first string-valued occurrence of the target
+// field number in a protobuf submessage.
+func firstStringField(data []byte, target int) string {
+	for len(data) > 0 {
+		num, typ, n := consumeTag(data)
+		if n < 0 {
+			return ""
+		}
+		data = data[n:]
+		if typ != 2 {
+			n = consumeFieldValue(num, typ, data)
+			if n < 0 {
+				return ""
+			}
+			data = data[n:]
+			continue
+		}
+		val, n := consumeBytes(data)
+		if n < 0 {
+			return ""
+		}
+		data = data[n:]
+		if num == target {
+			return string(val)
+		}
+	}
+	return ""
 }
 
 func parseModelsResponse(data []byte) []*registry.ModelInfo {

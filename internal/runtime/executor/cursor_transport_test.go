@@ -1,0 +1,209 @@
+package executor
+
+import (
+	"bytes"
+	"compress/gzip"
+	"testing"
+	"time"
+
+	cursorproto "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cursor/proto"
+)
+
+func TestSplitCursorClientType(t *testing.T) {
+	cases := []struct {
+		in            string
+		wantType      string
+		wantModel     string
+		defaultIsType string // expected type when no prefix matches
+	}{
+		{in: "sand/grok-4", wantType: "sand", wantModel: "grok-4"},
+		{in: "bot/grok-4", wantType: "sand", wantModel: "grok-4"},
+		{in: "grokbot/Grok-4", wantType: "sand", wantModel: "Grok-4"},
+		{in: "cli/claude-4-sonnet", wantType: "cli", wantModel: "claude-4-sonnet"},
+	}
+	for _, tc := range cases {
+		gotType, gotModel := splitCursorClientType(tc.in)
+		if gotType != tc.wantType || gotModel != tc.wantModel {
+			t.Errorf("splitCursorClientType(%q) = (%q, %q), want (%q, %q)",
+				tc.in, gotType, gotModel, tc.wantType, tc.wantModel)
+		}
+	}
+	// Plain names pass through with the configured default identity.
+	gotType, gotModel := splitCursorClientType("claude-4-sonnet")
+	if gotModel != "claude-4-sonnet" || gotType != cursorClientTypeSetting() {
+		t.Errorf("splitCursorClientType(plain) = (%q, %q), want default type %q",
+			gotType, gotModel, cursorClientTypeSetting())
+	}
+}
+
+func TestCursorNearestEffort(t *testing.T) {
+	allowed := []string{"low", "medium", "high"}
+	cases := []struct{ in, want string }{
+		{"high", "high"},
+		{"low", "low"},
+		{"xhigh", "high"},  // clamps to the strongest published value
+		{"minimal", "low"}, // alias
+		{"default", "medium"},
+		{"bogus", ""},
+	}
+	for _, tc := range cases {
+		if got := cursorNearestEffort(tc.in, allowed); got != tc.want {
+			t.Errorf("cursorNearestEffort(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestCursorModelParamsFor(t *testing.T) {
+	cursorSetParamOptions("grok-test", map[string][]string{
+		"thinking": {"true", "false"},
+		"effort":   {"low", "medium", "high"},
+	})
+	defer cursorModelParamOptions.Delete("grok-test")
+
+	if params := cursorModelParamsFor("grok-test", "none"); len(params) != 1 || params["thinking"] != "false" {
+		t.Errorf("none params = %v, want {thinking:false}", params)
+	}
+	if params := cursorModelParamsFor("grok-test", "high"); params["thinking"] != "true" || params["effort"] != "high" {
+		t.Errorf("high params = %v, want thinking:true effort:high", params)
+	}
+	if params := cursorModelParamsFor("grok-test", "max"); params["effort"] != "high" {
+		t.Errorf("max params = %v, want effort clamped to high", params)
+	}
+	if params := cursorModelParamsFor("unknown-model", "high"); params != nil {
+		t.Errorf("unknown model params = %v, want nil", params)
+	}
+}
+
+func TestCursorLivenessGuards(t *testing.T) {
+	// Silence guard: even heartbeats stopped past the idle window.
+	l := newCursorLiveness()
+	l.markFrame()
+	l.lastFrame = time.Now().Add(-1 * time.Hour)
+	if _, err := l.check(); err == nil {
+		t.Error("expected silence guard to fire")
+	}
+
+	// No-response guard: nothing at all arrived within the first timeout.
+	nr := newCursorLiveness()
+	nr.started = time.Now().Add(-1 * time.Hour)
+	if _, err := nr.check(); err == nil {
+		t.Error("expected no-response guard to fire")
+	}
+
+	// First-output guard: control frames arrived but no user-visible output.
+	fo := newCursorLiveness()
+	fo.lastFrame = time.Now().Add(-1 * time.Hour)
+	if _, err := fo.check(); err == nil {
+		t.Error("expected first-output guard to fire")
+	}
+
+	// Healthy stream: output seen, frames fresh — no error.
+	ok := newCursorLiveness()
+	ok.markFrame()
+	ok.markOutput()
+	if _, err := ok.check(); err != nil {
+		t.Errorf("healthy stream errored: %v", err)
+	}
+}
+
+// --- protobuf builders for catalog parsing tests ---
+
+func tvarint(v uint64) []byte {
+	var out []byte
+	for v >= 0x80 {
+		out = append(out, byte(v)|0x80)
+		v >>= 7
+	}
+	return append(out, byte(v))
+}
+
+func tnum(num int, v uint64) []byte {
+	return append(tvarint(uint64(num<<3|0)), tvarint(v)...)
+}
+
+func tlen(num int, payload []byte) []byte {
+	out := tvarint(uint64(num<<3 | 2))
+	out = append(out, tvarint(uint64(len(payload)))...)
+	return append(out, payload...)
+}
+
+func ts(num int, s string) []byte { return tlen(num, []byte(s)) }
+
+func TestParseAvailableModelsResponse(t *testing.T) {
+	// One option group per parameter value set.
+	boolValues := func(values ...string) []byte {
+		var group []byte
+		for _, v := range values {
+			group = append(group, tlen(1, ts(1, v))...)
+		}
+		return tlen(1, group) // bool_options
+	}
+	enumValues := func(values ...string) []byte {
+		var group []byte
+		for _, v := range values {
+			group = append(group, tlen(1, ts(1, v))...)
+		}
+		return tlen(2, group) // enum_options
+	}
+	thinkingDef := append(ts(1, "thinking"), tlen(4, boolValues("true", "false"))...)
+	effortDef := append(ts(1, "effort"), tlen(4, enumValues("low", "medium", "high"))...)
+	model := ts(1, "grok-4.6")
+	model = append(model, tnum(9, 1)...)       // supports_thinking
+	model = append(model, tnum(15, 300000)...) // context_token_limit
+	model = append(model, tlen(29, thinkingDef)...)
+	model = append(model, tlen(29, effortDef)...)
+	response := tlen(2, model)
+
+	models := parseAvailableModelsResponse(response)
+	if len(models) != 1 {
+		t.Fatalf("parsed %d models, want 1", len(models))
+	}
+	info := models[0]
+	if info.ID != "grok-4.6" || info.ContextLength != 300000 {
+		t.Fatalf("model = %s context = %d, want grok-4.6 / 300000", info.ID, info.ContextLength)
+	}
+	if info.Thinking == nil || !info.Thinking.ZeroAllowed {
+		t.Fatalf("thinking support = %+v, want ZeroAllowed", info.Thinking)
+	}
+	if len(info.Thinking.Levels) != 3 || info.Thinking.Levels[0] != "low" {
+		t.Fatalf("levels = %v, want low/medium/high", info.Thinking.Levels)
+	}
+
+	// The cached options table feeds request-time parameter gating.
+	raw, ok := cursorModelParamOptions.Load("grok-4.6")
+	if !ok {
+		t.Fatal("options not cached for parsed model")
+	}
+	options := raw.(map[string][]string)
+	if len(options["thinking"]) != 2 || len(options["effort"]) != 3 {
+		t.Fatalf("cached options = %v", options)
+	}
+}
+
+func TestParseAvailableModelsResponseSkipsDefault(t *testing.T) {
+	response := tlen(2, ts(1, "default"))
+	if models := parseAvailableModelsResponse(response); len(models) != 0 {
+		t.Fatalf("default entry not filtered: %d models", len(models))
+	}
+}
+
+func TestDecompressConnectPayload(t *testing.T) {
+	payload := []byte("hello connect")
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write(payload); err != nil {
+		t.Fatalf("gzip write: %v", err)
+	}
+	zw.Close()
+
+	got, err := cursorproto.DecompressConnectPayload(cursorproto.ConnectCompressionFlag, buf.Bytes())
+	if err != nil || !bytes.Equal(got, payload) {
+		t.Fatalf("decompressed = %q err = %v, want %q", got, err, payload)
+	}
+
+	// Uncompressed frames pass through untouched.
+	got, err = cursorproto.DecompressConnectPayload(0, payload)
+	if err != nil || !bytes.Equal(got, payload) {
+		t.Fatalf("passthrough = %q err = %v, want %q", got, err, payload)
+	}
+}

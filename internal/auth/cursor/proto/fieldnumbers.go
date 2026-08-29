@@ -30,6 +30,7 @@ const (
 	ARR_ModelDetails      = 3 // ModelDetails
 	ARR_McpTools          = 4 // McpTools
 	ARR_ConversationId    = 5 // string (optional)
+	ARR_RequestedModel    = 9 // RequestedModel (model parameters)
 )
 
 // ConversationStateStructure (msg 83)
@@ -68,11 +69,14 @@ const (
 
 // SelectedImage
 const (
-	SI_BlobId   = 1 // bytes (oneof dataOrBlobId)
-	SI_Uuid     = 2 // string
-	SI_Path     = 3 // string
-	SI_MimeType = 7 // string
-	SI_Data     = 8 // bytes (oneof dataOrBlobId)
+	SI_BlobId    = 1 // bytes (oneof dataOrBlobId)
+	SI_Uuid      = 2 // string
+	SI_Path      = 3 // string
+	SI_Dimension = 4 // SelectedImage_Dimension
+	SI_MimeType  = 7 // string
+	SI_Data      = 8 // bytes (oneof dataOrBlobId)
+	SI_DimWidth  = 1 // SelectedImage_Dimension.width (int32)
+	SI_DimHeight = 2 // SelectedImage_Dimension.height (int32)
 )
 
 // ModelDetails (msg 88)
@@ -122,9 +126,31 @@ const (
 
 // InteractionUpdate oneof "message"
 const (
-	IU_TextDelta         = 1 // TextDeltaUpdate
-	IU_ThinkingDelta     = 4 // ThinkingDeltaUpdate
-	IU_ThinkingCompleted = 5 // ThinkingCompletedUpdate
+	IU_TextDelta         = 1  // TextDeltaUpdate
+	IU_ThinkingDelta     = 4  // ThinkingDeltaUpdate
+	IU_ThinkingCompleted = 5  // ThinkingCompletedUpdate
+	IU_TokenDelta        = 8  // TokenDeltaUpdate
+	IU_Heartbeat         = 13 // HeartbeatUpdate
+	IU_TurnEnded         = 14 // TurnEndedUpdate
+)
+
+// TurnEndedUpdate — real token counters. The embedded descriptor generation
+// has an empty TurnEndedUpdate, but newer upstream generations populate these
+// fields; decoding them is harmless when absent.
+const (
+	TEU_InputTokens     = 1 // int64
+	TEU_OutputTokens    = 2 // int64
+	TEU_CacheRead       = 3 // int64
+	TEU_CacheWrite      = 4 // int64
+	TEU_ReasoningTokens = 5 // int64
+)
+
+// InteractionQuery / InteractionResponse (web-search approval pair)
+const (
+	IQ_Id            = 1 // uint32
+	IQ_WebSearch     = 2 // WebSearchRequestQuery
+	IR_Id            = 1 // uint32
+	IR_WebSearchResp = 2 // WebSearchRequestResponse
 )
 
 // TextDeltaUpdate (msg 92)

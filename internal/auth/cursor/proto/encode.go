@@ -8,6 +8,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
+	"slices"
 
 	log "github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/encoding/protowire"
@@ -31,11 +33,16 @@ type RunRequestParams struct {
 	McpTools       []McpToolDef
 	BlobStore      map[string][]byte // hex(sha256) -> data, populated during encoding
 	RawCheckpoint  []byte            // if non-nil, use as conversation_state directly (from server checkpoint)
+	// ModelParams are sent as RequestedModel.parameters (thinking/effort etc.).
+	// Empty means the requested_model field is omitted and upstream defaults apply.
+	ModelParams map[string]string
 }
 
 type ImageData struct {
 	MimeType string
 	Data     []byte
+	Width    int // decoded from the image header; 0 = unknown (dimension omitted)
+	Height   int
 }
 
 type TurnData struct {
@@ -186,6 +193,17 @@ func (e *encoder) setUint32(msg *dynamicpb.Message, name string, val uint32) {
 	msg.Set(fd, protoreflect.ValueOfUint32(val))
 }
 
+func (e *encoder) setInt32(msg *dynamicpb.Message, name string, val int32) {
+	if e.err != nil {
+		return
+	}
+	fd := e.requireFieldType(msg, name, protoreflect.Int32Kind, false)
+	if fd == nil {
+		return
+	}
+	msg.Set(fd, protoreflect.ValueOfInt32(val))
+}
+
 func (e *encoder) setBool(msg *dynamicpb.Message, name string, val bool) {
 	if e.err != nil {
 		return
@@ -250,6 +268,25 @@ func (e *encoder) marshal(msg *dynamicpb.Message) []byte {
 		return nil
 	}
 	return b
+}
+
+// requestedModel encodes RequestedModel{model_id, parameters} for the given
+// parameter map (sorted for deterministic wire output); nil when no params.
+// Upstream rejects parameter ids a model does not declare, so callers must
+// gate values against the account's model catalog.
+func (e *encoder) requestedModel(modelId string, params map[string]string) *dynamicpb.Message {
+	if e.err != nil || len(params) == 0 {
+		return nil
+	}
+	rm := e.newMsg("RequestedModel")
+	e.setStr(rm, "model_id", modelId)
+	for _, k := range slices.Sorted(maps.Keys(params)) {
+		par := e.newMsg("RequestedModel_ModelParameterbytes")
+		e.setStr(par, "id", k)
+		e.setStr(par, "value", params[k])
+		e.appendMsg(rm, "parameters", par)
+	}
+	return rm
 }
 
 // --- Encode functions mirroring cursor-fetch.ts ---
@@ -346,6 +383,13 @@ func EncodeRunRequest(p *RunRequestParams) ([]byte, error) {
 			e.setStr(si, "uuid", generateId())
 			e.setStr(si, "mime_type", img.MimeType)
 			e.setBytes(si, "data", img.Data)
+			// Some upstream models silently drop attachments without dimensions.
+			if img.Width > 0 && img.Height > 0 {
+				dim := e.newMsg("SelectedImage_Dimension")
+				e.setInt32(dim, "width", int32(img.Width))
+				e.setInt32(dim, "height", int32(img.Height))
+				e.setMsg(si, "dimension", dim)
+			}
 			e.appendMsg(sc, "selected_images", si)
 		}
 		e.setMsg(userMessage, "selected_context", sc)
@@ -389,6 +433,12 @@ func EncodeRunRequest(p *RunRequestParams) ([]byte, error) {
 		e.setMsg(arr, "mcp_tools", mcpTools)
 	}
 
+	// RequestedModel carries per-model parameters (thinking/effort). Upstream
+	// rejects ids a model does not declare, so callers gate on the catalog.
+	if rm := e.requestedModel(p.ModelId, p.ModelParams); rm != nil {
+		e.setMsg(arr, "requested_model", rm)
+	}
+
 	// --- AgentClientMessage ---
 	acm := e.newMsg("AgentClientMessage")
 	e.setMsg(acm, "run_request", arr)
@@ -413,6 +463,13 @@ func encodeRunRequestWithCheckpoint(p *RunRequestParams) ([]byte, error) {
 			e.setStr(si, "uuid", generateId())
 			e.setStr(si, "mime_type", img.MimeType)
 			e.setBytes(si, "data", img.Data)
+			// Some upstream models silently drop attachments without dimensions.
+			if img.Width > 0 && img.Height > 0 {
+				dim := e.newMsg("SelectedImage_Dimension")
+				e.setInt32(dim, "width", int32(img.Width))
+				e.setInt32(dim, "height", int32(img.Height))
+				e.setMsg(si, "dimension", dim)
+			}
 			e.appendMsg(sc, "selected_images", si)
 		}
 		e.setMsg(userMessage, "selected_context", sc)
@@ -474,6 +531,11 @@ func encodeRunRequestWithCheckpoint(p *RunRequestParams) ([]byte, error) {
 	if p.ConversationId != "" {
 		arrBuf = protowire.AppendTag(arrBuf, ARR_ConversationId, protowire.BytesType)
 		arrBuf = protowire.AppendString(arrBuf, p.ConversationId)
+	}
+	// field 9: requested_model (thinking/effort parameters)
+	if rmBytes := e.marshal(e.requestedModel(p.ModelId, p.ModelParams)); len(rmBytes) > 0 {
+		arrBuf = protowire.AppendTag(arrBuf, ARR_RequestedModel, protowire.BytesType)
+		arrBuf = protowire.AppendBytes(arrBuf, rmBytes)
 	}
 
 	// Wrap in AgentClientMessage field 1 (run_request)
@@ -629,6 +691,24 @@ func EncodeExecRequestContextResult(execMsgId uint32, execId string, tools []Mcp
 		return nil, e.err
 	}
 	return encodeExecClientMsg(execMsgId, execId, "request_context_result", rcr)
+}
+
+// EncodeInteractionQueryResponse grants a server-initiated InteractionQuery.
+// Only the web-search query is answered (approved); the upstream otherwise
+// waits on the query and the turn stalls. Mirrors the observed CLI behavior
+// of granting the search so the stream proceeds.
+func EncodeInteractionQueryResponse(queryId uint32) ([]byte, error) {
+	var e encoder
+	approved := e.newMsg("WebSearchRequestResponse_Approved")
+	wsResp := e.newMsg("WebSearchRequestResponse")
+	e.setMsg(wsResp, "approved", approved)
+	resp := e.newMsg("InteractionResponse")
+	e.setUint32(resp, "id", queryId)
+	e.setMsg(resp, "web_search_request_response", wsResp)
+	acm := e.newMsg("AgentClientMessage")
+	e.setMsg(acm, "interaction_response", resp)
+	b := e.marshal(acm)
+	return b, e.err
 }
 
 // EncodeExecMcpResult responds with MCP tool result.

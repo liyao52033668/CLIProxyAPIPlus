@@ -22,6 +22,7 @@ var providerAppliers = map[string]ProviderApplier{
 	"codebuddy-ai": nil,
 	"commandcode":  nil,
 	"xai":          nil,
+	"cursor":       nil,
 }
 
 // GetProviderApplier returns the ProviderApplier for the given provider name.
