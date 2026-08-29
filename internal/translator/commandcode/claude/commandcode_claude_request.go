@@ -32,8 +32,9 @@ func extractSystem(root gjson.Result) string {
 	return sys.String()
 }
 
-// convertMessages maps Claude messages to wire messages.
-func convertMessages(root gjson.Result) []cc.WireMessage {
+// convertMessages maps Claude messages to wire messages. toolNames carries the
+// tool_use id -> name mapping required on tool-result parts.
+func convertMessages(root gjson.Result, toolNames map[string]string) []cc.WireMessage {
 	var out []cc.WireMessage
 	root.Get("messages").ForEach(func(_, msg gjson.Result) bool {
 		role := msg.Get("role").String()
@@ -49,7 +50,7 @@ func convertMessages(root gjson.Result) []cc.WireMessage {
 					}
 				case "thinking":
 					if s := part.Get("thinking").String(); s != "" {
-						parts = append(parts, cc.WireContent{Type: "reasoning", ReasoningText: s})
+						parts = append(parts, cc.WireContent{Type: "reasoning", Text: s})
 					}
 				case "tool_use":
 					input := map[string]any{}
@@ -85,9 +86,11 @@ func convertMessages(root gjson.Result) []cc.WireMessage {
 			switch part.Get("type").String() {
 			case "tool_result":
 				output := flattenToolResultContent(part.Get("content"))
+				toolUseID := part.Get("tool_use_id").String()
 				toolParts = append(toolParts, cc.WireContent{
 					Type:       "tool-result",
-					ToolCallID: part.Get("tool_use_id").String(),
+					ToolCallID: toolUseID,
+					ToolName:   toolNames[toolUseID],
 					Output:     &cc.WireToolOutput{Type: "text", Value: output},
 				})
 			case "text":
@@ -121,9 +124,9 @@ func convertMessages(root gjson.Result) []cc.WireMessage {
 			userParts = append(userParts, cc.WireContent{Type: "text", Text: s})
 		}
 		if len(toolParts) > 0 {
-			// The upstream schema only accepts "user" and "assistant" roles, so
-			// tool results ride on user messages (Anthropic-style tool_result).
-			out = append(out, cc.WireMessage{Role: "user", Content: toolParts})
+			// Role "tool" is a dedicated wire branch: each part must be a
+			// tool-result carrying both toolCallId and toolName.
+			out = append(out, cc.WireMessage{Role: "tool", Content: toolParts})
 		}
 		if len(userParts) > 0 {
 			out = append(out, cc.WireMessage{Role: "user", Content: userParts})

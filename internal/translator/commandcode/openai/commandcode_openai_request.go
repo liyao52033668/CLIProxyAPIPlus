@@ -53,14 +53,34 @@ func ConvertOpenAIToCommandCodeRequest(modelName string, inputRawJSON []byte, st
 
 // convertMessages maps OpenAI messages to wire messages. System and developer
 // messages are skipped here; their text is carried in params.system via
-// ExtractOpenAISystem. The upstream schema only accepts "user" and "assistant"
-// roles, so tool results ride on user messages (Anthropic-style tool_result).
+// ExtractOpenAISystem. Tool results become role "tool" messages whose parts
+// must carry both toolCallId and toolName (the upstream schema requires it),
+// so tool names are resolved from the preceding assistant tool_calls.
 func convertMessages(root gjson.Result) []cc.WireMessage {
 	var out []cc.WireMessage
+
+	toolNames := make(map[string]string)
+	root.Get("messages").ForEach(func(_, msg gjson.Result) bool {
+		if msg.Get("role").String() != "assistant" {
+			return true
+		}
+		msg.Get("tool_calls").ForEach(func(_, call gjson.Result) bool {
+			id := call.Get("id").String()
+			name := call.Get("function.name").String()
+			if id != "" && name != "" {
+				toolNames[id] = name
+			}
+			return true
+		})
+		return true
+	})
 
 	appendAssistantMessage := func(msg gjson.Result) {
 		content := msg.Get("content")
 		parts := make([]cc.WireContent, 0, 2)
+		if rc := msg.Get("reasoning_content"); rc.Exists() && rc.String() != "" {
+			parts = append(parts, cc.WireContent{Type: "reasoning", Text: rc.String()})
+		}
 		if content.IsArray() {
 			content.ForEach(func(_, part gjson.Result) bool {
 				switch part.Get("type").String() {
@@ -68,7 +88,7 @@ func convertMessages(root gjson.Result) []cc.WireMessage {
 					parts = append(parts, cc.WireContent{Type: "text", Text: part.Get("text").String()})
 				case "reasoning_content":
 					if v := part.Get("reasoning_content").String(); v != "" {
-						parts = append(parts, cc.WireContent{Type: "reasoning", ReasoningText: v})
+						parts = append(parts, cc.WireContent{Type: "reasoning", Text: v})
 					}
 				default:
 					// Plain string parts inside arrays.
@@ -112,9 +132,11 @@ func convertMessages(root gjson.Result) []cc.WireMessage {
 		case "assistant":
 			appendAssistantMessage(msg)
 		case "tool":
-			out = append(out, cc.WireMessage{Role: "user", Content: []cc.WireContent{{
+			callID := msg.Get("tool_call_id").String()
+			out = append(out, cc.WireMessage{Role: "tool", Content: []cc.WireContent{{
 				Type:       "tool-result",
-				ToolCallID: msg.Get("tool_call_id").String(),
+				ToolCallID: callID,
+				ToolName:   toolNames[callID],
 				Output: &cc.WireToolOutput{
 					Type:  "text",
 					Value: flattenContent(msg.Get("content")),

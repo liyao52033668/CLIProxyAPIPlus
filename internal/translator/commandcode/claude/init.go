@@ -30,9 +30,29 @@ func init() {
 func ConvertClaudeToCommandCodeRequest(modelName string, inputRawJSON []byte, stream bool) []byte {
 	root := gjson.ParseBytes(inputRawJSON)
 
+	// toolNames maps tool_use ids to declared names so tool-result parts can
+	// carry the toolName field the upstream schema requires.
+	toolNames := make(map[string]string)
+	root.Get("messages").ForEach(func(_, msg gjson.Result) bool {
+		if msg.Get("role").String() != "assistant" {
+			return true
+		}
+		msg.Get("content").ForEach(func(_, part gjson.Result) bool {
+			if part.Get("type").String() == "tool_use" {
+				id := part.Get("id").String()
+				name := part.Get("name").String()
+				if id != "" && name != "" {
+					toolNames[id] = name
+				}
+			}
+			return true
+		})
+		return true
+	})
+
 	params := cc.WireParams{
 		Model:     modelName,
-		Messages:  convertMessages(root),
+		Messages:  convertMessages(root, toolNames),
 		Tools:     convertTools(root),
 		System:    extractSystem(root),
 		MaxTokens: root.Get("max_tokens").Int(),

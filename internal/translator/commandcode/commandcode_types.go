@@ -67,9 +67,9 @@ type WireParams struct {
 	ReasoningEffort string        `json:"reasoning_effort,omitempty"`
 }
 
-// WireMessage is a single message in the wire conversation.
-// The upstream schema only accepts "user" and "assistant" roles; tool results
-// ride on user messages as "tool-result" content parts.
+// WireMessage is a single message in the wire conversation. Role is "user",
+// "assistant" or "tool". "tool" messages carry "tool-result" content parts,
+// and the upstream schema requires both toolCallId and toolName on each part.
 type WireMessage struct {
 	Role    string        `json:"role"`
 	Content []WireContent `json:"content"`
@@ -77,10 +77,11 @@ type WireMessage struct {
 
 // WireContent is one content part. Type is one of
 // "text", "image", "tool-call", "tool-result" or "reasoning".
+// Reasoning parts carry their text in the Text field (upstream field "text").
 type WireContent struct {
 	Type string `json:"type"`
 
-	// text part
+	// text part; also the text payload of reasoning parts
 	Text string `json:"text,omitempty"`
 
 	// image part
@@ -92,11 +93,8 @@ type WireContent struct {
 	ToolName   string         `json:"toolName,omitempty"`
 	Input      map[string]any `json:"input,omitempty"`
 
-	// tool-result part (user role side)
+	// tool-result part (tool role side; toolName is required)
 	Output *WireToolOutput `json:"output,omitempty"`
-
-	// reasoning part (assistant side)
-	ReasoningText string `json:"-"`
 }
 
 // WireToolOutput is the output payload of a tool-result part.
