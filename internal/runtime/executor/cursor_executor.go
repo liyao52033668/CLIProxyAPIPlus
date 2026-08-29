@@ -1155,14 +1155,15 @@ func processH2SessionFrames(
 							}
 						}
 
-						// Send MCP result
-						for _, tr := range toolResults {
-							if tr.ToolCallId == pending.ToolCallId {
-								log.Debugf("cursor: sending inline MCP result for tool=%s", pending.ToolName)
-								if err := writeEncoded(cursorproto.EncodeExecMcpResult(pending.ExecMsgId, pending.ExecId, tr.Content, false)); err != nil {
-									return err
-								}
-								break
+						// Send MCP result. Matching must never silently fail: a
+						// client that normalizes tool-call ids (upstream ids have
+						// been observed to contain newlines) would otherwise leave
+						// the upstream waiting for a result forever.
+						tr, ok := matchToolResult(toolResults, pending.ToolCallId)
+						if ok {
+							log.Debugf("cursor: sending inline MCP result for tool=%s (call id %q)", pending.ToolName, pending.ToolCallId)
+							if err := writeEncoded(cursorproto.EncodeExecMcpResult(pending.ExecMsgId, pending.ExecId, tr.Content, false)); err != nil {
+								return err
 							}
 						}
 						continue
@@ -1279,6 +1280,13 @@ func parseOpenAIRequest(payload []byte) *parsedOpenAIRequest {
 			p.Images = extractImages(msg.Get("content"))
 		case "assistant":
 			assistantText := extractTextContent(msg.Get("content"))
+			if tc := describeAssistantToolCalls(msg); tc != "" {
+				if assistantText != "" {
+					assistantText += "\n" + tc
+				} else {
+					assistantText = tc
+				}
+			}
 			if pendingUser != "" {
 				p.Turns = append(p.Turns, cursorproto.TurnData{
 					UserText:      pendingUser,
@@ -1310,6 +1318,69 @@ func parseOpenAIRequest(payload []byte) *parsedOpenAIRequest {
 	p.Tools = gjson.GetBytes(payload, "tools").Array()
 
 	return p
+}
+
+// matchToolResult finds the tool result for a pending MCP call. Exact id match
+// first, then a whitespace-trimmed match (clients may normalize tool-call ids,
+// and upstream ids have been observed to contain newlines), and finally the
+// first available result so the upstream is never left waiting forever. The
+// boolean reports whether a result was found; degraded matches are logged.
+func matchToolResult(results []toolResultInfo, callID string) (toolResultInfo, bool) {
+	for _, tr := range results {
+		if tr.ToolCallId == callID {
+			return tr, true
+		}
+	}
+	trimmed := strings.TrimSpace(callID)
+	if trimmed != "" {
+		for _, tr := range results {
+			if strings.TrimSpace(tr.ToolCallId) == trimmed {
+				log.Warnf("cursor: tool result matched only after trimming call id %q", callID)
+				return tr, true
+			}
+		}
+	}
+	if len(results) > 0 {
+		log.Warnf("cursor: no tool result matched call id %q (%d result(s) available); falling back to the first result", callID, len(results))
+		return results[0], true
+	}
+	log.Warnf("cursor: no tool result available for pending call id %q", callID)
+	return toolResultInfo{}, false
+}
+
+// describeAssistantToolCalls renders OpenAI assistant tool_calls as plain text
+// so flattened conversation history preserves which tools were invoked with
+// which arguments — the upstream only sees text turns.
+func describeAssistantToolCalls(msg gjson.Result) string {
+	calls := msg.Get("tool_calls")
+	if !calls.IsArray() {
+		return ""
+	}
+	var sb strings.Builder
+	calls.ForEach(func(_, call gjson.Result) bool {
+		fn := call.Get("function")
+		name := fn.Get("name").String()
+		if name == "" {
+			return true
+		}
+		if sb.Len() > 0 {
+			sb.WriteString("\n")
+		}
+		args := strings.TrimSpace(fn.Get("arguments").String())
+		if args == "" {
+			args = "{}"
+		}
+		if len(args) > 2000 {
+			args = args[:2000] + "... [truncated]"
+		}
+		sb.WriteString("[Called tool " + name)
+		if id := call.Get("id").String(); id != "" {
+			sb.WriteString(" (call_id: " + id + ")")
+		}
+		sb.WriteString(" with arguments: " + args + "]")
+		return true
+	})
+	return sb.String()
 }
 
 // bakeToolResultsIntoTurns merges tool results into the last turn's assistant text

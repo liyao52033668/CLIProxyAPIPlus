@@ -20,7 +20,7 @@ func ConvertOpenAIToCommandCodeRequest(modelName string, inputRawJSON []byte, st
 		Model:     modelName,
 		Messages:  convertMessages(root),
 		Tools:     convertTools(root),
-		System:    root.Get("system").String(),
+		System:    ExtractOpenAISystem(inputRawJSON),
 		MaxTokens: root.Get("max_tokens").Int(),
 		Stream:    stream,
 	}
@@ -51,13 +51,15 @@ func ConvertOpenAIToCommandCodeRequest(modelName string, inputRawJSON []byte, st
 	return data
 }
 
-// convertMessages maps OpenAI messages to wire messages.
-// System messages are extracted into the top-level system field.
+// convertMessages maps OpenAI messages to wire messages. System and developer
+// messages are skipped here; their text is carried in params.system via
+// ExtractOpenAISystem. The upstream schema only accepts "user" and "assistant"
+// roles, so tool results ride on user messages (Anthropic-style tool_result).
 func convertMessages(root gjson.Result) []cc.WireMessage {
-	var systemParts []string
 	var out []cc.WireMessage
 
-	appendAssistantContent := func(content gjson.Result) {
+	appendAssistantMessage := func(msg gjson.Result) {
+		content := msg.Get("content")
 		parts := make([]cc.WireContent, 0, 2)
 		if content.IsArray() {
 			content.ForEach(func(_, part gjson.Result) bool {
@@ -79,6 +81,24 @@ func convertMessages(root gjson.Result) []cc.WireMessage {
 		} else if s := content.String(); s != "" {
 			parts = append(parts, cc.WireContent{Type: "text", Text: s})
 		}
+		msg.Get("tool_calls").ForEach(func(_, call gjson.Result) bool {
+			fn := call.Get("function")
+			name := fn.Get("name").String()
+			if name == "" {
+				return true
+			}
+			input := map[string]any{}
+			if args := strings.TrimSpace(fn.Get("arguments").String()); args != "" {
+				_ = json.Unmarshal([]byte(args), &input)
+			}
+			parts = append(parts, cc.WireContent{
+				Type:       "tool-call",
+				ToolCallID: call.Get("id").String(),
+				ToolName:   name,
+				Input:      input,
+			})
+			return true
+		})
 		if len(parts) > 0 {
 			out = append(out, cc.WireMessage{Role: "assistant", Content: parts})
 		}
@@ -88,21 +108,11 @@ func convertMessages(root gjson.Result) []cc.WireMessage {
 		role := msg.Get("role").String()
 		switch role {
 		case "system", "developer":
-			c := msg.Get("content")
-			if c.IsArray() {
-				c.ForEach(func(_, part gjson.Result) bool {
-					if s := part.Get("text").String(); s != "" {
-						systemParts = append(systemParts, s)
-					}
-					return true
-				})
-			} else if s := c.String(); s != "" {
-				systemParts = append(systemParts, s)
-			}
+			// Skipped: carried in params.system by the caller.
 		case "assistant":
-			appendAssistantContent(msg.Get("content"))
+			appendAssistantMessage(msg)
 		case "tool":
-			out = append(out, cc.WireMessage{Role: "tool", Content: []cc.WireContent{{
+			out = append(out, cc.WireMessage{Role: "user", Content: []cc.WireContent{{
 				Type:       "tool-result",
 				ToolCallID: msg.Get("tool_call_id").String(),
 				Output: &cc.WireToolOutput{
@@ -136,11 +146,6 @@ func convertMessages(root gjson.Result) []cc.WireMessage {
 		return true
 	})
 
-	if len(systemParts) > 0 && len(out) > 0 {
-		// System text is carried on the request params via the caller reading it;
-		// here we keep message order intact.
-		_ = systemParts
-	}
 	return out
 }
 

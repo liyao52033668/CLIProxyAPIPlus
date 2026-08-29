@@ -121,7 +121,9 @@ func convertMessages(root gjson.Result) []cc.WireMessage {
 			userParts = append(userParts, cc.WireContent{Type: "text", Text: s})
 		}
 		if len(toolParts) > 0 {
-			out = append(out, cc.WireMessage{Role: "tool", Content: toolParts})
+			// The upstream schema only accepts "user" and "assistant" roles, so
+			// tool results ride on user messages (Anthropic-style tool_result).
+			out = append(out, cc.WireMessage{Role: "user", Content: toolParts})
 		}
 		if len(userParts) > 0 {
 			out = append(out, cc.WireMessage{Role: "user", Content: userParts})

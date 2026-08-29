@@ -68,7 +68,8 @@ type WireParams struct {
 }
 
 // WireMessage is a single message in the wire conversation.
-// Role is "user", "assistant" or "tool".
+// The upstream schema only accepts "user" and "assistant" roles; tool results
+// ride on user messages as "tool-result" content parts.
 type WireMessage struct {
 	Role    string        `json:"role"`
 	Content []WireContent `json:"content"`
@@ -91,7 +92,7 @@ type WireContent struct {
 	ToolName   string         `json:"toolName,omitempty"`
 	Input      map[string]any `json:"input,omitempty"`
 
-	// tool-result part (tool role side)
+	// tool-result part (user role side)
 	Output *WireToolOutput `json:"output,omitempty"`
 
 	// reasoning part (assistant side)
