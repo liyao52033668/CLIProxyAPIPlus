@@ -93,11 +93,16 @@ func ConvertCommandCodeStreamToOpenAI(_ context.Context, modelName string, origi
 		state.ToolIndex++
 		state.ToolCalls[toolCallID] = idx
 
-		template, _ = sjson.SetBytes(template, "choices.0.delta.tool_calls."+itoa(idx)+".index", idx)
-		template, _ = sjson.SetBytes(template, "choices.0.delta.tool_calls."+itoa(idx)+".id", toolCallID)
-		template, _ = sjson.SetBytes(template, "choices.0.delta.tool_calls."+itoa(idx)+".type", "function")
-		template, _ = sjson.SetBytes(template, "choices.0.delta.tool_calls."+itoa(idx)+".function.name", toolName)
-		template, _ = sjson.SetBytes(template, "choices.0.delta.tool_calls."+itoa(idx)+".function.arguments", args)
+		// Each streamed chunk carries exactly ONE tool_calls fragment at array
+		// position 0; the parallel-call number lives in the fragment's "index"
+		// field. Writing the fragment at array position idx would make sjson
+		// null-pad the fresh template array (e.g. [null, {...}]), which clients
+		// reject.
+		template, _ = sjson.SetBytes(template, "choices.0.delta.tool_calls.0.index", idx)
+		template, _ = sjson.SetBytes(template, "choices.0.delta.tool_calls.0.id", toolCallID)
+		template, _ = sjson.SetBytes(template, "choices.0.delta.tool_calls.0.type", "function")
+		template, _ = sjson.SetBytes(template, "choices.0.delta.tool_calls.0.function.name", toolName)
+		template, _ = sjson.SetBytes(template, "choices.0.delta.tool_calls.0.function.arguments", args)
 
 	case cc.EventFinish:
 		state.FinishSeen = true
@@ -309,9 +314,4 @@ func generateToolCallID(name string) string {
 func newResponseID() string {
 	n := atomic.AddUint64(&functionCallIDCounter, 1)
 	return "chatcmpl-" + strconv.FormatUint(n, 16)
-}
-
-// itoa is a tiny helper to keep template paths readable.
-func itoa(v int) string {
-	return strconv.Itoa(v)
 }
