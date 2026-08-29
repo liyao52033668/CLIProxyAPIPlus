@@ -41,6 +41,9 @@ func CleanJSONSchemaForGemini(jsonStr string) string {
 
 // cleanJSONSchema performs the core cleaning operations on the JSON schema.
 func cleanJSONSchema(jsonStr string, addPlaceholder bool) string {
+	// Phase 0: Ensure array schemas define "items"; Gemini and Antigravity reject tool array schemas without them.
+	jsonStr = addDefaultArrayItems(jsonStr)
+
 	// Phase 1: Convert and add hints
 	jsonStr = convertRefsToHints(jsonStr)
 	jsonStr = convertConstToEnum(jsonStr)
@@ -68,6 +71,89 @@ func cleanJSONSchema(jsonStr string, addPlaceholder bool) string {
 	}
 
 	return jsonStr
+}
+
+// isArrayDeclaredType reports whether a schema "type" value (a single string or a type list) declares "array".
+func isArrayDeclaredType(t gjson.Result) bool {
+	if t.Type == gjson.JSON {
+		for _, item := range t.Array() {
+			if item.String() == "array" {
+				return true
+			}
+		}
+		return false
+	}
+	return t.String() == "array"
+}
+
+// addDefaultArrayItems populates a default string "items" schema on array definitions
+// missing an items property. Only standard schema containers are traversed so that
+// non-schema values (defaults, examples, descriptions) are never modified.
+func addDefaultArrayItems(jsonStr string) string {
+	if jsonStr == "" {
+		return jsonStr
+	}
+	var paths []string
+	collectArrayItemsPaths(gjson.Parse(jsonStr), "", &paths)
+	for i := len(paths) - 1; i >= 0; i-- {
+		jsonStr, _ = sjson.Set(jsonStr, paths[i], map[string]string{"type": "string"})
+	}
+	return jsonStr
+}
+
+// schemaSubNodeKeys are singular keys whose value is a subschema.
+var schemaSubNodeKeys = []string{"if", "then", "else", "not", "contains", "propertyNames", "unevaluatedProperties", "unevaluatedItems", "contentSchema", "additionalItems"}
+
+// collectArrayItemsPaths gathers the paths of array-typed schema nodes missing "items".
+func collectArrayItemsPaths(value gjson.Result, path string, paths *[]string) {
+	if !value.IsObject() {
+		return
+	}
+	if isArrayDeclaredType(value.Get("type")) && !value.Get("items").Exists() {
+		*paths = append(*paths, joinPath(path, "items"))
+	}
+
+	if props := value.Get("properties"); props.IsObject() {
+		props.ForEach(func(key, child gjson.Result) bool {
+			collectArrayItemsPaths(child, joinPath(joinPath(path, "properties"), escapeGJSONPathKey(key.String())), paths)
+			return true
+		})
+	}
+
+	for _, key := range []string{"additionalProperties", "patternProperties", "$defs", "definitions"} {
+		if container := value.Get(key); container.IsObject() {
+			container.ForEach(func(name, child gjson.Result) bool {
+				collectArrayItemsPaths(child, joinPath(joinPath(path, key), escapeGJSONPathKey(name.String())), paths)
+				return true
+			})
+		}
+	}
+
+	if items := value.Get("items"); items.Exists() {
+		itemsPath := joinPath(path, "items")
+		if items.IsObject() {
+			collectArrayItemsPaths(items, itemsPath, paths)
+		} else if items.IsArray() {
+			for index, element := range items.Array() {
+				collectArrayItemsPaths(element, joinPath(itemsPath, strconv.Itoa(index)), paths)
+			}
+		}
+	}
+
+	for _, key := range []string{"anyOf", "oneOf", "allOf", "prefixItems"} {
+		if list := value.Get(key); list.IsArray() {
+			listPath := joinPath(path, key)
+			for index, element := range list.Array() {
+				collectArrayItemsPaths(element, joinPath(listPath, strconv.Itoa(index)), paths)
+			}
+		}
+	}
+
+	for _, key := range schemaSubNodeKeys {
+		if subNode := value.Get(key); subNode.IsObject() {
+			collectArrayItemsPaths(subNode, joinPath(path, key), paths)
+		}
+	}
 }
 
 // removeKeywords removes all occurrences of specified keywords from the JSON schema.

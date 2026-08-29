@@ -1159,3 +1159,39 @@ func TestCleanJSONSchemaKeepsPropertiesNamedLikeKeywords(t *testing.T) {
 		}
 	}
 }
+
+// TestCleanJSONSchema_ToolArraysMissingItems guards the Gemini/Antigravity requirement that
+// reject tool array schemas that do not declare an items schema.
+func TestCleanJSONSchema_ToolArraysMissingItems(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"params": { "type": "array" },
+			"values": { "type": ["array", "null"], "description": "no items" },
+			"existing": { "type": "array", "items": { "type": "number" } }
+		}
+	}`
+
+	for cleaner, clean := range map[string]func(string) string{
+		"antigravity": CleanJSONSchemaForAntigravity,
+		"gemini":      CleanJSONSchemaForGemini,
+	} {
+		t.Run(cleaner, func(t *testing.T) {
+			got := gjson.Parse(clean(input))
+
+			for _, path := range []string{"properties.params.items.type", "properties.values.items.type"} {
+				if itemType := got.Get(path).String(); itemType != "string" {
+					t.Errorf("%s = %q, want string; got schema: %s", path, itemType, got.Raw)
+				}
+			}
+			if itemType := got.Get("properties.existing.items.type").String(); itemType != "number" {
+				t.Errorf("existing items type = %q, want number; got schema: %s", itemType, got.Raw)
+			}
+
+			rootArray := gjson.Parse(clean(`{"type":"array"}`))
+			if itemType := rootArray.Get("items.type").String(); itemType != "string" {
+				t.Errorf("root items type = %q, want string; got schema: %s", itemType, rootArray.Raw)
+			}
+		})
+	}
+}

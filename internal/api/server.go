@@ -1297,8 +1297,9 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 		// management key returns all models (allowedModels stays nil)
 
 		if _, ok := c.Request.URL.Query()["client_version"]; ok {
+			clientVersion := c.Query("client_version")
 			if s != nil && s.cfg != nil && s.cfg.Home.Enabled {
-				s.handleHomeCodexClientModels(c)
+				s.handleHomeCodexClientModels(c, clientVersion)
 				return
 			}
 			if allowedModels != nil {
@@ -1451,7 +1452,7 @@ func (s *Server) handleModelsWithFilter(c *gin.Context, handler interface{}, all
 	}
 }
 
-func (s *Server) handleHomeCodexClientModels(c *gin.Context) {
+func (s *Server) handleHomeCodexClientModels(c *gin.Context, clientVersion string) {
 	entries, ok := s.loadHomeModelEntries(c)
 	if !ok {
 		return
@@ -1476,7 +1477,7 @@ func (s *Server) handleHomeCodexClientModels(c *gin.Context) {
 		models = append(models, model)
 	}
 
-	c.JSON(http.StatusOK, openai.CodexClientModelsResponse(models))
+	c.JSON(http.StatusOK, openai.CodexClientModelsResponseForClient(models, clientVersion))
 }
 
 func (s *Server) geminiModelsHandler(geminiHandler *gemini.GeminiAPIHandler) gin.HandlerFunc {

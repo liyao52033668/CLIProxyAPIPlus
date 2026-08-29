@@ -179,7 +179,7 @@ func TestCodexClientModelsResponse_RequiresTemplateAndCodexProvidersForSearchToo
 		{"id": "gpt-5.6-sol"},
 	}, func(id string) []string {
 		return providers[id]
-	})
+	}, "")
 	models, ok := resp["models"].([]map[string]any)
 	if !ok {
 		t.Fatalf("models type = %T, want []map[string]any", resp["models"])
@@ -281,4 +281,77 @@ func TestCodexClientModelsResponse_PreservesUltraReasoningEffort(t *testing.T) {
 	}
 
 	t.Fatalf("supported_reasoning_levels = %#v, want ultra", levels)
+}
+
+func TestCodexClientModelsResponse_FiltersExtendedReasoningEffortsForOlderClients(t *testing.T) {
+	effortsForVersion := func(clientVersion string) []string {
+		resp := codexClientModelsResponse([]map[string]any{{"id": "gpt-5.6-sol"}}, nil, clientVersion)
+		models, ok := resp["models"].([]map[string]any)
+		if !ok {
+			t.Fatalf("models type = %T, want []map[string]any", resp["models"])
+		}
+		for _, entry := range models {
+			if stringModelValue(entry, "slug") != "gpt-5.6-sol" {
+				continue
+			}
+			levels, ok := entry["supported_reasoning_levels"].([]any)
+			if !ok {
+				t.Fatalf("supported_reasoning_levels = %T, want []any", entry["supported_reasoning_levels"])
+			}
+			efforts := make([]string, 0, len(levels))
+			for _, rawLevel := range levels {
+				level, _ := rawLevel.(map[string]any)
+				efforts = append(efforts, stringModelValue(level, "effort"))
+			}
+			return efforts
+		}
+		t.Fatal("expected codex client entry for gpt-5.6-sol")
+		return nil
+	}
+
+	older := effortsForVersion("0.137.0")
+	if len(older) != 4 {
+		t.Fatalf("0.137.0 expected 4 legacy reasoning levels, got %#v", older)
+	}
+	for _, effort := range older {
+		if effort == "max" || effort == "ultra" {
+			t.Fatalf("0.137.0 received unsupported reasoning effort %q", effort)
+		}
+	}
+
+	for _, clientVersion := range []string{"", "0.144.0", "0.149.1", "v0.149.1"} {
+		newer := effortsForVersion(clientVersion)
+		hasUltra := false
+		for _, effort := range newer {
+			if effort == "ultra" {
+				hasUltra = true
+			}
+		}
+		if !hasUltra {
+			t.Fatalf("client version %q expected ultra reasoning effort to be preserved, got %#v", clientVersion, newer)
+		}
+	}
+}
+
+func TestSupportsExtendedReasoningLevels(t *testing.T) {
+	tests := []struct {
+		name          string
+		clientVersion string
+		want          bool
+	}{
+		{name: "empty version preserves modern features", clientVersion: "", want: true},
+		{name: "older minor", clientVersion: "0.137.0", want: false},
+		{name: "same version", clientVersion: "0.144.0", want: true},
+		{name: "newer version", clientVersion: "0.149.1", want: true},
+		{name: "v prefix", clientVersion: "v0.149.1", want: true},
+		{name: "two segment version", clientVersion: "0.149", want: true},
+		{name: "unparseable version", clientVersion: "not-a-version", want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := supportsExtendedReasoningLevels(tt.clientVersion); got != tt.want {
+				t.Fatalf("supportsExtendedReasoningLevels(%q) = %v, want %v", tt.clientVersion, got, tt.want)
+			}
+		})
+	}
 }

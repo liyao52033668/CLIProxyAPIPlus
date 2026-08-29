@@ -560,3 +560,165 @@ func TestManager_SchedulerTracksMarkResultCooldownAndRecovery(t *testing.T) {
 		t.Fatalf("len(seen) = %d, want %d", len(seen), 2)
 	}
 }
+
+func TestReadyViewRoundRobinPreservesSuccessorAcrossRebuild(t *testing.T) {
+	t.Parallel()
+
+	entry := func(id string) *scheduledAuth {
+		return &scheduledAuth{auth: &Auth{ID: id}}
+	}
+
+	t.Run("a cooling resumes at b", func(t *testing.T) {
+		original := readyView{
+			flat: []*scheduledAuth{entry("A"), entry("B"), entry("C")},
+		}
+		if got := original.pickRoundRobin(nil); got == nil || got.auth.ID != "A" {
+			t.Fatalf("first pick = %v, want A", got)
+		}
+
+		state := snapshotReadyViewCursors(original)
+		rebuilt := readyView{
+			flat: []*scheduledAuth{entry("B"), entry("C")},
+		}
+		restoreReadyViewCursors(&rebuilt, state)
+
+		got := rebuilt.pickRoundRobin(nil)
+		if got == nil || got.auth.ID != "B" {
+			t.Fatalf("pick after A cooldown = %v, want B", got)
+		}
+	})
+
+	t.Run("b cooling resumes at c", func(t *testing.T) {
+		original := readyView{
+			flat: []*scheduledAuth{entry("A"), entry("B"), entry("C")},
+		}
+		// Pick A, then B
+		if got := original.pickRoundRobin(nil); got == nil || got.auth.ID != "A" {
+			t.Fatalf("first pick = %v, want A", got)
+		}
+		if got := original.pickRoundRobin(nil); got == nil || got.auth.ID != "B" {
+			t.Fatalf("second pick = %v, want B", got)
+		}
+
+		state := snapshotReadyViewCursors(original)
+		rebuilt := readyView{
+			flat: []*scheduledAuth{entry("A"), entry("C")},
+		}
+		restoreReadyViewCursors(&rebuilt, state)
+
+		got := rebuilt.pickRoundRobin(nil)
+		if got == nil || got.auth.ID != "C" {
+			t.Fatalf("pick after B cooldown = %v, want C", got)
+		}
+	})
+
+	t.Run("c cooling wraps to a", func(t *testing.T) {
+		original := readyView{
+			flat: []*scheduledAuth{entry("A"), entry("B"), entry("C")},
+		}
+		// Pick A, B, C
+		for _, want := range []string{"A", "B", "C"} {
+			if got := original.pickRoundRobin(nil); got == nil || got.auth.ID != want {
+				t.Fatalf("pick = %v, want %s", got, want)
+			}
+		}
+
+		state := snapshotReadyViewCursors(original)
+		rebuilt := readyView{
+			flat: []*scheduledAuth{entry("A"), entry("B")},
+		}
+		restoreReadyViewCursors(&rebuilt, state)
+
+		got := rebuilt.pickRoundRobin(nil)
+		if got == nil || got.auth.ID != "A" {
+			t.Fatalf("pick after C cooldown = %v, want A", got)
+		}
+	})
+
+	t.Run("recovery preserves successor", func(t *testing.T) {
+		original := readyView{
+			flat: []*scheduledAuth{entry("B"), entry("C")},
+		}
+		if got := original.pickRoundRobin(nil); got == nil || got.auth.ID != "B" {
+			t.Fatalf("first pick = %v, want B", got)
+		}
+
+		state := snapshotReadyViewCursors(original)
+		// A recovered and is prepended back
+		rebuilt := readyView{
+			flat: []*scheduledAuth{entry("A"), entry("B"), entry("C")},
+		}
+		restoreReadyViewCursors(&rebuilt, state)
+
+		got := rebuilt.pickRoundRobin(nil)
+		if got == nil || got.auth.ID != "C" {
+			t.Fatalf("pick after A recovery = %v, want C", got)
+		}
+	})
+
+	t.Run("retry exclusion resumes without rebuild", func(t *testing.T) {
+		view := readyView{
+			flat: []*scheduledAuth{entry("A"), entry("B"), entry("C")},
+		}
+		if got := view.pickRoundRobin(nil); got == nil || got.auth.ID != "A" {
+			t.Fatalf("first pick = %v, want A", got)
+		}
+		got := view.pickRoundRobin(func(candidate *scheduledAuth) bool {
+			return candidate.auth.ID != "B"
+		})
+		if got == nil || got.auth.ID != "C" {
+			t.Fatalf("pick after excluding B = %v, want C", got)
+		}
+	})
+
+	t.Run("multiple cooldown skips to first surviving successor", func(t *testing.T) {
+		original := readyView{
+			flat: []*scheduledAuth{entry("A"), entry("B"), entry("C"), entry("D")},
+		}
+		if got := original.pickRoundRobin(nil); got == nil || got.auth.ID != "A" {
+			t.Fatalf("first pick = %v, want A", got)
+		}
+
+		state := snapshotReadyViewCursors(original)
+		rebuilt := readyView{
+			flat: []*scheduledAuth{entry("C"), entry("D")},
+		}
+		restoreReadyViewCursors(&rebuilt, state)
+
+		got := rebuilt.pickRoundRobin(nil)
+		if got == nil || got.auth.ID != "C" {
+			t.Fatalf("pick after A and B cooldown = %v, want C", got)
+		}
+	})
+}
+
+func TestScheduledSuccessorIndex_WrapsAndSkipsFilteredCandidates(t *testing.T) {
+	t.Parallel()
+
+	entries := []*scheduledAuth{
+		{auth: &Auth{ID: "aaa"}},
+		{auth: &Auth{ID: "ccc"}},
+		{auth: &Auth{ID: "eee"}},
+	}
+	tests := []struct {
+		name   string
+		lastID string
+		want   int
+	}{
+		{name: "no previous pick starts at head", lastID: "", want: 0},
+		{name: "resumes after previous pick", lastID: "aaa", want: 1},
+		{name: "resumes after filtered-out pick", lastID: "bbb", want: 1},
+		{name: "wraps at the end of the ring", lastID: "eee", want: 0},
+		{name: "wraps for removed trailing pick", lastID: "zzz", want: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := scheduledSuccessorIndex(entries, tt.lastID); got != tt.want {
+				t.Fatalf("scheduledSuccessorIndex(%q) = %d, want %d", tt.lastID, got, tt.want)
+			}
+		})
+	}
+	if got := scheduledSuccessorIndex(nil, "aaa"); got != 0 {
+		t.Fatalf("scheduledSuccessorIndex(nil, aaa) = %d, want 0", got)
+	}
+}
