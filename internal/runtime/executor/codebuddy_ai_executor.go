@@ -99,6 +99,12 @@ func (e *CodeBuddyAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel, "")
+	// The CodeBuddy AI upstream requires the first message to be a plain-string
+	// system prompt (code 11128 "first message is not system prompt"): block-array
+	// system content fails the same check, and a request without any system
+	// message is rejected outright. The tencent CodeBuddy upstream behaves the
+	// opposite way and keeps its own handling in codebuddy_executor.go.
+	translated = helps.EnsureOpenAILeadingSystemMessage(translated, codebuddy_ai.DefaultSystemPrompt)
 	translated, _ = sjson.SetBytes(translated, "stream", true)
 	translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
 
@@ -162,6 +168,12 @@ func (e *CodeBuddyAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel, "")
+	// The CodeBuddy AI upstream requires the first message to be a plain-string
+	// system prompt (code 11128 "first message is not system prompt"): block-array
+	// system content fails the same check, and a request without any system
+	// message is rejected outright. The tencent CodeBuddy upstream behaves the
+	// opposite way and keeps its own handling in codebuddy_executor.go.
+	translated = helps.EnsureOpenAILeadingSystemMessage(translated, codebuddy_ai.DefaultSystemPrompt)
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -280,9 +292,9 @@ func (e *CodeBuddyAIExecutor) applyHeaders(req *http.Request, accessToken, userI
 	req.Header.Set("X-Domain", domain)
 	req.Header.Set("X-IDE-Type", "IDE")
 	req.Header.Set("X-IDE-Name", "CodeBuddy")
-	req.Header.Set("X-IDE-Version", "1.100.0")
+	req.Header.Set("X-IDE-Version", codebuddy_ai.PluginVersion)
 	req.Header.Set("X-Product", "cloud")
-	req.Header.Set("X-Product-Version", "1.100.0")
+	req.Header.Set("X-Product-Version", codebuddy_ai.PluginVersion)
 }
 
 var codeBuddyAIInternalModelPrefixes = []string{
@@ -306,6 +318,7 @@ func isCodeBuddyAIInternalModel(id string) bool {
 	return false
 }
 
+
 func FetchCodeBuddyAIModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config) []*registry.ModelInfo {
 	accessToken, userID, domain := codeBuddyAICredentials(auth)
 	if accessToken == "" {
@@ -313,10 +326,10 @@ func FetchCodeBuddyAIModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 		return registry.GetCodeBuddyAIModels()
 	}
 
-	log.Debugf("codebuddy-ai: fetching dynamic models from config API")
+	log.Debugf("codebuddy-ai: fetching dynamic models from getLatestModels API")
 
 	headers := make(http.Header)
-	headers.Set("User-Agent", codebuddy_ai.UserAgent)
+	headers.Set("User-Agent", codebuddy_ai.ConfigUserAgent)
 	headers.Set("Accept", "application/json, text/plain, */*")
 	headers.Set("X-Requested-With", "XMLHttpRequest")
 	headers.Set("Authorization", "Bearer "+accessToken)
@@ -324,8 +337,8 @@ func FetchCodeBuddyAIModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 	headers.Set("X-Domain", domain)
 	headers.Set("X-IDE-Type", "CodeBuddyIDE")
 	headers.Set("X-IDE-Name", "CodeBuddyIDE")
-	headers.Set("X-IDE-Version", "4.10.4")
-	headers.Set("X-Product-Version", "4.10.4")
+	headers.Set("X-IDE-Version", codebuddy_ai.IDEVersion)
+	headers.Set("X-Product-Version", codebuddy_ai.IDEVersion)
 	headers.Set("X-Env-ID", "production")
 	headers.Set("X-Product", "SaaS")
 
@@ -334,18 +347,19 @@ func FetchCodeBuddyAIModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 		Provider: "codebuddy-ai",
 		Auth:     auth,
 		Method:   http.MethodGet,
-		URL:      codebuddy_ai.BaseURL + "/v3/config",
+		URL:      codebuddy_ai.BaseURL + "/api/chat-slice/commonServer/getLatestModels",
 		Headers:  headers,
 		Client:   httpClient,
 	})
 	if errDo != nil {
-		log.Warnf("codebuddy-ai: using static models (config API fetch failed: %v)", errDo)
+		log.Warnf("codebuddy-ai: using static models (getLatestModels API fetch failed: %v)", errDo)
 		return registry.GetCodeBuddyAIModels()
 	}
 
-	modelsResult := gjson.GetBytes(body, "data.models")
+	// The getLatestModels API returns data directly as an array
+	modelsResult := gjson.GetBytes(body, "data")
 	if !modelsResult.Exists() || !modelsResult.IsArray() {
-		log.Warn("codebuddy-ai: config API response missing data.models array")
+		log.Warn("codebuddy-ai: getLatestModels API response missing data array")
 		return registry.GetCodeBuddyAIModels()
 	}
 
@@ -361,6 +375,14 @@ func FetchCodeBuddyAIModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 
 		if isCodeBuddyAIInternalModel(id) {
 			return true
+		}
+
+		// Non-chat models (e.g. text-to-image) cannot be served through the
+		// chat completions endpoint.
+		for _, tag := range value.Get("tags").Array() {
+			if tag.String() == "text-to-image" {
+				return true
+			}
 		}
 
 		name := value.Get("name").String()
@@ -422,9 +444,11 @@ func FetchCodeBuddyAIModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 		return true
 	})
 
-	log.Infof("codebuddy-ai: fetched %d models from config API", count)
+	count = len(dynamicModels)
+
+	log.Infof("codebuddy-ai: fetched %d models from getLatestModels API", count)
 	if count == 0 {
-		log.Warn("codebuddy-ai: no models parsed from config API, using static fallback")
+		log.Warn("codebuddy-ai: no models parsed from getLatestModels API, using static fallback")
 		return registry.GetCodeBuddyAIModels()
 	}
 

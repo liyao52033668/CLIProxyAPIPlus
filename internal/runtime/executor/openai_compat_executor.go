@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
@@ -141,6 +142,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		if err != nil {
 			return resp, err
 		}
+		translated = e.restoreOpenAICompatReasoningContent(ctx, translated)
 	}
 	if opts.Alt == "responses/compact" {
 		if updated, errDelete := sjson.DeleteBytes(translated, "stream"); errDelete == nil {
@@ -175,6 +177,9 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		return resp, toStatusErr(errDo)
 	}
 	body = normalizeOpenAICompatThinkingResponse(body)
+	if opts.Alt != "responses/compact" {
+		cacheOpenAICompatReasoningTurns(ctx, helps.CaptureOpenAICompatReasoningResponse(body))
+	}
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
 	// Ensure we at least record the request even if upstream doesn't return usage
 	reporter.EnsurePublished(ctx)
@@ -216,6 +221,7 @@ func (e *OpenAICompatExecutor) executeChatCompletionsViaForcedStream(ctx context
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
+	translated = e.restoreOpenAICompatReasoningContent(ctx, translated)
 	translated, _ = sjson.SetBytes(translated, "stream", true)
 	translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
 
@@ -298,6 +304,7 @@ func (e *OpenAICompatExecutor) executeChatCompletionsViaForcedStream(ctx context
 		return resp, err
 	}
 	body = normalizeOpenAICompatThinkingResponse(body)
+	cacheOpenAICompatReasoningTurns(ctx, helps.CaptureOpenAICompatReasoningResponse(body))
 	helps.AppendAPIResponseChunk(ctx, e.cfg, body)
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
 	reporter.EnsurePublished(ctx)
@@ -408,6 +415,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		if err != nil {
 			return nil, err
 		}
+		translated = e.restoreOpenAICompatReasoningContent(ctx, translated)
 	}
 
 	// Request usage data in the final streaming chunk so that token statistics
@@ -451,6 +459,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		var param any
 		var seenDone bool
 		thinkingState := newOpenAICompatThinkingStreamState()
+		reasoningCapture := helps.NewOpenAICompatReasoningStreamCapture()
 		emitTranslated := func(raw []byte) bool {
 			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, raw, &param)
 			for i := range chunks {
@@ -495,13 +504,16 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			data := bytes.TrimSpace(trimmedLine[len("data:"):])
 			if bytes.Equal(data, []byte("[DONE]")) {
 				for _, pending := range thinkingState.Flush() {
+					reasoningCapture.Observe(pending)
 					if !emitTranslated(pending) {
 						return
 					}
 				}
 				seenDone = true
 			}
-			if !emitTranslated(thinkingState.Transform(bytes.Clone(trimmedLine))) {
+			transformed := thinkingState.Transform(bytes.Clone(trimmedLine))
+			reasoningCapture.Observe(transformed)
+			if !emitTranslated(transformed) {
 				return
 			}
 			if seenDone {
@@ -518,18 +530,22 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
 			case <-ctx.Done():
 			}
-		} else if !seenDone {
-			for _, pending := range thinkingState.Flush() {
-				if !emitTranslated(pending) {
+		} else {
+			if !seenDone {
+				for _, pending := range thinkingState.Flush() {
+					reasoningCapture.Observe(pending)
+					if !emitTranslated(pending) {
+						return
+					}
+				}
+				// In case the upstream close the stream without a terminal [DONE] marker.
+				// Feed a synthetic done marker through the translator so pending
+				// response.completed events are still emitted exactly once.
+				if !emitTranslated([]byte("data: [DONE]")) {
 					return
 				}
 			}
-			// In case the upstream close the stream without a terminal [DONE] marker.
-			// Feed a synthetic done marker through the translator so pending
-			// response.completed events are still emitted exactly once.
-			if !emitTranslated([]byte("data: [DONE]")) {
-				return
-			}
+			cacheOpenAICompatReasoningTurns(ctx, reasoningCapture.Finish())
 		}
 		// Ensure we record the request if no usage chunk was ever seen
 		reporter.EnsurePublished(ctx)
@@ -1341,4 +1357,38 @@ func (e *OpenAICompatExecutor) overrideModel(payload []byte, model string) []byt
 	}
 	payload, _ = sjson.SetBytes(payload, "model", model)
 	return payload
+}
+
+// restoreOpenAICompatReasoningContent fills missing reasoning_content on
+// assistant messages from the replay cache so thinking-mode upstreams with
+// tool support (e.g. DeepSeek) accept follow-up turns.
+func (e *OpenAICompatExecutor) restoreOpenAICompatReasoningContent(ctx context.Context, payload []byte) []byte {
+	callerKey := helps.OpenAICompatReasoningCallerKey(ctx)
+	updated, _ := helps.RestoreOpenAICompatReasoningContent(payload, func(hasToolCalls bool, toolCallIDs []string, fingerprint string) (string, bool) {
+		for _, toolCallID := range toolCallIDs {
+			if reasoning, ok := internalcache.GetOpenAICompatReasoningForToolCall(callerKey, toolCallID); ok {
+				return reasoning, true
+			}
+		}
+		if fingerprint != "" {
+			if reasoning, ok := internalcache.GetOpenAICompatReasoningForContent(callerKey, fingerprint); ok {
+				return reasoning, true
+			}
+		}
+		if hasToolCalls {
+			return internalcache.GetOpenAICompatLatestReasoning(callerKey)
+		}
+		return "", false
+	})
+	return updated
+}
+
+func cacheOpenAICompatReasoningTurns(ctx context.Context, turns []helps.OpenAICompatReasoningTurn) {
+	if len(turns) == 0 {
+		return
+	}
+	callerKey := helps.OpenAICompatReasoningCallerKey(ctx)
+	for _, turn := range turns {
+		internalcache.StoreOpenAICompatReasoningTurn(callerKey, turn.Reasoning, turn.ToolCallIDs, turn.ContentFingerprint)
+	}
 }

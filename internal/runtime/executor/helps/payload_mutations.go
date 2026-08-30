@@ -68,10 +68,11 @@ func JoinRawJSONArray(items [][]byte) []byte {
 // MoveOpenAISystemToUserMessage removes the top-level "system" field and any
 // leading role=system messages from an OpenAI-format payload, prepending their
 // text as a new text block into the first role=user message. The CodeBuddy
-// upstream rejects requests that start with a system message (code 11128), so
-// the system prompt must be carried inside a user message instead. Remaining
-// mid-conversation system messages keep their position but are flattened to
-// plain-string content when they use a block array.
+// (copilot.tencent.com) upstream rejects requests that start with a system
+// message (code 11128), so the system prompt must be carried inside a user
+// message instead. Remaining mid-conversation system messages keep their
+// position but are flattened to plain-string content when they use a block
+// array.
 func MoveOpenAISystemToUserMessage(payload []byte) []byte {
 	topSystem := gjson.GetBytes(payload, "system")
 
@@ -144,6 +145,70 @@ func MoveOpenAISystemToUserMessage(payload []byte) []byte {
 		return payload
 	}
 
+	updated, errSet := sjson.SetRawBytes(payload, "messages", JoinRawJSONArray(kept))
+	if errSet != nil {
+		return payload
+	}
+	return updated
+}
+
+// EnsureOpenAILeadingSystemMessage guarantees that the first message of an
+// OpenAI-format payload is a role=system message, as required by the CodeBuddy
+// AI (www.codebuddy.ai) upstream (code 11128: "first message is not system
+// prompt"). A top-level "system" field is promoted to the first message when
+// no leading system message exists; otherwise defaultPrompt is prepended.
+// System message content is flattened to a plain string because the upstream
+// only accepts string system content.
+func EnsureOpenAILeadingSystemMessage(payload []byte, defaultPrompt string) []byte {
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.IsArray() || len(messages.Array()) == 0 {
+		return payload
+	}
+
+	kept := make([][]byte, 0, len(messages.Array())+1)
+	leadingSystem := false
+	changed := false
+	for index, message := range messages.Array() {
+		raw := []byte(message.Raw)
+		if message.Get("role").String() == "system" {
+			content := message.Get("content")
+			if content.IsArray() && len(content.Array()) > 0 {
+				if flattened, errSet := sjson.SetBytes(raw, "content", contentPlainText(content)); errSet == nil {
+					raw = flattened
+					changed = true
+				}
+			}
+			if index == 0 {
+				leadingSystem = true
+			}
+		}
+		kept = append(kept, raw)
+	}
+
+	if !leadingSystem {
+		text := ""
+		if topSystem := gjson.GetBytes(payload, "system"); topSystem.Exists() {
+			text = contentPlainText(topSystem)
+			if updated, errDelete := sjson.DeleteBytes(payload, "system"); errDelete == nil {
+				payload = updated
+				changed = true
+			}
+		}
+		if text == "" {
+			text = defaultPrompt
+		}
+		if text != "" {
+			systemMessage, errSet := sjson.SetBytes([]byte(`{"role":"system","content":""}`), "content", text)
+			if errSet == nil {
+				kept = append([][]byte{systemMessage}, kept...)
+				changed = true
+			}
+		}
+	}
+
+	if !changed {
+		return payload
+	}
 	updated, errSet := sjson.SetRawBytes(payload, "messages", JoinRawJSONArray(kept))
 	if errSet != nil {
 		return payload

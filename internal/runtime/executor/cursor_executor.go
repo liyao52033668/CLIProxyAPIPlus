@@ -2584,8 +2584,8 @@ func logCursorCatalogDiff(base, rich []*registry.ModelInfo) {
 	}
 	sort.Strings(onlyUsable)
 	sort.Strings(onlyPicker)
-	log.Debugf("cursor: catalog diff: usable=%d picker=%d only-in-usable=%v only-in-picker=%v",
-		len(baseIds), len(richIds), onlyUsable, onlyPicker)
+	// log.Debugf("cursor: catalog diff: usable=%d picker=%d only-in-usable=%v only-in-picker=%v",
+	// 	len(baseIds), len(richIds), onlyUsable, onlyPicker)
 }
 
 // fetchUsableModelsCatalog queries agent.v1.AgentService/GetUsableModels.

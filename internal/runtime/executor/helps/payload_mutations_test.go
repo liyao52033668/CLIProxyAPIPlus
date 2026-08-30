@@ -191,3 +191,77 @@ func TestMoveOpenAISystemToUserMessageNoChanges(t *testing.T) {
 		t.Fatalf("expected payload unchanged, got %s", string(got))
 	}
 }
+
+func TestEnsureOpenAILeadingSystemMessageAlreadyLeading(t *testing.T) {
+	payload := []byte(`{"messages":[{"role":"system","content":"sys"},{"role":"user","content":"hi"}]}`)
+	if got := EnsureOpenAILeadingSystemMessage(payload, "default"); string(got) != string(payload) {
+		t.Fatalf("expected payload unchanged, got %s", string(got))
+	}
+}
+
+func TestEnsureOpenAILeadingSystemMessageLeadingFlattened(t *testing.T) {
+	payload := []byte(`{"messages":[` +
+		`{"role":"system","content":[{"type":"text","text":"a"},{"type":"text","text":"b"}]},` +
+		`{"role":"user","content":"hi"}]}`)
+	updated := EnsureOpenAILeadingSystemMessage(payload, "default")
+	if got := gjson.GetBytes(updated, "messages.0.content").String(); got != "a\n\nb" {
+		t.Fatalf("expected flattened string system content, got %q", got)
+	}
+	if got := gjson.GetBytes(updated, "messages.1.role").String(); got != "user" {
+		t.Fatalf("user message must stay in place, got role %q", got)
+	}
+}
+
+func TestEnsureOpenAILeadingSystemMessagePrependsDefault(t *testing.T) {
+	payload := []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
+	updated := EnsureOpenAILeadingSystemMessage(payload, "You are CodeBuddy.")
+	if got := gjson.GetBytes(updated, "messages.0.role").String(); got != "system" {
+		t.Fatalf("first message must be system, got role %q", got)
+	}
+	if got := gjson.GetBytes(updated, "messages.0.content").String(); got != "You are CodeBuddy." {
+		t.Fatalf("expected default system prompt, got %q", got)
+	}
+	if got := gjson.GetBytes(updated, "messages.1.content").String(); got != "hi" {
+		t.Fatalf("user message must be preserved, got %q", got)
+	}
+}
+
+func TestEnsureOpenAILeadingSystemMessagePromotesTopLevelSystem(t *testing.T) {
+	payload := []byte(`{"system":"top level","messages":[{"role":"user","content":"hi"}]}`)
+	updated := EnsureOpenAILeadingSystemMessage(payload, "default")
+	if gjson.GetBytes(updated, "system").Exists() {
+		t.Fatalf("top-level system field must be removed")
+	}
+	if got := gjson.GetBytes(updated, "messages.0.role").String(); got != "system" {
+		t.Fatalf("first message must be system, got role %q", got)
+	}
+	if got := gjson.GetBytes(updated, "messages.0.content").String(); got != "top level" {
+		t.Fatalf("expected promoted top-level system text, got %q", got)
+	}
+	if got := gjson.GetBytes(updated, "messages.1.content").String(); got != "hi" {
+		t.Fatalf("user message must be preserved, got %q", got)
+	}
+}
+
+func TestEnsureOpenAILeadingSystemMessageMidSystemFlattened(t *testing.T) {
+	payload := []byte(`{"messages":[` +
+		`{"role":"user","content":"hi"},` +
+		`{"role":"system","content":[{"type":"text","text":"note"},{"type":"image","source":"data"}]}]}`)
+	updated := EnsureOpenAILeadingSystemMessage(payload, "default")
+	if got := gjson.GetBytes(updated, "messages.0.role").String(); got != "system" {
+		t.Fatalf("default system must be prepended, got role %q", got)
+	}
+	if got := gjson.GetBytes(updated, "messages.1.content").String(); got != "hi" {
+		t.Fatalf("user message must be preserved, got %q", got)
+	}
+	if got := gjson.GetBytes(updated, "messages.2.content").String(); got != "note" {
+		t.Fatalf("mid-conversation system must be flattened, got %q", got)
+	}
+}
+
+func TestEnsureOpenAILeadingSystemMessageNoMessages(t *testing.T) {
+	payload := []byte(`{"model":"m"}`)
+	if got := EnsureOpenAILeadingSystemMessage(payload, "default"); string(got) != string(payload) {
+		t.Fatalf("expected payload unchanged, got %s", string(got))
+	}
+}

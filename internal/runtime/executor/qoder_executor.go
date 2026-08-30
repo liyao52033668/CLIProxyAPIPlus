@@ -29,9 +29,12 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/qoder"
+	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
@@ -276,6 +279,7 @@ func (e *QoderExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	if err != nil {
 		return resp, err
 	}
+	body = qoderRestoreReasoningContent(ctx, body)
 
 	contract := fetchQoderModelContract(ctx, auth, e.cfg, baseModel)
 
@@ -354,6 +358,7 @@ func (e *QoderExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	if errParse != nil {
 		return resp, errParse
 	}
+	cacheOpenAICompatReasoningTurns(ctx, helps.CaptureOpenAICompatReasoningResponse(openAIResp))
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(openAIResp))
 	// Ensure usage is recorded even if upstream omits usage metadata.
 	reporter.EnsurePublished(ctx)
@@ -382,6 +387,7 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if err != nil {
 		return nil, fmt.Errorf("qoder executor: failed to set stream_options in payload: %w", err)
 	}
+	body = qoderRestoreReasoningContent(ctx, body)
 
 	contract := fetchQoderModelContract(ctx, auth, e.cfg, baseModel)
 
@@ -479,6 +485,9 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 		// Stateful thinking content cleaner to track truncated thinking across chunks
 		thinkingCleaner := newQoderThinkingCleaner()
+		// Accumulates reasoning/tool-call IDs so thinking-mode follow-up turns
+		// can replay reasoning_content back to the upstream.
+		reasoningCapture := helps.NewOpenAICompatReasoningStreamCapture()
 
 		for scanner.Scan() {
 			line := scanner.Bytes()
@@ -515,6 +524,7 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			// Clean thinking artifacts, transferring them to reasoning_content.
 			openAIChunk, reasoningContent := thinkingCleaner.clean(openAIChunk)
 			openAIChunk = qoderMergeReasoningContent(openAIChunk, reasoningContent)
+			reasoningCapture.Observe(openAIChunk)
 
 			// Wrap as SSE line for translator
 			sseLine := append([]byte("data: "), openAIChunk...)
@@ -533,6 +543,7 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		log.Debugf("qoder executor: stream bootstrap diagnostics stage=stream_loop_exit requested_model=%s upstream_model=%s status=%d elapsed_ms=%d sse_lines=%d openai_chunks=%d translated_payloads=%d content_chars=%d reasoning_chars=%d tool_call_chunks=%d finish_reason=%s ctx_err=%s scanner_err=%s stream_err=%s", strings.TrimSpace(requestedModel), strings.TrimSpace(req.Model), httpResp.StatusCode, time.Since(streamAttemptStartedAt).Milliseconds(), totalSSELines, totalOpenAIChunks, totalTranslatedPayloads, totalContentChars, totalReasoningChars, totalToolCallChunks, qoderEmptyDiagnosticValue(lastFinishReason), qoderDiagnosticErrString(ctx.Err()), qoderDiagnosticErrString(errScan), qoderDiagnosticErrString(streamErr))
 		if streamErr == nil {
 			for _, flushChunk := range thinkingCleaner.flushChunks() {
+				reasoningCapture.Observe(flushChunk)
 				flushLine := append([]byte("data: "), flushChunk...)
 				chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(flushLine), &param)
 				for i := range chunks {
@@ -543,6 +554,7 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				}
 			}
 			for _, flushChunk := range thinkingCleaner.flushReasoning() {
+				reasoningCapture.Observe(flushChunk)
 				flushLine := append([]byte("data: "), flushChunk...)
 				chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(flushLine), &param)
 				for i := range chunks {
@@ -552,6 +564,7 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
 				}
 			}
+			cacheOpenAICompatReasoningTurns(ctx, reasoningCapture.Finish())
 			doneChunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param)
 			for i := range doneChunks {
 				out <- cliproxyexecutor.StreamChunk{Payload: doneChunks[i]}
@@ -773,6 +786,13 @@ func (e *QoderExecutor) buildQoderRequestBody(openaiBody []byte, modelKey string
 					continue
 				}
 				structured := qoderBuildStructuredMessage(role, text)
+				if role == "assistant" {
+					// Thinking-mode upstreams reject follow-up turns whose
+					// assistant messages lost their reasoning_content.
+					if reasoning := qoderMessageReasoningContent(m); reasoning != "" {
+						structured["reasoning_content"] = reasoning
+					}
+				}
 				if role == "assistant" && len(toolCalls) > 0 {
 					structured["tool_calls"] = toolCalls
 				}
@@ -1002,6 +1022,38 @@ func qoderConversationKeyFromPayload(openaiBody []byte) string {
 
 func qoderStableConversationID(kind string, conversationKey string) string {
 	return uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:qoder:"+kind+":"+conversationKey)).String()
+}
+
+// qoderRestoreReasoningContent fills missing reasoning_content on assistant
+// messages from the shared replay cache so thinking-mode upstreams accept
+// follow-up turns even when clients strip reasoning from their history.
+func qoderRestoreReasoningContent(ctx context.Context, payload []byte) []byte {
+	callerKey := helps.OpenAICompatReasoningCallerKey(ctx)
+	updated, _ := helps.RestoreOpenAICompatReasoningContent(payload, func(hasToolCalls bool, toolCallIDs []string, fingerprint string) (string, bool) {
+		for _, toolCallID := range toolCallIDs {
+			if reasoning, ok := internalcache.GetOpenAICompatReasoningForToolCall(callerKey, toolCallID); ok {
+				return reasoning, true
+			}
+		}
+		if fingerprint != "" {
+			if reasoning, ok := internalcache.GetOpenAICompatReasoningForContent(callerKey, fingerprint); ok {
+				return reasoning, true
+			}
+		}
+		if hasToolCalls {
+			return internalcache.GetOpenAICompatLatestReasoning(callerKey)
+		}
+		return "", false
+	})
+	return updated
+}
+
+func qoderMessageReasoningContent(message map[string]any) string {
+	reasoning, ok := message["reasoning_content"].(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(reasoning)
 }
 
 func qoderBuildUserMessage(text string) map[string]any {
@@ -1510,6 +1562,7 @@ func (e *QoderExecutor) extractOpenAIChunkFromSSE(line []byte, model string) ([]
 // It preserves the last non-empty usage payload from upstream SSE chunks so usage stats work.
 func (e *QoderExecutor) parseQoderSSEToCompletion(data []byte, model string) ([]byte, error) {
 	var fullContent strings.Builder
+	var fullReasoning strings.Builder
 	var contentBuffer translatorcommon.ContentBlockTextBuffer
 	var finishReason string
 	var usageRaw string
@@ -1539,6 +1592,9 @@ func (e *QoderExecutor) parseQoderSSEToCompletion(data []byte, model string) ([]
 		if delta.Exists() {
 			content := contentBuffer.Text(delta.Get("content"))
 			fullContent.WriteString(content)
+			if reasoning := delta.Get("reasoning_content"); reasoning.Exists() && reasoning.Type == gjson.String {
+				fullReasoning.WriteString(reasoning.String())
+			}
 		}
 		if fr := choice.Get("finish_reason").String(); fr != "" && fr != "null" {
 			finishReason = fr
@@ -1550,6 +1606,13 @@ func (e *QoderExecutor) parseQoderSSEToCompletion(data []byte, model string) ([]
 	}
 	fullContent.WriteString(contentBuffer.Flush())
 
+	message := map[string]any{
+		"role":    "assistant",
+		"content": fullContent.String(),
+	}
+	if reasoning := strings.TrimSpace(fullReasoning.String()); reasoning != "" {
+		message["reasoning_content"] = reasoning
+	}
 	result := map[string]any{
 		"id":      "chatcmpl-" + uuid.NewString(),
 		"object":  "chat.completion",
@@ -1557,11 +1620,8 @@ func (e *QoderExecutor) parseQoderSSEToCompletion(data []byte, model string) ([]
 		"model":   model,
 		"choices": []any{
 			map[string]any{
-				"index": 0,
-				"message": map[string]any{
-					"role":    "assistant",
-					"content": fullContent.String(),
-				},
+				"index":         0,
+				"message":       message,
 				"finish_reason": finishReason,
 			},
 		},
@@ -2160,6 +2220,15 @@ func readHTTPRequestBody(req *http.Request) ([]byte, error) {
 //
 // Some upstream models leak thinking content into the content field. This cleaner
 // removes explicit <think>...</think> blocks while preserving normal Markdown.
+//
+// A marker only counts as a real thinking delimiter at a boundary: the start of
+// the stream or right after whitespace. Markers quoted inside visible content
+// (inline code, quotes) are answer text — e.g. a model discussing "带
+// `<think>` 标签的模型" — and must pass through untouched; stripping them
+// used to leave a stray backtick and divert the rest of the answer into
+// reasoning_content. Known limitation: inside a real thinking block the first
+// "</think>" closes it even when that occurrence is itself a quoted mention
+// in the leaked thinking.
 type qoderThinkingCleaner struct {
 	state             qoderThinkingState
 	pendingPrefix     strings.Builder
@@ -2168,6 +2237,9 @@ type qoderThinkingCleaner struct {
 	// firstVisibleHandled records that the stream-start </think>
 	// artifact check already ran on the first visible content, so it applies at most once.
 	firstVisibleHandled bool
+	// lastVisible is the last rune emitted as visible content (0 before any
+	// visible output). Marker boundary checks use it across chunk edges.
+	lastVisible rune
 	// pendingOrphanCloser buffers a partial </think>
 	// suffix in normal state to handle cross-chunk split orphan closers.
 	pendingOrphanCloser strings.Builder
@@ -2289,6 +2361,7 @@ func (c *qoderThinkingCleaner) flushChunks() [][]byte {
 	}
 	c.pendingChunk = nil
 	c.pendingPath = ""
+	c.trackVisible(pending)
 	return [][]byte{result}
 }
 
@@ -2344,19 +2417,40 @@ func (c *qoderThinkingCleaner) processNormal(text string) (cleaned string, emit 
 		// sometimes leaks a stray "</think>" closer without an opener into
 		// the first visible content. Strip it so answers don't begin with
 		// leaked thinking markers.
-		if c.firstVisibleHandled || !emit {
+		if !emit {
 			return
 		}
-		cleaned = qoderStripLeadingThinkArtifacts(cleaned)
-		emit = cleaned != ""
-		// Only mark handled when there is real non-whitespace content;
-		// whitespace-only chunks should not consume the one-shot strip.
-		if emit && strings.TrimSpace(cleaned) != "" {
-			c.firstVisibleHandled = true
+		if !c.firstVisibleHandled {
+			cleaned = qoderStripLeadingThinkArtifacts(cleaned)
+			emit = cleaned != ""
+			// Only mark handled when there is real non-whitespace content;
+			// whitespace-only chunks should not consume the one-shot strip.
+			if emit && strings.TrimSpace(cleaned) != "" {
+				c.firstVisibleHandled = true
+			}
 		}
+		c.trackVisible(cleaned)
 	}()
 
-	if idx := strings.Index(combined, "<think>"); idx != -1 {
+	// Find the first boundary-valid "<think>" opener. A marker quoted inside
+	// visible content (inline code, quotes) is answer text, not a thinking
+	// block, so it stays in the stream and the scan continues past it.
+	openerIdx := -1
+	for search := 0; ; {
+		idx := strings.Index(combined[search:], "<think>")
+		if idx == -1 {
+			break
+		}
+		idx += search
+		if qoderAtMarkerBoundary(combined, idx, c.lastVisible) {
+			openerIdx = idx
+			break
+		}
+		log.Debugf("qoder executor: thinking cleaner: keeping non-boundary <think> marker as content")
+		search = idx + len("<think>")
+	}
+	if openerIdx != -1 {
+		idx := openerIdx
 		if endIdx := strings.Index(combined[idx+len("<think>"):], "</think>"); endIdx != -1 {
 			endIdx += idx + len("<think>")
 			thinkingContent := combined[idx+len("<think>") : endIdx]
@@ -2375,23 +2469,20 @@ func (c *qoderThinkingCleaner) processNormal(text string) (cleaned string, emit 
 		return combined[:idx], idx > 0
 	}
 
-	// Remove leaked closing markers, including markers completed across chunks.
-	if idx := strings.Index(combined, "</think>"); idx != -1 {
-		cleaned := combined[:idx] + combined[idx+len("</think>"):]
-		if strings.TrimSpace(combined[:idx]) == "" {
-			cleaned = qoderStripLeadingThinkArtifacts(combined)
-		}
-		return c.processNormal(cleaned)
-	}
-
-	if suffix := qoderPartialThinkPrefixSuffix(combined); suffix != "" {
+	// A partial opener suffix is only a marker candidate at a boundary;
+	// elsewhere (e.g. inside inline code) it is ordinary text and must not be
+	// buffered, or the EOF flush would re-inject it at the wrong position.
+	if suffix := qoderPartialThinkPrefixSuffix(combined); suffix != "" &&
+		qoderAtMarkerBoundary(combined, len(combined)-len(suffix), c.lastVisible) {
 		emit := strings.TrimSuffix(combined, suffix)
 		c.pendingPrefix.WriteString(suffix)
 		return emit, emit != ""
 	}
 
-	// Buffer a partial </think> suffix that may complete in the next chunk.
-	if suffix := qoderPartialThinkEndSuffix(combined); suffix != "" {
+	// Buffer a partial </think> suffix that may complete in the next chunk,
+	// again only at a marker boundary.
+	if suffix := qoderPartialThinkEndSuffix(combined); suffix != "" &&
+		qoderAtMarkerBoundary(combined, len(combined)-len(suffix), c.lastVisible) {
 		emit := strings.TrimSuffix(combined, suffix)
 		c.pendingOrphanCloser.WriteString(suffix)
 		return emit, emit != ""
@@ -2448,6 +2539,28 @@ func qoderStripLeadingThinkArtifacts(text string) string {
 		}
 		return trimmed
 	}
+}
+
+// trackVisible records the last rune of emitted visible content so marker
+// boundary checks can look across chunk boundaries.
+func (c *qoderThinkingCleaner) trackVisible(text string) {
+	for _, r := range text {
+		c.lastVisible = r
+	}
+}
+
+// qoderAtMarkerBoundary reports whether a think marker starting at idx in s
+// sits at the start of the stream or right after whitespace. last is the last
+// rune emitted as visible content before this chunk (0 = stream start), used
+// when the marker opens the chunk. Markers preceded by other characters —
+// backticks, quotes, letters — are quoted mentions inside the answer, not
+// real thinking delimiters.
+func qoderAtMarkerBoundary(s string, idx int, last rune) bool {
+	if idx > 0 {
+		r, _ := utf8.DecodeLastRuneInString(s[:idx])
+		return unicode.IsSpace(r)
+	}
+	return last == 0 || unicode.IsSpace(last)
 }
 
 func qoderPartialThinkPrefixSuffix(text string) string {

@@ -21,7 +21,21 @@ import (
 const (
 	BaseURL       = "https://www.codebuddy.ai"
 	DefaultDomain = "www.codebuddy.ai"
-	UserAgent     = "CodeBuddy/1.100.0"
+	// IDEVersion is the CodeBuddyIDE (standalone IDE) build version that the
+	// config API expects from IDE clients.
+	IDEVersion = "4.10.4"
+	// PluginVersion is the chat plugin build version impersonated on the
+	// chat completions path.
+	PluginVersion = "1.100.0"
+	UserAgent     = "CodeBuddy/" + PluginVersion
+	// The config API only serves the full IDE config payload (including
+	// data.models) to clients whose User-Agent identifies a CodeBuddyIDE
+	// build; the plain UserAgent above receives a product-features-only
+	// body instead.
+	ConfigUserAgent = "CodeBuddy/" + IDEVersion + " CodeBuddyIDE/" + IDEVersion
+	// The chat upstream validates that the first message is a system prompt
+	// and has no fallback when the client sends none.
+	DefaultSystemPrompt = "You are CodeBuddy, an AI programming assistant."
 
 	authStatePath    = "/v2/plugin/auth/state"
 	authTokenPath    = "/v2/plugin/auth/token"

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/qoder"
+	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -1398,6 +1399,51 @@ func TestQoderExecutorBuildQoderRequestBody_NormalizesArrayUserContent(t *testin
 	}
 }
 
+func TestQoderExecutorBuildQoderRequestBody_PreservesAssistantReasoningContent(t *testing.T) {
+	e := NewQoderExecutor(&config.Config{})
+	payload := []byte(`{"messages":[{"role":"user","content":"question"},{"role":"assistant","content":"answer","reasoning_content":"  deep thought  "},{"role":"assistant","content":"plain"}]}`)
+	body := e.buildQoderRequestBody(payload, "qwen3.7-max", qoderModelContract{})
+	data := mustMarshalJSON(t, body)
+	if got := gjson.GetBytes(data, "messages.1.reasoning_content").String(); got != "deep thought" {
+		t.Fatalf("messages[1].reasoning_content = %q, want %q", got, "deep thought")
+	}
+	if gjson.GetBytes(data, "messages.2.reasoning_content").Exists() {
+		t.Fatalf("messages[2].reasoning_content exists, want the field omitted for assistant turns without reasoning")
+	}
+}
+
+func TestQoderExecutorBuildQoderRequestBody_PreservesReasoningOnToolCallAssistant(t *testing.T) {
+	// Thinking-mode upstreams reject follow-up requests whose tool-call
+	// assistant turns lost reasoning_content, so the rebuild must keep it
+	// alongside the preserved tool_calls.
+	e := NewQoderExecutor(&config.Config{})
+	payload := []byte(`{"messages":[{"role":"user","content":"list files"},{"role":"assistant","content":"","tool_calls":[{"id":"call_reasoning_keep","type":"function","function":{"name":"ls","arguments":"{}"}}],"reasoning_content":"need to inspect"},{"role":"tool","tool_call_id":"call_reasoning_keep","name":"ls","content":"a.txt"}],"tools":[{"type":"function","function":{"name":"ls"}}]}`)
+	body := e.buildQoderRequestBody(payload, "qwen3.7-max", qoderModelContract{})
+	data := mustMarshalJSON(t, body)
+	if got := gjson.GetBytes(data, "messages.1.reasoning_content").String(); got != "need to inspect" {
+		t.Fatalf("messages[1].reasoning_content = %q, want %q", got, "need to inspect")
+	}
+	if got := gjson.GetBytes(data, "messages.1.tool_calls.0.id").String(); got != "call_reasoning_keep" {
+		t.Fatalf("messages[1].tool_calls[0].id = %q, want %q", got, "call_reasoning_keep")
+	}
+}
+
+func TestQoderExecutorRestoreReasoningContent_BackfillsFromCache(t *testing.T) {
+	internalcache.StoreOpenAICompatReasoningTurn("", "cached reasoning", []string{"call_replay_backfill"}, "")
+	payload := []byte(`{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"","tool_calls":[{"id":"call_replay_backfill","type":"function","function":{"name":"ls","arguments":"{}"}}]}]}`)
+	restored := qoderRestoreReasoningContent(context.Background(), payload)
+	if got := gjson.GetBytes(restored, "messages.1.reasoning_content").String(); got != "cached reasoning" {
+		t.Fatalf("restored messages[1].reasoning_content = %q, want %q", got, "cached reasoning")
+	}
+
+	e := NewQoderExecutor(&config.Config{})
+	body := e.buildQoderRequestBody(restored, "qwen3.7-max", qoderModelContract{})
+	data := mustMarshalJSON(t, body)
+	if got := gjson.GetBytes(data, "messages.1.reasoning_content").String(); got != "cached reasoning" {
+		t.Fatalf("rebuilt messages[1].reasoning_content = %q, want %q", got, "cached reasoning")
+	}
+}
+
 func TestQoderExecutorBuildQoderRequestBody_DowngradesAssistantToolCallsWhenToolsDisabled(t *testing.T) {
 	e := NewQoderExecutor(&config.Config{})
 	body := e.buildQoderRequestBody([]byte(`{"messages":[{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Paris\"}"}}]}]}`), "qwen3.7-max", qoderModelContract{})
@@ -1915,22 +1961,25 @@ func TestQoderThinkingCleanerPreservesLaterFenceChunk(t *testing.T) {
 	}
 }
 
-func TestQoderThinkingCleanerExtractsThinkContentAcrossChunks(t *testing.T) {
+func TestQoderThinkingCleanerPassesThroughMidContentThinkMarker(t *testing.T) {
+	// A <think> marker that follows visible content is answer text (e.g. the
+	// model discussing the tag itself), not a leaked thinking block. It must
+	// pass through verbatim instead of swallowing the rest of the answer.
 	cleaner := newQoderThinkingCleaner()
 	first, reasoning := cleaner.clean(qoderTestChunk("prefix<think>reasoning step"))
-	if got := gjson.GetBytes(first, "choices.0.delta.content").String(); got != "prefix" {
-		t.Fatalf("first content = %q, want prefix", got)
+	if got := gjson.GetBytes(first, "choices.0.delta.content").String(); got != "prefix<think>reasoning step" {
+		t.Fatalf("first content = %q, want verbatim", got)
 	}
-	if reasoning != "reasoning step" {
-		t.Fatalf("first reasoning = %q, want reasoning step", reasoning)
+	if reasoning != "" {
+		t.Fatalf("first reasoning = %q, want empty", reasoning)
 	}
 
 	second, reasoning := cleaner.clean(qoderTestChunk(" more</think>suffix"))
-	if got := gjson.GetBytes(second, "choices.0.delta.content").String(); got != "suffix" {
-		t.Fatalf("second content = %q, want suffix", got)
+	if got := gjson.GetBytes(second, "choices.0.delta.content").String(); got != " more</think>suffix" {
+		t.Fatalf("second content = %q, want verbatim", got)
 	}
-	if reasoning != " more" {
-		t.Fatalf("second reasoning = %q, want more", reasoning)
+	if reasoning != "" {
+		t.Fatalf("second reasoning = %q, want empty", reasoning)
 	}
 }
 
@@ -2198,9 +2247,97 @@ func TestQoderThinkingCleanerWhitespaceOnlyFirstChunkDoesNotConsumeStrip(t *test
 	// Second chunk: stray closer followed by answer
 	second, reasoning := cleaner.clean(qoderTestChunk("</think>answer"))
 	if reasoning != "" {
-		t.Fatalf("reasoning = %q, want empty", reasoning)
+		t.Fatalf("second reasoning = %q, want empty", reasoning)
 	}
 	if got := gjson.GetBytes(second, "choices.0.delta.content").String(); got != "answer" {
 		t.Fatalf("second content = %q, want 'answer' (stray closer stripped)", got)
+	}
+}
+
+func TestQoderThinkingCleanerKeepsInlineBacktickThinkPair(t *testing.T) {
+	// Regression: an answer discussing the tag itself — "会过滤掉带
+	// `<think>...</think>` 标签的模型" — had its inline code stripped and the
+	// inner content diverted to reasoning_content, leaving a stray backtick
+	// and a cut-off sentence that then repeated across turns.
+	text := "会过滤掉带 `<think>...\n</think>` 标签的模型（`codebuddy_ai_executor.go:409-413`）"
+	cleaner := newQoderThinkingCleaner()
+	chunk, reasoning := cleaner.clean(qoderTestChunk(text))
+	if reasoning != "" {
+		t.Fatalf("reasoning = %q, want empty", reasoning)
+	}
+	if got := gjson.GetBytes(chunk, "choices.0.delta.content").String(); got != text {
+		t.Fatalf("content = %q, want verbatim", got)
+	}
+}
+
+func TestQoderThinkingCleanerKeepsInlineThinkPairSplitAcrossChunks(t *testing.T) {
+	// The quoted pair split so the opener starts a chunk right after a
+	// backtick emitted in the previous chunk; the boundary check must look
+	// at the last visible rune and keep both chunks verbatim.
+	cleaner := newQoderThinkingCleaner()
+	first, reasoning := cleaner.clean(qoderTestChunk("会过滤掉带 `"))
+	if reasoning != "" {
+		t.Fatalf("first reasoning = %q, want empty", reasoning)
+	}
+	if got := gjson.GetBytes(first, "choices.0.delta.content").String(); got != "会过滤掉带 `" {
+		t.Fatalf("first content = %q, want verbatim", got)
+	}
+
+	secondText := "<think>...\n</think>` 标签的模型"
+	second, reasoning := cleaner.clean(qoderTestChunk(secondText))
+	if reasoning != "" {
+		t.Fatalf("second reasoning = %q, want empty", reasoning)
+	}
+	if got := gjson.GetBytes(second, "choices.0.delta.content").String(); got != secondText {
+		t.Fatalf("second content = %q, want verbatim", got)
+	}
+}
+
+func TestQoderThinkingCleanerKeepsUnpairedOpenerAfterBacktick(t *testing.T) {
+	// An unpaired quoted opener must not enter the thinking state, otherwise
+	// every following chunk is swallowed into reasoning_content.
+	cleaner := newQoderThinkingCleaner()
+	first, reasoning := cleaner.clean(qoderTestChunk("过滤带 `<think>` 标签"))
+	if reasoning != "" {
+		t.Fatalf("first reasoning = %q, want empty", reasoning)
+	}
+	if got := gjson.GetBytes(first, "choices.0.delta.content").String(); got != "过滤带 `<think>` 标签" {
+		t.Fatalf("first content = %q, want verbatim", got)
+	}
+
+	second, reasoning := cleaner.clean(qoderTestChunk(" 后续说明"))
+	if reasoning != "" {
+		t.Fatalf("second reasoning = %q, want empty (not swallowed)", reasoning)
+	}
+	if got := gjson.GetBytes(second, "choices.0.delta.content").String(); got != " 后续说明" {
+		t.Fatalf("second content = %q, want verbatim", got)
+	}
+}
+
+func TestQoderThinkingCleanerWhitespacePrecededOpenerStillReal(t *testing.T) {
+	// Whitespace-preceded markers remain real thinking blocks.
+	cleaner := newQoderThinkingCleaner()
+	chunk, reasoning := cleaner.clean(qoderTestChunk("说 <think>hidden</think>答案"))
+	if reasoning != "hidden" {
+		t.Fatalf("reasoning = %q, want hidden", reasoning)
+	}
+	if got := gjson.GetBytes(chunk, "choices.0.delta.content").String(); got != "说 答案" {
+		t.Fatalf("content = %q, want think block stripped", got)
+	}
+}
+
+func TestQoderThinkingCleanerNoPartialBufferAfterNonSpace(t *testing.T) {
+	// A partial marker following a non-whitespace character is ordinary text:
+	// it must be emitted verbatim and never re-injected by flushChunks.
+	cleaner := newQoderThinkingCleaner()
+	chunk, reasoning := cleaner.clean(qoderTestChunk("abc<thi"))
+	if reasoning != "" {
+		t.Fatalf("reasoning = %q, want empty", reasoning)
+	}
+	if got := gjson.GetBytes(chunk, "choices.0.delta.content").String(); got != "abc<thi" {
+		t.Fatalf("content = %q, want verbatim", got)
+	}
+	if flushed := cleaner.flushChunks(); len(flushed) != 0 {
+		t.Fatalf("len(flushChunks()) = %d, want 0", len(flushed))
 	}
 }
