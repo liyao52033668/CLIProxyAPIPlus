@@ -153,18 +153,16 @@ func MoveOpenAISystemToUserMessage(payload []byte) []byte {
 }
 
 // EnsureOpenAILeadingSystemMessage guarantees that the first message of an
-// OpenAI-format payload is a role=system message, as required by the CodeBuddy
-// AI (www.codebuddy.ai) upstream (code 11128: "first message is not system
-// prompt"). A top-level "system" field is promoted to the first message when
-// no leading system message exists; otherwise defaultPrompt is prepended.
+// OpenAI-format payload is a role=system message with non-empty string
+// content, as required by the CodeBuddy AI (www.codebuddy.ai) upstream (code
+// 11128: "first message is not system prompt"). A top-level "system" field is
+// promoted to the first message when no leading system message exists; an
+// empty leading system prompt is filled with defaultPrompt; an empty or
+// missing messages array receives the default prompt as its only message.
 // System message content is flattened to a plain string because the upstream
 // only accepts string system content.
 func EnsureOpenAILeadingSystemMessage(payload []byte, defaultPrompt string) []byte {
 	messages := gjson.GetBytes(payload, "messages")
-	if !messages.IsArray() || len(messages.Array()) == 0 {
-		return payload
-	}
-
 	kept := make([][]byte, 0, len(messages.Array())+1)
 	leadingSystem := false
 	changed := false
@@ -172,8 +170,17 @@ func EnsureOpenAILeadingSystemMessage(payload []byte, defaultPrompt string) []by
 		raw := []byte(message.Raw)
 		if message.Get("role").String() == "system" {
 			content := message.Get("content")
-			if content.IsArray() && len(content.Array()) > 0 {
-				if flattened, errSet := sjson.SetBytes(raw, "content", contentPlainText(content)); errSet == nil {
+			text := contentPlainText(content)
+			if index == 0 && text == "" && defaultPrompt != "" {
+				// An empty leading system prompt still fails the upstream
+				// "first message is not system prompt" check; fill in the
+				// default prompt instead of leaving it empty.
+				if updated, errSet := sjson.SetBytes(raw, "content", defaultPrompt); errSet == nil {
+					raw = updated
+					changed = true
+				}
+			} else if content.IsArray() && len(content.Array()) > 0 {
+				if flattened, errSet := sjson.SetBytes(raw, "content", text); errSet == nil {
 					raw = flattened
 					changed = true
 				}

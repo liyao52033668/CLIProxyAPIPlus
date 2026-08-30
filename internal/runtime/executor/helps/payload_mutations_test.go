@@ -259,9 +259,45 @@ func TestEnsureOpenAILeadingSystemMessageMidSystemFlattened(t *testing.T) {
 	}
 }
 
-func TestEnsureOpenAILeadingSystemMessageNoMessages(t *testing.T) {
+func TestEnsureOpenAILeadingSystemMessageEmptyLeading(t *testing.T) {
+	payload := []byte(`{"messages":[{"role":"system","content":""},{"role":"user","content":"hi"}]}`)
+	updated := EnsureOpenAILeadingSystemMessage(payload, "You are CodeBuddy.")
+	if got := gjson.GetBytes(updated, "messages.0.content").String(); got != "You are CodeBuddy." {
+		t.Fatalf("empty leading system must be filled with the default, got %q", got)
+	}
+	if got := gjson.GetBytes(updated, "messages.1.content").String(); got != "hi" {
+		t.Fatalf("user message must be preserved, got %q", got)
+	}
+
+	payload = []byte(`{"messages":[{"role":"system","content":[]},{"role":"user","content":"hi"}]}`)
+	updated = EnsureOpenAILeadingSystemMessage(payload, "You are CodeBuddy.")
+	if got := gjson.GetBytes(updated, "messages.0.content").String(); got != "You are CodeBuddy." {
+		t.Fatalf("empty-array leading system must be filled with the default, got %q", got)
+	}
+}
+
+func TestEnsureOpenAILeadingSystemMessageEmptyMessages(t *testing.T) {
+	payload := []byte(`{"model":"m","messages":[]}`)
+	updated := EnsureOpenAILeadingSystemMessage(payload, "You are CodeBuddy.")
+	messages := gjson.GetBytes(updated, "messages").Array()
+	if len(messages) != 1 {
+		t.Fatalf("expected exactly 1 message, got %d", len(messages))
+	}
+	if messages[0].Get("role").String() != "system" || messages[0].Get("content").String() != "You are CodeBuddy." {
+		t.Fatalf("expected default system message, got %s", messages[0].Raw)
+	}
+
+	payload = []byte(`{"model":"m"}`)
+	updated = EnsureOpenAILeadingSystemMessage(payload, "You are CodeBuddy.")
+	messages = gjson.GetBytes(updated, "messages").Array()
+	if len(messages) != 1 || messages[0].Get("role").String() != "system" {
+		t.Fatalf("expected default system message for missing messages, got %s", updated)
+	}
+}
+
+func TestEnsureOpenAILeadingSystemMessageNoMessagesNoDefault(t *testing.T) {
 	payload := []byte(`{"model":"m"}`)
-	if got := EnsureOpenAILeadingSystemMessage(payload, "default"); string(got) != string(payload) {
-		t.Fatalf("expected payload unchanged, got %s", string(got))
+	if got := EnsureOpenAILeadingSystemMessage(payload, ""); string(got) != string(payload) {
+		t.Fatalf("expected payload unchanged without a default prompt, got %s", string(got))
 	}
 }

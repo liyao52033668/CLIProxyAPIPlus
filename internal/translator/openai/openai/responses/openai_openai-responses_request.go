@@ -69,8 +69,14 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		out, _ = sjson.SetRawBytes(out, "messages.-1", systemMessage)
 	}
 
-	// Convert input array to messages
-	if input := root.Get("input"); input.Exists() && input.IsArray() {
+	// Convert input array to messages. Chat completions bodies posted to the
+	// responses endpoint carry their turns in "messages" instead; accept that
+	// shape as a fallback so the turns are not silently dropped.
+	input := root.Get("input")
+	if !input.Exists() || !input.IsArray() {
+		input = root.Get("messages")
+	}
+	if input.IsArray() {
 		inputItems := input.Array()
 		outputCallIDs := make(map[string]struct{})
 		for _, item := range inputItems {
