@@ -634,18 +634,48 @@ func GetCodeBuddyAIModels() []*ModelInfo {
 	return []*ModelInfo{
 		{
 			ID: "default-model", Object: "model", Created: now, OwnedBy: "codebuddy-ai",
-			Type: "codebuddy-ai", DisplayName: "Default Model", Description: "Default model via CodeBuddy AI",
+			Type: "codebuddy-ai", DisplayName: "Auto", Description: "Automatic model selection via CodeBuddy AI",
 			ContextLength: 128000, MaxCompletionTokens: 32768, SupportedEndpoints: []string{"/chat/completions"},
 		},
 		{
-			ID: "glm-5v-turbo", Object: "model", Created: now, OwnedBy: "codebuddy-ai",
-			Type: "codebuddy-ai", DisplayName: "GLM-5v Turbo", Description: "GLM-5v Turbo via CodeBuddy AI",
+			ID: "fast-model", Object: "model", Created: now, OwnedBy: "codebuddy-ai",
+			Type: "codebuddy-ai", DisplayName: "Fast", Description: "Fast model via CodeBuddy AI",
+			ContextLength: 128000, MaxCompletionTokens: 32768, SupportedEndpoints: []string{"/chat/completions"},
+		},
+		{
+			ID: "balanced-model", Object: "model", Created: now, OwnedBy: "codebuddy-ai",
+			Type: "codebuddy-ai", DisplayName: "Balanced", Description: "Balanced model via CodeBuddy AI",
+			ContextLength: 128000, MaxCompletionTokens: 32768, SupportedEndpoints: []string{"/chat/completions"},
+		},
+		{
+			ID: "primary-model", Object: "model", Created: now, OwnedBy: "codebuddy-ai",
+			Type: "codebuddy-ai", DisplayName: "Primary", Description: "Primary model via CodeBuddy AI",
 			ContextLength: 200000, MaxCompletionTokens: 32768, SupportedEndpoints: []string{"/chat/completions"},
 		},
 		{
-			ID: "kimi-k2.5", Object: "model", Created: now, OwnedBy: "codebuddy-ai",
-			Type: "codebuddy-ai", DisplayName: "Kimi-K2.5", Description: "Kimi K2.5 via CodeBuddy AI",
-			ContextLength: 256000, MaxCompletionTokens: 32768, SupportedEndpoints: []string{"/chat/completions"},
+			ID: "deep-model", Object: "model", Created: now, OwnedBy: "codebuddy-ai",
+			Type: "codebuddy-ai", DisplayName: "Deep", Description: "Deep thinking model via CodeBuddy AI",
+			ContextLength: 200000, MaxCompletionTokens: 32768, SupportedEndpoints: []string{"/chat/completions"},
+		},
+		{
+			ID: "gpt-5.6-sol", Object: "model", Created: now, OwnedBy: "codebuddy-ai",
+			Type: "codebuddy-ai", DisplayName: "GPT-5.6-Sol", Description: "GPT-5.6 Sol via CodeBuddy AI",
+			ContextLength: 200000, MaxCompletionTokens: 32768, SupportedEndpoints: []string{"/chat/completions"},
+		},
+		{
+			ID: "gpt-5.6-terra", Object: "model", Created: now, OwnedBy: "codebuddy-ai",
+			Type: "codebuddy-ai", DisplayName: "GPT-5.6-Terra", Description: "GPT-5.6 Terra via CodeBuddy AI",
+			ContextLength: 200000, MaxCompletionTokens: 32768, SupportedEndpoints: []string{"/chat/completions"},
+		},
+		{
+			ID: "gpt-5.6-luna", Object: "model", Created: now, OwnedBy: "codebuddy-ai",
+			Type: "codebuddy-ai", DisplayName: "GPT-5.6-Luna", Description: "GPT-5.6 Luna via CodeBuddy AI",
+			ContextLength: 200000, MaxCompletionTokens: 32768, SupportedEndpoints: []string{"/chat/completions"},
+		},
+		{
+			ID: "gpt-5.5", Object: "model", Created: now, OwnedBy: "codebuddy-ai",
+			Type: "codebuddy-ai", DisplayName: "GPT-5.5", Description: "GPT-5.5 via CodeBuddy AI",
+			ContextLength: 200000, MaxCompletionTokens: 32768, SupportedEndpoints: []string{"/chat/completions"},
 		},
 		{
 			ID: "gpt-5.4", Object: "model", Created: now, OwnedBy: "codebuddy-ai",
@@ -658,43 +688,33 @@ func GetCodeBuddyAIModels() []*ModelInfo {
 			ContextLength: 200000, MaxCompletionTokens: 32768, SupportedEndpoints: []string{"/chat/completions"},
 		},
 		{
-			ID: "gpt-5.2-codex", Object: "model", Created: now, OwnedBy: "codebuddy-ai",
-			Type: "codebuddy-ai", DisplayName: "GPT-5.2-Codex", Description: "GPT-5.2 Codex via CodeBuddy AI",
+			ID: "gemini-3.5-flash", Object: "model", Created: now, OwnedBy: "codebuddy-ai",
+			Type: "codebuddy-ai", DisplayName: "Gemini-3.5-Flash", Description: "Gemini 3.5 Flash via CodeBuddy AI",
 			ContextLength: 200000, MaxCompletionTokens: 32768, SupportedEndpoints: []string{"/chat/completions"},
 		},
 		{
-			ID: "gpt-5.2", Object: "model", Created: now, OwnedBy: "codebuddy-ai",
-			Type: "codebuddy-ai", DisplayName: "GPT-5.2", Description: "GPT-5.2 via CodeBuddy AI",
+			ID: "glm-5.3", Object: "model", Created: now, OwnedBy: "codebuddy-ai",
+			Type: "codebuddy-ai", DisplayName: "GLM-5.3", Description: "GLM-5.3 via CodeBuddy AI",
 			ContextLength: 200000, MaxCompletionTokens: 32768, SupportedEndpoints: []string{"/chat/completions"},
 		},
 		{
-			ID: "gpt-5.1", Object: "model", Created: now, OwnedBy: "codebuddy-ai",
-			Type: "codebuddy-ai", DisplayName: "GPT-5.1", Description: "GPT-5.1 via CodeBuddy AI",
+			ID: "glm-5.2", Object: "model", Created: now, OwnedBy: "codebuddy-ai",
+			Type: "codebuddy-ai", DisplayName: "GLM-5.2", Description: "GLM-5.2 via CodeBuddy AI",
 			ContextLength: 200000, MaxCompletionTokens: 32768, SupportedEndpoints: []string{"/chat/completions"},
 		},
 		{
-			ID: "gpt-5.1-codex-max", Object: "model", Created: now, OwnedBy: "codebuddy-ai",
-			Type: "codebuddy-ai", DisplayName: "GPT-5.1-Codex-Max", Description: "GPT-5.1 Codex Max via CodeBuddy AI",
-			ContextLength: 200000, MaxCompletionTokens: 32768, SupportedEndpoints: []string{"/chat/completions"},
+			ID: "kimi-k3", Object: "model", Created: now, OwnedBy: "codebuddy-ai",
+			Type: "codebuddy-ai", DisplayName: "Kimi-K3", Description: "Kimi K3 via CodeBuddy AI",
+			ContextLength: 256000, MaxCompletionTokens: 32768, SupportedEndpoints: []string{"/chat/completions"},
 		},
 		{
-			ID: "gemini-3.0-pro", Object: "model", Created: now, OwnedBy: "codebuddy-ai",
-			Type: "codebuddy-ai", DisplayName: "Gemini-3.0-Pro", Description: "Gemini 3.0 Pro via CodeBuddy AI",
-			ContextLength: 200000, MaxCompletionTokens: 32768, SupportedEndpoints: []string{"/chat/completions"},
+			ID: "kimi-k2.6", Object: "model", Created: now, OwnedBy: "codebuddy-ai",
+			Type: "codebuddy-ai", DisplayName: "Kimi-K2.6", Description: "Kimi K2.6 via CodeBuddy AI",
+			ContextLength: 256000, MaxCompletionTokens: 32768, SupportedEndpoints: []string{"/chat/completions"},
 		},
 		{
-			ID: "gemini-3.0-flash", Object: "model", Created: now, OwnedBy: "codebuddy-ai",
-			Type: "codebuddy-ai", DisplayName: "Gemini-3.0-Flash", Description: "Gemini 3.0 Flash via CodeBuddy AI",
-			ContextLength: 200000, MaxCompletionTokens: 32768, SupportedEndpoints: []string{"/chat/completions"},
-		},
-		{
-			ID: "deepseek-v3.2", Object: "model", Created: now, OwnedBy: "codebuddy-ai",
-			Type: "codebuddy-ai", DisplayName: "DeepSeek-V3.2", Description: "DeepSeek V3.2 via CodeBuddy AI",
-			ContextLength: 128000, MaxCompletionTokens: 32768, SupportedEndpoints: []string{"/chat/completions"},
-		},
-		{
-			ID: "auto-chat", Object: "model", Created: now, OwnedBy: "codebuddy-ai",
-			Type: "codebuddy-ai", DisplayName: "Auto-Chat", Description: "Auto Chat via CodeBuddy AI",
+			ID: "minimax-m3", Object: "model", Created: now, OwnedBy: "codebuddy-ai",
+			Type: "codebuddy-ai", DisplayName: "MiniMax-M3", Description: "MiniMax M3 via CodeBuddy AI",
 			ContextLength: 128000, MaxCompletionTokens: 32768, SupportedEndpoints: []string{"/chat/completions"},
 		},
 	}

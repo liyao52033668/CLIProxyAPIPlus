@@ -318,7 +318,6 @@ func isCodeBuddyAIInternalModel(id string) bool {
 	return false
 }
 
-
 func FetchCodeBuddyAIModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config) []*registry.ModelInfo {
 	accessToken, userID, domain := codeBuddyAICredentials(auth)
 	if accessToken == "" {
@@ -326,7 +325,7 @@ func FetchCodeBuddyAIModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 		return registry.GetCodeBuddyAIModels()
 	}
 
-	log.Debugf("codebuddy-ai: fetching dynamic models from getLatestModels API")
+	log.Debugf("codebuddy-ai: fetching dynamic models from /v3/config API")
 
 	headers := make(http.Header)
 	headers.Set("User-Agent", codebuddy_ai.ConfigUserAgent)
@@ -347,19 +346,19 @@ func FetchCodeBuddyAIModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 		Provider: "codebuddy-ai",
 		Auth:     auth,
 		Method:   http.MethodGet,
-		URL:      codebuddy_ai.BaseURL + "/api/chat-slice/commonServer/getLatestModels",
+		URL:      codebuddy_ai.BaseURL + "/v3/config",
 		Headers:  headers,
 		Client:   httpClient,
 	})
 	if errDo != nil {
-		log.Warnf("codebuddy-ai: using static models (getLatestModels API fetch failed: %v)", errDo)
+		log.Warnf("codebuddy-ai: using static models (/v3/config API fetch failed: %v)", errDo)
 		return registry.GetCodeBuddyAIModels()
 	}
 
-	// The getLatestModels API returns data directly as an array
-	modelsResult := gjson.GetBytes(body, "data")
+	// The /v3/config API returns models in data.models array
+	modelsResult := gjson.GetBytes(body, "data.models")
 	if !modelsResult.Exists() || !modelsResult.IsArray() {
-		log.Warn("codebuddy-ai: getLatestModels API response missing data array")
+		log.Warn("codebuddy-ai: /v3/config API response missing data.models array")
 		return registry.GetCodeBuddyAIModels()
 	}
 
@@ -446,9 +445,9 @@ func FetchCodeBuddyAIModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 
 	count = len(dynamicModels)
 
-	log.Infof("codebuddy-ai: fetched %d models from getLatestModels API", count)
+	log.Infof("codebuddy-ai: fetched %d models from /v3/config API", count)
 	if count == 0 {
-		log.Warn("codebuddy-ai: no models parsed from getLatestModels API, using static fallback")
+		log.Warn("codebuddy-ai: no models parsed from /v3/config API, using static fallback")
 		return registry.GetCodeBuddyAIModels()
 	}
 
