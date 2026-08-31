@@ -110,12 +110,12 @@ func (e *CodeBuddyExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel, "")
-	// Only Claude-format requests with a top-level system field need this:
-	// the claude->openai translation turns that field into a leading system
-	// message that the CodeBuddy upstream rejects (code 11128).
-	if from == sdktranslator.FormatClaude && gjson.GetBytes(originalPayloadSource, "system").Exists() {
-		translated = helps.MoveOpenAISystemToUserMessage(translated)
-	}
+	// The tencent CodeBuddy upstream rejects a leading system message (code
+	// 11128). Claude-format requests get one from the top-level system field
+	// during claude->openai translation; /v1/responses traffic bridged to chat
+	// gets one from the responses `instructions` field. Move the leading system
+	// message into the first user message in both cases.
+	translated = helps.MoveOpenAISystemToUserMessage(translated)
 	translated, _ = sjson.SetBytes(translated, "stream", true)
 	translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
 
@@ -189,12 +189,12 @@ func (e *CodeBuddyExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel, "")
-	// Only Claude-format requests with a top-level system field need this:
-	// the claude->openai translation turns that field into a leading system
-	// message that the CodeBuddy upstream rejects (code 11128).
-	if from == sdktranslator.FormatClaude && gjson.GetBytes(originalPayloadSource, "system").Exists() {
-		translated = helps.MoveOpenAISystemToUserMessage(translated)
-	}
+	// The tencent CodeBuddy upstream rejects a leading system message (code
+	// 11128). Claude-format requests get one from the top-level system field
+	// during claude->openai translation; /v1/responses traffic bridged to chat
+	// gets one from the responses `instructions` field. Move the leading system
+	// message into the first user message in both cases.
+	translated = helps.MoveOpenAISystemToUserMessage(translated)
 
 	// CodeBuddy thinking configuration passes through the pipeline unchanged:
 	// extraction yields no config so the body is left as-is for the upstream.

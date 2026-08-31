@@ -2379,6 +2379,7 @@ func convertKiroAPIModels(apiModels []*kiroauth.KiroModel) []*ModelInfo {
 			ContextLength:       200000,
 			MaxCompletionTokens: 64000,
 			Thinking:            &registry.ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
+			SupportedEndpoints:  []string{"/chat/completions"},
 		}
 
 		if m.MaxInputTokens > 0 {
@@ -2457,6 +2458,7 @@ func generateKiroAgenticVariants(models []*ModelInfo) []*ModelInfo {
 			Description:         m.Description + " - Optimized for coding agents (chunked writes)",
 			ContextLength:       m.ContextLength,
 			MaxCompletionTokens: m.MaxCompletionTokens,
+			SupportedEndpoints:  m.SupportedEndpoints,
 		}
 
 		// Copy thinking support if present

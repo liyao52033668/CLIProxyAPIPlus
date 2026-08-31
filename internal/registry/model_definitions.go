@@ -1280,7 +1280,7 @@ func GetCommandCodeModels() []*ModelInfo {
 
 // GetKiroModels returns the Kiro (AWS CodeWhisperer) model definitions
 func GetKiroModels() []*ModelInfo {
-	return []*ModelInfo{
+	models := []*ModelInfo{
 		// --- Base Models ---
 		{
 			ID:                  "kiro-auto",
@@ -1525,12 +1525,19 @@ func GetKiroModels() []*ModelInfo {
 			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
 		},
 	}
+	// Declare /chat/completions support so /v1/responses requests are bridged
+	// via the ViaChat mechanism (the kiro executor has no openai-response→kiro
+	// translator registered).
+	for _, m := range models {
+		m.SupportedEndpoints = []string{"/chat/completions"}
+	}
+	return models
 }
 
 // GetAmazonQModels returns the Amazon Q (AWS CodeWhisperer) model definitions.
 // These models use the same API as Kiro and share the same executor.
 func GetAmazonQModels() []*ModelInfo {
-	return []*ModelInfo{
+	models := []*ModelInfo{
 		{
 			ID:                  "amazonq-auto",
 			Object:              "model",
@@ -1587,4 +1594,11 @@ func GetAmazonQModels() []*ModelInfo {
 			MaxCompletionTokens: 64000,
 		},
 	}
+	// Declare /chat/completions support so /v1/responses requests are bridged
+	// via the ViaChat mechanism (the kiro executor has no openai-response→kiro
+	// translator registered).
+	for _, m := range models {
+		m.SupportedEndpoints = []string{"/chat/completions"}
+	}
+	return models
 }

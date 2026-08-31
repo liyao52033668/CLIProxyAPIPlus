@@ -79,7 +79,17 @@ func (e *JoyCodeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, 
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
-	payload := buildJoyCodePayload(req.Payload, baseModel, auth)
+	// Translate the source format to OpenAI chat completions first (the JoyCode
+	// upstream only understands OpenAI format). For non-OpenAI source formats
+	// (e.g. claude from /v1/messages, openai-response from /v1/responses), we
+	// need a two-hop translation: SourceFormat → openai → joycode.
+	payload := req.Payload
+	from := opts.SourceFormat
+	if from != sdktranslator.FormatOpenAI {
+		payload = sdktranslator.TranslateRequest(from, sdktranslator.FormatOpenAI, baseModel, req.Payload, opts.Stream)
+		from = sdktranslator.FormatOpenAI
+	}
+	payload = buildJoyCodePayload(payload, baseModel, auth)
 
 	headers := make(http.Header)
 	tmpReq := &http.Request{Header: headers}
@@ -106,7 +116,10 @@ func (e *JoyCodeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, 
 		return resp, errDo
 	}
 
-	from := sdktranslator.FromString("openai")
+	from = opts.SourceFormat
+	if from != sdktranslator.FormatOpenAI {
+		from = sdktranslator.FormatOpenAI
+	}
 	to := sdktranslator.FromString("joycode")
 
 	var param any
@@ -131,7 +144,17 @@ func (e *JoyCodeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
-	payload := buildJoyCodePayload(req.Payload, baseModel, auth)
+	// Translate the source format to OpenAI chat completions first (the JoyCode
+	// upstream only understands OpenAI format). For non-OpenAI source formats
+	// (e.g. claude from /v1/messages, openai-response from /v1/responses), we
+	// need a two-hop translation: SourceFormat → openai → joycode.
+	payload := req.Payload
+	from := opts.SourceFormat
+	if from != sdktranslator.FormatOpenAI {
+		payload = sdktranslator.TranslateRequest(from, sdktranslator.FormatOpenAI, baseModel, req.Payload, opts.Stream)
+		from = sdktranslator.FormatOpenAI
+	}
+	payload = buildJoyCodePayload(payload, baseModel, auth)
 
 	headers := make(http.Header)
 	tmpReq := &http.Request{Header: headers}
@@ -164,7 +187,10 @@ func (e *JoyCodeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.
 		defer close(chunks)
 		defer httpResp.Body.Close()
 
-		from := sdktranslator.FromString("openai")
+		from := opts.SourceFormat
+		if from != sdktranslator.FormatOpenAI {
+			from = sdktranslator.FormatOpenAI
+		}
 		to := sdktranslator.FromString("joycode")
 		var streamParam any
 		var totalPromptTokens, totalCompletionTokens int64

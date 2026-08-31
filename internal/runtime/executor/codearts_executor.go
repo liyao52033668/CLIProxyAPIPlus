@@ -122,7 +122,15 @@ func (e *CodeArtsExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 
 	userID := extractUserID(auth)
 
-	payload := buildCodeArtsPayload(req.Payload, baseModel, agentID, userID, opts)
+	// Translate the source format to OpenAI chat completions first (the
+	// CodeArts upstream only understands OpenAI format). For non-OpenAI source
+	// formats (e.g. claude from /v1/messages), a two-hop translation is needed:
+	// SourceFormat → openai → codearts.
+	payload := req.Payload
+	if opts.SourceFormat != sdktranslator.FormatOpenAI {
+		payload = sdktranslator.TranslateRequest(opts.SourceFormat, sdktranslator.FormatOpenAI, baseModel, req.Payload, false)
+	}
+	payload = buildCodeArtsPayload(payload, baseModel, agentID, userID, opts)
 
 	headers := make(http.Header)
 	tmpReq := &http.Request{Header: headers}
@@ -264,7 +272,10 @@ func (e *CodeArtsExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 		respModel = req.Model
 	}
 
-	from := sdktranslator.FromString("openai")
+	from := opts.SourceFormat
+	if from != sdktranslator.FormatOpenAI {
+		from = sdktranslator.FormatOpenAI
+	}
 	to := sdktranslator.FromString("codearts")
 
 	openAIResp := buildOpenAINonStreamResponse(fullContent, reasoningBuilder.String(), respModel, promptTokens, completionTokens, toolCallsList)
@@ -297,7 +308,15 @@ func (e *CodeArtsExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 
 	userID := extractUserID(auth)
 
-	payload := buildCodeArtsPayload(req.Payload, baseModel, agentID, userID, opts)
+	// Translate the source format to OpenAI chat completions first (the
+	// CodeArts upstream only understands OpenAI format). For non-OpenAI source
+	// formats (e.g. claude from /v1/messages), a two-hop translation is needed:
+	// SourceFormat → openai → codearts.
+	payload := req.Payload
+	if opts.SourceFormat != sdktranslator.FormatOpenAI {
+		payload = sdktranslator.TranslateRequest(opts.SourceFormat, sdktranslator.FormatOpenAI, baseModel, req.Payload, true)
+	}
+	payload = buildCodeArtsPayload(payload, baseModel, agentID, userID, opts)
 
 	headers := make(http.Header)
 	tmpReq := &http.Request{Header: headers}
@@ -333,7 +352,10 @@ func (e *CodeArtsExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 		defer close(chunks)
 		defer httpResp.Body.Close()
 
-		from := sdktranslator.FromString("openai")
+		from := opts.SourceFormat
+		if from != sdktranslator.FormatOpenAI {
+			from = sdktranslator.FormatOpenAI
+		}
 		to := sdktranslator.FromString("codearts")
 		var streamParam any
 		var totalPromptTokens, totalCompletionTokens int64
