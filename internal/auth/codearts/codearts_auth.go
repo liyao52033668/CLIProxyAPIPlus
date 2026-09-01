@@ -39,7 +39,6 @@ func NewCodeArtsAuth(httpClient *http.Client) *CodeArtsAuth {
 }
 
 // AuthorizationURL returns the URL the user should visit to log in.
-// Matches Python: build_login_url(ticket_id, port, theme=1, locale="zh-cn", version=3, uri_scheme="codearts")
 func (a *CodeArtsAuth) AuthorizationURL(ticketID string, port int) string {
 	params := url.Values{}
 	params.Set("ticket_id", ticketID)
@@ -53,7 +52,6 @@ func (a *CodeArtsAuth) AuthorizationURL(ticketID string, port int) string {
 }
 
 // PollForLoginResult polls the ticket endpoint until the user completes login.
-// Matches Python: poll_login_ticket(ticket_id, identifier, timeout=120)
 // Returns the full auth result JSON map.
 func (a *CodeArtsAuth) PollForLoginResult(ctx context.Context, ticketID, identifier string) (map[string]any, error) {
 	pollURL := fmt.Sprintf("%s/v2/login/ticket", APIHost)
@@ -89,7 +87,7 @@ func (a *CodeArtsAuth) PollForLoginResult(ctx context.Context, ticketID, identif
 			continue
 		}
 
-		// Python checks: if data.get("status") == "success": return data.get("result")
+		// A successful ticket carries the auth result payload.
 		if status, _ := result["status"].(string); status == "success" {
 			if authResult, ok := result["result"].(map[string]any); ok {
 				log.Info("codearts: login successful")
@@ -103,7 +101,6 @@ func (a *CodeArtsAuth) PollForLoginResult(ctx context.Context, ticketID, identif
 }
 
 // ExchangeForSecurityToken exchanges X-Auth-Token for AK/SK/SecurityToken.
-// Matches Python: get_credential_by_token(x_auth_token)
 func (a *CodeArtsAuth) ExchangeForSecurityToken(ctx context.Context, xAuthToken string) (*CodeArtsTokenData, error) {
 	exchangeURL := fmt.Sprintf("%s/v3.0/OS-CREDENTIAL/securitytokens", IAMHost)
 
@@ -161,7 +158,8 @@ func (a *CodeArtsAuth) ExchangeForSecurityToken(ctx context.Context, xAuthToken 
 }
 
 // ProcessLoginResult extracts credentials from login result.
-// Matches Python logic: check for credential in result, or exchange x_auth_token.
+// The result either carries a credential block directly, or an x_auth_token
+// that must be exchanged for one.
 func (a *CodeArtsAuth) ProcessLoginResult(ctx context.Context, authResult map[string]any) (*CodeArtsTokenData, error) {
 	userID, _ := authResult["user_id"].(string)
 	userName, _ := authResult["user_name"].(string)
@@ -219,7 +217,6 @@ func NeedsRefresh(token *CodeArtsTokenData) bool {
 }
 
 // RefreshToken refreshes the security token using POST /v2/login/refresh.
-// Matches Python: refresh_token(credential)
 func (a *CodeArtsAuth) RefreshToken(ctx context.Context, token *CodeArtsTokenData) (*CodeArtsTokenData, error) {
 	if token == nil || (token.AK == "" || token.SK == "") {
 		return nil, fmt.Errorf("codearts: cannot refresh without AK/SK")

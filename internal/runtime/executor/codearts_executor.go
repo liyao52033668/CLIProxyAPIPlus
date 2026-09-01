@@ -353,11 +353,10 @@ func (e *CodeArtsExecutor) sendCodeArtsChat(ctx context.Context, auth *cliproxya
 }
 
 const (
-	// codeartsModelsCacheTTL mirrors the reference repo (codearts2api) 1h cache
-	// window for the dynamically fetched model list.
+	// codeartsModelsCacheTTL is the cache window for the dynamically fetched model list.
 	codeartsModelsCacheTTL = time.Hour
-	// codeartsModelsFailCooldown mirrors the reference 5min negative cache used
-	// after a failed fetch to avoid hammering the upstream agent-center API.
+	// codeartsModelsFailCooldown is the negative cache window applied after a failed
+	// fetch to avoid hammering the upstream agent-center API.
 	codeartsModelsFailCooldown = 5 * time.Minute
 )
 
@@ -493,7 +492,7 @@ func FetchCodeArtsModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *conf
 			displayName = id
 		}
 		dynamicModels = append(dynamicModels, &registry.ModelInfo{
-			// Display IDs are lowercased to match the reference repo model list.
+			// Model IDs are exposed lowercased so clients can match them case-insensitively.
 			ID:                  strings.ToLower(id),
 			Name:                strings.ToLower(id),
 			DisplayName:         displayName,
@@ -514,10 +513,9 @@ func FetchCodeArtsModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *conf
 		return registry.GetCodeArtsModels()
 	}
 
-	// Mirror the reference repo: the default CodeAgent detail only lists the
-	// models bound to that agent, so merge the static registry (verified usable
-	// models) back in to keep the full account model set. Dynamic entries win on
-	// overlapping IDs.
+	// The default CodeAgent detail only lists the models bound to that agent, so
+	// merge the static registry (verified usable models) back in to keep the full
+	// account model set. Dynamic entries win on overlapping IDs.
 	seen := make(map[string]bool, len(dynamicModels))
 	for _, m := range dynamicModels {
 		seen[m.ID] = true
@@ -616,7 +614,7 @@ func (e *CodeArtsExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 	userID := extractUserID(auth)
 
 	// chatID is the 32-hex conversation id sent upstream and echoed back in the
-	// completion response (reference repo parity), so clients can continue it.
+	// completion response, so clients can continue the same conversation.
 	chatID := generateChatID()
 
 	// Translate the source format to OpenAI chat completions first (the
@@ -784,7 +782,7 @@ func (e *CodeArtsExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 	userID := extractUserID(auth)
 
 	// chatID is the 32-hex conversation id sent upstream and exposed to clients
-	// via the X-Codearts-Chat-Id response header (reference repo parity).
+	// via the X-Codearts-Chat-Id response header.
 	chatID := generateChatID()
 
 	// Translate the source format to OpenAI chat completions first (the
@@ -964,7 +962,7 @@ func (e *CodeArtsExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 
 	}()
 
-	// Expose the conversation id to clients (reference repo parity).
+	// Expose the conversation id to clients.
 	httpResp.Header.Set("X-Codearts-Chat-Id", chatID)
 
 	return &cliproxyexecutor.StreamResult{
@@ -1752,7 +1750,7 @@ func mergeCodeArtsToolCall(existing map[string]interface{}, tc map[string]interf
 
 // buildOpenAINonStreamResponse builds a complete OpenAI non-stream response.
 // The chatID is the 32-hex conversation id also sent upstream, exposed so
-// clients can continue the same conversation (reference repo parity).
+// clients can continue the same conversation.
 func buildOpenAINonStreamResponse(content, reasoning, model, chatID string, promptTokens, completionTokens int64, toolCalls []map[string]interface{}) []byte {
 	message := map[string]interface{}{
 		"role": "assistant",

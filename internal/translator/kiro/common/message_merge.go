@@ -9,7 +9,6 @@ import (
 
 // MergeAdjacentMessages merges adjacent messages with the same role.
 // This reduces API call complexity and improves compatibility.
-// Based on AIClient-2-API implementation.
 // NOTE: Tool messages are NOT merged because each has a unique tool_call_id that must be preserved.
 func MergeAdjacentMessages(messages []gjson.Result) []gjson.Result {
 	if len(messages) <= 1 {

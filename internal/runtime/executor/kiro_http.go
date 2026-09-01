@@ -18,7 +18,6 @@ import (
 
 // kiroHTTPClientPool provides a shared HTTP client with connection pooling for Kiro API.
 // This reduces connection overhead and improves performance for concurrent requests.
-// Based on kiro2Api's connection pooling pattern.
 var (
 	kiroHTTPClientPool     *http.Client
 	kiroHTTPClientPoolOnce sync.Once
@@ -105,11 +104,9 @@ func newKiroHTTPClientWithPooling(ctx context.Context, cfg *config.Config, auth 
 
 // kiroEndpointConfig bundles endpoint URL with its compatible Origin and AmzTarget values.
 // This solves the "triple mismatch" problem where different endpoints require matching
-// Origin and X-Amz-Target header values.
-//
-// Based on reference implementations:
-// - amq2api-main: Uses Amazon Q endpoint with CLI origin and AmazonQDeveloperStreamingService target
-// - AIClient-2-API: Uses CodeWhisperer endpoint with AI_EDITOR origin and AmazonCodeWhispererStreamingService target
+// Origin and X-Amz-Target header values: the Amazon Q endpoint pairs the CLI origin with
+// the AmazonQDeveloperStreamingService target, while the CodeWhisperer endpoint pairs the
+// AI_EDITOR origin with the AmazonCodeWhispererStreamingService target.
 type kiroEndpointConfig struct {
 	URL       string // Endpoint URL
 	Origin    string // Request Origin: "CLI" for Amazon Q quota, "AI_EDITOR" for Kiro IDE quota

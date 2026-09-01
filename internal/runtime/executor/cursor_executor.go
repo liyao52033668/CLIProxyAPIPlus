@@ -394,7 +394,6 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 // It supports MCP tool call sessions: when Cursor returns an MCP tool call,
 // the H2 stream is kept alive. When Claude Code returns the tool result in
 // the next request, the result is sent back on the same stream (session resume).
-// This mirrors the activeSessions/resumeWithToolResults pattern in cursor-fetch.ts.
 func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
 	log.Debugf("cursor ExecuteStream: model=%s sourceFormat=%s payloadLen=%d", req.Model, opts.SourceFormat, len(req.Payload))
 	defer func() {
@@ -582,7 +581,6 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	// Use a session-scoped context for the heartbeat that is NOT tied to the HTTP request.
 	// This ensures the heartbeat survives across request boundaries during MCP tool execution.
-	// Mirrors the TS plugin's setInterval-based heartbeat that lives independently of HTTP responses.
 	sessionCtx, sessionCancel := context.WithCancel(context.Background())
 	go cursorH2Heartbeat(sessionCtx, stream)
 

@@ -3,11 +3,8 @@ package management
 import (
 	"context"
 	"net/http"
-	"net/url"
 
 	"github.com/gin-gonic/gin"
-
-	// "github.com/router-for-me/CLIProxyAPI/v7/internal/browser"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	log "github.com/sirupsen/logrus"
@@ -26,13 +23,6 @@ func (h *Handler) RequestCodeArtsToken(c *gin.Context) {
 	}
 
 	RegisterOAuthSession(state, "codearts")
-
-	callbackURL, errCallback := h.managementCallbackURL("/v0/oauth/codearts/status")
-	if errCallback != nil {
-		log.WithError(errCallback).Error("failed to compute codearts status url")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "callback server unavailable"})
-		return
-	}
 
 	// Use CodeArts OAuth handler to generate the real authorization URL directly
 	var authURL string
@@ -55,7 +45,8 @@ func (h *Handler) RequestCodeArtsToken(c *gin.Context) {
 		}
 	}
 
-	SetOAuthSessionError(state, "auth_url|"+callbackURL+"?state="+url.QueryEscape(state))
+	// Stash the authorization URL so the web UI can re-read it while polling.
+	SetOAuthSessionError(state, "auth_url|"+authURL)
 
 	c.JSON(http.StatusOK, gin.H{
 		"status": "ok",

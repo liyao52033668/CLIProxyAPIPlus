@@ -19,7 +19,6 @@ import (
 )
 
 const (
-	// OAuth endpoints and client metadata are derived from the reference Python implementation.
 	iFlowOAuthTokenEndpoint     = "https://iflow.cn/oauth/token"
 	iFlowOAuthAuthorizeEndpoint = "https://iflow.cn/oauth"
 	iFlowUserInfoEndpoint       = "https://iflow.cn/api/oauth/getUserInfo"

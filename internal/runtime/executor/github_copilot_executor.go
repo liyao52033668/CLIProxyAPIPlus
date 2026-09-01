@@ -878,15 +878,10 @@ func (e *GitHubCopilotExecutor) applyHeaders(r *http.Request, apiToken string, b
 // a role:"user" message is emitted AFTER the tool message, making the last message
 // appear user-initiated when it's actually part of an agent tool loop.
 //
-// VSCode Copilot Chat solves this with explicit flags (iterationNumber,
-// isContinuation, subAgentInvocationId). Since CPA doesn't have these flags,
-// we infer agent status by checking whether the conversation contains prior
-// assistant/tool messages — if it does, the current request is a continuation.
-//
-// References:
-//   - opencode#8030, opencode#15824: same root cause and fix approach
-//   - vscode-copilot-chat: toolCallingLoop.ts (iterationNumber === 0)
-//   - pi-ai: github-copilot-headers.ts (last message role check)
+// Official clients carry explicit flags (iterationNumber, isContinuation,
+// subAgentInvocationId) for this. Since CPA doesn't have them, we infer agent
+// status by checking whether the conversation contains prior assistant/tool
+// messages — if it does, the current request is a continuation.
 func isAgentInitiated(body []byte) bool {
 	if len(body) == 0 {
 		return false
@@ -1385,12 +1380,8 @@ func stripGitHubCopilotResponsesUnsupportedFields(body []byte) []byte {
 	return body
 }
 
-// applyGitHubCopilotResponsesDefaults sets required fields for the Responses API
-// that both vscode-copilot-chat and pi-ai always include.
-//
-// References:
-//   - vscode-copilot-chat: src/platform/endpoint/node/responsesApi.ts
-//   - pi-ai (badlogic/pi-mono): packages/ai/src/providers/openai-responses.ts
+// applyGitHubCopilotResponsesDefaults sets the fields the Responses API requires
+// and that official clients always include.
 func applyGitHubCopilotResponsesDefaults(body []byte) []byte {
 	// store: false — prevents request/response storage
 	if !gjson.GetBytes(body, "store").Exists() {

@@ -14,7 +14,6 @@ import (
 )
 
 // retryConfig holds configuration for socket retry logic.
-// Based on kiro2Api Python implementation patterns.
 type retryConfig struct {
 	MaxRetries      int           // Maximum number of retry attempts
 	BaseDelay       time.Duration // Base delay between retries (exponential backoff)
@@ -50,7 +49,6 @@ func defaultRetryConfig() retryConfig {
 
 // isRetryableError checks if an error is retryable based on error type and message.
 // Returns true for network timeouts, connection resets, and temporary failures.
-// Based on kiro2Api's retry logic patterns.
 func isRetryableError(err error) bool {
 	if err == nil {
 		return false
@@ -127,7 +125,6 @@ func isRetryableError(err error) bool {
 }
 
 // isRetryableHTTPStatus checks if an HTTP status code is retryable.
-// Based on kiro2Api: 502, 503, 504 are retryable server errors.
 func isRetryableHTTPStatus(statusCode int) bool {
 	return retryableHTTPStatusCodes[statusCode]
 }

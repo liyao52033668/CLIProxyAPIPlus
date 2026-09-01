@@ -1,5 +1,4 @@
 // Package proto provides hand-rolled protobuf encode/decode for Cursor's gRPC API.
-// Field numbers are extracted from the TypeScript generated proto/agent_pb.ts in alma-plugins/cursor-auth.
 package proto
 
 // AgentClientMessage (msg 118) oneof "message"

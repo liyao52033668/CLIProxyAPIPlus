@@ -1,6 +1,5 @@
 // Package proto provides protobuf encoding for Cursor's gRPC API,
 // using dynamicpb with the embedded FileDescriptorProto from agent.proto.
-// This mirrors the cursor-auth TS plugin's use of @bufbuild/protobuf create()+toBinary().
 package proto
 
 import (
@@ -289,10 +288,9 @@ func (e *encoder) requestedModel(modelId string, params map[string]string) *dyna
 	return rm
 }
 
-// --- Encode functions mirroring cursor-fetch.ts ---
+// --- Encode functions ---
 
 // EncodeHeartbeat returns an encoded AgentClientMessage with clientHeartbeat.
-// Mirrors: create(AgentClientMessageSchema, { message: { case: 'clientHeartbeat', value: create(ClientHeartbeatSchema, {}) } })
 func EncodeHeartbeat() ([]byte, error) {
 	var e encoder
 	hb := e.newMsg("ClientHeartbeat")
@@ -303,7 +301,6 @@ func EncodeHeartbeat() ([]byte, error) {
 }
 
 // EncodeRunRequest builds a full AgentClientMessage wrapping an AgentRunRequest.
-// Mirrors buildCursorRequest() in cursor-fetch.ts.
 // If p.RawCheckpoint is set, it is used directly as the conversation_state bytes
 // (from a previous conversation_checkpoint_update), skipping manual turn construction.
 func EncodeRunRequest(p *RunRequestParams) ([]byte, error) {
@@ -622,7 +619,6 @@ func EncodeResumeRequest(p *ResumeRequestParams) ([]byte, error) {
 }
 
 // --- KV response encoders ---
-// Mirrors handleKvMessage() in cursor-fetch.ts
 
 // EncodeKvGetBlobResult responds to a getBlobArgs request.
 func EncodeKvGetBlobResult(kvId uint32, blobData []byte) ([]byte, error) {
@@ -658,7 +654,6 @@ func EncodeKvSetBlobResult(kvId uint32) ([]byte, error) {
 }
 
 // --- Exec response encoders ---
-// Mirrors handleExecMessage() and sendExec() in cursor-fetch.ts
 
 // EncodeExecRequestContextResult responds to requestContextArgs with tool definitions.
 func EncodeExecRequestContextResult(execMsgId uint32, execId string, tools []McpToolDef) ([]byte, error) {
@@ -877,7 +872,6 @@ func EncodeExecWriteShellStdinError(execMsgId uint32, execId string, errMsg stri
 }
 
 // encodeExecClientMsg wraps an exec result in AgentClientMessage.
-// Mirrors sendExec() in cursor-fetch.ts.
 func encodeExecClientMsg(id uint32, execId string, resultFieldName string, resultMsg *dynamicpb.Message) ([]byte, error) {
 	var e encoder
 	ecm := e.newMsg("ExecClientMessage")
@@ -903,7 +897,6 @@ func encodeExecClientMsg(id uint32, execId string, resultFieldName string, resul
 // --- Utilities ---
 
 // jsonToProtobufValueBytes converts a JSON schema (json.RawMessage) to protobuf Value binary.
-// This mirrors the TS pattern: toBinary(ValueSchema, fromJson(ValueSchema, jsonSchema))
 func jsonToProtobufValueBytes(jsonData json.RawMessage) []byte {
 	if len(jsonData) == 0 {
 		return nil
@@ -924,7 +917,6 @@ func jsonToProtobufValueBytes(jsonData json.RawMessage) []byte {
 }
 
 // ProtobufValueBytesToJSON converts protobuf Value binary back to JSON.
-// This mirrors the TS pattern: toJson(ValueSchema, fromBinary(ValueSchema, value))
 func ProtobufValueBytesToJSON(data []byte) (any, error) {
 	val := &structpb.Value{}
 	if err := proto.Unmarshal(data, val); err != nil {

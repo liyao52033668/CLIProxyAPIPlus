@@ -717,7 +717,7 @@ func (e *KiroExecutor) extractEventTypeFromBytes(headers []byte) string {
 // streamToChannel converts AWS Event Stream to channel-based streaming.
 // Supports tool calling - emits tool_use content blocks when tools are used.
 // Includes embedded [Called ...] tool call parsing and input buffering for toolUseEvent.
-// Implements duplicate content filtering using lastContentEvent detection (based on AIClient-2-API).
+// Implements duplicate content filtering using lastContentEvent detection.
 // Extracts stop_reason from upstream events when available.
 // thinkingEnabled controls whether <thinking> tags are parsed - only parse when request enabled thinking.
 func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out chan<- cliproxyexecutor.StreamChunk, targetFormat sdktranslator.Format, model string, originalReq, claudeBody []byte, reporter *helps.UsageReporter, thinkingEnabled bool) {
@@ -736,7 +736,6 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 	// is too aggressive for streaming scenarios.
 
 	// Streaming token calculation - accumulate content for real-time token counting
-	// Based on AIClient-2-API implementation
 	var accumulatedContent strings.Builder
 	accumulatedContent.Grow(4096) // Pre-allocate 4KB capacity to reduce reallocations
 

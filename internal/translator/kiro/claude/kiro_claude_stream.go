@@ -167,8 +167,8 @@ func BuildClaudeThinkingDeltaEvent(thinkingDelta string, index int) []byte {
 }
 
 // PendingTagSuffix detects if the buffer ends with a partial prefix of the given tag.
-// Returns the length of the partial match (0 if no match).
-// Based on amq2api implementation for handling cross-chunk tag boundaries.
+// Returns the length of the partial match (0 if no match). This keeps a tag that
+// straddles two stream chunks from being emitted as literal text.
 func PendingTagSuffix(buffer, tag string) int {
 	if buffer == "" || tag == "" {
 		return 0

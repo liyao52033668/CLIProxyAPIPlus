@@ -12,7 +12,6 @@ import (
 )
 
 // agentDescriptorB64 is the base64-encoded FileDescriptorProto for agent.proto.
-// Extracted from alma-plugins/plugins/cursor-auth/proto/agent_pb.ts.
 const agentDescriptorB64 = "" +
 	"CgthZ2VudC5wcm90bxIIYWdlbnQudjEicgoOR2xvYlRvb2xSZXN1bHQSLAoHc3VjY2VzcxgBIAEo" +
 	"CzIZLmFnZW50LnYxLkdsb2JUb29sU3VjY2Vzc0gAEigKBWVycm9yGAIgASgLMhcuYWdlbnQudjEu" +

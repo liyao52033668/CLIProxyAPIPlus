@@ -6,11 +6,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"html"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -18,6 +20,12 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
 )
+
+// codeArtsTicketPollInterval is the snap-manager ticket poll cadence.
+const codeArtsTicketPollInterval = 2 * time.Second
+
+// codeArtsLoginTimeout bounds how long a session waits for the user to authorize.
+const codeArtsLoginTimeout = 5 * time.Minute
 
 type sessionStatus string
 
@@ -32,7 +40,6 @@ const (
 type webSession struct {
 	stateID   string
 	ticketID  string
-	secret    string
 	verifier  string
 	challenge string
 	status    sessionStatus
@@ -41,6 +48,15 @@ type webSession struct {
 	token     *CodeArtsTokenData
 	tokenResp *TokenResponse
 	cancel    context.CancelFunc
+	// pollSecret holds the secret used for ticket polling. It starts as the
+	// locally generated value and is replaced by the portal-issued secret once
+	// the callback delivers it.
+	pollSecret atomic.Value
+}
+
+func (s *webSession) currentSecret() string {
+	secret, _ := s.pollSecret.Load().(string)
+	return secret
 }
 
 // AuthSuccessCallback is called when authentication is successful.
@@ -125,6 +141,8 @@ func (h *OAuthWebHandler) handleStart(c *gin.Context) {
 }
 
 // CreateSessionAndGetAuthURL creates a new session and returns the CodeArts authorization URL.
+// Ticket polling starts immediately, before the user opens the URL, so the login can
+// complete without the browser ever reaching a local callback listener.
 // This method is exposed for use by management API handlers.
 func (h *OAuthWebHandler) CreateSessionAndGetAuthURL(stateID string) (string, error) {
 	ticketID, err := RandomHex(16)
@@ -140,20 +158,20 @@ func (h *OAuthWebHandler) CreateSessionAndGetAuthURL(stateID string) (string, er
 		return "", fmt.Errorf("codearts: generate PKCE pair: %w", err)
 	}
 
-	port := h.cfg.Port
-	if port == 0 {
-		port = 8318
-	}
+	port := h.callbackPort()
+
+	ctx, cancel := context.WithTimeout(context.Background(), codeArtsLoginTimeout)
 
 	sess := &webSession{
 		stateID:   stateID,
 		ticketID:  ticketID,
-		secret:    secret,
 		verifier:  verifier,
 		challenge: challenge,
 		status:    sWaitingCB,
 		startedAt: time.Now(),
+		cancel:    cancel,
 	}
+	sess.pollSecret.Store(secret)
 
 	h.mu.Lock()
 	h.sessions[stateID] = sess
@@ -162,16 +180,71 @@ func (h *OAuthWebHandler) CreateSessionAndGetAuthURL(stateID string) (string, er
 
 	loginURL := BuildAuthorizeURL(ticketID, challenge, port)
 
-	log.Infof("CodeArts OAuth: session %s started (PKCE flow)", stateID)
+	go h.runTicketPoll(ctx, cancel, sess)
+
+	log.Infof("CodeArts OAuth: session %s started (ticket polling)", stateID)
 
 	return loginURL, nil
 }
 
+// callbackPort returns the port advertised to the portal as the local callback port.
+func (h *OAuthWebHandler) callbackPort() int {
+	if h.cfg != nil && h.cfg.Port != 0 {
+		return h.cfg.Port
+	}
+	return 8318
+}
+
+// runTicketPoll polls the snap-manager login ticket endpoint until credentials are
+// available, the context expires, or the session leaves the polling state. It owns
+// the session lifecycle: on success it persists the token and fires the callback.
+func (h *OAuthWebHandler) runTicketPoll(ctx context.Context, cancel context.CancelFunc, sess *webSession) {
+	defer cancel()
+
+	tokenResp, err := h.pollTicketForSession(ctx, sess)
+	if err != nil {
+		h.mu.Lock()
+		if sess.status != sSuccess {
+			sess.status = sFailed
+			sess.error = err.Error()
+		}
+		h.mu.Unlock()
+		log.Errorf("CodeArts OAuth: ticket polling failed for state %s: %v", sess.stateID, err)
+		return
+	}
+
+	h.finishSession(sess, tokenResp)
+}
+
+// finishSession stores the credentials, persists the auth file and notifies listeners.
+func (h *OAuthWebHandler) finishSession(sess *webSession, tokenResp *TokenResponse) {
+	tokenData := h.tokenDataFromResponse(tokenResp, sess.verifier)
+
+	h.mu.Lock()
+	alreadyDone := sess.status == sSuccess
+	sess.status = sSuccess
+	sess.token = tokenData
+	sess.tokenResp = tokenResp
+	h.mu.Unlock()
+
+	if alreadyDone {
+		return
+	}
+
+	h.saveTokenToFile(tokenData)
+	log.Infof("CodeArts OAuth: authentication successful for user %s (state %s)", tokenData.UserName, sess.stateID)
+
+	if h.authSuccessCallback != nil {
+		h.authSuccessCallback(sess.stateID)
+	}
+}
+
 // handleCallback receives the callback from HuaweiCloud after user login.
 // Two channels are supported:
-//   - PKCE channel: query carries code (+ error) → ExchangeCode with verifier
-//   - ticket-polling channel: query carries secret + redirect (nested ticket_id)
-//     → PollLoginTicket until credentials are ready
+//   - ticket-polling channel: query carries secret + redirect (nested ticket_id).
+//     The secret is handed to the session's poller and the browser is bounced back
+//     to the portal so the login can finalize; this handler never blocks on polling.
+//   - PKCE channel: query carries code → ExchangeCode with the session verifier.
 func (h *OAuthWebHandler) handleCallback(c *gin.Context) {
 	code := c.Query("code")
 	secret := c.Query("secret")
@@ -180,104 +253,162 @@ func (h *OAuthWebHandler) handleCallback(c *gin.Context) {
 
 	if errMsg != "" {
 		log.Errorf("CodeArts OAuth callback error: %s", errMsg)
-		c.Header("Content-Type", "text/html; charset=utf-8")
-		c.String(http.StatusOK, `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Authentication failed</title></head><body style="display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;font-family:sans-serif;background:#f5f5f5"><div style="text-align:center;padding:40px;background:white;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,0.1)"><h1>❌ Authentication failed</h1><p>Error: `+errMsg+`</p></div></body></html>`)
+		h.renderCallbackFailure(c, "Error: "+errMsg)
 		return
 	}
 
-	// Find a pending session to complete.
-	h.mu.RLock()
-	var matchedSess *webSession
-	var matchedStateID string
-	for stateID, sess := range h.sessions {
-		if sess.status == sWaitingCB {
-			matchedSess = sess
-			matchedStateID = stateID
-			break
-		}
-	}
-	h.mu.RUnlock()
-
-	if matchedSess == nil {
+	ticketID := ticketIDFromRedirect(redirectURL)
+	sess := h.lookupSession(ticketID)
+	if sess == nil {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "no pending session found"})
 		return
 	}
 
-	h.mu.Lock()
-	matchedSess.status = sPolling
-	h.mu.Unlock()
-
-	port := h.cfg.Port
-	if port == 0 {
-		port = 8318
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-
-	var tokenResp *TokenResponse
-	var err error
-
-	if code != "" {
-		// PKCE authorization-code channel.
-		tokenResp, err = h.auth.ExchangeCode(ctx, code, matchedSess.verifier, port)
-	} else if secret != "" {
-		// Ticket-polling fallback channel: use ticket_id from the nested redirect.
-		ticketID := matchedSess.ticketID
-		if parsed, parseErr := url.Parse(redirectURL); parseErr == nil {
-			if tid := parsed.Query().Get("ticket_id"); tid != "" {
-				ticketID = tid
-			}
+	if secret != "" {
+		// Ticket-polling channel: the portal issues its own secret; hand it to the
+		// already-running poller and send the browser back to finalize the login.
+		sess.pollSecret.Store(secret)
+		h.markPolling(sess)
+		if redirectURL != "" {
+			h.renderCallbackRedirect(c, redirectURL)
+			return
 		}
-		tokenResp, err = h.pollTicket(ctx, ticketID, secret)
-	} else {
-		err = fmt.Errorf("codearts: callback missing both code and secret")
-	}
-
-	if err != nil {
-		h.mu.Lock()
-		matchedSess.status = sFailed
-		matchedSess.error = err.Error()
-		h.mu.Unlock()
-		log.Errorf("CodeArts OAuth: authentication failed: %v", err)
-		c.Header("Content-Type", "text/html; charset=utf-8")
-		c.String(http.StatusOK, `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Authentication failed</title></head><body style="display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;font-family:sans-serif;background:#f5f5f5"><div style="text-align:center;padding:40px;background:white;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,0.1)"><h1>❌ Authentication failed</h1><p>Authentication failed. Please try again.</p></div></body></html>`)
+		h.renderCallbackSuccess(c)
 		return
 	}
 
-	tokenData := h.tokenDataFromResponse(tokenResp, matchedSess.verifier)
-
-	h.mu.Lock()
-	matchedSess.status = sSuccess
-	matchedSess.token = tokenData
-	matchedSess.tokenResp = tokenResp
-	h.mu.Unlock()
-
-	// Save auth file
-	h.saveTokenToFile(tokenData)
-	log.Infof("CodeArts OAuth: authentication successful for user %s", tokenData.UserName)
-
-	// Call the success callback if registered
-	if h.authSuccessCallback != nil {
-		h.authSuccessCallback(matchedStateID)
+	if code == "" {
+		h.renderCallbackFailure(c, "Callback carried neither an authorization code nor a ticket secret.")
+		return
 	}
 
-	c.Header("Content-Type", "text/html; charset=utf-8")
-	c.String(http.StatusOK, `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Authentication successful</title></head><body style="display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;font-family:sans-serif;background:#f5f5f5"><div style="text-align:center;padding:40px;background:white;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,0.1)"><h1>✅ Authentication successful!</h1><p>You can close this tab.</p><p style="color:#666;font-size:14px">You may safely close this window or tab now.</p></div></body></html>`)
+	// PKCE authorization-code channel.
+	h.markPolling(sess)
+	tokenResp, err := h.auth.ExchangeCode(c.Request.Context(), code, sess.verifier, h.callbackPort())
+	if err != nil {
+		h.mu.Lock()
+		sess.status = sFailed
+		sess.error = err.Error()
+		h.mu.Unlock()
+		log.Errorf("CodeArts OAuth: authentication failed: %v", err)
+		h.renderCallbackFailure(c, "Authentication failed. Please try again.")
+		return
+	}
+
+	h.finishSession(sess, tokenResp)
+	h.renderCallbackSuccess(c)
 }
 
-// pollTicket polls the snap-manager login ticket endpoint until credentials are
-// available or the context is cancelled.
-func (h *OAuthWebHandler) pollTicket(ctx context.Context, ticketID, secret string) (*TokenResponse, error) {
-	ticker := time.NewTicker(2 * time.Second)
+// lookupSession resolves a session by the ticket id carried in the callback,
+// falling back to the sole pending session when the ticket is absent.
+func (h *OAuthWebHandler) lookupSession(ticketID string) *webSession {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	if ticketID != "" {
+		if stateID, ok := h.ticketToState[ticketID]; ok {
+			if sess, okSess := h.sessions[stateID]; okSess {
+				return sess
+			}
+		}
+		return nil
+	}
+
+	// Without a ticket id the callback can only be attributed unambiguously when
+	// exactly one session is waiting.
+	var candidate *webSession
+	for _, sess := range h.sessions {
+		if sess.status != sWaitingCB && sess.status != sPolling {
+			continue
+		}
+		if candidate != nil {
+			return nil
+		}
+		candidate = sess
+	}
+	return candidate
+}
+
+// markPolling moves a waiting session into the polling state.
+func (h *OAuthWebHandler) markPolling(sess *webSession) {
+	h.mu.Lock()
+	if sess.status == sWaitingCB {
+		sess.status = sPolling
+	}
+	h.mu.Unlock()
+}
+
+// ticketIDFromRedirect extracts the ticket_id nested in the callback redirect param.
+func ticketIDFromRedirect(redirectURL string) string {
+	if redirectURL == "" {
+		return ""
+	}
+	parsed, err := url.Parse(redirectURL)
+	if err != nil {
+		return ""
+	}
+	return parsed.Query().Get("ticket_id")
+}
+
+// SubmitCallbackSecret hands a portal-issued secret to an existing session's poller.
+// This is used by the management API when the user pastes the callback URL because a
+// remote deployment cannot receive the loopback redirect.
+func (h *OAuthWebHandler) SubmitCallbackSecret(stateID, ticketID, secret string) error {
+	if secret == "" {
+		return fmt.Errorf("codearts: callback secret is required")
+	}
+
+	h.mu.RLock()
+	sess, ok := h.sessions[stateID]
+	h.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("codearts: session not found for state %s", stateID)
+	}
+
+	if ticketID != "" && ticketID != sess.ticketID {
+		return fmt.Errorf("codearts: ticket mismatch for state %s", stateID)
+	}
+
+	sess.pollSecret.Store(secret)
+	h.markPolling(sess)
+	log.Infof("CodeArts OAuth: callback secret accepted for state %s, polling ticket", stateID)
+	return nil
+}
+
+func (h *OAuthWebHandler) renderCallbackRedirect(c *gin.Context, redirectURL string) {
+	escaped := html.EscapeString(redirectURL)
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.String(http.StatusOK, `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Completing login</title>`+
+		`<meta http-equiv="refresh" content="0; url=`+escaped+`"></head>`+
+		`<body style="display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;font-family:sans-serif;background:#f5f5f5">`+
+		`<div style="text-align:center;padding:40px;background:white;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,0.1)">`+
+		`<h1>Completing login...</h1><p>Redirecting to HuaweiCloud to finish. If nothing happens, `+
+		`<a href="`+escaped+`">click here</a>.</p></div></body></html>`)
+}
+
+func (h *OAuthWebHandler) renderCallbackSuccess(c *gin.Context) {
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.String(http.StatusOK, `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Authentication successful</title></head><body style="display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;font-family:sans-serif;background:#f5f5f5"><div style="text-align:center;padding:40px;background:white;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,0.1)"><h1>&#x2705; Authentication successful!</h1><p>You can close this tab.</p><p style="color:#666;font-size:14px">You may safely close this window or tab now.</p></div></body></html>`)
+}
+
+func (h *OAuthWebHandler) renderCallbackFailure(c *gin.Context, detail string) {
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.String(http.StatusOK, `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Authentication failed</title></head><body style="display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;font-family:sans-serif;background:#f5f5f5"><div style="text-align:center;padding:40px;background:white;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,0.1)"><h1>&#x274c; Authentication failed</h1><p>`+html.EscapeString(detail)+`</p></div></body></html>`)
+}
+
+// pollTicketForSession polls the snap-manager login ticket endpoint, re-reading the
+// session secret on every tick so a portal-issued secret can replace the local one.
+func (h *OAuthWebHandler) pollTicketForSession(ctx context.Context, sess *webSession) (*TokenResponse, error) {
+	ticker := time.NewTicker(codeArtsTicketPollInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-ticker.C:
-			tr, errPoll := h.auth.PollLoginTicket(ctx, ticketID, secret)
+			tr, errPoll := h.auth.PollLoginTicket(ctx, sess.ticketID, sess.currentSecret())
 			if errPoll != nil {
+				log.Debugf("codearts: ticket poll error for state %s: %v", sess.stateID, errPoll)
 				continue
 			}
 			if tr != nil && tr.Credentials.SecurityToken != "" {
@@ -393,91 +524,41 @@ func (h *OAuthWebHandler) saveTokenToFile(tokenData *CodeArtsTokenData) {
 	log.Infof("CodeArts OAuth: token saved to %s", authFilePath)
 }
 
-// ExchangeCodeForSession exchanges an authorization code for a token using the
-// session's PKCE verifier. This is used by the management API when users manually
-// paste the redirect URL in remote deployment scenarios.
-func (h *OAuthWebHandler) ExchangeCodeForSession(ctx context.Context, stateID, code string) (*TokenResponse, error) {
-	h.mu.RLock()
-	sess, ok := h.sessions[stateID]
-	h.mu.RUnlock()
+// WaitForCompletion blocks until the session reaches a terminal state and returns
+// the resulting token response. Callers that only need to hand over the callback
+// secret should use SubmitCallbackSecret instead.
+func (h *OAuthWebHandler) WaitForCompletion(ctx context.Context, stateID string) (*TokenResponse, error) {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		h.mu.RLock()
+		sess, ok := h.sessions[stateID]
+		var status sessionStatus
+		var sessErr string
+		var tokenResp *TokenResponse
+		if ok {
+			status = sess.status
+			sessErr = sess.error
+			tokenResp = sess.tokenResp
+		}
+		h.mu.RUnlock()
 
-	if !ok {
-		return nil, fmt.Errorf("codearts: session not found for state %s", stateID)
+		if !ok {
+			return nil, fmt.Errorf("codearts: session not found for state %s", stateID)
+		}
+		switch status {
+		case sSuccess:
+			return tokenResp, nil
+		case sFailed:
+			return nil, fmt.Errorf("codearts: %s", sessErr)
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-ticker.C:
+		}
 	}
-
-	if sess.verifier == "" {
-		return nil, fmt.Errorf("codearts: session %s has no PKCE verifier", stateID)
-	}
-
-	port := h.cfg.Port
-	if port == 0 {
-		port = 8318
-	}
-
-	tokenResp, err := h.auth.ExchangeCode(ctx, code, sess.verifier, port)
-	if err != nil {
-		return nil, err
-	}
-
-	tokenData := h.tokenDataFromResponse(tokenResp, sess.verifier)
-
-	h.mu.Lock()
-	sess.status = sSuccess
-	sess.token = tokenData
-	sess.tokenResp = tokenResp
-	h.mu.Unlock()
-
-	return tokenResp, nil
-}
-
-// CompleteWithTicketPoll completes the OAuth flow by polling the snap-manager
-// login ticket endpoint with the secret received from the HuaweiCloud callback.
-// This is used by the management API when users manually paste the redirect URL
-// in remote deployment scenarios (the callback URL carries secret + redirect, not code).
-func (h *OAuthWebHandler) CompleteWithTicketPoll(ctx context.Context, stateID, ticketID, secret string) (*TokenResponse, error) {
-	h.mu.RLock()
-	sess, ok := h.sessions[stateID]
-	h.mu.RUnlock()
-
-	if !ok {
-		return nil, fmt.Errorf("codearts: session not found for state %s", stateID)
-	}
-
-	// Prefer the ticket_id from the callback URL; fall back to session's ticket_id.
-	if ticketID == "" {
-		ticketID = sess.ticketID
-	}
-
-	tokenResp, err := h.pollTicket(ctx, ticketID, secret)
-	if err != nil {
-		return nil, err
-	}
-
-	tokenData := h.tokenDataFromResponse(tokenResp, sess.verifier)
-
-	h.mu.Lock()
-	sess.status = sSuccess
-	sess.token = tokenData
-	sess.tokenResp = tokenResp
-	h.mu.Unlock()
-
-	return tokenResp, nil
-}
-
-// SaveTokenFromResponse saves the token data from a TokenResponse to the auth file.
-// This is used by the management API after ExchangeCodeForSession.
-func (h *OAuthWebHandler) SaveTokenFromResponse(stateID string, tokenResp *TokenResponse) {
-	h.mu.RLock()
-	sess, ok := h.sessions[stateID]
-	h.mu.RUnlock()
-
-	if !ok || sess.token == nil {
-		log.Warnf("CodeArts OAuth: cannot save token for state %s - session or token not found", stateID)
-		return
-	}
-
-	h.saveTokenToFile(sess.token)
-	log.Infof("CodeArts OAuth: token saved for user %s (state %s)", sess.token.UserName, stateID)
 }
 
 // HTML templates

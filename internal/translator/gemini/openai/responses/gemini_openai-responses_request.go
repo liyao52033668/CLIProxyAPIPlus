@@ -162,7 +162,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				// Handle regular messages
 				// Note: In Responses format, model outputs may appear as content items with type "output_text"
 				// even when the message.role is "user". We split such items into distinct Gemini messages
-				// with roles derived from the content type to match docs/convert-2.md.
+				// with roles derived from the content type.
 				if contentArray := item.Get("content"); contentArray.Exists() && contentArray.IsArray() {
 					currentRole := ""
 					currentParts := make([][]byte, 0)

@@ -62,7 +62,6 @@ const (
 )
 
 // retryableHTTPStatusCodes defines HTTP status codes that are considered retryable.
-// Based on kiro2Api reference: 502 (Bad Gateway), 503 (Service Unavailable), 504 (Gateway Timeout)
 var retryableHTTPStatusCodes = map[int]bool{
 	502: true, // Bad Gateway - upstream server error
 	503: true, // Service Unavailable - server temporarily overloaded
