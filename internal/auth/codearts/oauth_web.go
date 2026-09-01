@@ -24,8 +24,16 @@ import (
 // codeArtsTicketPollInterval is the snap-manager ticket poll cadence.
 const codeArtsTicketPollInterval = 2 * time.Second
 
-// codeArtsLoginTimeout bounds how long a session waits for the user to authorize.
-const codeArtsLoginTimeout = 5 * time.Minute
+// LoginWindow bounds how long a session waits for the user to authorize. It must
+// stay below the management OAuth session TTL (10 minutes) so the timeout is
+// reported while that session still exists; otherwise the web UI only ever sees
+// "unknown or expired state".
+const LoginWindow = 8 * time.Minute
+
+// CallbackGracePeriod bounds ticket polling after the callback secret arrives.
+// The portal redirect has been followed by then, so the ticket should be
+// claimable almost immediately.
+const CallbackGracePeriod = 2 * time.Minute
 
 type sessionStatus string
 
@@ -52,6 +60,12 @@ type webSession struct {
 	// locally generated value and is replaced by the portal-issued secret once
 	// the callback delivers it.
 	pollSecret atomic.Value
+	// pollTicketID holds the ticket id used for polling. The portal may mint its
+	// own ticket and hand it back through the callback redirect, in which case
+	// that one wins over the locally generated ticket.
+	pollTicketID atomic.Value
+	// deadline bounds the poll loop and is extended when the callback arrives.
+	deadline atomic.Value
 }
 
 func (s *webSession) currentSecret() string {
@@ -59,8 +73,29 @@ func (s *webSession) currentSecret() string {
 	return secret
 }
 
+func (s *webSession) currentTicketID() string {
+	ticketID, _ := s.pollTicketID.Load().(string)
+	if ticketID == "" {
+		return s.ticketID
+	}
+	return ticketID
+}
+
+func (s *webSession) deadlineAt() time.Time {
+	deadline, _ := s.deadline.Load().(time.Time)
+	return deadline
+}
+
+func (s *webSession) extendDeadline(d time.Duration) {
+	s.deadline.Store(time.Now().Add(d))
+}
+
 // AuthSuccessCallback is called when authentication is successful.
 type AuthSuccessCallback func(stateID string)
+
+// AuthFailureCallback is called when authentication fails or times out, so the
+// management OAuth session can stop reporting the flow as pending.
+type AuthFailureCallback func(stateID string, err error)
 
 // OAuthWebHandler handles CodeArts OAuth web login flow.
 type OAuthWebHandler struct {
@@ -71,6 +106,7 @@ type OAuthWebHandler struct {
 	mu                  sync.RWMutex
 	auth                *CodeArtsAuth
 	authSuccessCallback AuthSuccessCallback
+	authFailureCallback AuthFailureCallback
 }
 
 // NewOAuthWebHandler creates a new CodeArts OAuth web handler.
@@ -86,6 +122,11 @@ func NewOAuthWebHandler(cfg *config.Config) *OAuthWebHandler {
 // SetAuthSuccessCallback sets the callback to be called when authentication is successful.
 func (h *OAuthWebHandler) SetAuthSuccessCallback(callback AuthSuccessCallback) {
 	h.authSuccessCallback = callback
+}
+
+// SetAuthFailureCallback sets the callback to be called when authentication fails.
+func (h *OAuthWebHandler) SetAuthFailureCallback(callback AuthFailureCallback) {
+	h.authFailureCallback = callback
 }
 
 // RegisterRoutes registers CodeArts OAuth web routes.
@@ -160,8 +201,6 @@ func (h *OAuthWebHandler) CreateSessionAndGetAuthURL(stateID string) (string, er
 
 	port := h.callbackPort()
 
-	ctx, cancel := context.WithTimeout(context.Background(), codeArtsLoginTimeout)
-
 	sess := &webSession{
 		stateID:   stateID,
 		ticketID:  ticketID,
@@ -169,9 +208,13 @@ func (h *OAuthWebHandler) CreateSessionAndGetAuthURL(stateID string) (string, er
 		challenge: challenge,
 		status:    sWaitingCB,
 		startedAt: time.Now(),
-		cancel:    cancel,
 	}
 	sess.pollSecret.Store(secret)
+	sess.pollTicketID.Store(ticketID)
+	sess.extendDeadline(LoginWindow)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	sess.cancel = cancel
 
 	h.mu.Lock()
 	h.sessions[stateID] = sess
@@ -196,24 +239,39 @@ func (h *OAuthWebHandler) callbackPort() int {
 }
 
 // runTicketPoll polls the snap-manager login ticket endpoint until credentials are
-// available, the context expires, or the session leaves the polling state. It owns
-// the session lifecycle: on success it persists the token and fires the callback.
+// available, the deadline passes, or the context is cancelled. It owns the session
+// lifecycle: on success it persists the token, and either way it notifies listeners
+// so the polling web UI stops waiting.
 func (h *OAuthWebHandler) runTicketPoll(ctx context.Context, cancel context.CancelFunc, sess *webSession) {
 	defer cancel()
 
 	tokenResp, err := h.pollTicketForSession(ctx, sess)
 	if err != nil {
-		h.mu.Lock()
-		if sess.status != sSuccess {
-			sess.status = sFailed
-			sess.error = err.Error()
-		}
-		h.mu.Unlock()
-		log.Errorf("CodeArts OAuth: ticket polling failed for state %s: %v", sess.stateID, err)
+		h.failSession(sess, err)
 		return
 	}
 
 	h.finishSession(sess, tokenResp)
+}
+
+// failSession marks the session failed and notifies listeners.
+func (h *OAuthWebHandler) failSession(sess *webSession, err error) {
+	h.mu.Lock()
+	alreadyDone := sess.status == sSuccess || sess.status == sFailed
+	if !alreadyDone {
+		sess.status = sFailed
+		sess.error = err.Error()
+	}
+	h.mu.Unlock()
+
+	if alreadyDone {
+		return
+	}
+
+	log.Errorf("CodeArts OAuth: login failed for state %s: %v", sess.stateID, err)
+	if h.authFailureCallback != nil {
+		h.authFailureCallback(sess.stateID, err)
+	}
 }
 
 // finishSession stores the credentials, persists the auth file and notifies listeners.
@@ -267,10 +325,15 @@ func (h *OAuthWebHandler) handleCallback(c *gin.Context) {
 	if secret != "" {
 		// Ticket-polling channel: the portal issues its own secret; hand it to the
 		// already-running poller and send the browser back to finalize the login.
-		sess.pollSecret.Store(secret)
-		h.markPolling(sess)
+		h.acceptCallbackSecret(sess, ticketID, secret)
 		if redirectURL != "" {
-			h.renderCallbackRedirect(c, redirectURL)
+			validated, err := ValidatePortalRedirect(redirectURL)
+			if err != nil {
+				log.Warnf("CodeArts OAuth: refusing to follow callback redirect: %v", err)
+				h.renderCallbackFailure(c, "The callback redirect target is not a HuaweiCloud address.")
+				return
+			}
+			h.renderCallbackRedirect(c, validated)
 			return
 		}
 		h.renderCallbackSuccess(c)
@@ -286,11 +349,7 @@ func (h *OAuthWebHandler) handleCallback(c *gin.Context) {
 	h.markPolling(sess)
 	tokenResp, err := h.auth.ExchangeCode(c.Request.Context(), code, sess.verifier, h.callbackPort())
 	if err != nil {
-		h.mu.Lock()
-		sess.status = sFailed
-		sess.error = err.Error()
-		h.mu.Unlock()
-		log.Errorf("CodeArts OAuth: authentication failed: %v", err)
+		h.failSession(sess, err)
 		h.renderCallbackFailure(c, "Authentication failed. Please try again.")
 		return
 	}
@@ -329,6 +388,17 @@ func (h *OAuthWebHandler) lookupSession(ticketID string) *webSession {
 	return candidate
 }
 
+// acceptCallbackSecret records the portal-issued secret and ticket id, moves the
+// session into the polling state and extends the poll deadline.
+func (h *OAuthWebHandler) acceptCallbackSecret(sess *webSession, ticketID, secret string) {
+	sess.pollSecret.Store(secret)
+	if ticketID != "" {
+		sess.pollTicketID.Store(ticketID)
+	}
+	sess.extendDeadline(CallbackGracePeriod)
+	h.markPolling(sess)
+}
+
 // markPolling moves a waiting session into the polling state.
 func (h *OAuthWebHandler) markPolling(sess *webSession) {
 	h.mu.Lock()
@@ -350,29 +420,43 @@ func ticketIDFromRedirect(redirectURL string) string {
 	return parsed.Query().Get("ticket_id")
 }
 
-// SubmitCallbackSecret hands a portal-issued secret to an existing session's poller.
-// This is used by the management API when the user pastes the callback URL because a
-// remote deployment cannot receive the loopback redirect.
-func (h *OAuthWebHandler) SubmitCallbackSecret(stateID, ticketID, secret string) error {
+// SubmitPastedCallback records the portal-issued secret from a pasted callback URL
+// and returns the portal redirect the user still has to open. In a remote
+// deployment the browser never reaches the loopback callback, so nothing has
+// followed that redirect yet — and only the user's browser can, because it carries
+// the portal session. The caller is expected to surface the returned URL.
+func (h *OAuthWebHandler) SubmitPastedCallback(stateID, ticketID, secret, redirectURL string) (string, error) {
 	if secret == "" {
-		return fmt.Errorf("codearts: callback secret is required")
+		return "", fmt.Errorf("codearts: callback secret is required")
 	}
 
 	h.mu.RLock()
 	sess, ok := h.sessions[stateID]
 	h.mu.RUnlock()
 	if !ok {
-		return fmt.Errorf("codearts: session not found for state %s", stateID)
+		return "", fmt.Errorf("codearts: session not found for state %s", stateID)
 	}
-
 	if ticketID != "" && ticketID != sess.ticketID {
-		return fmt.Errorf("codearts: ticket mismatch for state %s", stateID)
+		return "", fmt.Errorf("codearts: ticket mismatch for state %s", stateID)
 	}
 
-	sess.pollSecret.Store(secret)
-	h.markPolling(sess)
-	log.Infof("CodeArts OAuth: callback secret accepted for state %s, polling ticket", stateID)
-	return nil
+	finalizeURL := ""
+	if redirectURL != "" {
+		validated, err := ValidatePortalRedirect(redirectURL)
+		if err != nil {
+			return "", err
+		}
+		finalizeURL = validated
+	}
+
+	h.acceptCallbackSecret(sess, ticketID, secret)
+
+	if finalizeURL == "" {
+		log.Warnf("CodeArts OAuth: pasted callback for state %s carries no redirect; the portal login may never finalize", stateID)
+		return "", nil
+	}
+	log.Infof("CodeArts OAuth: pasted callback accepted for state %s, awaiting portal finalization", stateID)
+	return finalizeURL, nil
 }
 
 func (h *OAuthWebHandler) renderCallbackRedirect(c *gin.Context, redirectURL string) {
@@ -397,7 +481,8 @@ func (h *OAuthWebHandler) renderCallbackFailure(c *gin.Context, detail string) {
 }
 
 // pollTicketForSession polls the snap-manager login ticket endpoint, re-reading the
-// session secret on every tick so a portal-issued secret can replace the local one.
+// session secret, ticket id and deadline on every tick so the callback can update
+// them while the loop is running.
 func (h *OAuthWebHandler) pollTicketForSession(ctx context.Context, sess *webSession) (*TokenResponse, error) {
 	ticker := time.NewTicker(codeArtsTicketPollInterval)
 	defer ticker.Stop()
@@ -406,7 +491,10 @@ func (h *OAuthWebHandler) pollTicketForSession(ctx context.Context, sess *webSes
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-ticker.C:
-			tr, errPoll := h.auth.PollLoginTicket(ctx, sess.ticketID, sess.currentSecret())
+			if deadline := sess.deadlineAt(); !deadline.IsZero() && time.Now().After(deadline) {
+				return nil, fmt.Errorf("codearts: login timed out waiting for authorization")
+			}
+			tr, errPoll := h.auth.PollLoginTicket(ctx, sess.currentTicketID(), sess.currentSecret())
 			if errPoll != nil {
 				log.Debugf("codearts: ticket poll error for state %s: %v", sess.stateID, errPoll)
 				continue
@@ -522,43 +610,6 @@ func (h *OAuthWebHandler) saveTokenToFile(tokenData *CodeArtsTokenData) {
 		return
 	}
 	log.Infof("CodeArts OAuth: token saved to %s", authFilePath)
-}
-
-// WaitForCompletion blocks until the session reaches a terminal state and returns
-// the resulting token response. Callers that only need to hand over the callback
-// secret should use SubmitCallbackSecret instead.
-func (h *OAuthWebHandler) WaitForCompletion(ctx context.Context, stateID string) (*TokenResponse, error) {
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		h.mu.RLock()
-		sess, ok := h.sessions[stateID]
-		var status sessionStatus
-		var sessErr string
-		var tokenResp *TokenResponse
-		if ok {
-			status = sess.status
-			sessErr = sess.error
-			tokenResp = sess.tokenResp
-		}
-		h.mu.RUnlock()
-
-		if !ok {
-			return nil, fmt.Errorf("codearts: session not found for state %s", stateID)
-		}
-		switch status {
-		case sSuccess:
-			return tokenResp, nil
-		case sFailed:
-			return nil, fmt.Errorf("codearts: %s", sessErr)
-		}
-
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-ticker.C:
-		}
-	}
 }
 
 // HTML templates

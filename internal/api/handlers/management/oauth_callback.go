@@ -1,13 +1,11 @@
 package management
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
@@ -139,8 +137,9 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 	}
 
 	// CodeArts special handling: the callback URL carries secret + redirect (with ticket_id),
-	// not code. The session's poller was started when the auth URL was issued, so we only
-	// hand it the portal-issued secret and return immediately.
+	// not code. The session's poller was started when the auth URL was issued, so we hand it
+	// the portal-issued secret. The nested redirect still has to be opened by the user's own
+	// browser to finalize the login upstream, so it is returned for the UI to surface.
 	if canonicalProvider == "codearts" {
 		if h.codeArtsOAuthHandler == nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "error": "codearts handler unavailable"})
@@ -151,13 +150,22 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": err.Error()})
 			return
 		}
-		if err := h.codeArtsOAuthHandler.SubmitCallbackSecret(state, parsed.ticketID, parsed.secret); err != nil {
+		finalizeURL, err := h.codeArtsOAuthHandler.SubmitPastedCallback(state, parsed.ticketID, parsed.secret, parsed.redirectURL)
+		if err != nil {
 			log.WithError(err).Warnf("CodeArts OAuth: callback rejected for state %s", state)
 			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": err.Error()})
 			return
 		}
-		go h.awaitCodeArtsCompletion(state)
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+		// The session's own poller reports success or failure through the handler's
+		// success/failure callbacks, which drive the management OAuth session.
+		resp := gin.H{"status": "ok"}
+		if finalizeURL != "" {
+			resp["finalize_url"] = finalizeURL
+			// Surface the finalize URL through get-auth-status too, so a UI that only
+			// polls still learns the login is not finished yet.
+			SetOAuthSessionError(state, "auth_url|"+finalizeURL)
+		}
+		c.JSON(http.StatusOK, resp)
 		return
 	}
 
@@ -211,12 +219,14 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 
 // codeArtsCallbackParams holds the parsed CodeArts callback parameters.
 type codeArtsCallbackParams struct {
-	ticketID string
-	secret   string
+	ticketID    string
+	secret      string
+	redirectURL string
 }
 
-// parseCodeArtsCallback extracts the secret and ticket_id from a CodeArts callback URL.
-// The callback carries secret + redirect (redirect contains the nested ticket_id).
+// parseCodeArtsCallback extracts the secret, ticket_id and portal redirect from a
+// CodeArts callback URL. The callback carries secret + redirect (the redirect
+// contains the nested ticket_id and is what finalizes the login upstream).
 func parseCodeArtsCallback(rawRedirect string) (*codeArtsCallbackParams, error) {
 	u, err := url.Parse(strings.TrimSpace(rawRedirect))
 	if err != nil {
@@ -230,7 +240,8 @@ func parseCodeArtsCallback(rawRedirect string) (*codeArtsCallbackParams, error) 
 	}
 
 	ticketID := ""
-	if redirectParam := q.Get("redirect"); redirectParam != "" {
+	redirectParam := strings.TrimSpace(q.Get("redirect"))
+	if redirectParam != "" {
 		if redirectURL, parseErr := url.Parse(redirectParam); parseErr == nil {
 			ticketID = strings.TrimSpace(redirectURL.Query().Get("ticket_id"))
 		}
@@ -239,23 +250,5 @@ func parseCodeArtsCallback(rawRedirect string) (*codeArtsCallbackParams, error) 
 		return nil, fmt.Errorf("missing ticket_id in callback URL")
 	}
 
-	return &codeArtsCallbackParams{ticketID: ticketID, secret: secret}, nil
-}
-
-// awaitCodeArtsCompletion waits for the CodeArts session poller to finish and
-// reports the outcome on the management OAuth session. The poller itself persists
-// the auth file; this only mirrors its result back to the polling web UI.
-func (h *Handler) awaitCodeArtsCompletion(state string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-
-	tokenResp, err := h.codeArtsOAuthHandler.WaitForCompletion(ctx, state)
-	if err != nil {
-		SetOAuthSessionError(state, "CodeArts login failed: "+err.Error())
-		log.WithError(err).Errorf("CodeArts OAuth: login failed for state %s", state)
-		return
-	}
-
-	completeOAuthSuccess(state, "codearts")
-	log.Infof("CodeArts OAuth: callback completed successfully for state %s, user %s", state, tokenResp.UserName)
+	return &codeArtsCallbackParams{ticketID: ticketID, secret: secret, redirectURL: redirectParam}, nil
 }

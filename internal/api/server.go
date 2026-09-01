@@ -409,6 +409,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		management.CompleteOAuthSession(stateID)
 		management.CompleteOAuthSessionsByProvider("codearts")
 	})
+	s.codeArtsOAuthHandler.SetAuthFailureCallback(func(stateID string, err error) {
+		management.SetOAuthSessionError(stateID, "CodeArts login failed: "+err.Error())
+	})
 	log.Info("CodeArts OAuth Web routes registered at /v0/oauth/codearts/*")
 
 	// === CLIProxyAPIPlus extension: Register JoyCode OAuth Web routes ===

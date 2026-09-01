@@ -1,6 +1,8 @@
 package codearts
 
 import (
+	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -48,6 +50,8 @@ func newTestSession(handler *OAuthWebHandler, stateID, ticketID, secret string) 
 		startedAt: time.Now(),
 	}
 	sess.pollSecret.Store(secret)
+	sess.pollTicketID.Store(ticketID)
+	sess.extendDeadline(LoginWindow)
 	handler.sessions[stateID] = sess
 	handler.ticketToState[ticketID] = stateID
 	return sess
@@ -106,26 +110,138 @@ func TestCodeArtsCallbackStoresSecretAndBouncesBrowser(t *testing.T) {
 	}
 }
 
-func TestSubmitCallbackSecretValidatesTicket(t *testing.T) {
+func TestSubmitPastedCallbackValidatesTicket(t *testing.T) {
 	handler := NewOAuthWebHandler(&config.Config{})
 	sess := newTestSession(handler, "state-1", "ticket-1", "local-secret")
 
-	if err := handler.SubmitCallbackSecret("state-1", "other-ticket", "portal-secret"); err == nil {
-		t.Fatal("SubmitCallbackSecret accepted a mismatched ticket")
+	if _, err := handler.SubmitPastedCallback("state-1", "other-ticket", "portal-secret", ""); err == nil {
+		t.Fatal("SubmitPastedCallback accepted a mismatched ticket")
 	}
-	if err := handler.SubmitCallbackSecret("missing-state", "ticket-1", "portal-secret"); err == nil {
-		t.Fatal("SubmitCallbackSecret accepted an unknown state")
+	if _, err := handler.SubmitPastedCallback("missing-state", "ticket-1", "portal-secret", ""); err == nil {
+		t.Fatal("SubmitPastedCallback accepted an unknown state")
 	}
-	if err := handler.SubmitCallbackSecret("state-1", "ticket-1", ""); err == nil {
-		t.Fatal("SubmitCallbackSecret accepted an empty secret")
+	if _, err := handler.SubmitPastedCallback("state-1", "ticket-1", "", ""); err == nil {
+		t.Fatal("SubmitPastedCallback accepted an empty secret")
 	}
-	if err := handler.SubmitCallbackSecret("state-1", "ticket-1", "portal-secret"); err != nil {
-		t.Fatalf("SubmitCallbackSecret returned error: %v", err)
+
+	// Without a redirect there is nothing to finalize, but the secret must still land.
+	finalizeURL, err := handler.SubmitPastedCallback("state-1", "ticket-1", "portal-secret", "")
+	if err != nil {
+		t.Fatalf("SubmitPastedCallback returned error: %v", err)
+	}
+	if finalizeURL != "" {
+		t.Fatalf("finalize URL = %q, want empty", finalizeURL)
 	}
 	if got := sess.currentSecret(); got != "portal-secret" {
 		t.Fatalf("session secret = %q, want %q", got, "portal-secret")
 	}
 	if sess.status != sPolling {
 		t.Fatalf("session status = %s, want %s", sess.status, sPolling)
+	}
+}
+
+func TestSubmitPastedCallbackReturnsFinalizeURL(t *testing.T) {
+	handler := NewOAuthWebHandler(&config.Config{})
+	newTestSession(handler, "state-1", "ticket-1", "local-secret")
+
+	redirect := "https://codearts.huaweicloud.com/portal/callback?ticket_id=ticket-1"
+	finalizeURL, err := handler.SubmitPastedCallback("state-1", "ticket-1", "portal-secret", redirect)
+	if err != nil {
+		t.Fatalf("SubmitPastedCallback returned error: %v", err)
+	}
+	if finalizeURL != redirect {
+		t.Fatalf("finalize URL = %q, want %q", finalizeURL, redirect)
+	}
+}
+
+func TestSubmitPastedCallbackRejectsNonHuaweiRedirect(t *testing.T) {
+	handler := NewOAuthWebHandler(&config.Config{})
+	sess := newTestSession(handler, "state-1", "ticket-1", "local-secret")
+
+	if _, err := handler.SubmitPastedCallback("state-1", "ticket-1", "portal-secret",
+		"http://127.0.0.1:8318/oauth/callback?ticket_id=ticket-1"); err == nil {
+		t.Fatal("SubmitPastedCallback accepted a loopback redirect")
+	}
+	if got := sess.currentSecret(); got != "local-secret" {
+		t.Fatalf("session secret = %q, want the untouched local secret", got)
+	}
+}
+
+func TestSessionDeadlineFailureNotifiesListener(t *testing.T) {
+	handler := NewOAuthWebHandler(&config.Config{})
+	sess := newTestSession(handler, "state-1", "ticket-1", "local-secret")
+	// Expire the session so the very first poll tick gives up.
+	sess.deadline.Store(time.Now().Add(-time.Second))
+
+	failed := make(chan error, 1)
+	handler.SetAuthFailureCallback(func(stateID string, err error) {
+		if stateID != "state-1" {
+			t.Errorf("failure callback state = %q, want %q", stateID, "state-1")
+		}
+		failed <- err
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go handler.runTicketPoll(ctx, cancel, sess)
+
+	select {
+	case err := <-failed:
+		if err == nil {
+			t.Fatal("failure callback received a nil error")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("failure callback was not invoked after the deadline passed")
+	}
+
+	handler.mu.RLock()
+	status := sess.status
+	handler.mu.RUnlock()
+	if status != sFailed {
+		t.Fatalf("session status = %s, want %s", status, sFailed)
+	}
+}
+
+func TestLoginWindowStaysBelowManagementSessionTTL(t *testing.T) {
+	// The management OAuth session TTL is 10 minutes; a longer login window would
+	// expire the state before the timeout could be reported to the web UI.
+	if LoginWindow >= 10*time.Minute {
+		t.Fatalf("LoginWindow = %s, must stay below the 10m management session TTL", LoginWindow)
+	}
+	if CallbackGracePeriod > LoginWindow {
+		t.Fatalf("CallbackGracePeriod = %s, must not exceed LoginWindow %s", CallbackGracePeriod, LoginWindow)
+	}
+}
+
+func TestValidatePortalRedirect(t *testing.T) {
+	if _, err := ValidatePortalRedirect("https://codearts.huaweicloud.com/portal/callback?ticket_id=t"); err != nil {
+		t.Fatalf("rejected a valid portal redirect: %v", err)
+	}
+	for name, raw := range map[string]string{
+		"empty":            "",
+		"custom scheme":    "codearts://callback?ticket_id=t",
+		"file scheme":      "file:///etc/passwd",
+		"foreign host":     "https://example.com/portal/callback",
+		"loopback literal": "http://127.0.0.1/portal/callback",
+		"private literal":  "http://10.0.0.5/portal/callback",
+		"localhost":        "http://localhost/portal/callback",
+		"suffix spoof":     "https://codearts.huaweicloud.com.evil.test/portal/callback",
+	} {
+		if _, err := ValidatePortalRedirect(raw); err == nil {
+			t.Fatalf("%s redirect was accepted: %s", name, raw)
+		}
+	}
+}
+
+func TestIsPublicIP(t *testing.T) {
+	for _, raw := range []string{"127.0.0.1", "10.1.2.3", "172.16.0.1", "192.168.1.1", "169.254.1.1",
+		"100.64.0.1", "198.18.0.1", "203.0.113.5", "240.0.0.1", "::1", "fc00::1", "0.0.0.0"} {
+		if isPublicIP(net.ParseIP(raw)) {
+			t.Fatalf("%s classified as public", raw)
+		}
+	}
+	for _, raw := range []string{"8.8.8.8", "1.1.1.1", "2400:cb00::1"} {
+		if !isPublicIP(net.ParseIP(raw)) {
+			t.Fatalf("%s classified as non-public", raw)
+		}
 	}
 }
