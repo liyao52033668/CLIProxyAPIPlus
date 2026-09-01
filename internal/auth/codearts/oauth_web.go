@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
@@ -167,9 +168,14 @@ func (h *OAuthWebHandler) CreateSessionAndGetAuthURL(stateID string) (string, er
 }
 
 // handleCallback receives the callback from HuaweiCloud after user login.
-// PKCE flow: receives code + error params, exchanges code for token.
+// Two channels are supported:
+//   - PKCE channel: query carries code (+ error) → ExchangeCode with verifier
+//   - ticket-polling channel: query carries secret + redirect (nested ticket_id)
+//     → PollLoginTicket until credentials are ready
 func (h *OAuthWebHandler) handleCallback(c *gin.Context) {
 	code := c.Query("code")
+	secret := c.Query("secret")
+	redirectURL := c.Query("redirect")
 	errMsg := c.Query("error")
 
 	if errMsg != "" {
@@ -179,13 +185,7 @@ func (h *OAuthWebHandler) handleCallback(c *gin.Context) {
 		return
 	}
 
-	if code == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "missing code"})
-		return
-	}
-
-	// Find session by matching the code against pending sessions
-	// In PKCE flow, we need to exchange the code with the verifier
+	// Find a pending session to complete.
 	h.mu.RLock()
 	var matchedSess *webSession
 	var matchedStateID string
@@ -207,40 +207,45 @@ func (h *OAuthWebHandler) handleCallback(c *gin.Context) {
 	matchedSess.status = sPolling
 	h.mu.Unlock()
 
-	// Exchange code for token
 	port := h.cfg.Port
 	if port == 0 {
 		port = 8318
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	tokenResp, err := h.auth.ExchangeCode(ctx, code, matchedSess.verifier, port)
+	var tokenResp *TokenResponse
+	var err error
+
+	if code != "" {
+		// PKCE authorization-code channel.
+		tokenResp, err = h.auth.ExchangeCode(ctx, code, matchedSess.verifier, port)
+	} else if secret != "" {
+		// Ticket-polling fallback channel: use ticket_id from the nested redirect.
+		ticketID := matchedSess.ticketID
+		if parsed, parseErr := url.Parse(redirectURL); parseErr == nil {
+			if tid := parsed.Query().Get("ticket_id"); tid != "" {
+				ticketID = tid
+			}
+		}
+		tokenResp, err = h.pollTicket(ctx, ticketID, secret)
+	} else {
+		err = fmt.Errorf("codearts: callback missing both code and secret")
+	}
+
 	if err != nil {
 		h.mu.Lock()
 		matchedSess.status = sFailed
 		matchedSess.error = err.Error()
 		h.mu.Unlock()
-		log.Errorf("CodeArts OAuth: exchange code failed: %v", err)
+		log.Errorf("CodeArts OAuth: authentication failed: %v", err)
 		c.Header("Content-Type", "text/html; charset=utf-8")
-		c.String(http.StatusOK, `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Authentication failed</title></head><body style="display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;font-family:sans-serif;background:#f5f5f5"><div style="text-align:center;padding:40px;background:white;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,0.1)"><h1>❌ Authentication failed</h1><p>Failed to exchange authorization code.</p></div></body></html>`)
+		c.String(http.StatusOK, `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Authentication failed</title></head><body style="display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;font-family:sans-serif;background:#f5f5f5"><div style="text-align:center;padding:40px;background:white;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,0.1)"><h1>❌ Authentication failed</h1><p>Authentication failed. Please try again.</p></div></body></html>`)
 		return
 	}
 
-	// Convert TokenResponse to CodeArtsTokenData
-	expiresAt, _ := time.Parse(time.RFC3339, tokenResp.Credentials.Expiration)
-	tokenData := &CodeArtsTokenData{
-		AK:            tokenResp.Credentials.AccessKeyID,
-		SK:            tokenResp.Credentials.SecretAccessKey,
-		SecurityToken: tokenResp.Credentials.SecurityToken,
-		ExpiresAt:     expiresAt,
-		RefreshToken:  tokenResp.RefreshToken,
-		CodeVerifier:  matchedSess.verifier,
-		UserID:        tokenResp.UserID,
-		UserName:      tokenResp.UserName,
-		DomainID:      tokenResp.DomainID,
-	}
+	tokenData := h.tokenDataFromResponse(tokenResp, matchedSess.verifier)
 
 	h.mu.Lock()
 	matchedSess.status = sSuccess
@@ -259,6 +264,44 @@ func (h *OAuthWebHandler) handleCallback(c *gin.Context) {
 
 	c.Header("Content-Type", "text/html; charset=utf-8")
 	c.String(http.StatusOK, `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Authentication successful</title></head><body style="display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;font-family:sans-serif;background:#f5f5f5"><div style="text-align:center;padding:40px;background:white;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,0.1)"><h1>✅ Authentication successful!</h1><p>You can close this tab.</p><p style="color:#666;font-size:14px">You may safely close this window or tab now.</p></div></body></html>`)
+}
+
+// pollTicket polls the snap-manager login ticket endpoint until credentials are
+// available or the context is cancelled.
+func (h *OAuthWebHandler) pollTicket(ctx context.Context, ticketID, secret string) (*TokenResponse, error) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-ticker.C:
+			tr, errPoll := h.auth.PollLoginTicket(ctx, ticketID, secret)
+			if errPoll != nil {
+				continue
+			}
+			if tr != nil && tr.Credentials.SecurityToken != "" {
+				return tr, nil
+			}
+		}
+	}
+}
+
+// tokenDataFromResponse converts a TokenResponse into CodeArtsTokenData,
+// preserving the PKCE code_verifier for refresh_token-based renewal.
+func (h *OAuthWebHandler) tokenDataFromResponse(tokenResp *TokenResponse, verifier string) *CodeArtsTokenData {
+	expiresAt, _ := time.Parse(time.RFC3339, tokenResp.Credentials.Expiration)
+	return &CodeArtsTokenData{
+		AK:            tokenResp.Credentials.AccessKeyID,
+		SK:            tokenResp.Credentials.SecretAccessKey,
+		SecurityToken: tokenResp.Credentials.SecurityToken,
+		ExpiresAt:     expiresAt,
+		RefreshToken:  tokenResp.RefreshToken,
+		CodeVerifier:  verifier,
+		UserID:        tokenResp.UserID,
+		UserName:      tokenResp.UserName,
+		DomainID:      tokenResp.DomainID,
+	}
 }
 
 func (h *OAuthWebHandler) handleStatus(c *gin.Context) {
@@ -376,19 +419,41 @@ func (h *OAuthWebHandler) ExchangeCodeForSession(ctx context.Context, stateID, c
 		return nil, err
 	}
 
-	// Update session with token data
-	expiresAt, _ := time.Parse(time.RFC3339, tokenResp.Credentials.Expiration)
-	tokenData := &CodeArtsTokenData{
-		AK:            tokenResp.Credentials.AccessKeyID,
-		SK:            tokenResp.Credentials.SecretAccessKey,
-		SecurityToken: tokenResp.Credentials.SecurityToken,
-		ExpiresAt:     expiresAt,
-		RefreshToken:  tokenResp.RefreshToken,
-		CodeVerifier:  sess.verifier,
-		UserID:        tokenResp.UserID,
-		UserName:      tokenResp.UserName,
-		DomainID:      tokenResp.DomainID,
+	tokenData := h.tokenDataFromResponse(tokenResp, sess.verifier)
+
+	h.mu.Lock()
+	sess.status = sSuccess
+	sess.token = tokenData
+	sess.tokenResp = tokenResp
+	h.mu.Unlock()
+
+	return tokenResp, nil
+}
+
+// CompleteWithTicketPoll completes the OAuth flow by polling the snap-manager
+// login ticket endpoint with the secret received from the HuaweiCloud callback.
+// This is used by the management API when users manually paste the redirect URL
+// in remote deployment scenarios (the callback URL carries secret + redirect, not code).
+func (h *OAuthWebHandler) CompleteWithTicketPoll(ctx context.Context, stateID, ticketID, secret string) (*TokenResponse, error) {
+	h.mu.RLock()
+	sess, ok := h.sessions[stateID]
+	h.mu.RUnlock()
+
+	if !ok {
+		return nil, fmt.Errorf("codearts: session not found for state %s", stateID)
 	}
+
+	// Prefer the ticket_id from the callback URL; fall back to session's ticket_id.
+	if ticketID == "" {
+		ticketID = sess.ticketID
+	}
+
+	tokenResp, err := h.pollTicket(ctx, ticketID, secret)
+	if err != nil {
+		return nil, err
+	}
+
+	tokenData := h.tokenDataFromResponse(tokenResp, sess.verifier)
 
 	h.mu.Lock()
 	sess.status = sSuccess

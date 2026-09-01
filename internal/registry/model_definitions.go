@@ -133,18 +133,6 @@ func GetCodeArtsModels() []*ModelInfo {
 	now := int64(1748044800) // 2025-05-24
 	return []*ModelInfo{
 		{
-			ID:                  "glm-5.3",
-			Object:              "model",
-			Created:             now,
-			OwnedBy:             "codearts",
-			Type:                "codearts",
-			DisplayName:         "GLM-5.3",
-			Description:         "GLM-5.3 via CodeArts",
-			ContextLength:       1048576,
-			MaxCompletionTokens: 131072,
-			SupportedEndpoints:  []string{"/chat/completions"},
-		},
-		{
 			ID:                  "glm-5.3-flash",
 			Object:              "model",
 			Created:             now,
