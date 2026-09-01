@@ -12,10 +12,12 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codearts"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
@@ -29,7 +31,29 @@ import (
 
 const (
 	codeartsChatURL   = "https://snap-access.cn-north-4.myhuaweicloud.com/v1/chat/chat"
-	codeArtsUserAgent = "DevKit-VSCode:huaweicloud.codearts-snap|CodeArts Agent:D1"
+	codeArtsUserAgent = "DevKit-VSCode:huaweicloud.vscode-codebot|CodeArts Agent:D1"
+
+	codeartsMarketplaceURL = "https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery"
+	// codeartsVSCodeUpdateURL returns the latest stable VSCode releases, newest first.
+	codeartsVSCodeUpdateURL = "https://update.code.visualstudio.com/api/releases/stable"
+
+	// Static header values sent to the CodeArts chat API.
+	codeartsAgentType       = "ChatAgent"
+	codeartsHeartbeatEnable = "true"
+	codeartsIdeName         = "CodeArts Agent"
+	codeartsIsConfidential  = "false"
+	codeartsPluginName      = "snap_vscode"
+	codeartsLanguage        = "zh-cn"
+	// codeartsPluginVersionDefault is the fallback plugin version used when the
+	// marketplace fetch fails.
+	codeartsPluginVersionDefault = "26.8.203"
+	// codeartsIdeVersionDefault is the fallback host IDE (VSCode) version used
+	// when the update endpoint fetch fails.
+	codeartsIdeVersionDefault = "1.135.0"
+
+	// codeartsRemoteVersionRefresh is how often the latest plugin and host IDE
+	// versions are re-fetched from their remote sources.
+	codeartsRemoteVersionRefresh = 24 * time.Hour
 )
 
 // CodeArtsExecutor executes chat completions against the HuaweiCloud CodeArts API.
@@ -44,6 +68,142 @@ func NewCodeArtsExecutor(cfg *config.Config) *CodeArtsExecutor {
 
 // Identifier returns the executor's provider key.
 func (e *CodeArtsExecutor) Identifier() string { return "codearts" }
+
+var (
+	codeArtsPluginVersionMu    sync.Mutex
+	codeArtsPluginVersionVal   string
+	codeArtsPluginVersionFresh time.Time
+)
+
+var (
+	codeArtsIdeVersionMu    sync.Mutex
+	codeArtsIdeVersionVal   string
+	codeArtsIdeVersionFresh time.Time
+)
+
+// codeArtsPluginVersion returns the latest CodeArts plugin version fetched from
+// the VSCode marketplace, cached for codeartsRemoteVersionRefresh. Falls back to
+// the last known value (or the default) when the fetch fails. The proxy runs on
+// a server that does not install VSCode, so the version is resolved remotely.
+func (e *CodeArtsExecutor) codeArtsPluginVersion() string {
+	codeArtsPluginVersionMu.Lock()
+	defer codeArtsPluginVersionMu.Unlock()
+
+	if time.Since(codeArtsPluginVersionFresh) < codeartsRemoteVersionRefresh {
+		if codeArtsPluginVersionVal != "" {
+			return codeArtsPluginVersionVal
+		}
+		return codeartsPluginVersionDefault
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	v, err := fetchLatestCodeArtsPluginVersion(ctx, e.cfg)
+	codeArtsPluginVersionFresh = time.Now()
+	if err != nil || v == "" {
+		log.Warnf("codearts: failed to fetch plugin version from marketplace: %v", err)
+	} else {
+		codeArtsPluginVersionVal = v
+		log.Infof("codearts: using latest plugin version %s from marketplace", v)
+	}
+
+	if codeArtsPluginVersionVal != "" {
+		return codeArtsPluginVersionVal
+	}
+	return codeartsPluginVersionDefault
+}
+
+// fetchLatestCodeArtsPluginVersion queries the VSCode marketplace for the latest
+// huaweicloud.vscode-codebot extension version.
+func fetchLatestCodeArtsPluginVersion(ctx context.Context, cfg *config.Config) (string, error) {
+	const payload = `{"filters":[{"criteria":[{"filterType":7,"value":"huaweicloud.vscode-codebot"}],"pageNumber":1,"pageSize":10,"sortBy":0,"sortOrder":0}],"flags":914}`
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, codeartsMarketplaceURL, bytes.NewReader([]byte(payload)))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json;api-version=3.0-preview.1")
+
+	client := helps.NewProxyAwareHTTPClient(ctx, cfg, nil, 10*time.Second)
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("marketplace returned %d", resp.StatusCode)
+	}
+
+	ext := gjson.GetBytes(body, "results.0.extensions.0")
+	if !ext.Exists() {
+		return "", fmt.Errorf("marketplace returned no extension")
+	}
+	if ext.Get("publisher.publisherName").String() != "HuaweiCloud" || ext.Get("extensionName").String() != "vscode-codebot" {
+		return "", fmt.Errorf("marketplace returned unexpected extension")
+	}
+	return ext.Get("versions.0.version").String(), nil
+}
+
+// codeArtsIdeVersion returns the latest stable VSCode version fetched from
+// Microsoft's update endpoint, cached for codeartsRemoteVersionRefresh. The
+// CodeArts upstream uses it as the host IDE version; the proxy runs on a server
+// without VSCode, so the version is resolved remotely.
+func (e *CodeArtsExecutor) codeArtsIdeVersion() string {
+	codeArtsIdeVersionMu.Lock()
+	defer codeArtsIdeVersionMu.Unlock()
+
+	if time.Since(codeArtsIdeVersionFresh) < codeartsRemoteVersionRefresh {
+		if codeArtsIdeVersionVal != "" {
+			return codeArtsIdeVersionVal
+		}
+		return codeartsIdeVersionDefault
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	v, err := fetchLatestVSCodeVersion(ctx, e.cfg)
+	codeArtsIdeVersionFresh = time.Now()
+	if err != nil || v == "" {
+		log.Warnf("codearts: failed to fetch latest VSCode version: %v", err)
+	} else {
+		codeArtsIdeVersionVal = v
+		log.Infof("codearts: using latest VSCode version %s from update endpoint", v)
+	}
+
+	if codeArtsIdeVersionVal != "" {
+		return codeArtsIdeVersionVal
+	}
+	return codeartsIdeVersionDefault
+}
+
+// fetchLatestVSCodeVersion queries Microsoft's update endpoint for the latest
+// stable VSCode release version.
+func fetchLatestVSCodeVersion(ctx context.Context, cfg *config.Config) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, codeartsVSCodeUpdateURL, nil)
+	if err != nil {
+		return "", err
+	}
+	client := helps.NewProxyAwareHTTPClient(ctx, cfg, nil, 10*time.Second)
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("VSCode update endpoint returned %d", resp.StatusCode)
+	}
+	versions := gjson.ParseBytes(body).Array()
+	if len(versions) == 0 || versions[0].String() == "" {
+		return "", fmt.Errorf("VSCode update endpoint returned no versions")
+	}
+	return versions[0].String(), nil
+}
 
 // PrepareRequest sets CodeArts-specific headers and signs the request.
 func (e *CodeArtsExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
@@ -72,15 +232,15 @@ func (e *CodeArtsExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.
 	req.Header.Set("User-Agent", codeArtsUserAgent)
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Agent-Type", "ChatAgent")
-	req.Header.Set("Client-Version", "Vscode_26.3.5")
-	req.Header.Set("Heartbeat-Enable", "true")
-	req.Header.Set("Ide-Name", "CodeArts Agent")
-	req.Header.Set("Ide-Version", "1.96.4")
-	req.Header.Set("Is-Confidential", "false")
-	req.Header.Set("Plugin-Name", "snap_vscode")
-	req.Header.Set("Plugin-Version", "26.3.5")
-	req.Header.Set("X-Language", "zh-cn")
+	req.Header.Set("Agent-Type", codeartsAgentType)
+	req.Header.Set("Client-Version", "Vscode_"+e.codeArtsPluginVersion())
+	req.Header.Set("Heartbeat-Enable", codeartsHeartbeatEnable)
+	req.Header.Set("Ide-Name", codeartsIdeName)
+	req.Header.Set("Ide-Version", e.codeArtsIdeVersion())
+	req.Header.Set("Is-Confidential", codeartsIsConfidential)
+	req.Header.Set("Plugin-Name", codeartsPluginName)
+	req.Header.Set("Plugin-Version", e.codeArtsPluginVersion())
+	req.Header.Set("X-Language", codeartsLanguage)
 	req.Header.Set("X-Snap-Traceid", traceID)
 
 	codearts.SignRequest(req, bodyBytes, ak, sk, securityToken)
@@ -103,6 +263,103 @@ func (e *CodeArtsExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.A
 		return nil, fmt.Errorf("codearts: request failed: %w", err)
 	}
 	return resp, nil
+}
+
+// FetchCodeArtsModels fetches the available CodeArts models dynamically from the
+// CodeArts agent-center API (GET /v1/agent-center/agents/detail). The response
+// mirrors what the official CodeArts plugin displays in its model picker. Falls
+// back to the static registry list when credentials are missing or the request fails.
+func FetchCodeArtsModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config) []*registry.ModelInfo {
+	token := extractCodeArtsToken(auth)
+	if token == nil {
+		log.Info("codearts: no AK/SK credentials, skipping dynamic model fetch")
+		return registry.GetCodeArtsModels()
+	}
+
+	agentID := codearts.DefaultAgentID
+	if auth != nil && auth.Attributes != nil {
+		if aid := strings.TrimSpace(auth.Attributes["agent_id"]); aid != "" {
+			agentID = aid
+		}
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, codearts.GptsURL+"/detail", nil)
+	if err != nil {
+		log.Warnf("codearts: failed to build models request: %v", err)
+		return registry.GetCodeArtsModels()
+	}
+	q := req.URL.Query()
+	q.Set("agent_id", agentID)
+	req.URL.RawQuery = q.Encode()
+
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-snap-traceid", generateTraceID())
+	req.Header.Set("Agent-Type", "AgentCenter")
+	req.Header.Set("X-Language", codeartsLanguage)
+	req.Header.Set("area", "green")
+	if token.XAuthToken != "" {
+		req.Header.Set("x-auth-token", token.XAuthToken)
+	}
+
+	codearts.SignRequest(req, nil, token.AK, token.SK, token.SecurityToken)
+
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, 30*time.Second)
+	resp, errDo := httpClient.Do(req)
+	if errDo != nil {
+		log.Warnf("codearts: failed to fetch models: %v", errDo)
+		return registry.GetCodeArtsModels()
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.Warnf("codearts: models request returned %d: %s", resp.StatusCode, string(body))
+		return registry.GetCodeArtsModels()
+	}
+
+	models := gjson.GetBytes(body, "model")
+	if !models.Exists() || !models.IsArray() {
+		log.Warn("codearts: invalid models response format")
+		return registry.GetCodeArtsModels()
+	}
+
+	now := time.Now().Unix()
+	dynamicModels := make([]*registry.ModelInfo, 0, 8)
+	models.ForEach(func(_, value gjson.Result) bool {
+		params := value.Get("model_parameters")
+		id := params.Get("model_id").String()
+		if id == "" {
+			id = value.Get("model_alias").String()
+		}
+		if id == "" {
+			return true
+		}
+		displayName := value.Get("model_name").String()
+		if displayName == "" {
+			displayName = id
+		}
+		dynamicModels = append(dynamicModels, &registry.ModelInfo{
+			ID:                  id,
+			Name:                id,
+			DisplayName:         displayName,
+			ContextLength:       int(params.Get("context_window").Int()),
+			MaxCompletionTokens: int(params.Get("max_tokens").Int()),
+			OwnedBy:             "huaweicloud",
+			Type:                "codearts",
+			Object:              "model",
+			Created:             now,
+			SupportedEndpoints:  []string{"/chat/completions"},
+		})
+		return true
+	})
+
+	if len(dynamicModels) == 0 {
+		log.Warn("codearts: no models returned, using static fallback")
+		return registry.GetCodeArtsModels()
+	}
+
+	log.Infof("codearts: fetched %d models dynamically", len(dynamicModels))
+	return dynamicModels
 }
 
 // Execute handles non-streaming chat completions.

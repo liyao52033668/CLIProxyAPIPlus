@@ -1423,7 +1423,9 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		models = executor.FetchCommandCodeModels(ctx, a, s.cfg)
 		models = applyExcludedModels(models, excluded)
 	case "codearts":
-		models = getCodeArtsModels()
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		models = executor.FetchCodeArtsModels(ctx, a, s.cfg)
 		models = applyExcludedModels(models, excluded)
 	case "joycode":
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
