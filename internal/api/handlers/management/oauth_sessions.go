@@ -292,6 +292,8 @@ func NormalizeOAuthProvider(provider string) (string, error) {
 		return "xai", nil
 	case "commandcode", "command-code":
 		return "commandcode", nil
+	case "codearts":
+		return "codearts", nil
 	default:
 		return "", errUnsupportedOAuthFlow
 	}

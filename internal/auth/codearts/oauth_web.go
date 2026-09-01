@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
@@ -30,14 +29,17 @@ const (
 )
 
 type webSession struct {
-	stateID    string
-	ticketID   string
-	identifier string
-	status     sessionStatus
-	startedAt  time.Time
-	error      string
-	token      *CodeArtsTokenData
-	cancel     context.CancelFunc
+	stateID   string
+	ticketID  string
+	secret    string
+	verifier  string
+	challenge string
+	status    sessionStatus
+	startedAt time.Time
+	error     string
+	token     *CodeArtsTokenData
+	tokenResp *TokenResponse
+	cancel    context.CancelFunc
 }
 
 // AuthSuccessCallback is called when authentication is successful.
@@ -80,8 +82,8 @@ func (h *OAuthWebHandler) RegisterRoutes(router gin.IRouter, protectedMiddleware
 	protected.GET("", h.handleIndex)
 	protected.GET("/start", h.handleStart)
 
-	// HuaweiCloud redirects to http://localhost:{port}/callback.
-	router.GET("/callback", h.handleCallback)
+	// HuaweiCloud redirects to http://127.0.0.1:{port}/oauth/callback (PKCE flow).
+	router.GET("/oauth/callback", h.handleCallback)
 }
 
 func generateState() (string, error) {
@@ -90,12 +92,6 @@ func generateState() (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
-}
-
-func generateTicketID() string {
-	b := make([]byte, 32)
-	rand.Read(b)
-	return fmt.Sprintf("%x", b)
 }
 
 func (h *OAuthWebHandler) handleIndex(c *gin.Context) {
@@ -130,7 +126,18 @@ func (h *OAuthWebHandler) handleStart(c *gin.Context) {
 // CreateSessionAndGetAuthURL creates a new session and returns the CodeArts authorization URL.
 // This method is exposed for use by management API handlers.
 func (h *OAuthWebHandler) CreateSessionAndGetAuthURL(stateID string) (string, error) {
-	ticketID := generateTicketID()
+	ticketID, err := RandomHex(16)
+	if err != nil {
+		return "", fmt.Errorf("codearts: generate ticket id: %w", err)
+	}
+	secret, err := RandomHex(16)
+	if err != nil {
+		return "", fmt.Errorf("codearts: generate ticket secret: %w", err)
+	}
+	verifier, challenge, err := PKCE()
+	if err != nil {
+		return "", fmt.Errorf("codearts: generate PKCE pair: %w", err)
+	}
 
 	port := h.cfg.Port
 	if port == 0 {
@@ -140,6 +147,9 @@ func (h *OAuthWebHandler) CreateSessionAndGetAuthURL(stateID string) (string, er
 	sess := &webSession{
 		stateID:   stateID,
 		ticketID:  ticketID,
+		secret:    secret,
+		verifier:  verifier,
+		challenge: challenge,
 		status:    sWaitingCB,
 		startedAt: time.Now(),
 	}
@@ -149,94 +159,93 @@ func (h *OAuthWebHandler) CreateSessionAndGetAuthURL(stateID string) (string, er
 	h.ticketToState[ticketID] = stateID
 	h.mu.Unlock()
 
-	loginURL := h.auth.AuthorizationURL(ticketID, port)
+	loginURL := BuildAuthorizeURL(ticketID, challenge, port)
 
-	log.Infof("CodeArts OAuth: session %s started", stateID)
+	log.Infof("CodeArts OAuth: session %s started (PKCE flow)", stateID)
 
 	return loginURL, nil
 }
 
 // handleCallback receives the callback from HuaweiCloud after user login.
-// Python: GET /callback?identifier=XXX&redirect=YYY
-// The redirect URL contains ticket_id which we use to match the correct session.
+// PKCE flow: receives code + error params, exchanges code for token.
 func (h *OAuthWebHandler) handleCallback(c *gin.Context) {
-	identifier := c.Query("identifier")
-	redirectURL := c.Query("redirect")
+	code := c.Query("code")
+	errMsg := c.Query("error")
 
-	if identifier == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "missing identifier"})
+	if errMsg != "" {
+		log.Errorf("CodeArts OAuth callback error: %s", errMsg)
+		c.Header("Content-Type", "text/html; charset=utf-8")
+		c.String(http.StatusOK, `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Authentication failed</title></head><body style="display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;font-family:sans-serif;background:#f5f5f5"><div style="text-align:center;padding:40px;background:white;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,0.1)"><h1>❌ Authentication failed</h1><p>Error: `+errMsg+`</p></div></body></html>`)
 		return
 	}
 
-	var ticketFromRedirect string
-	if redirectURL != "" {
-		if parsed, errParse := url.Parse(redirectURL); errParse == nil {
-			ticketFromRedirect = parsed.Query().Get("ticket_id")
+	if code == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "missing code"})
+		return
+	}
+
+	// Find session by matching the code against pending sessions
+	// In PKCE flow, we need to exchange the code with the verifier
+	h.mu.RLock()
+	var matchedSess *webSession
+	var matchedStateID string
+	for stateID, sess := range h.sessions {
+		if sess.status == sWaitingCB {
+			matchedSess = sess
+			matchedStateID = stateID
+			break
 		}
 	}
-	if ticketFromRedirect == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "missing or invalid ticket"})
+	h.mu.RUnlock()
+
+	if matchedSess == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "no pending session found"})
 		return
 	}
 
 	h.mu.Lock()
-	stateID, okState := h.ticketToState[ticketFromRedirect]
-	matchedSess, okSession := h.sessions[stateID]
-	if !okState || !okSession || matchedSess.status != sWaitingCB {
-		h.mu.Unlock()
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "unknown or expired session"})
-		return
-	}
-	delete(h.ticketToState, ticketFromRedirect)
-	matchedSess.identifier = identifier
 	matchedSess.status = sPolling
 	h.mu.Unlock()
 
+	// Exchange code for token
+	port := h.cfg.Port
+	if port == 0 {
+		port = 8318
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	matchedSess.cancel = cancel
-	go h.pollLogin(ctx, matchedSess)
+	defer cancel()
 
-	if redirectURL != "" {
-		c.Redirect(http.StatusTemporaryRedirect, redirectURL)
-		return
-	}
-	c.Header("Content-Type", "text/html; charset=utf-8")
-	c.String(http.StatusOK, `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Authentication successful</title></head><body style="display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;font-family:sans-serif;background:#f5f5f5"><div style="text-align:center;padding:40px;background:white;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,0.1)"><h1>✅ Authentication successful!</h1><p>You can close this tab.</p><p style="color:#666;font-size:14px">You may safely close this window or tab now.</p></div></body></html>`)
-}
-
-func (h *OAuthWebHandler) pollLogin(ctx context.Context, sess *webSession) {
-	if sess.cancel != nil {
-		defer sess.cancel()
-	}
-
-	log.Infof("CodeArts OAuth: polling for login result for session %s", sess.stateID)
-
-	// Poll with ticket_id + identifier (matching Python: poll_login_ticket)
-	authResult, err := h.auth.PollForLoginResult(ctx, sess.ticketID, sess.identifier)
+	tokenResp, err := h.auth.ExchangeCode(ctx, code, matchedSess.verifier, port)
 	if err != nil {
 		h.mu.Lock()
-		sess.status = sFailed
-		sess.error = err.Error()
+		matchedSess.status = sFailed
+		matchedSess.error = err.Error()
 		h.mu.Unlock()
-		log.Errorf("CodeArts OAuth: poll failed: %v", err)
+		log.Errorf("CodeArts OAuth: exchange code failed: %v", err)
+		c.Header("Content-Type", "text/html; charset=utf-8")
+		c.String(http.StatusOK, `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Authentication failed</title></head><body style="display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;font-family:sans-serif;background:#f5f5f5"><div style="text-align:center;padding:40px;background:white;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,0.1)"><h1>❌ Authentication failed</h1><p>Failed to exchange authorization code.</p></div></body></html>`)
 		return
 	}
 
-	// Process login result: extract credential or exchange x_auth_token
-	tokenData, err := h.auth.ProcessLoginResult(ctx, authResult)
-	if err != nil {
-		h.mu.Lock()
-		sess.status = sFailed
-		sess.error = err.Error()
-		h.mu.Unlock()
-		log.Errorf("CodeArts OAuth: process result failed: %v", err)
-		return
+	// Convert TokenResponse to CodeArtsTokenData
+	expiresAt, _ := time.Parse(time.RFC3339, tokenResp.Credentials.Expiration)
+	tokenData := &CodeArtsTokenData{
+		AK:            tokenResp.Credentials.AccessKeyID,
+		SK:            tokenResp.Credentials.SecretAccessKey,
+		SecurityToken: tokenResp.Credentials.SecurityToken,
+		ExpiresAt:     expiresAt,
+		RefreshToken:  tokenResp.RefreshToken,
+		CodeVerifier:  matchedSess.verifier,
+		UserID:        tokenResp.UserID,
+		UserName:      tokenResp.UserName,
+		DomainID:      tokenResp.DomainID,
 	}
 
 	h.mu.Lock()
-	sess.status = sSuccess
-	sess.token = tokenData
-	stateID := sess.stateID
+	matchedSess.status = sSuccess
+	matchedSess.token = tokenData
+	matchedSess.tokenResp = tokenResp
 	h.mu.Unlock()
 
 	// Save auth file
@@ -245,8 +254,11 @@ func (h *OAuthWebHandler) pollLogin(ctx context.Context, sess *webSession) {
 
 	// Call the success callback if registered
 	if h.authSuccessCallback != nil {
-		h.authSuccessCallback(stateID)
+		h.authSuccessCallback(matchedStateID)
 	}
+
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.String(http.StatusOK, `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Authentication successful</title></head><body style="display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;font-family:sans-serif;background:#f5f5f5"><div style="text-align:center;padding:40px;background:white;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,0.1)"><h1>✅ Authentication successful!</h1><p>You can close this tab.</p><p style="color:#666;font-size:14px">You may safely close this window or tab now.</p></div></body></html>`)
 }
 
 func (h *OAuthWebHandler) handleStatus(c *gin.Context) {
@@ -315,12 +327,12 @@ func (h *OAuthWebHandler) saveTokenToFile(tokenData *CodeArtsTokenData) {
 		"ak":             tokenData.AK,
 		"sk":             tokenData.SK,
 		"security_token": tokenData.SecurityToken,
-		"x_auth_token":   tokenData.XAuthToken,
 		"expires_at":     tokenData.ExpiresAt.Format(time.RFC3339),
+		"refresh_token":  tokenData.RefreshToken,
+		"code_verifier":  tokenData.CodeVerifier,
 		"user_id":        tokenData.UserID,
 		"user_name":      tokenData.UserName,
 		"domain_id":      tokenData.DomainID,
-		"email":          tokenData.Email,
 		"last_refresh":   time.Now().Format(time.RFC3339),
 	}
 
@@ -336,6 +348,71 @@ func (h *OAuthWebHandler) saveTokenToFile(tokenData *CodeArtsTokenData) {
 		return
 	}
 	log.Infof("CodeArts OAuth: token saved to %s", authFilePath)
+}
+
+// ExchangeCodeForSession exchanges an authorization code for a token using the
+// session's PKCE verifier. This is used by the management API when users manually
+// paste the redirect URL in remote deployment scenarios.
+func (h *OAuthWebHandler) ExchangeCodeForSession(ctx context.Context, stateID, code string) (*TokenResponse, error) {
+	h.mu.RLock()
+	sess, ok := h.sessions[stateID]
+	h.mu.RUnlock()
+
+	if !ok {
+		return nil, fmt.Errorf("codearts: session not found for state %s", stateID)
+	}
+
+	if sess.verifier == "" {
+		return nil, fmt.Errorf("codearts: session %s has no PKCE verifier", stateID)
+	}
+
+	port := h.cfg.Port
+	if port == 0 {
+		port = 8318
+	}
+
+	tokenResp, err := h.auth.ExchangeCode(ctx, code, sess.verifier, port)
+	if err != nil {
+		return nil, err
+	}
+
+	// Update session with token data
+	expiresAt, _ := time.Parse(time.RFC3339, tokenResp.Credentials.Expiration)
+	tokenData := &CodeArtsTokenData{
+		AK:            tokenResp.Credentials.AccessKeyID,
+		SK:            tokenResp.Credentials.SecretAccessKey,
+		SecurityToken: tokenResp.Credentials.SecurityToken,
+		ExpiresAt:     expiresAt,
+		RefreshToken:  tokenResp.RefreshToken,
+		CodeVerifier:  sess.verifier,
+		UserID:        tokenResp.UserID,
+		UserName:      tokenResp.UserName,
+		DomainID:      tokenResp.DomainID,
+	}
+
+	h.mu.Lock()
+	sess.status = sSuccess
+	sess.token = tokenData
+	sess.tokenResp = tokenResp
+	h.mu.Unlock()
+
+	return tokenResp, nil
+}
+
+// SaveTokenFromResponse saves the token data from a TokenResponse to the auth file.
+// This is used by the management API after ExchangeCodeForSession.
+func (h *OAuthWebHandler) SaveTokenFromResponse(stateID string, tokenResp *TokenResponse) {
+	h.mu.RLock()
+	sess, ok := h.sessions[stateID]
+	h.mu.RUnlock()
+
+	if !ok || sess.token == nil {
+		log.Warnf("CodeArts OAuth: cannot save token for state %s - session or token not found", stateID)
+		return
+	}
+
+	h.saveTokenToFile(sess.token)
+	log.Infof("CodeArts OAuth: token saved for user %s (state %s)", sess.token.UserName, stateID)
 }
 
 // HTML templates

@@ -13,6 +13,10 @@ type CodeArtsTokenData struct {
 	UserID        string    `json:"user_id,omitempty"`
 	UserName      string    `json:"user_name,omitempty"`
 	DomainID      string    `json:"domain_id,omitempty"`
+	// RefreshToken enables refresh_token-based renewal via snap-manager / STS.
+	RefreshToken string `json:"refresh_token,omitempty"`
+	// CodeVerifier is the PKCE verifier persisted alongside refresh_token.
+	CodeVerifier string `json:"code_verifier,omitempty"`
 }
 
 // IsExpired returns true if the token is expired or will expire within margin.

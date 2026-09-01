@@ -70,7 +70,9 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 	// Get all available models
 	allModels := h.Models()
 
-	// Filter to only include the 4 required fields: id, object, created, owned_by
+	// Filter to only include the required fields: id, object, created, owned_by.
+	// CodeArts models additionally expose context_length and max_output_tokens,
+	// mirroring the reference codearts2api model list structure.
 	filteredModels := make([]map[string]any, len(allModels))
 	for i, model := range allModels {
 		filteredModel := map[string]any{
@@ -86,6 +88,17 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 		// Add owned_by field if it exists
 		if ownedBy, exists := model["owned_by"]; exists {
 			filteredModel["owned_by"] = ownedBy
+		}
+
+		// CodeArts model entries follow the reference repo: include context_length
+		// and max_output_tokens (mapped from max_completion_tokens).
+		if ownedBy, _ := model["owned_by"].(string); ownedBy == "codearts" {
+			if contextLength, exists := model["context_length"]; exists {
+				filteredModel["context_length"] = contextLength
+			}
+			if maxCompletionTokens, exists := model["max_completion_tokens"]; exists {
+				filteredModel["max_output_tokens"] = maxCompletionTokens
+			}
 		}
 
 		filteredModels[i] = filteredModel

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -57,9 +58,50 @@ func (h *Handler) RequestCodeArtsToken(c *gin.Context) {
 
 	SetOAuthSessionError(state, "auth_url|"+callbackURL+"?state="+url.QueryEscape(state))
 
+	// Start background task to wait for callback file (for remote deployment scenario)
+	go h.waitForCodeArtsCallback(state)
+
 	c.JSON(http.StatusOK, gin.H{
 		"status": "ok",
 		"url":    authURL,
 		"state":  state,
 	})
+}
+
+// waitForCodeArtsCallback waits for the callback file written by PostOAuthCallback
+// when users manually paste the redirect URL in remote deployment scenarios.
+func (h *Handler) waitForCodeArtsCallback(state string) {
+	if h.codeArtsOAuthHandler == nil {
+		log.Warn("CodeArts OAuth handler not available, skipping callback wait")
+		return
+	}
+
+	callbackPayload, errWait := waitForOAuthCallbackFile(h.cfg.AuthDir, "codearts", state, defaultOAuthCallbackWait)
+	if errWait != nil {
+		log.WithError(errWait).Warnf("CodeArts OAuth: wait callback file failed for state %s", state)
+		return
+	}
+
+	if errValidate := validateOAuthCallbackPayload("codearts", state, callbackPayload, true); errValidate != nil {
+		log.WithError(errValidate).Warnf("CodeArts OAuth: validate callback payload failed for state %s", state)
+		return
+	}
+
+	// Exchange code for token using the web handler's session verifier
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	tokenResp, err := h.codeArtsOAuthHandler.ExchangeCodeForSession(ctx, state, callbackPayload.Code)
+	if err != nil {
+		SetOAuthSessionError(state, "Failed to exchange authorization code: "+err.Error())
+		log.WithError(err).Errorf("CodeArts OAuth: exchange code failed for state %s", state)
+		return
+	}
+
+	// Save auth file
+	h.codeArtsOAuthHandler.SaveTokenFromResponse(state, tokenResp)
+
+	// Complete the OAuth session
+	completeOAuthSuccess(state, "codearts")
+	log.Infof("CodeArts OAuth: callback processed successfully for state %s", state)
 }

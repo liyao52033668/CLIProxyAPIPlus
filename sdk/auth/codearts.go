@@ -2,11 +2,14 @@ package auth
 
 import (
 	"context"
-	"crypto/rand"
 	"fmt"
+	"html"
+	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codearts"
@@ -30,9 +33,10 @@ func (CodeArtsAuthenticator) RefreshLead() *time.Duration {
 }
 
 type codeartsCallbackResult struct {
-	Identifier string
-	Redirect   string
-	Error      string
+	Code     string
+	Error    string
+	Secret   string
+	Redirect string
 }
 
 func (a CodeArtsAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {
@@ -46,33 +50,83 @@ func (a CodeArtsAuthenticator) Login(ctx context.Context, cfg *config.Config, op
 		opts = &LoginOptions{}
 	}
 
+	ticketID, err := codearts.RandomHex(16)
+	if err != nil {
+		return nil, fmt.Errorf("codearts: generate ticket id: %w", err)
+	}
+	secret, err := codearts.RandomHex(16)
+	if err != nil {
+		return nil, fmt.Errorf("codearts: generate ticket secret: %w", err)
+	}
+	verifier, challenge, err := codearts.PKCE()
+	if err != nil {
+		return nil, fmt.Errorf("codearts: generate PKCE pair: %w", err)
+	}
+
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, fmt.Errorf("codearts: failed to find free port: %w", err)
 	}
 	port := listener.Addr().(*net.TCPAddr).Port
 
-	cbChan := make(chan codeartsCallbackResult, 1)
+	cbChan := make(chan codeartsCallbackResult, 4)
+
+	// The portal issues its own ticket secret and delivers it to the local
+	// callback via the `secret` query param after the user authorizes; the
+	// locally generated secret is never seen by the portal. Swap it in once the
+	// callback arrives so ticket polling can succeed.
+	var pollSecret atomic.Value
+	pollSecret.Store(secret)
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
-		identifier := r.URL.Query().Get("identifier")
-		redirect := r.URL.Query().Get("redirect")
-		cbChan <- codeartsCallbackResult{
-			Identifier: identifier,
-			Redirect:   redirect,
+	mux.HandleFunc("/oauth/callback", func(w http.ResponseWriter, r *http.Request) {
+		cb := codeartsCallbackResult{
+			Code:     r.URL.Query().Get("code"),
+			Error:    r.URL.Query().Get("error"),
+			Secret:   r.URL.Query().Get("secret"),
+			Redirect: r.URL.Query().Get("redirect"),
 		}
-		if redirect != "" {
-			http.Redirect(w, r, redirect, http.StatusTemporaryRedirect)
-			return
+		// Compatibility: some portal variants POST the payload.
+		if cb.Code == "" && cb.Secret == "" && cb.Redirect == "" && r.Method == http.MethodPost {
+			body, _ := io.ReadAll(io.LimitReader(r.Body, 64*1024))
+			if vals, errForm := url.ParseQuery(string(body)); errForm == nil {
+				cb.Code = vals.Get("code")
+				cb.Error = vals.Get("error")
+				cb.Secret = vals.Get("secret")
+				cb.Redirect = vals.Get("redirect")
+			}
 		}
+		if cb.Secret != "" {
+			pollSecret.Store(cb.Secret)
+		}
+
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write([]byte(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>CodeArts Login</title></head>` +
-			`<body style="display:flex;justify-content:center;align-items:center;height:100vh;` +
-			`font-family:system-ui;background:#1a1a2e;color:#e0e0e0">` +
-			`<div style="text-align:center">` +
-			`<h1 style="color:#4CAF50">&#10003; Login Successful</h1>` +
-			`<p>You can close this window and return to the terminal.</p>` +
-			`</div></body></html>`))
+		if cb.Redirect != "" && cb.Code == "" {
+			// Continue the portal flow: send the browser back so the login
+			// finalizes while we keep polling the ticket endpoint.
+			_, _ = w.Write([]byte(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>CodeArts Login</title>` +
+				`<meta http-equiv="refresh" content="0; url=` + html.EscapeString(cb.Redirect) + `">` +
+				`</head><body style="display:flex;justify-content:center;align-items:center;height:100vh;` +
+				`font-family:system-ui;background:#1a1a2e;color:#e0e0e0">` +
+				`<div style="text-align:center">` +
+				`<h1 style="color:#FFA500">Completing login...</h1>` +
+				`<p>Redirecting to Huawei Cloud to finish. If nothing happens, ` +
+				`<a href="` + html.EscapeString(cb.Redirect) + `" style="color:#4CAF50">click here</a>.</p>` +
+				`</div></body></html>`))
+		} else {
+			_, _ = w.Write([]byte(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>CodeArts Login</title></head>` +
+				`<body style="display:flex;justify-content:center;align-items:center;height:100vh;` +
+				`font-family:system-ui;background:#1a1a2e;color:#e0e0e0">` +
+				`<div style="text-align:center">` +
+				`<h1 style="color:#4CAF50">&#10003; Login Successful</h1>` +
+				`<p>You can close this window and return to the terminal.</p>` +
+				`</div></body></html>`))
+		}
+
+		select {
+		case cbChan <- cb:
+		default:
+		}
 	})
 
 	srv := &http.Server{Handler: mux}
@@ -87,9 +141,8 @@ func (a CodeArtsAuthenticator) Login(ctx context.Context, cfg *config.Config, op
 		_ = srv.Shutdown(shutdownCtx)
 	}()
 
-	ticketID := generateCodeArtsTicketID()
 	codeartsAuth := codearts.NewCodeArtsAuth(nil)
-	authURL := codeartsAuth.AuthorizationURL(ticketID, port)
+	authURL := codearts.BuildAuthorizeURL(ticketID, challenge, port)
 
 	if !opts.NoBrowser {
 		fmt.Println("Opening browser for CodeArts authentication")
@@ -109,67 +162,91 @@ func (a CodeArtsAuthenticator) Login(ctx context.Context, cfg *config.Config, op
 
 	fmt.Println("Waiting for CodeArts authentication callback...")
 
-	var cbRes codeartsCallbackResult
+	// Ticket polling (fallback channel), using the portal-issued secret once
+	// the callback delivers it.
+	ticketChan := make(chan *codearts.TokenResponse, 1)
+	pollCtx, pollCancel := context.WithCancel(ctx)
+	defer pollCancel()
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-pollCtx.Done():
+				return
+			case <-ticker.C:
+				curSecret, _ := pollSecret.Load().(string)
+				tr, errPoll := codeartsAuth.PollLoginTicket(pollCtx, ticketID, curSecret)
+				if errPoll != nil {
+					log.Debugf("codearts: ticket poll error: %v", errPoll)
+					continue
+				}
+				if tr == nil || tr.Credentials.SecurityToken == "" {
+					continue
+				}
+				ticketChan <- tr
+				return
+			}
+		}
+	}()
+
 	timeoutTimer := time.NewTimer(5 * time.Minute)
 	defer timeoutTimer.Stop()
 
-	select {
-	case cbRes = <-cbChan:
-	case <-timeoutTimer.C:
-		return nil, fmt.Errorf("codearts: authentication timed out")
+	var tr *codearts.TokenResponse
+loginLoop:
+	for {
+		select {
+		case cb := <-cbChan:
+			if cb.Error != "" {
+				return nil, fmt.Errorf("codearts: authentication failed: %s", cb.Error)
+			}
+			if cb.Code != "" {
+				fmt.Println("Callback received, exchanging authorization code...")
+				tr, err = codeartsAuth.ExchangeCode(ctx, cb.Code, verifier, port)
+				if err != nil {
+					return nil, fmt.Errorf("codearts: %w", err)
+				}
+				break loginLoop
+			}
+			// Secret-only callback: ticket polling continues with the portal secret.
+		case tk := <-ticketChan:
+			tr = tk
+			break loginLoop
+		case <-timeoutTimer.C:
+			return nil, fmt.Errorf("codearts: authentication timed out")
+		}
 	}
 
-	if cbRes.Error != "" {
-		return nil, fmt.Errorf("codearts: authentication failed: %s", cbRes.Error)
-	}
-	if cbRes.Identifier == "" {
-		return nil, fmt.Errorf("codearts: missing identifier in callback")
+	if tr == nil || tr.Credentials.SecurityToken == "" {
+		return nil, fmt.Errorf("codearts: no credentials obtained from login")
 	}
 
-	fmt.Println("Callback received, polling for login result...")
-
-	pollCtx, pollCancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer pollCancel()
-
-	authResult, err := codeartsAuth.PollForLoginResult(pollCtx, ticketID, cbRes.Identifier)
-	if err != nil {
-		return nil, fmt.Errorf("codearts: %w", err)
-	}
-
-	tokenData, err := codeartsAuth.ProcessLoginResult(ctx, authResult)
-	if err != nil {
-		return nil, fmt.Errorf("codearts: %w", err)
-	}
-
-	label := tokenData.UserName
+	label := tr.UserName
 	if label == "" {
 		label = "codearts"
 	}
 
 	fmt.Println("CodeArts authentication successful")
 
-	return &coreauth.Auth{
-		ID:       fmt.Sprintf("codearts-%s.json", tokenData.UserName),
-		Provider: "codearts",
-		FileName: fmt.Sprintf("codearts-%s.json", tokenData.UserName),
-		Label:    label,
-		Metadata: map[string]any{
-			"type":           "codearts",
-			"ak":             tokenData.AK,
-			"sk":             tokenData.SK,
-			"security_token": tokenData.SecurityToken,
-			"x_auth_token":   tokenData.XAuthToken,
-			"expires_at":     tokenData.ExpiresAt.Format(time.RFC3339),
-			"user_id":        tokenData.UserID,
-			"user_name":      tokenData.UserName,
-			"domain_id":      tokenData.DomainID,
-			"email":          tokenData.Email,
-		},
-	}, nil
-}
+	metadata := map[string]any{
+		"type":           "codearts",
+		"ak":             tr.Credentials.AccessKeyID,
+		"sk":             tr.Credentials.SecretAccessKey,
+		"security_token": tr.Credentials.SecurityToken,
+		"expires_at":     tr.Credentials.Expiration,
+		"refresh_token":  tr.RefreshToken,
+		"code_verifier":  verifier,
+		"user_id":        tr.UserID,
+		"user_name":      tr.UserName,
+		"domain_id":      tr.DomainID,
+	}
 
-func generateCodeArtsTicketID() string {
-	b := make([]byte, 32)
-	rand.Read(b)
-	return fmt.Sprintf("%x", b)
+	return &coreauth.Auth{
+		ID:       fmt.Sprintf("codearts-%s.json", tr.UserName),
+		Provider: "codearts",
+		FileName: fmt.Sprintf("codearts-%s.json", tr.UserName),
+		Label:    label,
+		Metadata: metadata,
+	}, nil
 }
