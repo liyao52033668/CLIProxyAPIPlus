@@ -270,21 +270,52 @@ func mapFinishReason(reason string) string {
 	}
 }
 
-// parseUsage extracts totalUsage from a finish event.
+// parseUsage extracts usage from a finish event.
+// Supports both upstream response formats:
+// - Format A (old): totalUsage.inputTokens (camelCase)
+// - Format B (new): usage.input_tokens (snake_case)
 func parseUsage(event gjson.Result) *cc.FinishUsage {
-	u := event.Get("totalUsage")
+	// Try "usage" first (new format), then "totalUsage" (old format)
+	u := event.Get("usage")
+	if !u.Exists() {
+		u = event.Get("totalUsage")
+	}
 	if !u.Exists() {
 		return nil
 	}
+	
+	// Try multiple field name formats for each metric
+	inputTokens := u.Get("input_tokens").Int()
+	if inputTokens == 0 {
+		inputTokens = u.Get("inputTokens").Int()
+	}
+	
+	outputTokens := u.Get("output_tokens").Int()
+	if outputTokens == 0 {
+		outputTokens = u.Get("outputTokens").Int()
+	}
+	
 	out := &cc.FinishUsage{
-		InputTokens:       u.Get("inputTokens").Int(),
-		OutputTokens:      u.Get("outputTokens").Int(),
+		InputTokens:       inputTokens,
+		OutputTokens:      outputTokens,
 		InputTokenDetails: &cc.FinishUsageInputDetails{},
 	}
-	if d := u.Get("inputTokenDetails"); d.Exists() {
+	
+	// Try cache token fields from both nested and flattened structures
+	d := u.Get("inputTokenDetails")
+	if d.Exists() {
 		out.InputTokenDetails.CacheReadTokens = d.Get("cacheReadTokens").Int()
 		out.InputTokenDetails.CacheWriteTokens = d.Get("cacheWriteTokens").Int()
 	}
+	
+	// Fallback to flattened snake_case fields
+	if out.InputTokenDetails.CacheReadTokens == 0 {
+		out.InputTokenDetails.CacheReadTokens = u.Get("cache_read_input_tokens").Int()
+	}
+	if out.InputTokenDetails.CacheWriteTokens == 0 {
+		out.InputTokenDetails.CacheWriteTokens = u.Get("cache_creation_input_tokens").Int()
+	}
+	
 	return out
 }
 

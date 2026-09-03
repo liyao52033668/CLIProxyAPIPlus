@@ -412,25 +412,41 @@ func forceStreamFlag(body []byte, stream bool) []byte {
 }
 
 // parseWireUsage converts a finish event into usage details.
+// Supports both upstream response formats:
+// - Format A (old): totalUsage.inputTokens (camelCase)
+// - Format B (new): usage.input_tokens (snake_case)
 func parseWireUsage(body []byte) usage.Detail {
-	finish := gjson.GetBytes(body, "totalUsage")
-	
-	// Try multiple field paths for cache tokens to support different upstream response formats:
-	// Format A (nested): inputTokenDetails.cacheReadTokens
-	// Format B (flattened): cache_read_input_tokens
-	cacheRead := finish.Get("inputTokenDetails.cacheReadTokens").Int()
-	if cacheRead == 0 {
-		cacheRead = finish.Get("cache_read_input_tokens").Int()
+	// Try "usage" first (new format), then "totalUsage" (old format)
+	u := gjson.GetBytes(body, "usage")
+	if !u.Exists() {
+		u = gjson.GetBytes(body, "totalUsage")
 	}
 	
-	cacheWrite := finish.Get("inputTokenDetails.cacheWriteTokens").Int()
+	// Try multiple field name formats for each metric
+	inputTokens := u.Get("input_tokens").Int()
+	if inputTokens == 0 {
+		inputTokens = u.Get("inputTokens").Int()
+	}
+	
+	outputTokens := u.Get("output_tokens").Int()
+	if outputTokens == 0 {
+		outputTokens = u.Get("outputTokens").Int()
+	}
+	
+	// Try cache token fields from both nested and flattened structures
+	cacheRead := u.Get("cache_read_input_tokens").Int()
+	if cacheRead == 0 {
+		cacheRead = u.Get("inputTokenDetails.cacheReadTokens").Int()
+	}
+	
+	cacheWrite := u.Get("cache_creation_input_tokens").Int()
 	if cacheWrite == 0 {
-		cacheWrite = finish.Get("cache_creation_input_tokens").Int()
+		cacheWrite = u.Get("inputTokenDetails.cacheWriteTokens").Int()
 	}
 	
 	return usage.Detail{
-		InputTokens:         finish.Get("inputTokens").Int(),
-		OutputTokens:        finish.Get("outputTokens").Int(),
+		InputTokens:         inputTokens,
+		OutputTokens:        outputTokens,
 		CacheReadTokens:     cacheRead,
 		CacheCreationTokens: cacheWrite,
 	}
