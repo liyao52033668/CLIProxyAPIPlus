@@ -760,26 +760,34 @@ func (e *CodeArtsExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 		var param any
 		translated := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, req.Payload, openAIResp, &param)
 
-		// Parse cache and reasoning tokens from upstream response (OpenAI-compatible format)
-		cachedTokens := gjson.GetBytes(openAIResp, "usage.prompt_tokens_details.cached_tokens").Int()
-		if cachedTokens == 0 {
-			cachedTokens = gjson.GetBytes(openAIResp, "usage.input_tokens_details.cached_tokens").Int()
-		}
-		
-		reasoningTokens := gjson.GetBytes(openAIResp, "usage.completion_tokens_details.reasoning_tokens").Int()
-		if reasoningTokens == 0 {
-			reasoningTokens = gjson.GetBytes(openAIResp, "usage.output_tokens_details.reasoning_tokens").Int()
-		}
+	// Parse cache and reasoning tokens from upstream response (OpenAI-compatible format)
+	// Note: CodeArts upstream may not return these fields - handle gracefully
+	cachedTokens := gjson.GetBytes(openAIResp, "usage.prompt_tokens_details.cached_tokens").Int()
+	if cachedTokens == 0 {
+		cachedTokens = gjson.GetBytes(openAIResp, "usage.input_tokens_details.cached_tokens").Int()
+	}
+	
+	reasoningTokens := gjson.GetBytes(openAIResp, "usage.completion_tokens_details.reasoning_tokens").Int()
+	if reasoningTokens == 0 {
+		reasoningTokens = gjson.GetBytes(openAIResp, "usage.output_tokens_details.reasoning_tokens").Int()
+	}
+	// Fallback to top-level usage parsing if details fields don't exist
+	if cachedTokens == 0 {
+		cachedTokens = gjson.GetBytes(openAIResp, "usage.cached_tokens").Int()
+	}
+	if reasoningTokens == 0 {
+		reasoningTokens = gjson.GetBytes(openAIResp, "usage.reasoning_tokens").Int()
+	}
 
-		reporter.Publish(ctx, usage.Detail{
-			InputTokens:       promptTokens,
-			OutputTokens:      completionTokens,
-			CachedTokens:      cachedTokens,    // ← NEW
-			CacheReadTokens:   cachedTokens,    // ← NEW
-			CacheCreationTokens: cachedTokens,  // ← NEW
-			ReasoningTokens:   reasoningTokens, // ← NEW
-		})
-		reporter.EnsurePublished(ctx)
+	reporter.Publish(ctx, usage.Detail{
+		InputTokens:         promptTokens,
+		OutputTokens:        completionTokens,
+		CachedTokens:        cachedTokens,
+		CacheReadTokens:     cachedTokens,
+		CacheCreationTokens: cachedTokens,
+		ReasoningTokens:     reasoningTokens,
+	})
+	reporter.EnsurePublished(ctx)
 
 		return cliproxyexecutor.Response{Payload: translated}, nil
 }
@@ -964,28 +972,51 @@ func (e *CodeArtsExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 			log.Warnf("codearts: stream ended with no data lines (total_lines=%d, first_non_empty=%q)", lineCount, firstNonEmptyLine)
 		}
 
-			if err := scanner.Err(); err != nil {
-				log.Warnf("codearts: stream scanner error: %v", err)
-				chunks <- cliproxyexecutor.StreamChunk{Err: err}
-			}
+				if err := scanner.Err(); err != nil {
+					log.Warnf("codearts: stream scanner error: %v", err)
+					chunks <- cliproxyexecutor.StreamChunk{Err: err}
+				}
 
-			// Aggregate cache and reasoning tokens from all chunks
-			// Note: CodeArts upstream typically provides usage in final chunk or separate frame
-			totalCachedTokens := int64(0)
-			totalReasoningTokens := int64(0)
-			
-			// Publish final usage record with aggregated token counts
-			reporter.Publish(ctx, usage.Detail{
-				InputTokens:       totalPromptTokens,
-				OutputTokens:      totalCompletionTokens,
-				CachedTokens:      totalCachedTokens,
-				CacheReadTokens:   totalCachedTokens,
-				CacheCreationTokens: totalCachedTokens,
-				ReasoningTokens:   totalReasoningTokens,
-			})
-			reporter.EnsurePublished(ctx)
+				// Aggregate cache and reasoning tokens from all chunks
+				// Parse usage details from the last chunk (OpenAI-compatible format)
+				totalCachedTokens := int64(0)
+				totalReasoningTokens := int64(0)
+				
+				// Try to parse from accumulated response body if available
+				fullContentStr := accumulatedContent.String()
+				if fullContentStr != "" {
+					cachedTokens := gjson.GetBytes([]byte(fullContentStr), "usage.prompt_tokens_details.cached_tokens").Int()
+					if cachedTokens == 0 {
+						cachedTokens = gjson.GetBytes([]byte(fullContentStr), "usage.input_tokens_details.cached_tokens").Int()
+					}
+					if cachedTokens == 0 {
+						cachedTokens = gjson.GetBytes([]byte(fullContentStr), "usage.cached_tokens").Int()
+					}
+					
+					reasoningTokens := gjson.GetBytes([]byte(fullContentStr), "usage.completion_tokens_details.reasoning_tokens").Int()
+					if reasoningTokens == 0 {
+						reasoningTokens = gjson.GetBytes([]byte(fullContentStr), "usage.output_tokens_details.reasoning_tokens").Int()
+					}
+					if reasoningTokens == 0 {
+						reasoningTokens = gjson.GetBytes([]byte(fullContentStr), "usage.reasoning_tokens").Int()
+					}
+					
+					totalCachedTokens = cachedTokens
+					totalReasoningTokens = reasoningTokens
+				}
+				
+				// Publish final usage record with aggregated token counts
+				reporter.Publish(ctx, usage.Detail{
+					InputTokens:         totalPromptTokens,
+					OutputTokens:        totalCompletionTokens,
+					CachedTokens:        totalCachedTokens,
+					CacheReadTokens:     totalCachedTokens,
+					CacheCreationTokens: totalCachedTokens,
+					ReasoningTokens:     totalReasoningTokens,
+				})
+				reporter.EnsurePublished(ctx)
 
-	}()
+			}()
 
 	// Expose the conversation id to clients.
 	httpResp.Header.Set("X-Codearts-Chat-Id", chatID)
