@@ -1,17 +1,4 @@
 main:
-  vscode:
-    - docker:
-        image: docker.cnb.cool/liyao52033/images/debian:latest
-      runner:
-        cpus: 16
-      services:
-        - vscode
-        - docker
-      stages:
-        - name: 默认安装依赖
-          script: |
-            ls -al
-
   push:
     - services:
         - docker
@@ -105,6 +92,7 @@ main:
             fi
         - name: prepare build args
           imports: https://cnb.cool/liyao52033/envs/-/blob/main/envs.yml
+          timeout: 30m
           script: |
               VERSION="${NEW_TAG:-$(git tag --sort=-v:refname | head -n 1 || echo "")}"
               COMMIT="${CNB_COMMIT:-$(git rev-parse --short HEAD 2>/dev/null || echo none)}"
@@ -167,4 +155,18 @@ main:
             # max_turns: 3
             # 将 prompt 输出到文件（调试用）
             # prompt_output: ./prompt.txt
+
+"$":
+  vscode:
+    - docker:
+        image: docker.cnb.cool/liyao52033/images/debian:latest
+      runner:
+        cpus: 16
+      services:
+        - vscode
+        - docker
+      stages:
+        - name: 默认安装依赖
+          script: |
+            ls -al
 
