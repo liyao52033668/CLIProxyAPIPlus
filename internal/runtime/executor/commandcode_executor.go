@@ -444,12 +444,21 @@ func parseWireUsage(body []byte) usage.Detail {
 		cacheWrite = u.Get("inputTokenDetails.cacheWriteTokens").Int()
 	}
 	
-	return usage.Detail{
+	detail := usage.Detail{
 		InputTokens:         inputTokens,
 		OutputTokens:        outputTokens,
 		CacheReadTokens:     cacheRead,
 		CacheCreationTokens: cacheWrite,
 	}
+	
+	// Map CacheReadTokens to CachedTokens for keeper/frontend compatibility
+	if detail.CacheReadTokens > 0 {
+		detail.CachedTokens = detail.CacheReadTokens
+	} else if detail.CacheCreationTokens > 0 {
+		detail.CachedTokens = detail.CacheCreationTokens
+	}
+	
+	return detail
 }
 
 // commandCodeBodyLogLimit caps how many raw upstream body bytes are kept for
