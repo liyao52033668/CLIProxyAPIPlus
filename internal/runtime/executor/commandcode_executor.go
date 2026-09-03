@@ -444,11 +444,24 @@ func parseWireUsage(body []byte) usage.Detail {
 		cacheWrite = u.Get("inputTokenDetails.cacheWriteTokens").Int()
 	}
 	
+	// Try reasoning/thinking token fields (if upstream supports them)
+	reasoningTokens := u.Get("reasoning_tokens").Int()
+	if reasoningTokens == 0 {
+		reasoningTokens = u.Get("reasoningTokens").Int()
+	}
+	if reasoningTokens == 0 {
+		reasoningTokens = u.Get("thinking_tokens").Int()
+	}
+	if reasoningTokens == 0 {
+		reasoningTokens = u.Get("thoughtsTokenCount").Int()
+	}
+	
 	detail := usage.Detail{
 		InputTokens:         inputTokens,
 		OutputTokens:        outputTokens,
 		CacheReadTokens:     cacheRead,
 		CacheCreationTokens: cacheWrite,
+		ReasoningTokens:     reasoningTokens,  // ← NEW: thinking tokens
 	}
 	
 	// Map CacheReadTokens to CachedTokens for keeper/frontend compatibility

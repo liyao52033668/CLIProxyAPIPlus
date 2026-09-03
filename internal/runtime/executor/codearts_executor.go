@@ -757,16 +757,31 @@ func (e *CodeArtsExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 	to := sdktranslator.FromString("codearts")
 
 	openAIResp := buildOpenAINonStreamResponse(fullContent, reasoningBuilder.String(), respModel, chatID, promptTokens, completionTokens, toolCallsList)
-	var param any
-	translated := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, req.Payload, openAIResp, &param)
+		var param any
+		translated := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, req.Payload, openAIResp, &param)
 
-	reporter.Publish(ctx, usage.Detail{
-		InputTokens:  promptTokens,
-		OutputTokens: completionTokens,
-	})
-	reporter.EnsurePublished(ctx)
+		// Parse cache and reasoning tokens from upstream response (OpenAI-compatible format)
+		cachedTokens := gjson.GetBytes(openAIResp, "usage.prompt_tokens_details.cached_tokens").Int()
+		if cachedTokens == 0 {
+			cachedTokens = gjson.GetBytes(openAIResp, "usage.input_tokens_details.cached_tokens").Int()
+		}
+		
+		reasoningTokens := gjson.GetBytes(openAIResp, "usage.completion_tokens_details.reasoning_tokens").Int()
+		if reasoningTokens == 0 {
+			reasoningTokens = gjson.GetBytes(openAIResp, "usage.output_tokens_details.reasoning_tokens").Int()
+		}
 
-	return cliproxyexecutor.Response{Payload: translated}, nil
+		reporter.Publish(ctx, usage.Detail{
+			InputTokens:       promptTokens,
+			OutputTokens:      completionTokens,
+			CachedTokens:      cachedTokens,    // ← NEW
+			CacheReadTokens:   cachedTokens,    // ← NEW
+			CacheCreationTokens: cachedTokens,  // ← NEW
+			ReasoningTokens:   reasoningTokens, // ← NEW
+		})
+		reporter.EnsurePublished(ctx)
+
+		return cliproxyexecutor.Response{Payload: translated}, nil
 }
 
 // ExecuteStream handles streaming chat completions.
@@ -949,16 +964,26 @@ func (e *CodeArtsExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 			log.Warnf("codearts: stream ended with no data lines (total_lines=%d, first_non_empty=%q)", lineCount, firstNonEmptyLine)
 		}
 
-		if err := scanner.Err(); err != nil {
-			log.Warnf("codearts: stream scanner error: %v", err)
-			chunks <- cliproxyexecutor.StreamChunk{Err: err}
-		}
+			if err := scanner.Err(); err != nil {
+				log.Warnf("codearts: stream scanner error: %v", err)
+				chunks <- cliproxyexecutor.StreamChunk{Err: err}
+			}
 
-		reporter.Publish(ctx, usage.Detail{
-			InputTokens:  totalPromptTokens,
-			OutputTokens: totalCompletionTokens,
-		})
-		reporter.EnsurePublished(ctx)
+			// Aggregate cache and reasoning tokens from all chunks
+			// Note: CodeArts upstream typically provides usage in final chunk or separate frame
+			totalCachedTokens := int64(0)
+			totalReasoningTokens := int64(0)
+			
+			// Publish final usage record with aggregated token counts
+			reporter.Publish(ctx, usage.Detail{
+				InputTokens:       totalPromptTokens,
+				OutputTokens:      totalCompletionTokens,
+				CachedTokens:      totalCachedTokens,
+				CacheReadTokens:   totalCachedTokens,
+				CacheCreationTokens: totalCachedTokens,
+				ReasoningTokens:   totalReasoningTokens,
+			})
+			reporter.EnsurePublished(ctx)
 
 	}()
 
@@ -1430,6 +1455,8 @@ type codeartsStreamResult struct {
 	FinishReason     string
 	PromptTokens     int64
 	CompletionTokens int64
+	CachedTokens     int64  // ← NEW: cache tokens
+	ReasoningTokens  int64  // ← NEW: reasoning tokens
 	ModelName        string
 	Err              error
 }
@@ -1499,6 +1526,18 @@ func (s *codeartsStreamState) convert(data, event, model string) codeartsStreamR
 	if u := gjson.Get(data, "usage"); u.Exists() {
 		res.PromptTokens = u.Get("prompt_tokens").Int()
 		res.CompletionTokens = u.Get("completion_tokens").Int()
+		
+		// Parse cache tokens (fallback to multiple possible field names)
+		res.CachedTokens = u.Get("prompt_tokens_details.cached_tokens").Int()
+		if res.CachedTokens == 0 {
+			res.CachedTokens = u.Get("input_tokens_details.cached_tokens").Int()
+		}
+		
+		// Parse reasoning tokens (fallback to multiple possible field names)
+		res.ReasoningTokens = u.Get("completion_tokens_details.reasoning_tokens").Int()
+		if res.ReasoningTokens == 0 {
+			res.ReasoningTokens = u.Get("output_tokens_details.reasoning_tokens").Int()
+		}
 	}
 	if pt := gjson.Get(data, "prompt_tokens").Int(); pt > 0 {
 		res.PromptTokens = pt
