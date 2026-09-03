@@ -414,11 +414,25 @@ func forceStreamFlag(body []byte, stream bool) []byte {
 // parseWireUsage converts a finish event into usage details.
 func parseWireUsage(body []byte) usage.Detail {
 	finish := gjson.GetBytes(body, "totalUsage")
+	
+	// Try multiple field paths for cache tokens to support different upstream response formats:
+	// Format A (nested): inputTokenDetails.cacheReadTokens
+	// Format B (flattened): cache_read_input_tokens
+	cacheRead := finish.Get("inputTokenDetails.cacheReadTokens").Int()
+	if cacheRead == 0 {
+		cacheRead = finish.Get("cache_read_input_tokens").Int()
+	}
+	
+	cacheWrite := finish.Get("inputTokenDetails.cacheWriteTokens").Int()
+	if cacheWrite == 0 {
+		cacheWrite = finish.Get("cache_creation_input_tokens").Int()
+	}
+	
 	return usage.Detail{
 		InputTokens:         finish.Get("inputTokens").Int(),
 		OutputTokens:        finish.Get("outputTokens").Int(),
-		CacheReadTokens:     finish.Get("inputTokenDetails.cacheReadTokens").Int(),
-		CacheCreationTokens: finish.Get("inputTokenDetails.cacheWriteTokens").Int(),
+		CacheReadTokens:     cacheRead,
+		CacheCreationTokens: cacheWrite,
 	}
 }
 
