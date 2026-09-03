@@ -270,6 +270,8 @@ func parseCommandCodeUsagePayload(response *apicall.Response) (*CommandCodeUsage
 		TotalTokensIn:         int64(intField(object, "totalTokensIn", "total_tokens_in")),
 		TotalTokensOut:        int64(intField(object, "totalTokensOut", "total_tokens_out")),
 		TotalTokens:           int64(intField(object, "totalTokens", "total_tokens")),
+		CachedTokens:          int64(intField(object, "cachedTokens", "cached_tokens")),     // ← NEW: 缓存 Token
+		ReasoningTokens:       int64(intField(object, "reasoningTokens", "reasoning_tokens")), // ← NEW: 思考 Token
 		TotalCredits:          floatField(object, "totalCredits", "total_credits"),
 		TotalFreeCredits:      floatField(object, "totalFreeCredits", "total_free_credits"),
 		TotalMonthlyCredits:   floatField(object, "totalMonthlyCredits", "total_monthly_credits"),

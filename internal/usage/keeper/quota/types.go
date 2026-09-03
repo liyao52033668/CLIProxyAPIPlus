@@ -254,6 +254,8 @@ type CommandCodeUsagePayload struct {
 	TotalTokensIn         int64   `json:"totalTokensIn,omitempty"`
 	TotalTokensOut        int64   `json:"totalTokensOut,omitempty"`
 	TotalTokens           int64   `json:"totalTokens,omitempty"`
+	CachedTokens          int64   `json:"cachedTokens,omitempty"`     // ← NEW: 缓存 Token
+	ReasoningTokens       int64   `json:"reasoningTokens,omitempty"`  // ← NEW: 思考 Token
 	TotalCredits          float64 `json:"totalCredits,omitempty"`
 	TotalFreeCredits      float64 `json:"totalFreeCredits,omitempty"`
 	TotalMonthlyCredits   float64 `json:"totalMonthlyCredits,omitempty"`
