@@ -292,6 +292,7 @@ func main() {
 	var btLogin bool
 	var qoderLogin bool
 	var codeartsLogin bool
+	var codeartsAKSKLogin bool
 	var joycodeLogin bool
 	var xaiLogin bool
 	var commandCodeLogin bool
@@ -341,6 +342,7 @@ func main() {
 	flag.BoolVar(&btLogin, "bt-login", false, "Login to BaoTa Panel AI using phone and password")
 	flag.BoolVar(&qoderLogin, "qoder-login", false, "Login to Qoder using PKCE browser flow")
 	flag.BoolVar(&codeartsLogin, "codearts-login", false, "Login to HuaweiCloud CodeArts using OAuth")
+	flag.BoolVar(&codeartsAKSKLogin, "codearts-aksk-login", false, "Login to HuaweiCloud CodeArts using permanent IAM AK/SK (CODEARTS_CLI_AK / CODEARTS_CLI_SK)")
 	flag.BoolVar(&joycodeLogin, "joycode-login", false, "Login to JoyCode using OAuth")
 	flag.BoolVar(&xaiLogin, "xai-login", false, "Login to xAI using OAuth")
 	flag.BoolVar(&commandCodeLogin, "commandcode-login", false, "Login to Command Code using browser OAuth")
@@ -887,6 +889,8 @@ func main() {
 		cmd.DoQoderLogin(cfg, options)
 	} else if codeartsLogin {
 		cmd.DoCodeArtsLogin(cfg, options)
+	} else if codeartsAKSKLogin {
+		cmd.DoCodeArtsAKSKLogin(cfg, options)
 	} else if joycodeLogin {
 		cmd.DoJoyCodeLogin(cfg, options)
 	} else if xaiLogin {

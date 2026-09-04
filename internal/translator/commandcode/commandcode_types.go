@@ -124,7 +124,7 @@ const (
 type FinishUsage struct {
 	InputTokens       int64                    `json:"inputTokens"`
 	OutputTokens      int64                    `json:"outputTokens"`
-	ReasoningTokens   int64                    `json:"reasoningTokens,omitempty"`  // ← NEW: thinking tokens
+	ReasoningTokens   int64                    `json:"reasoningTokens,omitempty"` // ← NEW: thinking tokens
 	InputTokenDetails *FinishUsageInputDetails `json:"inputTokenDetails,omitempty"`
 }
 

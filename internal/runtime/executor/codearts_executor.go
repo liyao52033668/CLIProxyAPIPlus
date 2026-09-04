@@ -38,7 +38,6 @@ const (
 	// official CodeArts Agent kernel (InferHub-registered model IDs, case-sensitive).
 	codeartsChatV2URL = "https://snap-access.cn-north-4.myhuaweicloud.com/api/v2/chat/completions"
 
-	codeartsMarketplaceURL = "https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery"
 	// codeartsVSCodeUpdateURL returns the latest stable VSCode releases, newest first.
 	codeartsVSCodeUpdateURL = "https://update.code.visualstudio.com/api/releases/stable"
 
@@ -49,15 +48,12 @@ const (
 	codeartsIsConfidential  = "false"
 	codeartsPluginName      = "snap_vscode"
 	codeartsLanguage        = "zh-cn"
-	// codeartsPluginVersionDefault is the fallback plugin version used when the
-	// marketplace fetch fails.
-	codeartsPluginVersionDefault = "26.8.203"
 	// codeartsIdeVersionDefault is the fallback host IDE (VSCode) version used
 	// when the update endpoint fetch fails.
 	codeartsIdeVersionDefault = "1.135.0"
 
-	// codeartsRemoteVersionRefresh is how often the latest plugin and host IDE
-	// versions are re-fetched from their remote sources.
+	// codeartsRemoteVersionRefresh is how often the latest host IDE version is
+	// re-fetched from its remote source.
 	codeartsRemoteVersionRefresh = 24 * time.Hour
 )
 
@@ -80,81 +76,10 @@ func NewCodeArtsExecutor(cfg *config.Config) *CodeArtsExecutor {
 func (e *CodeArtsExecutor) Identifier() string { return "codearts" }
 
 var (
-	codeArtsPluginVersionMu    sync.Mutex
-	codeArtsPluginVersionVal   string
-	codeArtsPluginVersionFresh time.Time
-)
-
-var (
 	codeArtsIdeVersionMu    sync.Mutex
 	codeArtsIdeVersionVal   string
 	codeArtsIdeVersionFresh time.Time
 )
-
-// codeArtsPluginVersion returns the latest CodeArts plugin version fetched from
-// the VSCode marketplace, cached for codeartsRemoteVersionRefresh. Falls back to
-// the last known value (or the default) when the fetch fails. The proxy runs on
-// a server that does not install VSCode, so the version is resolved remotely.
-func (e *CodeArtsExecutor) codeArtsPluginVersion() string {
-	codeArtsPluginVersionMu.Lock()
-	defer codeArtsPluginVersionMu.Unlock()
-
-	if time.Since(codeArtsPluginVersionFresh) < codeartsRemoteVersionRefresh {
-		if codeArtsPluginVersionVal != "" {
-			return codeArtsPluginVersionVal
-		}
-		return codeartsPluginVersionDefault
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	v, err := fetchLatestCodeArtsPluginVersion(ctx, e.cfg)
-	codeArtsPluginVersionFresh = time.Now()
-	if err != nil || v == "" {
-		log.Warnf("codearts: failed to fetch plugin version from marketplace: %v", err)
-	} else {
-		codeArtsPluginVersionVal = v
-		log.Infof("codearts: using latest plugin version %s from marketplace", v)
-	}
-
-	if codeArtsPluginVersionVal != "" {
-		return codeArtsPluginVersionVal
-	}
-	return codeartsPluginVersionDefault
-}
-
-// fetchLatestCodeArtsPluginVersion queries the VSCode marketplace for the latest
-// huaweicloud.vscode-codebot extension version.
-func fetchLatestCodeArtsPluginVersion(ctx context.Context, cfg *config.Config) (string, error) {
-	const payload = `{"filters":[{"criteria":[{"filterType":7,"value":"huaweicloud.vscode-codebot"}],"pageNumber":1,"pageSize":10,"sortBy":0,"sortOrder":0}],"flags":914}`
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, codeartsMarketplaceURL, bytes.NewReader([]byte(payload)))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json;api-version=3.0-preview.1")
-
-	client := helps.NewProxyAwareHTTPClient(ctx, cfg, nil, 10*time.Second)
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("marketplace returned %d", resp.StatusCode)
-	}
-
-	ext := gjson.GetBytes(body, "results.0.extensions.0")
-	if !ext.Exists() {
-		return "", fmt.Errorf("marketplace returned no extension")
-	}
-	if ext.Get("publisher.publisherName").String() != "HuaweiCloud" || ext.Get("extensionName").String() != "vscode-codebot" {
-		return "", fmt.Errorf("marketplace returned unexpected extension")
-	}
-	return ext.Get("versions.0.version").String(), nil
-}
 
 // codeArtsIdeVersion returns the latest stable VSCode version fetched from
 // Microsoft's update endpoint, cached for codeartsRemoteVersionRefresh. The
@@ -243,13 +168,13 @@ func (e *CodeArtsExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Agent-Type", codeartsAgentType)
-	req.Header.Set("Client-Version", "Vscode_"+e.codeArtsPluginVersion())
+	req.Header.Set("Client-Version", "Vscode_"+codearts.SnapPluginVersion())
 	req.Header.Set("Heartbeat-Enable", codeartsHeartbeatEnable)
 	req.Header.Set("Ide-Name", codeartsIdeName)
 	req.Header.Set("Ide-Version", e.codeArtsIdeVersion())
 	req.Header.Set("Is-Confidential", codeartsIsConfidential)
 	req.Header.Set("Plugin-Name", codeartsPluginName)
-	req.Header.Set("Plugin-Version", e.codeArtsPluginVersion())
+	req.Header.Set("Plugin-Version", codearts.SnapPluginVersion())
 	req.Header.Set("X-Language", codeartsLanguage)
 	req.Header.Set("X-Snap-Traceid", traceID)
 
@@ -295,7 +220,11 @@ func (e *CodeArtsExecutor) buildCodeArtsV2Request(auth *cliproxyauth.Auth, bodyB
 	h := make(http.Header)
 	h.Set("Content-Type", "application/json")
 	h.Set("Accept", "text/event-stream")
-	h.Set("x-auth-token", securityToken)
+	// With permanent AK/SK there is no security token; the signature alone
+	// authenticates the caller, matching the official CLI.
+	if securityToken != "" {
+		h.Set("x-auth-token", securityToken)
+	}
 	h.Set("x-snap-traceid", traceID)
 	h.Set("X-Language", codeartsLanguage)
 	h.Set("app-id", "CodeAgent3.0")
@@ -448,8 +377,9 @@ func FetchCodeArtsModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *conf
 	req.Header.Set("X-Language", codeartsLanguage)
 	req.Header.Set("area", "green")
 
-	// agent-center requests authenticate via the AK/SK signature and
-	// X-Security-Token (set by SignRequest); x-auth-token is rejected by APIG.
+	// agent-center requests authenticate via the AK/SK signature plus
+	// X-Security-Token when one exists (both set by SignRequest); permanent
+	// AK/SK carries no security token. x-auth-token is rejected by APIG.
 	codearts.SignRequest(req, nil, token.AK, token.SK, token.SecurityToken)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, 30*time.Second)
@@ -1047,6 +977,13 @@ func (e *CodeArtsExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth)
 		return nil, fmt.Errorf("codearts: no metadata to refresh")
 	}
 
+	// Permanent IAM AK/SK credentials never expire and have no refresh grant.
+	// This must not rely on expires_at, because CodeArtsTokenData.IsExpired
+	// treats a zero expiry as already expired.
+	if isCodeArtsAKSKAuth(auth) {
+		return auth, nil
+	}
+
 	currentToken := extractCodeArtsToken(auth)
 	if currentToken == nil {
 		return nil, fmt.Errorf("codearts: no valid token data found for refresh")
@@ -1091,6 +1028,20 @@ func (e *CodeArtsExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth)
 
 	log.Infof("codearts: successfully refreshed token, expires at %s", newToken.ExpiresAt.Format(time.RFC3339))
 	return updated, nil
+}
+
+// isCodeArtsAKSKAuth reports whether the auth holds permanent IAM AK/SK
+// credentials rather than STS temporary credentials.
+func isCodeArtsAKSKAuth(auth *cliproxyauth.Auth) bool {
+	if auth == nil || auth.Metadata == nil {
+		return false
+	}
+	for _, key := range []string{"auth_kind", "login_mode"} {
+		if strings.EqualFold(strings.TrimSpace(metadataStr(auth.Metadata, key)), "aksk") {
+			return true
+		}
+	}
+	return false
 }
 
 // extractCodeArtsToken extracts token data from auth metadata.

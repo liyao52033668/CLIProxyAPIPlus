@@ -421,29 +421,29 @@ func parseWireUsage(body []byte) usage.Detail {
 	if !u.Exists() {
 		u = gjson.GetBytes(body, "totalUsage")
 	}
-	
+
 	// Try multiple field name formats for each metric
 	inputTokens := u.Get("input_tokens").Int()
 	if inputTokens == 0 {
 		inputTokens = u.Get("inputTokens").Int()
 	}
-	
+
 	outputTokens := u.Get("output_tokens").Int()
 	if outputTokens == 0 {
 		outputTokens = u.Get("outputTokens").Int()
 	}
-	
+
 	// Try cache token fields from both nested and flattened structures
 	cacheRead := u.Get("cache_read_input_tokens").Int()
 	if cacheRead == 0 {
 		cacheRead = u.Get("inputTokenDetails.cacheReadTokens").Int()
 	}
-	
+
 	cacheWrite := u.Get("cache_creation_input_tokens").Int()
 	if cacheWrite == 0 {
 		cacheWrite = u.Get("inputTokenDetails.cacheWriteTokens").Int()
 	}
-	
+
 	// Try reasoning/thinking token fields (if upstream supports them)
 	reasoningTokens := u.Get("reasoning_tokens").Int()
 	if reasoningTokens == 0 {
@@ -455,22 +455,22 @@ func parseWireUsage(body []byte) usage.Detail {
 	if reasoningTokens == 0 {
 		reasoningTokens = u.Get("thoughtsTokenCount").Int()
 	}
-	
+
 	detail := usage.Detail{
 		InputTokens:         inputTokens,
 		OutputTokens:        outputTokens,
 		CacheReadTokens:     cacheRead,
 		CacheCreationTokens: cacheWrite,
-		ReasoningTokens:     reasoningTokens,  // ← NEW: thinking tokens
+		ReasoningTokens:     reasoningTokens, // ← NEW: thinking tokens
 	}
-	
+
 	// Map CacheReadTokens to CachedTokens for keeper/frontend compatibility
 	if detail.CacheReadTokens > 0 {
 		detail.CachedTokens = detail.CacheReadTokens
 	} else if detail.CacheCreationTokens > 0 {
 		detail.CachedTokens = detail.CacheCreationTokens
 	}
-	
+
 	return detail
 }
 

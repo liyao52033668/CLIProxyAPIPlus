@@ -1130,6 +1130,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/codebuddy-auth-url", s.mgmt.RequestCodeBuddyToken)
 		mgmt.GET("/codebuddy-ai-auth-url", s.mgmt.RequestCodeBuddyAIToken)
 		mgmt.GET("/codearts-auth-url", s.mgmt.RequestCodeArtsToken)
+		mgmt.POST("/codearts-auth-url", s.mgmt.RequestCodeArtsAKSKToken)
 		mgmt.GET("/bt-auth-url", s.mgmt.RequestBTToken)
 		mgmt.POST("/bt-auth-url", s.mgmt.RequestBTToken)
 		mgmt.GET("/joycode-auth-url", s.mgmt.GetJoyCodeAuthURL)

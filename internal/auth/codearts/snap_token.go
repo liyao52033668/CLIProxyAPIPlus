@@ -12,6 +12,7 @@ package codearts
 // reliable refresh_token-based renewal without re-authentication.
 
 import (
+	"bytes"
 	"context"
 	crand "crypto/rand"
 	"crypto/sha256"
@@ -23,7 +24,10 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/tidwall/gjson"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -42,9 +46,95 @@ const (
 	epLoginTicket = "/v1/login/ticket"
 
 	snapPluginName = "snap_AIIDE"
-	// snapPluginVersion mirrors the current huaweicloud.vscode-codebot plugin
-	snapPluginVersion = "26.8.203"
+
+	// snapPluginVersionDefault is the fallback plugin version used when the
+	// VSCode marketplace fetch fails.
+	snapPluginVersionDefault = "26.8.203"
+
+	// snapPluginVersionRefresh is how often the latest plugin version is
+	// re-fetched from the VSCode marketplace.
+	snapPluginVersionRefresh = 24 * time.Hour
+
+	// snapMarketplaceURL is the VSCode public gallery extension query endpoint.
+	snapMarketplaceURL = "https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery"
 )
+
+var (
+	snapPluginVersionMu    sync.Mutex
+	snapPluginVersionVal   string
+	snapPluginVersionFresh time.Time
+)
+
+// SnapPluginVersion returns the latest huaweicloud.vscode-codebot plugin
+// version fetched from the VSCode marketplace, cached for
+// snapPluginVersionRefresh. Falls back to the last known value (or the
+// default) when the fetch fails.
+//
+// The proxy runs on a server that does not install VSCode, so the version is
+// resolved remotely. Callers that need the version for a request header or a
+// login URL should use this instead of a hard-coded constant.
+func SnapPluginVersion() string {
+	snapPluginVersionMu.Lock()
+	defer snapPluginVersionMu.Unlock()
+
+	if time.Since(snapPluginVersionFresh) < snapPluginVersionRefresh {
+		if snapPluginVersionVal != "" {
+			return snapPluginVersionVal
+		}
+		return snapPluginVersionDefault
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	v, err := fetchLatestSnapPluginVersion(ctx, nil)
+	snapPluginVersionFresh = time.Now()
+	if err != nil || v == "" {
+		log.Warnf("codearts: failed to fetch plugin version from marketplace: %v", err)
+	} else {
+		snapPluginVersionVal = v
+		log.Infof("codearts: using latest plugin version %s from marketplace", v)
+	}
+
+	if snapPluginVersionVal != "" {
+		return snapPluginVersionVal
+	}
+	return snapPluginVersionDefault
+}
+
+// fetchLatestSnapPluginVersion queries the VSCode marketplace for the latest
+// huaweicloud.vscode-codebot extension version.
+func fetchLatestSnapPluginVersion(ctx context.Context, client *http.Client) (string, error) {
+	const payload = `{"filters":[{"criteria":[{"filterType":7,"value":"huaweicloud.vscode-codebot"}],"pageNumber":1,"pageSize":10,"sortBy":0,"sortOrder":0}],"flags":914}`
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, snapMarketplaceURL, bytes.NewReader([]byte(payload)))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json;api-version=3.0-preview.1")
+
+	if client == nil {
+		client = &http.Client{Timeout: 10 * time.Second}
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("marketplace returned %d", resp.StatusCode)
+	}
+
+	ext := gjson.GetBytes(body, "results.0.extensions.0")
+	if !ext.Exists() {
+		return "", fmt.Errorf("marketplace returned no extension")
+	}
+	if ext.Get("publisher.publisherName").String() != "HuaweiCloud" || ext.Get("extensionName").String() != "vscode-codebot" {
+		return "", fmt.Errorf("marketplace returned unexpected extension")
+	}
+	return ext.Get("versions.0.version").String(), nil
+}
 
 // Credentials is the STS temporary credential block returned by the token endpoint.
 type Credentials struct {
@@ -84,7 +174,7 @@ func BuildAuthorizeURL(ticketID, codeChallenge string, port int) string {
 	q.Set("code_challenge_method", "S256")
 	q.Set("ticket_id", ticketID)
 	q.Set("plugin-name", snapPluginName)
-	q.Set("plugin-version", snapPluginVersion)
+	q.Set("plugin-version", SnapPluginVersion())
 	// is_redirect=true asks the portal to redirect over HTTP back to the local
 	// callback instead of the codearts:// custom scheme (which needs the desktop
 	// app to forward the code). Mirrors the legacy devcloud login flow.
@@ -151,7 +241,7 @@ func (a *CodeArtsAuth) PollLoginTicket(ctx context.Context, ticketID, secret str
 		return nil, err
 	}
 	req.Header.Set("plugin-name", snapPluginName)
-	req.Header.Set("plugin-version", snapPluginVersion)
+	req.Header.Set("plugin-version", SnapPluginVersion())
 
 	resp, err := a.httpClient.Do(req)
 	if err != nil {

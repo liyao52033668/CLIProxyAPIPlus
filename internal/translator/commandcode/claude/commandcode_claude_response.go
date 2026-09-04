@@ -353,31 +353,31 @@ func parseUsage(event gjson.Result) *cc.FinishUsage {
 	if !u.Exists() {
 		return nil
 	}
-	
+
 	// Try multiple field name formats for each metric
 	inputTokens := u.Get("input_tokens").Int()
 	if inputTokens == 0 {
 		inputTokens = u.Get("inputTokens").Int()
 	}
-	
+
 	outputTokens := u.Get("output_tokens").Int()
 	if outputTokens == 0 {
 		outputTokens = u.Get("outputTokens").Int()
 	}
-	
+
 	out := &cc.FinishUsage{
 		InputTokens:       inputTokens,
 		OutputTokens:      outputTokens,
 		InputTokenDetails: &cc.FinishUsageInputDetails{},
 	}
-	
+
 	// Try cache token fields from both nested and flattened structures
 	d := u.Get("inputTokenDetails")
 	if d.Exists() {
 		out.InputTokenDetails.CacheReadTokens = d.Get("cacheReadTokens").Int()
 		out.InputTokenDetails.CacheWriteTokens = d.Get("cacheWriteTokens").Int()
 	}
-	
+
 	// Fallback to flattened snake_case fields
 	if out.InputTokenDetails.CacheReadTokens == 0 {
 		out.InputTokenDetails.CacheReadTokens = u.Get("cache_read_input_tokens").Int()
@@ -385,7 +385,7 @@ func parseUsage(event gjson.Result) *cc.FinishUsage {
 	if out.InputTokenDetails.CacheWriteTokens == 0 {
 		out.InputTokenDetails.CacheWriteTokens = u.Get("cache_creation_input_tokens").Int()
 	}
-	
+
 	return out
 }
 

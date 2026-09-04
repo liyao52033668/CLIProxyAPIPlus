@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -18,6 +19,16 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
+)
+
+// Login-mode metadata keys and values are owned by internal/auth/codearts so the
+// management API and this authenticator write identical records.
+const (
+	codeArtsLoginModeMetadataKey = codearts.LoginModeMetadataKey
+	codeArtsLoginModeOAuth       = codearts.LoginModeOAuth
+	codeArtsLoginModeAKSK        = codearts.LoginModeAKSK
+	codeArtsAccessKeyMetadataKey = codearts.AccessKeyMetadataKey
+	codeArtsSecretKeyMetadataKey = codearts.SecretKeyMetadataKey
 )
 
 var codeartsRefreshLead = 4 * time.Hour
@@ -50,6 +61,78 @@ func (a CodeArtsAuthenticator) Login(ctx context.Context, cfg *config.Config, op
 		opts = &LoginOptions{}
 	}
 
+	switch strings.ToLower(strings.TrimSpace(opts.Metadata[codeArtsLoginModeMetadataKey])) {
+	case "", codeArtsLoginModeOAuth:
+		return a.loginOAuth(ctx, cfg, opts)
+	case codeArtsLoginModeAKSK:
+		return a.loginAKSK(ctx, opts)
+	default:
+		return nil, fmt.Errorf("codearts auth: unsupported login mode %q", opts.Metadata[codeArtsLoginModeMetadataKey])
+	}
+}
+
+// loginAKSK authorizes with permanent HuaweiCloud IAM access keys. These do not
+// expire, so the resulting auth carries no expires_at and is never refreshed.
+func (a CodeArtsAuthenticator) loginAKSK(ctx context.Context, opts *LoginOptions) (*coreauth.Auth, error) {
+	ak, err := codeArtsRequireSecret(opts, codeArtsAccessKeyMetadataKey, codearts.EnvAccessKeyID, "Enter HuaweiCloud IAM Access Key ID (AK): ")
+	if err != nil {
+		return nil, err
+	}
+	sk, err := codeArtsRequireSecret(opts, codeArtsSecretKeyMetadataKey, codearts.EnvSecretAccessKey, "Enter HuaweiCloud IAM Secret Access Key (SK): ")
+	if err != nil {
+		return nil, err
+	}
+
+	fmt.Println("Verifying CodeArts AK/SK credentials...")
+	codeartsAuth := codearts.NewCodeArtsAuth(nil)
+	info, err := codeartsAuth.VerifyAKSK(ctx, ak, sk)
+	if err != nil {
+		return nil, err
+	}
+
+	label := codearts.AKSKLabel(info)
+	fileName := codearts.AKSKFileName(label)
+
+	// No expires_at: permanent keys must not be scheduled for refresh.
+	metadata := codearts.BuildAKSKMetadata(ak, sk, info)
+
+	fmt.Println("CodeArts AK/SK authentication successful")
+
+	return &coreauth.Auth{
+		ID:       fileName,
+		Provider: "codearts",
+		FileName: fileName,
+		Label:    label + " (AK/SK)",
+		Metadata: metadata,
+	}, nil
+}
+
+// codeArtsRequireSecret resolves a credential from login metadata, the
+// environment, or an interactive prompt, in that order.
+func codeArtsRequireSecret(opts *LoginOptions, metadataKey, envKey, prompt string) (string, error) {
+	if opts != nil && opts.Metadata != nil {
+		if value := strings.TrimSpace(opts.Metadata[metadataKey]); value != "" {
+			return value, nil
+		}
+	}
+	if raw, ok := os.LookupEnv(envKey); ok {
+		if value := strings.TrimSpace(raw); value != "" {
+			return value, nil
+		}
+	}
+	if opts != nil && opts.Prompt != nil {
+		value, err := opts.Prompt(prompt)
+		if err != nil {
+			return "", err
+		}
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed, nil
+		}
+	}
+	return "", fmt.Errorf("codearts auth: missing %s (set %s or provide it interactively)", metadataKey, envKey)
+}
+
+func (a CodeArtsAuthenticator) loginOAuth(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {
 	ticketID, err := codearts.RandomHex(16)
 	if err != nil {
 		return nil, fmt.Errorf("codearts: generate ticket id: %w", err)
@@ -231,6 +314,7 @@ loginLoop:
 
 	metadata := map[string]any{
 		"type":           "codearts",
+		"auth_kind":      codeArtsLoginModeOAuth,
 		"ak":             tr.Credentials.AccessKeyID,
 		"sk":             tr.Credentials.SecretAccessKey,
 		"security_token": tr.Credentials.SecurityToken,
