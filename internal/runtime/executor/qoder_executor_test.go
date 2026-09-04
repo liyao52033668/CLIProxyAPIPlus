@@ -1821,6 +1821,79 @@ func TestQoderExecutorExecuteStream_PublishesUsageFromSSE(t *testing.T) {
 	}
 }
 
+func TestQoderExecutorExecuteStream_SynthesizesFinishReasonOnCleanEOF(t *testing.T) {
+	// When the upstream ends the stream cleanly (200 OK, EOF) without ever
+	// emitting a finish_reason, the executor synthesizes a terminal chunk
+	// with finish_reason="stop" before sending [DONE]. This prevents clients
+	// from seeing a truncated answer with no termination signal.
+	requestCount := 0
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", qoderRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requestCount++
+		switch requestCount {
+		case 1:
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"id":"u1","name":"Qoder User","securityOauthToken":"session-token","refreshToken":"refresh-token","userType":"personal_standard"}`)),
+				Request:    req,
+			}, nil
+		case 2:
+			// Upstream sends content but NO finish_reason, then EOF.
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body: io.NopCloser(strings.NewReader(strings.Join([]string{
+					``,
+					`data: {"body":"{\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}"}`,
+					`data: {"body":"{\"choices\":[{\"delta\":{\"content\":\" world\"}}]}"}`,
+					// No finish_reason chunk — upstream ended cleanly.
+				}, "\n"))),
+				Request: req,
+			}, nil
+		default:
+			t.Fatalf("unexpected request %d: %s %s", requestCount, req.Method, req.URL.String())
+			return nil, nil
+		}
+	}))
+
+	e := NewQoderExecutor(&config.Config{})
+	streamResult, err := e.ExecuteStream(ctx, &cliproxyauth.Auth{
+		Metadata: map[string]any{
+			"auth_method":           "pat",
+			"personal_access_token": "qdr_pat_token",
+			"uid":                   "u1",
+			"machine_id":            "m1",
+		},
+	}, cliproxyexecutor.Request{
+		Model:   "qmodel_latest",
+		Payload: []byte(`{"messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai")})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	var chunks []string
+	for chunk := range streamResult.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected stream chunk error: %v", chunk.Err)
+		}
+		chunks = append(chunks, string(chunk.Payload))
+	}
+
+	// Verify that a synthetic finish_reason chunk was emitted.
+	// The synthetic chunk should have finish_reason="stop".
+	foundSynthetic := false
+	for _, c := range chunks {
+		if strings.Contains(c, `"finish_reason":"stop"`) {
+			foundSynthetic = true
+			break
+		}
+	}
+	if !foundSynthetic {
+		t.Fatalf("expected synthetic finish_reason chunk, got chunks: %v", chunks)
+	}
+}
+
 type captureQoderUsagePlugin struct {
 	records chan usage.Record
 }
@@ -2003,21 +2076,21 @@ func TestQoderThinkingCleanerDetectsSplitThinkStartTag(t *testing.T) {
 }
 
 func TestQoderThinkingCleanerFlushesPartialThinkPrefixAtEOF(t *testing.T) {
+	// A partial "<thi" following non-whitespace text is ordinary answer
+	// text, not a marker candidate. It is emitted verbatim in the same
+	// chunk and nothing is buffered for flush.
 	cleaner := newQoderThinkingCleaner()
 	chunk, reasoning := cleaner.clean(qoderTestChunk("literal <thi"))
-	if got := gjson.GetBytes(chunk, "choices.0.delta.content").String(); got != "literal " {
-		t.Fatalf("content = %q, want literal prefix", got)
+	if got := gjson.GetBytes(chunk, "choices.0.delta.content").String(); got != "literal <thi" {
+		t.Fatalf("content = %q, want verbatim", got)
 	}
 	if reasoning != "" {
 		t.Fatalf("reasoning = %q, want empty", reasoning)
 	}
 
 	flushed := cleaner.flushChunks()
-	if len(flushed) != 1 {
-		t.Fatalf("len(flushed) = %d, want 1", len(flushed))
-	}
-	if got := gjson.GetBytes(flushed[0], "choices.0.delta.content").String(); got != "<thi" {
-		t.Fatalf("flushed content = %q, want <thi", got)
+	if len(flushed) != 0 {
+		t.Fatalf("len(flushed) = %d, want 0 (no buffering needed)", len(flushed))
 	}
 }
 
@@ -2314,15 +2387,33 @@ func TestQoderThinkingCleanerKeepsUnpairedOpenerAfterBacktick(t *testing.T) {
 	}
 }
 
-func TestQoderThinkingCleanerWhitespacePrecededOpenerStillReal(t *testing.T) {
-	// Whitespace-preceded markers remain real thinking blocks.
+func TestQoderThinkingCleanerWhitespacePrecededOpenerAfterVisibleTextPassesThrough(t *testing.T) {
+	// Regression: a whitespace-preceded <think> marker that follows
+	// non-whitespace visible text in the same chunk is answer text (e.g.
+	// the model discussing the tag itself), not a leaked thinking block.
+	// Treating it as a real opener used to divert the rest of the answer
+	// into reasoning_content, making the answer look truncated mid-stream.
 	cleaner := newQoderThinkingCleaner()
-	chunk, reasoning := cleaner.clean(qoderTestChunk("说 <think>hidden</think>答案"))
+	chunk, reasoning := cleaner.clean(qoderTestChunk("说 答案"))
+	if reasoning != "" {
+		t.Fatalf("reasoning = %q, want empty (marker after visible text is answer text)", reasoning)
+	}
+	if got := gjson.GetBytes(chunk, "choices.0.delta.content").String(); got != "说 答案" {
+		t.Fatalf("content = %q, want verbatim", got)
+	}
+}
+
+func TestQoderThinkingCleanerLeadingWhitespaceThinkStillExtracted(t *testing.T) {
+	// A <think> marker preceded only by whitespace at stream start is
+	// still a real thinking delimiter. The thinking content is extracted
+	// and the visible answer passes through.
+	cleaner := newQoderThinkingCleaner()
+	chunk, reasoning := cleaner.clean(qoderTestChunk("\n<think>hidden</think>答案"))
 	if reasoning != "hidden" {
 		t.Fatalf("reasoning = %q, want hidden", reasoning)
 	}
-	if got := gjson.GetBytes(chunk, "choices.0.delta.content").String(); got != "说 答案" {
-		t.Fatalf("content = %q, want think block stripped", got)
+	if got := gjson.GetBytes(chunk, "choices.0.delta.content").String(); got != "\n答案" {
+		t.Fatalf("content = %q, want newline + answer", got)
 	}
 }
 
