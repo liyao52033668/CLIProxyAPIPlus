@@ -255,8 +255,8 @@ func (e *CodeArtsExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.
 
 	codearts.SignRequest(req, bodyBytes, ak, sk, securityToken)
 
-	log.Debugf("codearts: signing request url=%s, body_len=%d, ak=%s, headers=%v",
-		req.URL.String(), len(bodyBytes), ak[:min(4, len(ak))]+"...", req.Header)
+	// log.Debugf("codearts: signing request url=%s, body_len=%d, ak=%s, headers=%v",
+	// 	req.URL.String(), len(bodyBytes), ak[:min(4, len(ak))]+"...", req.Header)
 	return nil
 }
 
@@ -750,15 +750,16 @@ func (e *CodeArtsExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 		respModel = req.Model
 	}
 
+	// The response is already an OpenAI chat completion, so translate back to the
+	// client's own schema (from) with openai as the wire format (to). Forcing
+	// from to openai here would look up the unregistered claude→codearts pair and
+	// hand OpenAI JSON to Claude clients, which cannot parse it.
 	from := opts.SourceFormat
-	if from != sdktranslator.FormatOpenAI {
-		from = sdktranslator.FormatOpenAI
-	}
-	to := sdktranslator.FromString("codearts")
+	to := sdktranslator.FormatOpenAI
 
 	openAIResp := buildOpenAINonStreamResponse(fullContent, reasoningBuilder.String(), respModel, chatID, promptTokens, completionTokens, toolCallsList)
-		var param any
-		translated := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, req.Payload, openAIResp, &param)
+	var param any
+	translated := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, req.Payload, openAIResp, &param)
 
 	// Parse cache and reasoning tokens from upstream response (OpenAI-compatible format)
 	// Note: CodeArts upstream may not return these fields - handle gracefully
@@ -766,7 +767,7 @@ func (e *CodeArtsExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 	if cachedTokens == 0 {
 		cachedTokens = gjson.GetBytes(openAIResp, "usage.input_tokens_details.cached_tokens").Int()
 	}
-	
+
 	reasoningTokens := gjson.GetBytes(openAIResp, "usage.completion_tokens_details.reasoning_tokens").Int()
 	if reasoningTokens == 0 {
 		reasoningTokens = gjson.GetBytes(openAIResp, "usage.output_tokens_details.reasoning_tokens").Int()
@@ -789,7 +790,7 @@ func (e *CodeArtsExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 	})
 	reporter.EnsurePublished(ctx)
 
-		return cliproxyexecutor.Response{Payload: translated}, nil
+	return cliproxyexecutor.Response{Payload: translated}, nil
 }
 
 // ExecuteStream handles streaming chat completions.
@@ -866,11 +867,12 @@ func (e *CodeArtsExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 		defer close(chunks)
 		defer httpResp.Body.Close()
 
+		// Chunks below are OpenAI chat completion chunks, so translate back to the
+		// client's own schema (from) with openai as the wire format (to). Forcing
+		// from to openai here would look up the unregistered claude→codearts pair
+		// and hand OpenAI SSE to Claude clients, which cannot parse it.
 		from := opts.SourceFormat
-		if from != sdktranslator.FormatOpenAI {
-			from = sdktranslator.FormatOpenAI
-		}
-		to := sdktranslator.FromString("codearts")
+		to := sdktranslator.FormatOpenAI
 		var streamParam any
 		var totalPromptTokens, totalCompletionTokens int64
 		var lineCount int
@@ -878,7 +880,22 @@ func (e *CodeArtsExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 		var firstNonEmptyLine string
 		var accumulatedContent strings.Builder
 		var hasToolCalls bool
+		var streamFailed bool
 		respModel := req.Model
+
+		// The registered response translators consume SSE data lines, so frame
+		// every OpenAI chunk as one before handing it over. Claude's translator
+		// drops unframed payloads outright, which would empty the whole stream.
+		emitTranslated := func(payload []byte) {
+			framed := make([]byte, 0, len(payload)+6)
+			framed = append(framed, "data: "...)
+			framed = append(framed, payload...)
+			for _, tc := range sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, req.Payload, framed, &streamParam) {
+				if len(tc) > 0 {
+					chunks <- cliproxyexecutor.StreamChunk{Payload: tc}
+				}
+			}
+		}
 
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
@@ -900,6 +917,7 @@ func (e *CodeArtsExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 				// silently with whatever content was accumulated.
 				if errFrame := codeArtsFrameError(data); errFrame != nil {
 					log.Warnf("codearts: upstream error frame: %v", errFrame)
+					streamFailed = true
 					chunks <- cliproxyexecutor.StreamChunk{Err: errFrame}
 				}
 				break
@@ -934,12 +952,7 @@ func (e *CodeArtsExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 			if chunk == nil {
 				continue
 			}
-			translatedChunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, req.Payload, chunk, &streamParam)
-			for _, tc := range translatedChunks {
-				if len(tc) > 0 {
-					chunks <- cliproxyexecutor.StreamChunk{Payload: tc}
-				}
-			}
+			emitTranslated(chunk)
 		}
 
 		if !hasToolCalls && accumulatedContent.Len() > 0 && strings.Contains(accumulatedContent.String(), "<tool_call_id>") {
@@ -947,76 +960,72 @@ func (e *CodeArtsExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 			if len(xmlToolCalls) > 0 {
 				hasToolCalls = true
 				for i, tc := range xmlToolCalls {
-					chunk := buildToolCallStreamChunk(respModel, i, tc)
-					translatedChunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, req.Payload, chunk, &streamParam)
-					for _, tChunk := range translatedChunks {
-						if len(tChunk) > 0 {
-							chunks <- cliproxyexecutor.StreamChunk{Payload: tChunk}
-						}
-					}
+					emitTranslated(buildToolCallStreamChunk(respModel, i, tc))
 				}
 			}
 		}
 
 		if hasToolCalls {
-			finishChunk := buildFinishReasonStreamChunk(respModel, "tool_calls")
-			translatedChunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, req.Payload, finishChunk, &streamParam)
-			for _, tChunk := range translatedChunks {
-				if len(tChunk) > 0 {
-					chunks <- cliproxyexecutor.StreamChunk{Payload: tChunk}
-				}
-			}
+			emitTranslated(buildFinishReasonStreamChunk(respModel, "tool_calls"))
 		}
 
 		if dataLineCount == 0 {
 			log.Warnf("codearts: stream ended with no data lines (total_lines=%d, first_non_empty=%q)", lineCount, firstNonEmptyLine)
 		}
 
-				if err := scanner.Err(); err != nil {
-					log.Warnf("codearts: stream scanner error: %v", err)
-					chunks <- cliproxyexecutor.StreamChunk{Err: err}
-				}
+		if err := scanner.Err(); err != nil {
+			log.Warnf("codearts: stream scanner error: %v", err)
+			streamFailed = true
+			chunks <- cliproxyexecutor.StreamChunk{Err: err}
+		}
 
-				// Aggregate cache and reasoning tokens from all chunks
-				// Parse usage details from the last chunk (OpenAI-compatible format)
-				totalCachedTokens := int64(0)
-				totalReasoningTokens := int64(0)
-				
-				// Try to parse from accumulated response body if available
-				fullContentStr := accumulatedContent.String()
-				if fullContentStr != "" {
-					cachedTokens := gjson.GetBytes([]byte(fullContentStr), "usage.prompt_tokens_details.cached_tokens").Int()
-					if cachedTokens == 0 {
-						cachedTokens = gjson.GetBytes([]byte(fullContentStr), "usage.input_tokens_details.cached_tokens").Int()
-					}
-					if cachedTokens == 0 {
-						cachedTokens = gjson.GetBytes([]byte(fullContentStr), "usage.cached_tokens").Int()
-					}
-					
-					reasoningTokens := gjson.GetBytes([]byte(fullContentStr), "usage.completion_tokens_details.reasoning_tokens").Int()
-					if reasoningTokens == 0 {
-						reasoningTokens = gjson.GetBytes([]byte(fullContentStr), "usage.output_tokens_details.reasoning_tokens").Int()
-					}
-					if reasoningTokens == 0 {
-						reasoningTokens = gjson.GetBytes([]byte(fullContentStr), "usage.reasoning_tokens").Int()
-					}
-					
-					totalCachedTokens = cachedTokens
-					totalReasoningTokens = reasoningTokens
-				}
-				
-				// Publish final usage record with aggregated token counts
-				reporter.Publish(ctx, usage.Detail{
-					InputTokens:         totalPromptTokens,
-					OutputTokens:        totalCompletionTokens,
-					CachedTokens:        totalCachedTokens,
-					CacheReadTokens:     totalCachedTokens,
-					CacheCreationTokens: totalCachedTokens,
-					ReasoningTokens:     totalReasoningTokens,
-				})
-				reporter.EnsurePublished(ctx)
+		// Feed the terminal marker to the translator so schemas that need explicit
+		// closing events (Claude's message_stop) emit them. The handler layer owns
+		// the wire terminator itself, so nothing is forwarded for openai clients.
+		if !streamFailed && dataLineCount > 0 {
+			emitTranslated([]byte("[DONE]"))
+		}
 
-			}()
+		// Aggregate cache and reasoning tokens from all chunks
+		// Parse usage details from the last chunk (OpenAI-compatible format)
+		totalCachedTokens := int64(0)
+		totalReasoningTokens := int64(0)
+
+		// Try to parse from accumulated response body if available
+		fullContentStr := accumulatedContent.String()
+		if fullContentStr != "" {
+			cachedTokens := gjson.GetBytes([]byte(fullContentStr), "usage.prompt_tokens_details.cached_tokens").Int()
+			if cachedTokens == 0 {
+				cachedTokens = gjson.GetBytes([]byte(fullContentStr), "usage.input_tokens_details.cached_tokens").Int()
+			}
+			if cachedTokens == 0 {
+				cachedTokens = gjson.GetBytes([]byte(fullContentStr), "usage.cached_tokens").Int()
+			}
+
+			reasoningTokens := gjson.GetBytes([]byte(fullContentStr), "usage.completion_tokens_details.reasoning_tokens").Int()
+			if reasoningTokens == 0 {
+				reasoningTokens = gjson.GetBytes([]byte(fullContentStr), "usage.output_tokens_details.reasoning_tokens").Int()
+			}
+			if reasoningTokens == 0 {
+				reasoningTokens = gjson.GetBytes([]byte(fullContentStr), "usage.reasoning_tokens").Int()
+			}
+
+			totalCachedTokens = cachedTokens
+			totalReasoningTokens = reasoningTokens
+		}
+
+		// Publish final usage record with aggregated token counts
+		reporter.Publish(ctx, usage.Detail{
+			InputTokens:         totalPromptTokens,
+			OutputTokens:        totalCompletionTokens,
+			CachedTokens:        totalCachedTokens,
+			CacheReadTokens:     totalCachedTokens,
+			CacheCreationTokens: totalCachedTokens,
+			ReasoningTokens:     totalReasoningTokens,
+		})
+		reporter.EnsurePublished(ctx)
+
+	}()
 
 	// Expose the conversation id to clients.
 	httpResp.Header.Set("X-Codearts-Chat-Id", chatID)
@@ -1486,8 +1495,8 @@ type codeartsStreamResult struct {
 	FinishReason     string
 	PromptTokens     int64
 	CompletionTokens int64
-	CachedTokens     int64  // ← NEW: cache tokens
-	ReasoningTokens  int64  // ← NEW: reasoning tokens
+	CachedTokens     int64 // ← NEW: cache tokens
+	ReasoningTokens  int64 // ← NEW: reasoning tokens
 	ModelName        string
 	Err              error
 }
@@ -1557,13 +1566,13 @@ func (s *codeartsStreamState) convert(data, event, model string) codeartsStreamR
 	if u := gjson.Get(data, "usage"); u.Exists() {
 		res.PromptTokens = u.Get("prompt_tokens").Int()
 		res.CompletionTokens = u.Get("completion_tokens").Int()
-		
+
 		// Parse cache tokens (fallback to multiple possible field names)
 		res.CachedTokens = u.Get("prompt_tokens_details.cached_tokens").Int()
 		if res.CachedTokens == 0 {
 			res.CachedTokens = u.Get("input_tokens_details.cached_tokens").Int()
 		}
-		
+
 		// Parse reasoning tokens (fallback to multiple possible field names)
 		res.ReasoningTokens = u.Get("completion_tokens_details.reasoning_tokens").Int()
 		if res.ReasoningTokens == 0 {

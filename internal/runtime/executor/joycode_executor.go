@@ -116,11 +116,12 @@ func (e *JoyCodeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, 
 		return resp, errDo
 	}
 
+	// The upstream body is an OpenAI chat completion, so translate back to the
+	// client's own schema (from) with openai as the wire format (to). Forcing from
+	// to openai here would look up the unregistered claude→joycode pair and hand
+	// OpenAI JSON to Claude clients, which cannot parse it.
 	from = opts.SourceFormat
-	if from != sdktranslator.FormatOpenAI {
-		from = sdktranslator.FormatOpenAI
-	}
-	to := sdktranslator.FromString("joycode")
+	to := sdktranslator.FormatOpenAI
 
 	var param any
 	translated := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, req.Payload, body, &param)
@@ -187,13 +188,28 @@ func (e *JoyCodeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.
 		defer close(chunks)
 		defer httpResp.Body.Close()
 
+		// Chunks below are OpenAI chat completion chunks, so translate back to the
+		// client's own schema (from) with openai as the wire format (to). Forcing
+		// from to openai here would look up the unregistered claude→joycode pair
+		// and hand OpenAI SSE to Claude clients, which cannot parse it.
 		from := opts.SourceFormat
-		if from != sdktranslator.FormatOpenAI {
-			from = sdktranslator.FormatOpenAI
-		}
-		to := sdktranslator.FromString("joycode")
+		to := sdktranslator.FormatOpenAI
 		var streamParam any
 		var totalPromptTokens, totalCompletionTokens int64
+		var sawData bool
+		var streamFailed bool
+
+		// The registered response translators consume SSE data lines, so keep each
+		// chunk framed as one. Claude's translator drops unframed payloads
+		// outright, which would empty the whole stream.
+		emitTranslated := func(payload string) {
+			framed := []byte("data: " + payload)
+			for _, tc := range sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, req.Payload, framed, &streamParam) {
+				if len(tc) > 0 {
+					chunks <- cliproxyexecutor.StreamChunk{Payload: tc}
+				}
+			}
+		}
 
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
@@ -215,6 +231,7 @@ func (e *JoyCodeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.
 			if data == "[DONE]" {
 				break
 			}
+			sawData = true
 
 			if pt := gjson.Get(data, "usage.prompt_tokens").Int(); pt > 0 {
 				totalPromptTokens = pt
@@ -223,17 +240,20 @@ func (e *JoyCodeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.
 				totalCompletionTokens = ct
 			}
 
-			translatedChunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, req.Payload, []byte(data), &streamParam)
-			for _, tc := range translatedChunks {
-				if len(tc) > 0 {
-					chunks <- cliproxyexecutor.StreamChunk{Payload: tc}
-				}
-			}
+			emitTranslated(data)
 		}
 
 		if err := scanner.Err(); err != nil {
 			log.Warnf("joycode: stream scanner error: %v", err)
+			streamFailed = true
 			chunks <- cliproxyexecutor.StreamChunk{Err: err}
+		}
+
+		// Feed the terminal marker to the translator so schemas that need explicit
+		// closing events (Claude's message_stop) emit them. The handler layer owns
+		// the wire terminator itself, so nothing is forwarded for openai clients.
+		if !streamFailed && sawData {
+			emitTranslated("[DONE]")
 		}
 
 		reporter.Publish(ctx, usage.Detail{
