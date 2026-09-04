@@ -25,9 +25,9 @@ main:
         - name: generate changelog and create release
           script: |
             # New tag from auto-tag stage; fall back to latest tag if empty
-            CURRENT_TAG="${NEW_TAG:-$(git tag --sort=-v:refname | head -n 1 || echo "")}"
+            CURRENT_TAG="${NEW_TAG:-$(git describe --tags --abbrev=0 2>/dev/null || echo "")}"
             # Previous tag (excluding CURRENT_TAG)
-            PREV_TAG=$(git tag --sort=-v:refname | grep -v "^${CURRENT_TAG}$" | head -n 1 || echo "")
+            PREV_TAG=$(git tag --merged HEAD --sort=-v:refname | grep -v "^${CURRENT_TAG}$" | head -n 1 || echo "")
 
             echo "=== Release Info ==="
             echo "CURRENT_TAG: ${CURRENT_TAG}"
@@ -94,7 +94,7 @@ main:
           imports: https://cnb.cool/liyao52033/envs/-/blob/main/envs.yml
           timeout: 30m
           script: |
-              VERSION="${NEW_TAG:-$(git tag --sort=-v:refname | head -n 1 || echo "")}"
+              VERSION="${NEW_TAG:-$(git describe --tags --abbrev=0 2>/dev/null || echo "")}"
               COMMIT="${CNB_COMMIT:-$(git rev-parse --short HEAD 2>/dev/null || echo none)}"
               BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
