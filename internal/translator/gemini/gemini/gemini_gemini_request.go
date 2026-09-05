@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
@@ -61,7 +62,11 @@ func ConvertGeminiRequestToGemini(_ string, inputRawJSON []byte, _ bool) []byte 
 		valid := role == "user" || role == "model"
 		if role == "" || !valid {
 			var newRole string
-			if prevRole == "" {
+			if translatorcommon.ContentHasGeminiFunctionResponse([]byte(value.Raw)) {
+				// Tool results must always stay on a user turn so the Gemini API
+				// can pair them with the preceding model functionCall turn.
+				newRole = "user"
+			} else if prevRole == "" {
 				newRole = "user"
 			} else if prevRole == "user" {
 				newRole = "model"

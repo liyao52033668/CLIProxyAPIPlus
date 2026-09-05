@@ -120,12 +120,12 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 		}
 	}
 
-	if dataType == "response.reasoning_summary_text.delta" {
+	if dataType == "response.reasoning_summary_text.delta" || dataType == "response.reasoning_text.delta" {
 		if deltaResult := rootResult.Get("delta"); deltaResult.Exists() {
 			template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
 			template, _ = sjson.SetBytes(template, "choices.0.delta.reasoning_content", (*param).(*ConvertCliToOpenAIParams).ReasoningBuffer.Text(deltaResult))
 		}
-	} else if dataType == "response.reasoning_summary_text.done" {
+	} else if dataType == "response.reasoning_summary_text.done" || dataType == "response.reasoning_text.done" {
 		template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
 		template, _ = sjson.SetBytes(template, "choices.0.delta.reasoning_content", "\n\n")
 	} else if dataType == "response.output_text.delta" {
@@ -432,6 +432,17 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 						if summaryItem.Get("type").String() == "summary_text" {
 							reasoningText = summaryItem.Get("text").String()
 							break
+						}
+					}
+				}
+				// Extract reasoning content from content
+				if contentResult := outputItem.Get("content"); contentResult.IsArray() {
+					contentArray := contentResult.Array()
+					for _, contentItem := range contentArray {
+						if contentItem.Get("type").String() == "reasoning_text" {
+							if text := contentItem.Get("text").String(); text != "" {
+								reasoningText += text
+							}
 						}
 					}
 				}

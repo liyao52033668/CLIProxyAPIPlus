@@ -364,18 +364,21 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				continue
 			}
 			originalRole := roleResult.String()
-			precedingToolUseIDs := pendingToolUseIDs
-			pendingToolUseIDs = nil
+			var precedingToolUseIDs []string
+			if originalRole != "system" && originalRole != "developer" {
+				precedingToolUseIDs = pendingToolUseIDs
+				pendingToolUseIDs = nil
+			}
 			role := originalRole
 			if role == "assistant" {
 				role = "model"
-			} else if role == "system" {
+			} else if role == "system" || role == "developer" {
 				role = "user"
 			}
 			clientContentJSON := []byte(`{"role":"","parts":[]}`)
 			clientContentJSON, _ = sjson.SetBytes(clientContentJSON, "role", role)
 			contentsResult := messageResult.Get("content")
-			if originalRole == "system" {
+			if originalRole == "system" || originalRole == "developer" {
 				if reminderText, ok := translatorcommon.ClaudeMessageSystemReminderText(contentsResult); ok {
 					partJSON := []byte(`{}`)
 					partJSON, _ = sjson.SetBytes(partJSON, "text", reminderText)

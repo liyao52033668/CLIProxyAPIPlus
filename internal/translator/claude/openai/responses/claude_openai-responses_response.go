@@ -51,6 +51,8 @@ type claudeToResponsesState struct {
 	InputTokens  int64
 	OutputTokens int64
 	UsageSeen    bool
+	// terminal stop reason from message_delta (e.g. "max_tokens", "end_turn")
+	StopReason string
 }
 
 type claudeResponsesWebSearchItem struct {
@@ -460,6 +462,9 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 				st.UsageSeen = true
 			}
 		}
+		if reason := root.Get("delta.stop_reason"); reason.Exists() {
+			st.StopReason = reason.String()
+		}
 	case "message_stop":
 		// Close any web search items whose result block never arrived; the client
 		// must not be left with a dangling in_progress item.
@@ -471,6 +476,12 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 		completed, _ = sjson.SetBytes(completed, "sequence_number", nextSeq())
 		completed, _ = sjson.SetBytes(completed, "response.id", st.ResponseID)
 		completed, _ = sjson.SetBytes(completed, "response.created_at", st.CreatedAt)
+		// A max_tokens stop reason means the turn was truncated: report an
+		// incomplete response so clients can distinguish it from a full answer.
+		if st.StopReason == "max_tokens" {
+			completed, _ = sjson.SetBytes(completed, "response.status", "incomplete")
+			completed, _ = sjson.SetBytes(completed, "response.incomplete_details.reason", "max_output_tokens")
+		}
 		// Inject original request fields into response as per docs/response.completed.json
 
 		reqBytes := pickRequestJSON(originalRequestRawJSON, requestRawJSON)
@@ -674,6 +685,7 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 		reasoningItemID string
 		inputTokens     int64
 		outputTokens    int64
+		stopReason      string
 	)
 
 	// Per-index tool call aggregation
@@ -785,12 +797,21 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 			if usage := root.Get("usage"); usage.Exists() {
 				outputTokens = usage.Get("output_tokens").Int()
 			}
+			if reason := root.Get("delta.stop_reason"); reason.Exists() {
+				stopReason = reason.String()
+			}
 		}
 	}
 
 	// Populate base fields
 	out, _ = sjson.SetBytes(out, "id", responseID)
 	out, _ = sjson.SetBytes(out, "created_at", createdAt)
+	// A max_tokens stop reason means the turn was truncated: report an
+	// incomplete response so clients can distinguish it from a full answer.
+	if stopReason == "max_tokens" {
+		out, _ = sjson.SetBytes(out, "status", "incomplete")
+		out, _ = sjson.SetBytes(out, "incomplete_details.reason", "max_output_tokens")
+	}
 
 	// Inject request echo fields as top-level (similar to streaming variant)
 	reqBytes := pickRequestJSON(originalRequestRawJSON, requestRawJSON)

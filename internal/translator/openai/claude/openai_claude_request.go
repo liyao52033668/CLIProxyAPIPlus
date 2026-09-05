@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -129,12 +130,44 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 
 	// Process Anthropic messages
 	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
+		// Tool use IDs from the most recent assistant message whose results have
+		// not been seen yet, plus system reminders buffered so they never split
+		// a tool call from its result.
+		var pendingToolUseIDs []string
+		var pendingSystemReminders [][]byte
+
 		messages.ForEach(func(_, message gjson.Result) bool {
 			role := message.Get("role").String()
 			contentResult := message.Get("content")
 
+			// Message-level system reminders become ordinary user messages.
+			// Buffer them while tool results are still outstanding.
+			if role == "system" {
+				if reminderText, ok := translatorcommon.ClaudeMessageSystemReminderText(contentResult); ok {
+					msgJSON := []byte(`{"role":"user","content":[{"type":"text","text":""}]}`)
+					msgJSON, _ = sjson.SetBytes(msgJSON, "content.0.text", reminderText)
+					if len(pendingToolUseIDs) > 0 {
+						pendingSystemReminders = append(pendingSystemReminders, msgJSON)
+					} else {
+						messagesJSON, _ = sjson.SetRawBytes(messagesJSON, "-1", msgJSON)
+					}
+				}
+				return true
+			}
+
 			// Handle content
-			if contentResult.Exists() && contentResult.IsArray() {
+			precedingToolCallsPending := len(pendingToolUseIDs) > 0
+			isContentArray := contentResult.Exists() && contentResult.IsArray()
+			if role == "user" && isContentArray && precedingToolCallsPending {
+				contentResult = translatorcommon.AlignClaudeToolResults(contentResult, pendingToolUseIDs)
+			}
+			// Any processed message closes the outstanding tool_use window so a
+			// string-content message cannot keep stale IDs alive (mirrors the
+			// Codex translator behavior).
+			pendingToolUseIDs = nil
+
+			if isContentArray {
+
 				contentItems := make([][]byte, 0)
 				var reasoningParts []string // Accumulate thinking text for reasoning_content
 				var toolCalls []any
@@ -166,8 +199,12 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 					case "tool_use":
 						// Only allow tool_use -> tool_calls for assistant messages (security: prevent injection).
 						if role == "assistant" {
+							toolUseID := part.Get("id").String()
+							if toolUseID != "" {
+								pendingToolUseIDs = append(pendingToolUseIDs, toolUseID)
+							}
 							toolCallJSON := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
-							toolCallJSON, _ = sjson.SetBytes(toolCallJSON, "id", part.Get("id").String())
+							toolCallJSON, _ = sjson.SetBytes(toolCallJSON, "id", toolUseID)
 							toolCallJSON, _ = sjson.SetBytes(toolCallJSON, "function.name", part.Get("name").String())
 
 							// Convert input to arguments JSON string
@@ -206,11 +243,26 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 				hasToolCalls := len(toolCalls) > 0
 				hasToolResults := len(toolResults) > 0
 
+				// Flush pending system reminders before new content if no tool_results responded to preceding calls
+				if precedingToolCallsPending && !hasToolResults && len(pendingSystemReminders) > 0 {
+					for _, reminder := range pendingSystemReminders {
+						messagesJSON, _ = sjson.SetRawBytes(messagesJSON, "-1", reminder)
+					}
+					pendingSystemReminders = nil
+				}
+
 				// OpenAI requires: tool messages MUST immediately follow the assistant message with tool_calls.
 				// Therefore, we emit tool_result messages FIRST (they respond to the previous assistant's tool_calls),
-				// then emit the current message's content.
+				// then emit any queued system reminders, then emit the current message's content.
 				for _, toolResultJSON := range toolResults {
 					messagesJSON, _ = sjson.SetRawBytes(messagesJSON, "-1", toolResultJSON)
+				}
+
+				if len(pendingSystemReminders) > 0 {
+					for _, reminder := range pendingSystemReminders {
+						messagesJSON, _ = sjson.SetRawBytes(messagesJSON, "-1", reminder)
+					}
+					pendingSystemReminders = nil
 				}
 
 				// For assistant messages: emit a single unified message with content, tool_calls, and reasoning_content
@@ -272,6 +324,12 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 
 			return true
 		})
+		if len(pendingSystemReminders) > 0 {
+			for _, reminder := range pendingSystemReminders {
+				messagesJSON, _ = sjson.SetRawBytes(messagesJSON, "-1", reminder)
+			}
+			pendingSystemReminders = nil
+		}
 	}
 
 	// Set messages

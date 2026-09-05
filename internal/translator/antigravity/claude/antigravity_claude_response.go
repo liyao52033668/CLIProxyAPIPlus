@@ -42,9 +42,8 @@ func decodeSignature(signature string) string {
 }
 
 func formatClaudeSignatureValue(modelName, signature string) string {
-	if cache.SignatureCacheEnabled() {
-		return fmt.Sprintf("%s#%s", cache.GetModelGroup(modelName), signature)
-	}
+	// Provider signatures are emitted as provider-native opaque values without
+	// CPA-specific prefixes (such as claude#, gemini#, or gpt#).
 	if cache.GetModelGroup(modelName) == "claude" {
 		return decodeSignature(signature)
 	}

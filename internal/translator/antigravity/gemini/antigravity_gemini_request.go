@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
@@ -68,7 +69,11 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 			valid := role == "user" || role == "model"
 			if role == "" || !valid {
 				var newRole string
-				if prevRole == "" {
+				if translatorcommon.ContentHasGeminiFunctionResponse([]byte(value.Raw)) {
+					// Tool results must always stay on a user turn so the upstream
+					// API can pair them with the preceding model functionCall turn.
+					newRole = "user"
+				} else if prevRole == "" {
 					newRole = "user"
 				} else if prevRole == "user" {
 					newRole = "model"

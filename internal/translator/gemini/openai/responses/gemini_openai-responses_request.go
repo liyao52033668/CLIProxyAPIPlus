@@ -121,6 +121,13 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 			i++
 		}
 
+		// Leading system/developer items are hoisted into systemInstruction.
+		// Mid-session ones are demoted to user turns instead, so the Gemini
+		// prompt cache is preserved across turns.
+		hasEncounteredConversation := false
+		var pendingDeveloperParts [][]byte
+		openFunctionCalls := 0
+
 		for i := 0; i < len(normalized); i++ {
 			item := normalized[i]
 			itemType := item.Get("type").String()
@@ -132,32 +139,80 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 			switch itemType {
 			case "message":
 				if strings.EqualFold(itemRole, "system") || strings.EqualFold(itemRole, "developer") {
-					if contentArray := item.Get("content"); contentArray.Exists() {
-						systemInstr := []byte(`{"parts":[]}`)
-						if systemInstructionResult := gjson.GetBytes(out, "systemInstruction"); systemInstructionResult.Exists() {
-							systemInstr = []byte(systemInstructionResult.Raw)
-						}
+					if !hasEncounteredConversation {
+						if contentArray := item.Get("content"); contentArray.Exists() {
+							systemInstr := []byte(`{"parts":[]}`)
+							if systemInstructionResult := gjson.GetBytes(out, "systemInstruction"); systemInstructionResult.Exists() {
+								systemInstr = []byte(systemInstructionResult.Raw)
+							}
 
+							if contentArray.IsArray() {
+								contentArray.ForEach(func(_, contentItem gjson.Result) bool {
+									part := []byte(`{"text":""}`)
+									text := contentItem.Get("text").String()
+									part, _ = sjson.SetBytes(part, "text", text)
+									systemInstr, _ = sjson.SetRawBytes(systemInstr, "parts.-1", part)
+									return true
+								})
+							} else if contentArray.Type == gjson.String {
+								part := []byte(`{"text":""}`)
+								part, _ = sjson.SetBytes(part, "text", contentArray.String())
+								systemInstr, _ = sjson.SetRawBytes(systemInstr, "parts.-1", part)
+							}
+
+							if gjson.GetBytes(systemInstr, "parts.#").Int() > 0 {
+								out, _ = sjson.SetRawBytes(out, "systemInstruction", systemInstr)
+							}
+						}
+						continue
+					}
+
+					// Mid-session system/developer notice: demote to a user turn
+					// so the prompt cache is preserved. Buffer it while function
+					// call outputs are still pending so it cannot split a call
+					// from its response.
+					var devParts [][]byte
+					if contentArray := item.Get("content"); contentArray.Exists() {
 						if contentArray.IsArray() {
 							contentArray.ForEach(func(_, contentItem gjson.Result) bool {
-								part := []byte(`{"text":""}`)
 								text := contentItem.Get("text").String()
-								part, _ = sjson.SetBytes(part, "text", text)
-								systemInstr, _ = sjson.SetRawBytes(systemInstr, "parts.-1", part)
+								if text != "" {
+									part := []byte(`{"text":""}`)
+									part, _ = sjson.SetBytes(part, "text", text)
+									devParts = append(devParts, part)
+								}
 								return true
 							})
-						} else if contentArray.Type == gjson.String {
+						} else if contentArray.Type == gjson.String && contentArray.String() != "" {
 							part := []byte(`{"text":""}`)
 							part, _ = sjson.SetBytes(part, "text", contentArray.String())
-							systemInstr, _ = sjson.SetRawBytes(systemInstr, "parts.-1", part)
+							devParts = append(devParts, part)
 						}
-
-						if gjson.GetBytes(systemInstr, "parts.#").Int() > 0 {
-							out, _ = sjson.SetRawBytes(out, "systemInstruction", systemInstr)
+					}
+					if len(devParts) > 0 {
+						if openFunctionCalls > 0 {
+							pendingDeveloperParts = append(pendingDeveloperParts, devParts...)
+						} else {
+							one := []byte(`{"role":"user","parts":[]}`)
+							for _, part := range devParts {
+								one, _ = sjson.SetRawBytes(one, "parts.-1", part)
+							}
+							out, _ = sjson.SetRawBytes(out, "contents.-1", one)
 						}
 					}
 					continue
 				}
+
+				// Flush any pending developer notice before intervening user/model content.
+				if openFunctionCalls == 0 && len(pendingDeveloperParts) > 0 {
+					one := []byte(`{"role":"user","parts":[]}`)
+					for _, part := range pendingDeveloperParts {
+						one, _ = sjson.SetRawBytes(one, "parts.-1", part)
+					}
+					out, _ = sjson.SetRawBytes(out, "contents.-1", one)
+					pendingDeveloperParts = nil
+				}
+				hasEncounteredConversation = true
 
 				// Handle regular messages
 				// Note: In Responses format, model outputs may appear as content items with type "output_text"
@@ -304,6 +359,8 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				}
 
 			case "function_call", "custom_tool_call":
+				hasEncounteredConversation = true
+				openFunctionCalls++
 				// Handle function calls - convert to model message with functionCall.
 				name := item.Get("name").String()
 				if namespace := item.Get("namespace").String(); namespace != "" {
@@ -341,6 +398,10 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				out, _ = sjson.SetRawBytes(out, "contents.-1", modelContent)
 
 			case "function_call_output", "custom_tool_call_output":
+				hasEncounteredConversation = true
+				if openFunctionCalls > 0 {
+					openFunctionCalls--
+				}
 				// Handle function call outputs - convert to function message with functionResponse
 				callID := item.Get("call_id").String()
 				functionContent := []byte(`{"role":"function","parts":[]}`)
@@ -369,7 +430,18 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				}
 				out, _ = sjson.SetRawBytes(out, "contents.-1", functionContent)
 
+				// Flush any buffered developer notice once all call outputs are emitted.
+				if openFunctionCalls == 0 && len(pendingDeveloperParts) > 0 {
+					one := []byte(`{"role":"user","parts":[]}`)
+					for _, part := range pendingDeveloperParts {
+						one, _ = sjson.SetRawBytes(one, "parts.-1", part)
+					}
+					out, _ = sjson.SetRawBytes(out, "contents.-1", one)
+					pendingDeveloperParts = nil
+				}
+
 			case "reasoning":
+				hasEncounteredConversation = true
 				thoughtText := item.Get("summary.0.text").String()
 				signature := openAIResponsesGeminiThoughtSignature(item.Get("encrypted_content").String())
 
@@ -385,6 +457,15 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				modelContent := buildOpenAIResponsesReasoningModelContent(thoughtText, visibleText, signature, useGeminiNativeReasoningLayout)
 				out, _ = sjson.SetRawBytes(out, "contents.-1", modelContent)
 			}
+		}
+		// Flush any buffered developer notice at the end of the conversation.
+		if len(pendingDeveloperParts) > 0 {
+			one := []byte(`{"role":"user","parts":[]}`)
+			for _, part := range pendingDeveloperParts {
+				one, _ = sjson.SetRawBytes(one, "parts.-1", part)
+			}
+			out, _ = sjson.SetRawBytes(out, "contents.-1", one)
+			pendingDeveloperParts = nil
 		}
 	} else if input.Exists() && input.Type == gjson.String {
 		// Simple string input conversion to user message
