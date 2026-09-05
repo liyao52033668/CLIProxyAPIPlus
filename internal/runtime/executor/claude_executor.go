@@ -1008,7 +1008,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		misc.EnsureHeader(r.Header, incomingHeaders, "Anthropic-Dangerous-Direct-Browser-Access", "true")
 	}
 	misc.EnsureHeader(r.Header, incomingHeaders, "X-App", "cli")
-	// Values below match Claude Code 2.1.63 / @anthropic-ai/sdk 0.74.0 (updated 2026-02-28).
+	// Values below match Claude Code 2.1.258 / @anthropic-ai/sdk 0.112.1.
 	misc.EnsureHeader(r.Header, incomingHeaders, "X-Stainless-Retry-Count", "0")
 	misc.EnsureHeader(r.Header, incomingHeaders, "X-Stainless-Runtime", "node")
 	misc.EnsureHeader(r.Header, incomingHeaders, "X-Stainless-Lang", "js")
@@ -1071,7 +1071,7 @@ func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 }
 
 func checkSystemInstructions(payload []byte) []byte {
-	return checkSystemInstructionsWithSigningMode(payload, false, false, false, "2.1.63", "", "")
+	return checkSystemInstructionsWithSigningMode(payload, false, false, false, "2.1.258", "", "")
 }
 
 func isClaudeOAuthToken(apiKey string) bool {
@@ -1644,7 +1644,7 @@ func generateBillingHeader(payload []byte, experimentalCCHSigning bool, version,
 }
 
 func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
-	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, false, "2.1.63", "", "")
+	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, false, "2.1.258", "", "")
 }
 
 // checkSystemInstructionsWithSigningMode injects Claude Code-style system blocks:
