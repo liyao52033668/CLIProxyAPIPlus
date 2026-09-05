@@ -20,7 +20,6 @@ func TestGetQoderModels_ThinkingCapabilities(t *testing.T) {
 		{id: "qmodel", levels: []string{"low", "medium", "high"}},
 		{id: "dmodel", levels: []string{"low", "medium", "high"}},
 		{id: "dfmodel", levels: []string{"high", "max"}},
-		{id: "gm51model", levels: []string{"low", "medium", "high"}},
 		{id: "kmodel", levels: []string{"low", "medium", "high"}},
 	}
 

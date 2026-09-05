@@ -123,8 +123,13 @@ func validateCodexClientModel(model map[string]any) error {
 	}
 
 	levels, ok := model["supported_reasoning_levels"].([]any)
-	if !ok || len(levels) == 0 {
-		return fmt.Errorf("field %q must be a non-empty array", "supported_reasoning_levels")
+	if !ok {
+		return fmt.Errorf("field %q must be an array", "supported_reasoning_levels")
+	}
+	if len(levels) == 0 {
+		// An empty levels array is valid: the model exposes no reasoning
+		// levels and the default level is dropped when serving the entry.
+		return nil
 	}
 	seenLevels := make(map[string]struct{}, len(levels))
 	for i, rawLevel := range levels {
