@@ -66,11 +66,11 @@ func signDpopProof(kp *dpopKeyPair, htu string) (string, error) {
 	return input + "." + b64(sig), nil
 }
 
+// padded encodes b as a big-endian left-padded fixed-size buffer.
+// FillBytes panics when b is negative or does not fit, which cannot happen
+// for ECDSA signature components and P-256 coordinates used here.
 func padded(b *big.Int, size int) []byte {
-	out := make([]byte, size)
-	raw := b.Bytes()
-	copy(out[size-len(raw):], raw)
-	return out
+	return b.FillBytes(make([]byte, size))
 }
 
 func b64(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
