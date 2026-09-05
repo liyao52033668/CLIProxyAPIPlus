@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"maps"
 	"net/http"
 	"os"
 	"strings"
@@ -302,8 +301,12 @@ func captureRequestInfo(c *gin.Context, captureBody bool) (*RequestInfo, error) 
 	method := c.Request.Method
 
 	// Capture headers
-	headers := make(map[string][]string)
-	maps.Copy(headers, c.Request.Header)
+	var headers map[string][]string
+	if c.Request.Header != nil {
+		headers = c.Request.Header.Clone()
+	} else {
+		headers = make(map[string][]string)
+	}
 
 	// Capture request body. shouldCaptureRequestBody only enables this when
 	// ContentLength is known and within the configured cap; still hard-limit the
