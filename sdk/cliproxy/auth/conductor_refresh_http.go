@@ -22,9 +22,6 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	if m.store == nil || auth == nil {
 		return nil
 	}
-	if shouldSkipPersist(ctx) {
-		return nil
-	}
 	if auth.Attributes != nil {
 		if v := strings.ToLower(strings.TrimSpace(auth.Attributes["runtime_only"])); v == "true" {
 			return nil
@@ -34,6 +31,26 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	if auth.Metadata == nil {
 		return nil
 	}
+	// Check skip-persist before touching bookkeeping so skipped calls never
+	// advance lastPersistedAt without actually writing to the store.
+	if shouldSkipPersist(ctx) {
+		return nil
+	}
+	// Serialize persistence per auth ID so concurrent refresh/preparation
+	// results cannot race or write out of order.
+	lockVal, _ := m.persistLocks.LoadOrStore(auth.ID, &authPersistLock{})
+	pLock, _ := lockVal.(*authPersistLock)
+	if pLock == nil {
+		_, err := m.store.Save(ctx, auth)
+		return err
+	}
+	pLock.mu.Lock()
+	defer pLock.mu.Unlock()
+	if auth.UpdatedAt.Before(pLock.lastPersistedAt) {
+		log.Debugf("skip out-of-order persist for %s: UpdatedAt %s predates last persisted %s", auth.ID, auth.UpdatedAt.Format(time.RFC3339), pLock.lastPersistedAt.Format(time.RFC3339))
+		return nil
+	}
+	pLock.lastPersistedAt = auth.UpdatedAt
 	_, err := m.store.Save(ctx, auth)
 	return err
 }
@@ -354,6 +371,10 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) (*Auth, error) {
 	if cloned == nil || exec == nil {
 		return nil, &Error{Code: "auth_not_found", Message: "no refreshable auth or executor available for " + id}
 	}
+	// Snapshot the pre-refresh state before the executor runs so the three-way
+	// merge can detect executor-side changes (some executors mutate the passed
+	// auth in place and return it).
+	refreshBase := cloned.Clone()
 	updated, err := exec.Refresh(ctx, cloned)
 	if err != nil && errors.Is(err, context.Canceled) {
 		log.Debugf("refresh canceled for %s, %s", auth.Provider, auth.ID)
@@ -368,12 +389,32 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) (*Auth, error) {
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil && !current.Disabled && current.Status != StatusDisabled {
 			current.LastError = refreshErrorFromError(err)
-			if unauthorized {
-				current.NextRefreshAfter = time.Time{}
+			hasValidAccessToken := current.HasValidAccessToken(now)
+			hasExpiredAccessToken := !hasValidAccessToken && current.HasExpiredAccessToken(now)
+			if unauthorized || hasExpiredAccessToken {
 				current.Unavailable = true
 				current.Status = StatusError
-				current.StatusMessage = "unauthorized"
+				if unauthorized {
+					current.NextRefreshAfter = time.Time{}
+					current.StatusMessage = "unauthorized"
+				} else {
+					current.NextRefreshAfter = now.Add(refreshFailureBackoff)
+					current.StatusMessage = "token expired"
+				}
+			} else if hasValidAccessToken {
+				// Access token remains valid. Preserve current in-flight/cooldown status without overwrite.
+				nextRetry := now.Add(refreshFailureBackoff)
+				if exp, ok := current.AccessTokenExpirationTime(); ok && !exp.IsZero() && nextRetry.After(exp) {
+					nextRetry = exp
+				}
+				current.NextRefreshAfter = nextRetry
+
+				if !current.Unavailable {
+					log.Warnf("credential refresh failed for %s (%s): %s; retaining active credential as access token is unexpired", current.Provider, current.ID, boundedErrorDiagnostic(err))
+				}
 			} else {
+				// Metadata carries no access token to assess (e.g. tokens kept in
+				// Storage). Keep the credential schedulable and only back off.
 				current.NextRefreshAfter = now.Add(refreshFailureBackoff)
 			}
 			m.auths[id] = current
@@ -415,7 +456,9 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) (*Auth, error) {
 	if m.shouldRefresh(updated, now) {
 		updated.NextRefreshAfter = now.Add(refreshIneffectiveBackoff)
 	}
-	return m.update(ctx, updated, true)
+	// Merge refresh results into the latest runtime auth so concurrent user
+	// modifications and active cooldowns are preserved.
+	return m.updateMerged(ctx, refreshBase, updated, true, updateModeRefresh)
 }
 
 func (m *Manager) executorFor(provider string) ProviderExecutor {
@@ -649,4 +692,17 @@ func (m *Manager) HTTPRequest(ctx context.Context, auth *Auth, req *http.Request
 // HttpRequest is deprecated, use HTTPRequest instead.
 func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error) {
 	return m.HTTPRequest(ctx, auth, req)
+}
+
+// boundedErrorDiagnostic returns a bounded single-line error message suitable for logs.
+func boundedErrorDiagnostic(err error) string {
+	if err == nil {
+		return ""
+	}
+	const maxLen = 300
+	diagnostic := strings.Join(strings.Fields(err.Error()), " ")
+	if len(diagnostic) > maxLen {
+		diagnostic = diagnostic[:maxLen] + " ..."
+	}
+	return diagnostic
 }

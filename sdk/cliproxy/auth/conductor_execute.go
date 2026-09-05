@@ -83,12 +83,28 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	return auth.Clone(), nil
 }
 
+// UpdatePreparedAuth atomically merges request preparation results into the latest runtime auth
+// under the manager lock, preserving concurrent modifications without modifying refresh lifecycle fields.
+func (m *Manager) UpdatePreparedAuth(ctx context.Context, base, updated *Auth) (*Auth, error) {
+	return m.updateMerged(ctx, base, updated, false, updateModePrepare)
+}
+
+// UpdateRefreshedAuth atomically merges refresh results into the latest runtime auth
+// under the manager lock, preserving concurrent modifications (proxy_url, notes, weights, etc.).
+func (m *Manager) UpdateRefreshedAuth(ctx context.Context, base, updated *Auth) (*Auth, error) {
+	return m.updateMerged(ctx, base, updated, false, updateModeRefresh)
+}
+
 // Update replaces an existing auth entry and notifies hooks.
 func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	return m.update(ctx, auth, false)
 }
 
 func (m *Manager) update(ctx context.Context, auth *Auth, requireActive bool) (*Auth, error) {
+	return m.updateMerged(ctx, nil, auth, requireActive, updateModeReplace)
+}
+
+func (m *Manager) updateMerged(ctx context.Context, base *Auth, auth *Auth, requireActive bool, mode updateAuthMode) (*Auth, error) {
 	if auth == nil || auth.ID == "" {
 		return nil, nil
 	}
@@ -104,6 +120,15 @@ func (m *Manager) update(ctx context.Context, auth *Auth, requireActive bool) (*
 	if requireActive && (existing.Disabled || existing.Status == StatusDisabled) {
 		m.mu.Unlock()
 		return nil, nil
+	}
+	if mode == updateModeRefresh {
+		if merged := MergeRefreshedAuth(base, existing, auth); merged != nil {
+			auth = merged
+		}
+	} else if mode == updateModePrepare {
+		if merged := MergePreparedAuth(base, existing, auth); merged != nil {
+			auth = merged
+		}
 	}
 	if !auth.indexAssigned && auth.Index == "" {
 		auth.Index = existing.Index
@@ -191,6 +216,7 @@ func (m *Manager) Remove(ctx context.Context, id string) {
 		m.scheduler.removeAuth(id)
 	}
 	m.removeRefreshSchedule(id)
+	m.persistLocks.Delete(id)
 	if m.store != nil {
 		_ = m.store.Delete(ctx, id)
 	}
@@ -584,7 +610,8 @@ func (m *Manager) prepareRequestAuth(ctx context.Context, auth *Auth, executor P
 	if !ok || preparer == nil || !preparer.ShouldPrepareRequestAuth(auth) {
 		return auth, nil
 	}
-	updated, err := preparer.PrepareRequestAuth(ctx, auth)
+	base := auth.Clone()
+	updated, err := preparer.PrepareRequestAuth(ctx, base.Clone())
 	if err != nil {
 		return nil, err
 	}
@@ -595,10 +622,14 @@ func (m *Manager) prepareRequestAuth(ctx context.Context, auth *Auth, executor P
 	if shouldSkipPersist(ctx) {
 		persistCtx = context.Background()
 	}
-	if _, errUpdate := m.Update(persistCtx, updated); errUpdate != nil {
+	saved, errUpdate := m.UpdatePreparedAuth(persistCtx, base, updated)
+	if errUpdate != nil {
 		return nil, errUpdate
 	}
-	return updated, nil
+	if saved != nil {
+		return saved, nil
+	}
+	return auth, nil
 }
 
 func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int) (cliproxyexecutor.Response, error) {

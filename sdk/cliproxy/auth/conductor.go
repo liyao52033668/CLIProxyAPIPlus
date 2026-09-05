@@ -65,9 +65,12 @@ const (
 	// success but the auth still evaluates as needing refresh (e.g. token expiry
 	// wasn't updated). Without this guard, the auto-refresh loop can tight-loop and
 	// burn CPU at idle.
-	refreshIneffectiveBackoff    = 30 * time.Second
-	quotaBackoffBase             = time.Second
-	quotaBackoffMax              = 30 * time.Minute
+	refreshIneffectiveBackoff = 30 * time.Second
+	quotaBackoffBase          = time.Second
+	quotaBackoffMax           = 30 * time.Minute
+	// minQuotaCooldownFloor enforces a minimum wait when an upstream Retry-After
+	// hint is zero or sub-second, preventing 429 retry thrash against credentials.
+	minQuotaCooldownFloor        = 10 * time.Second
 	autoModelFailoverMaxAttempts = 3
 )
 
@@ -217,6 +220,23 @@ type Manager struct {
 	// Auto refresh state
 	refreshCancel context.CancelFunc
 	refreshLoop   *authAutoRefreshLoop
+
+	// persistLocks serializes disk persistence per auth ID and guards against out-of-order writes.
+	persistLocks sync.Map
+}
+
+type updateAuthMode int
+
+const (
+	updateModeReplace updateAuthMode = iota
+	updateModeRefresh
+	updateModePrepare
+)
+
+// authPersistLock serializes disk persistence per auth ID and guards against out-of-order writes.
+type authPersistLock struct {
+	mu              sync.Mutex
+	lastPersistedAt time.Time
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
