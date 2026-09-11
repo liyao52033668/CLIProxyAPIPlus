@@ -42,6 +42,8 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 	out = append(out, s.synthesizeVertexCompat(ctx)...)
 	// BT (BaoTa)
 	out = append(out, s.synthesizeBTKeys(ctx)...)
+	// Freebuff (Codebuff)
+	out = append(out, s.synthesizeFreebuffKeys(ctx)...)
 
 	return out, nil
 }
@@ -442,6 +444,75 @@ func (s *ConfigSynthesizer) synthesizeBTKeys(ctx *SynthesisContext) []*coreauth.
 		}
 		ApplyAuthExcludedModelsMeta(a, cfg, entry.ExcludedModels, "credentials")
 		out = append(out, a)
+	}
+	return out
+}
+
+// synthesizeFreebuffKeys creates Auth entries for Freebuff (Codebuff) API keys.
+func (s *ConfigSynthesizer) synthesizeFreebuffKeys(ctx *SynthesisContext) []*coreauth.Auth {
+	cfg := ctx.Config
+	now := ctx.Now
+	idGen := ctx.IDGenerator
+
+	out := make([]*coreauth.Auth, 0, len(cfg.FreebuffKey))
+	for i := range cfg.FreebuffKey {
+		fk := cfg.FreebuffKey[i]
+		prefix := strings.TrimSpace(fk.Prefix)
+		add := func(key, proxyURL, comment string) {
+			key = strings.TrimSpace(key)
+			if key == "" {
+				return
+			}
+			proxyURL = strings.TrimSpace(proxyURL)
+			baseURL := strings.TrimSpace(fk.BaseURL)
+			id, token := idGen.Next("freebuff:apikey", key, baseURL, proxyURL)
+			attrs := map[string]string{
+				"source":       fmt.Sprintf("config:freebuff[%s]", token),
+				"api_key":      key,
+				"config_index": strconv.Itoa(i),
+			}
+			if comment != "" {
+				attrs["comment"] = comment
+			}
+			if fk.Priority != 0 {
+				attrs["priority"] = strconv.Itoa(fk.Priority)
+			}
+			if baseURL != "" {
+				attrs["base_url"] = baseURL
+			}
+			if hash := diff.ComputeFreebuffModelsHash(fk.Models); hash != "" {
+				attrs["models_hash"] = hash
+			}
+			addConfigHeadersToAttrs(fk.Headers, attrs)
+			metadata := map[string]any{}
+			if fk.DisableCooling {
+				metadata["disable_cooling"] = true
+			}
+			a := &coreauth.Auth{
+				ID:         id,
+				Provider:   "freebuff",
+				Label:      "freebuff-apikey",
+				Prefix:     prefix,
+				Status:     coreauth.StatusActive,
+				ProxyURL:   proxyURL,
+				Attributes: attrs,
+				Metadata:   metadata,
+				CreatedAt:  now,
+				UpdatedAt:  now,
+			}
+			ApplyAuthExcludedModelsMeta(a, cfg, fk.ExcludedModels, "apikey")
+			if len(a.Metadata) == 0 {
+				a.Metadata = nil
+			}
+			out = append(out, a)
+		}
+		if len(fk.APIKeyEntries) > 0 {
+			for _, entry := range fk.APIKeyEntries {
+				add(entry.APIKey, entry.ProxyURL, "")
+			}
+			continue
+		}
+		add(fk.APIKey, fk.ProxyURL, strings.TrimSpace(fk.Comment))
 	}
 	return out
 }

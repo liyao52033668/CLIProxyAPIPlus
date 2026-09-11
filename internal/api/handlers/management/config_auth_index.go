@@ -34,6 +34,11 @@ type openAICompatibilityAPIKeyWithAuthIndex struct {
 	AuthIndex string `json:"auth-index,omitempty"`
 }
 
+type freebuffKeyWithAuthIndex struct {
+	config.FreebuffKey
+	AuthIndex string `json:"auth-index,omitempty"`
+}
+
 type openAICompatibilityWithAuthIndex struct {
 	Name                  string                                   `json:"name"`
 	Priority              int                                      `json:"priority,omitempty"`
@@ -193,6 +198,46 @@ func (h *Handler) vertexCompatKeysWithAuthIndex() []vertexCompatKeyWithAuthIndex
 			VertexCompatKey: entry,
 			AuthIndex:       authIndex,
 		}
+	}
+	return out
+}
+
+func (h *Handler) freebuffKeysWithAuthIndex() []freebuffKeyWithAuthIndex {
+	if h == nil {
+		return nil
+	}
+	liveIndexByID := h.liveAuthIndexByID()
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.cfg == nil {
+		return nil
+	}
+
+	idGen := synthesizer.NewStableIDGenerator()
+	out := make([]freebuffKeyWithAuthIndex, 0, len(h.cfg.FreebuffKey))
+	for i := range h.cfg.FreebuffKey {
+		entry := h.cfg.FreebuffKey[i]
+		authIndex := ""
+		baseURL := strings.TrimSpace(entry.BaseURL)
+		if len(entry.APIKeyEntries) > 0 {
+			for _, apiKeyEntry := range entry.APIKeyEntries {
+				key := strings.TrimSpace(apiKeyEntry.APIKey)
+				if key == "" {
+					continue
+				}
+				id, _ := idGen.Next("freebuff:apikey", key, baseURL, strings.TrimSpace(apiKeyEntry.ProxyURL))
+				authIndex = liveIndexByID[id]
+				break
+			}
+		} else if key := strings.TrimSpace(entry.APIKey); key != "" {
+			id, _ := idGen.Next("freebuff:apikey", key, baseURL, strings.TrimSpace(entry.ProxyURL))
+			authIndex = liveIndexByID[id]
+		}
+		out = append(out, freebuffKeyWithAuthIndex{
+			FreebuffKey: entry,
+			AuthIndex:   authIndex,
+		})
 	}
 	return out
 }

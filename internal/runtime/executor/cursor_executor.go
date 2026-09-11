@@ -654,14 +654,20 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}
 	}
 
+	// sendDoneSwitchable terminates the response. OpenAI-format clients are
+	// terminated by the handler itself: ForwardStream.WriteDone writes
+	// "data: [DONE]" when the output channel closes. Emitting a raw [DONE]
+	// chunk here as well produced a duplicate terminal marker. Translated
+	// formats (Claude/Gemini) have no such handler hook, so their terminal
+	// events must still be synthesized through the translator.
 	sendDoneSwitchable := func() {
-		if needsTranslate {
-			done := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, payload, []byte("data: [DONE]\n"), &streamParam)
-			for _, d := range done {
-				emitToOut(cliproxyexecutor.StreamChunk{Payload: bytes.Clone(d)})
-			}
-		} else {
-			emitToOut(cliproxyexecutor.StreamChunk{Payload: []byte("[DONE]")})
+		marker := cursorDoneMarker(needsTranslate)
+		if marker == nil {
+			return
+		}
+		done := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, payload, marker, &streamParam)
+		for _, d := range done {
+			emitToOut(cliproxyexecutor.StreamChunk{Payload: bytes.Clone(d)})
 		}
 	}
 
@@ -713,36 +719,20 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	go func() {
 		var resumeOutCh chan cliproxyexecutor.StreamChunk
 		_ = resumeOutCh
-		thinkingActive := false
+		roleSent := false
 		toolCallIndex := 0
 		tokenUsage := &cursorTokenUsage{}
 		tokenUsage.setInputEstimate(len(payload))
 
 		streamErr := processH2SessionFrames(sessionCtx, stream, params.BlobStore, params.McpTools,
 			func(text string, isThinking bool) {
-				if isThinking {
-					if !thinkingActive {
-						thinkingActive = true
-						sendChunkSwitchable(`{"role":"assistant","content":"<think>"}`, "")
-					}
-					sendChunkSwitchable(fmt.Sprintf(`{"content":%s}`, jsonString(text)), "")
-				} else {
-					if thinkingActive {
-						thinkingActive = false
-						sendChunkSwitchable(`{"content":"</think>"}`, "")
-					}
-					sendChunkSwitchable(fmt.Sprintf(`{"content":%s}`, jsonString(text)), "")
-				}
+				sendChunkSwitchable(cursorTextDeltaJSON(text, isThinking, &roleSent), "")
 			},
 			func(exec pendingMcpExec) {
 				// Mark the park BEFORE closing the output channel: the watchdog
 				// fires on request ctx end and must see the park to not treat a
 				// normal tool-call handoff as a client disconnect.
 				mcpParked.Store(true)
-				if thinkingActive {
-					thinkingActive = false
-					sendChunkSwitchable(`{"content":"</think>"}`, "")
-				}
 				// ToolCallId/ToolName come from upstream unvalidated; control
 				// characters there would split the SSE data line mid-JSON.
 				toolCallJSON := fmt.Sprintf(`{"tool_calls":[{"index":%d,"id":%s,"type":"function","function":{"name":%s,"arguments":%s}}]}`,
@@ -787,6 +777,8 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 						created = time.Now().Unix()
 						// tool_call indices restart within each HTTP response
 						toolCallIndex = 0
+						// each new HTTP response emits its own leading role delta
+						roleSent = false
 						outMu.Unlock()
 					},
 				}
@@ -836,10 +828,6 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				stream.Close()
 				return
 			}
-		}
-
-		if thinkingActive {
-			sendChunkSwitchable(`{"content":"</think>"}`, "")
 		}
 
 		if midStreamErr {
@@ -1240,16 +1228,22 @@ func processH2SessionFrames(
 				buf.Next(consumed)
 				log.Debugf("cursor: parsed Connect frame flags=0x%02x payload=%d bytes consumed=%d", flags, len(payload), consumed)
 
+				// The stream advertises connect-accept-encoding: gzip, so the
+				// compression flag (0x01) may be set on any frame — including
+				// the end-of-stream trailer, which the api5 agent host sends
+				// gzipped (flags 0x03). ParseConnectEndStreamFrame decompresses
+				// before parsing; without that the trailer's gzip magic
+				// (0x1f 0x8b) fails JSON parsing and the real upstream error is
+				// replaced by a decoding error.
 				if flags&cursorproto.ConnectEndStreamFlag != 0 {
-					if err := cursorproto.ParseConnectEndStream(payload); err != nil {
+					if err := cursorproto.ParseConnectEndStreamFrame(flags, payload); err != nil {
 						log.Warnf("cursor: connect end stream error: %v", err)
 						return err // propagate server-side errors (quota, rate limit, etc.)
 					}
 					continue
 				}
 
-				// The stream advertises connect-accept-encoding: gzip; a
-				// compressed message carries the compression flag.
+				// A compressed data message carries the compression flag.
 				decompressed, gzErr := cursorproto.DecompressConnectPayload(flags, payload)
 				if gzErr != nil {
 					log.Warnf("cursor: decompress connect payload: %v", gzErr)
@@ -2470,6 +2464,41 @@ func sseChunk(id string, created int64, model string, delta string, finishReason
 func jsonString(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
+}
+
+// cursorTextDeltaJSON builds the OpenAI delta JSON fragment for one text-delta
+// frame from the Cursor H2 stream. Reasoning is emitted as a dedicated
+// reasoning_content field instead of being wrapped in literal
+// <think>...</think> tags inside content: OpenAI-compatible clients only
+// recognize reasoning_content/reasoning/reasoning_text as reasoning and have
+// no support for parsing inline think tags out of content, so the tags would
+// otherwise leak into the user-visible answer verbatim. roleSent is set to
+// true the first time this emits a role field so later deltas (thinking or
+// not) omit it.
+func cursorTextDeltaJSON(text string, isThinking bool, roleSent *bool) string {
+	role := ""
+	if !*roleSent {
+		role = `"role":"assistant",`
+		*roleSent = true
+	}
+	field := "content"
+	if isThinking {
+		field = "reasoning_content"
+	}
+	return fmt.Sprintf(`{%s"%s":%s}`, role, field, jsonString(text))
+}
+
+// cursorDoneMarker returns the raw marker to feed through the response
+// translator when the Cursor stream ends. For translated formats the
+// translator turns it into that format's terminal event. For OpenAI-format
+// clients it returns nil: the handler owns the terminal "data: [DONE]" via
+// ForwardStream.WriteDone, and emitting a second one from the executor would
+// duplicate it on the wire.
+func cursorDoneMarker(needsTranslate bool) []byte {
+	if !needsTranslate {
+		return nil
+	}
+	return []byte("data: [DONE]\n")
 }
 
 func decodeMcpArgsToJSON(args map[string][]byte) string {

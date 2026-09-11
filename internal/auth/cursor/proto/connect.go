@@ -75,6 +75,18 @@ func (e *ConnectError) Error() string {
 	return fmt.Sprintf("Connect error %s: %s", e.Code, e.Message)
 }
 
+// ParseConnectEndStreamFrame parses an end-of-stream trailer, decompressing it
+// first when the frame carries the compression flag. The api2 agent host sends
+// the trailer as plain JSON (flags 0x02), while api5 sends it gzipped
+// (flags 0x03); parsing the compressed bytes directly fails on the gzip magic.
+func ParseConnectEndStreamFrame(flags byte, data []byte) error {
+	decompressed, err := DecompressConnectPayload(flags, data)
+	if err != nil {
+		return err
+	}
+	return ParseConnectEndStream(decompressed)
+}
+
 // ParseConnectEndStream parses a Connect end-of-stream frame payload (JSON).
 // Returns nil if there is no error in the trailer.
 // On error, returns a *ConnectError with the server's error code and message.

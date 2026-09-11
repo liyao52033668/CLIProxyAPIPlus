@@ -220,3 +220,39 @@ func mustMsg(t *testing.T, name string) protoreflect.MessageDescriptor {
 	}
 	return md
 }
+
+func TestSanitizeCursorToolSchemaStripsCompositionKeywords(t *testing.T) {
+	in := []byte(`{"type":"object","properties":{"a":{"oneOf":[{"type":"string"},{"type":"number"}]},"b":{"type":"array","items":{"anyOf":[{"type":"string"}]}}},"allOf":[{"type":"object"}],"not":{"type":"null"}}`)
+	out := SanitizeCursorToolSchema(in)
+
+	for _, key := range []string{"oneOf", "anyOf", "allOf"} {
+		if strings.Contains(string(out), key) {
+			t.Fatalf("expected %q to be stripped, got %s", key, out)
+		}
+	}
+	if !strings.Contains(string(out), `"not"`) {
+		t.Fatalf(`expected "not" to be preserved, got %s`, out)
+	}
+	if !strings.Contains(string(out), `"a"`) || !strings.Contains(string(out), `"b"`) {
+		t.Fatalf("expected property keys to survive, got %s", out)
+	}
+}
+
+func TestSanitizeCursorToolSchemaPassesThroughNonObjects(t *testing.T) {
+	cases := [][]byte{nil, {}, []byte("not json"), []byte(`"plain"`), []byte(`[1,2]`)}
+	for _, in := range cases {
+		got := SanitizeCursorToolSchema(in)
+		if string(got) != string(in) {
+			t.Fatalf("expected %q unchanged, got %q", in, got)
+		}
+	}
+}
+
+func TestSanitizeCursorToolSchemaDoesNotMutateInput(t *testing.T) {
+	in := []byte(`{"oneOf":[{"type":"string"}]}`)
+	orig := string(in)
+	SanitizeCursorToolSchema(in)
+	if string(in) != orig {
+		t.Fatalf("input slice was mutated: %s", in)
+	}
+}

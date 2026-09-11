@@ -42,4 +42,7 @@ const (
 
 	// CommandCode represents the Command Code provider identifier.
 	CommandCode = "commandcode"
+
+	// Freebuff represents the Freebuff (Codebuff) provider identifier.
+	Freebuff = "freebuff"
 )

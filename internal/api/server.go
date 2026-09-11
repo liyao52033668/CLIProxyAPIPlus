@@ -1083,6 +1083,15 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/vertex-api-key", s.mgmt.PatchVertexCompatKey)
 		mgmt.DELETE("/vertex-api-key", s.mgmt.DeleteVertexCompatKey)
 
+		mgmt.GET("/freebuff-api-key", secretExport, s.mgmt.GetFreebuffKeys)
+		mgmt.PUT("/freebuff-api-key", s.mgmt.PutFreebuffKeys)
+		mgmt.PATCH("/freebuff-api-key", s.mgmt.PatchFreebuffKey)
+		mgmt.DELETE("/freebuff-api-key", s.mgmt.DeleteFreebuffKey)
+
+		// Freebuff publishes no upstream model list, so the UI reads this
+		// compiled-in catalog instead of proxying /v1/models.
+		mgmt.GET("/freebuff/models", s.mgmt.GetFreebuffCatalog)
+
 		mgmt.GET("/oauth-excluded-models", s.mgmt.GetOAuthExcludedModels)
 		mgmt.PUT("/oauth-excluded-models", s.mgmt.PutOAuthExcludedModels)
 		mgmt.PATCH("/oauth-excluded-models", s.mgmt.PatchOAuthExcludedModels)

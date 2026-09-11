@@ -942,6 +942,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetCodeArtsModels()
 	case "gitlab":
 		return GetGitlabModels()
+	case "freebuff":
+		return GetFreebuffModels()
 	case "xai", "x-ai", "grok":
 		return GetXAIModels()
 	default:

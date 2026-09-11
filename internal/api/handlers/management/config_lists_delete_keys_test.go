@@ -301,3 +301,113 @@ func TestDeleteCodexKey_RequiresBaseURLWhenAPIKeyDuplicated(t *testing.T) {
 		t.Fatalf("codex keys len = %d, want 2", got)
 	}
 }
+
+const testFreebuffCredential = "freebuff-placeholder-credential"
+
+func TestPatchFreebuffKeyPreservesUnspecifiedFields(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	h := &Handler{
+		cfg: &config.Config{FreebuffKey: []config.FreebuffKey{{
+			APIKey:  testFreebuffCredential,
+			BaseURL: "https://www.codebuff.com",
+			Models: []config.FreebuffModel{{
+				Name: "deepseek/deepseek-v4-flash", Alias: "flash", AgentID: "base2-free-deepseek-flash",
+			}},
+		}}},
+		configFilePath: writeTestConfigFile(t),
+	}
+	body := []byte(`{"index":0,"value":{"priority":7}}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPatch, "/v0/management/freebuff-api-key", strings.NewReader(string(body)))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.PatchFreebuffKey(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if len(h.cfg.FreebuffKey) != 1 {
+		t.Fatalf("freebuff keys = %#v", h.cfg.FreebuffKey)
+	}
+	entry := h.cfg.FreebuffKey[0]
+	if entry.APIKey != testFreebuffCredential || entry.Priority != 7 || len(entry.Models) != 1 {
+		t.Fatalf("patched entry = %#v", entry)
+	}
+}
+
+func TestDeleteFreebuffKeyRejectsMalformedIndex(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	h := &Handler{
+		cfg:            &config.Config{FreebuffKey: []config.FreebuffKey{{APIKey: testFreebuffCredential}}},
+		configFilePath: writeTestConfigFile(t),
+	}
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodDelete, "/v0/management/freebuff-api-key?index=invalid", nil)
+
+	h.DeleteFreebuffKey(c)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if len(h.cfg.FreebuffKey) != 1 || h.cfg.FreebuffKey[0].APIKey != testFreebuffCredential {
+		t.Fatalf("malformed index changed config: %#v", h.cfg.FreebuffKey)
+	}
+}
+
+func TestPatchFreebuffKeyRejectsAmbiguousCredentialMatch(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	h := &Handler{
+		cfg: &config.Config{FreebuffKey: []config.FreebuffKey{
+			{APIKey: testFreebuffCredential, Priority: 1},
+			{APIKey: testFreebuffCredential, Priority: 2},
+		}},
+		configFilePath: writeTestConfigFile(t),
+	}
+	body := []byte(`{"match":"` + testFreebuffCredential + `","value":{"priority":9}}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPatch, "/v0/management/freebuff-api-key", strings.NewReader(string(body)))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.PatchFreebuffKey(c)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if h.cfg.FreebuffKey[0].Priority != 1 || h.cfg.FreebuffKey[1].Priority != 2 {
+		t.Fatalf("ambiguous match changed config: %#v", h.cfg.FreebuffKey)
+	}
+}
+
+func TestDeleteFreebuffKeyRejectsAmbiguousCredentialMatch(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	h := &Handler{
+		cfg: &config.Config{FreebuffKey: []config.FreebuffKey{
+			{APIKey: testFreebuffCredential, BaseURL: "https://a.example"},
+			{APIKey: testFreebuffCredential, BaseURL: "https://b.example"},
+		}},
+		configFilePath: writeTestConfigFile(t),
+	}
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodDelete, "/v0/management/freebuff-api-key?api-key="+testFreebuffCredential, nil)
+
+	h.DeleteFreebuffKey(c)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if len(h.cfg.FreebuffKey) != 2 {
+		t.Fatalf("ambiguous delete changed config: %#v", h.cfg.FreebuffKey)
+	}
+}

@@ -3,6 +3,7 @@
 package proto
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -421,7 +422,7 @@ func EncodeRunRequest(p *RunRequestParams) ([]byte, error) {
 			e.setStr(td, "name", tool.Name)
 			e.setStr(td, "description", tool.Description)
 			if len(tool.InputSchema) > 0 {
-				e.setBytes(td, "input_schema", jsonToProtobufValueBytes(tool.InputSchema))
+				e.setBytes(td, "input_schema", toolInputSchemaBytes(tool.InputSchema))
 			}
 			e.setStr(td, "provider_identifier", "proxy")
 			e.setStr(td, "tool_name", tool.Name)
@@ -495,7 +496,7 @@ func encodeRunRequestWithCheckpoint(p *RunRequestParams) ([]byte, error) {
 			e.setStr(td, "name", tool.Name)
 			e.setStr(td, "description", tool.Description)
 			if len(tool.InputSchema) > 0 {
-				e.setBytes(td, "input_schema", jsonToProtobufValueBytes(tool.InputSchema))
+				e.setBytes(td, "input_schema", toolInputSchemaBytes(tool.InputSchema))
 			}
 			e.setStr(td, "provider_identifier", "proxy")
 			e.setStr(td, "tool_name", tool.Name)
@@ -567,7 +568,7 @@ func EncodeResumeRequest(p *ResumeRequestParams) ([]byte, error) {
 			e.setStr(td, "name", tool.Name)
 			e.setStr(td, "description", tool.Description)
 			if len(tool.InputSchema) > 0 {
-				e.setBytes(td, "input_schema", jsonToProtobufValueBytes(tool.InputSchema))
+				e.setBytes(td, "input_schema", toolInputSchemaBytes(tool.InputSchema))
 			}
 			e.setStr(td, "provider_identifier", "proxy")
 			e.setStr(td, "tool_name", tool.Name)
@@ -603,7 +604,7 @@ func EncodeResumeRequest(p *ResumeRequestParams) ([]byte, error) {
 			e.setStr(td, "name", tool.Name)
 			e.setStr(td, "description", tool.Description)
 			if len(tool.InputSchema) > 0 {
-				e.setBytes(td, "input_schema", jsonToProtobufValueBytes(tool.InputSchema))
+				e.setBytes(td, "input_schema", toolInputSchemaBytes(tool.InputSchema))
 			}
 			e.setStr(td, "provider_identifier", "proxy")
 			e.setStr(td, "tool_name", tool.Name)
@@ -666,7 +667,7 @@ func EncodeExecRequestContextResult(execMsgId uint32, execId string, tools []Mcp
 			e.setStr(td, "name", tool.Name)
 			e.setStr(td, "description", tool.Description)
 			if len(tool.InputSchema) > 0 {
-				e.setBytes(td, "input_schema", jsonToProtobufValueBytes(tool.InputSchema))
+				e.setBytes(td, "input_schema", toolInputSchemaBytes(tool.InputSchema))
 			}
 			e.setStr(td, "provider_identifier", "proxy")
 			e.setStr(td, "tool_name", tool.Name)
@@ -895,6 +896,74 @@ func encodeExecClientMsg(id uint32, execId string, resultFieldName string, resul
 }
 
 // --- Utilities ---
+
+// cursorUnsupportedSchemaKeys are the JSON-Schema composition keywords
+// Cursor's gateway cannot carry. A tool whose input schema contains oneOf,
+// anyOf, or allOf is rejected upstream with a wrapped provider 400 for the
+// whole request. MCP tools imported from external servers routinely ship such
+// schemas. "not" is tolerated upstream and kept.
+var cursorUnsupportedSchemaKeys = map[string]struct{}{
+	"oneOf": {},
+	"anyOf": {},
+	"allOf": {},
+}
+
+// SanitizeCursorToolSchema strips the JSON-Schema composition keywords
+// Cursor's gateway rejects (oneOf/anyOf/allOf) from a tool input schema,
+// preserving every other key including "not". The unsupported keys are
+// removed at every object level (top-level and nested) and the value is
+// re-serialized. The input slice is never mutated.
+//
+// A nil, empty, or invalid JSON input is returned unchanged, as is a JSON
+// value that is not an object (the callers only feed tool input schemas,
+// which are always objects; any other shape is passed through intact).
+func SanitizeCursorToolSchema(parameters []byte) []byte {
+	if len(parameters) == 0 {
+		return parameters
+	}
+	dec := json.NewDecoder(bytes.NewReader(parameters))
+	dec.UseNumber()
+	var parsed any
+	if err := dec.Decode(&parsed); err != nil {
+		return parameters
+	}
+	sanitized := sanitizeSchemaValue(parsed)
+	out, err := json.Marshal(sanitized)
+	if err != nil {
+		return parameters
+	}
+	return out
+}
+
+// sanitizeSchemaValue recursively walks a decoded JSON value, deleting the
+// unsupported composition keywords from every object while leaving all other
+// keys (including "not") intact.
+func sanitizeSchemaValue(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		for key, child := range v {
+			if _, unsupported := cursorUnsupportedSchemaKeys[key]; unsupported {
+				delete(v, key)
+				continue
+			}
+			v[key] = sanitizeSchemaValue(child)
+		}
+		return v
+	case []any:
+		for i, child := range v {
+			v[i] = sanitizeSchemaValue(child)
+		}
+		return v
+	default:
+		return value
+	}
+}
+
+// toolInputSchemaBytes encodes a tool input schema for the wire, sanitizing
+// the composition keywords Cursor rejects first.
+func toolInputSchemaBytes(schema json.RawMessage) []byte {
+	return jsonToProtobufValueBytes(SanitizeCursorToolSchema(schema))
+}
 
 // jsonToProtobufValueBytes converts a JSON schema (json.RawMessage) to protobuf Value binary.
 func jsonToProtobufValueBytes(jsonData json.RawMessage) []byte {

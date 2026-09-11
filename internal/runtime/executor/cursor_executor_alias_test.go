@@ -39,3 +39,48 @@ func TestCursorTokenUsageDetailNil(t *testing.T) {
 		t.Fatalf("expected zero detail for nil usage, got %+v", detail)
 	}
 }
+
+func TestCursorTextDeltaJSONSeparatesReasoningFromContent(t *testing.T) {
+	roleSent := false
+
+	first := cursorTextDeltaJSON("let me think", true, &roleSent)
+	if first != `{"role":"assistant","reasoning_content":"let me think"}` {
+		t.Fatalf("thinking delta = %s", first)
+	}
+
+	second := cursorTextDeltaJSON("plain answer", false, &roleSent)
+	if second != `{"content":"plain answer"}` {
+		t.Fatalf("content delta = %s", second)
+	}
+	if roleSent != true {
+		t.Fatalf("roleSent = %v, want true", roleSent)
+	}
+}
+
+func TestCursorTextDeltaJSONEmitsRoleOnce(t *testing.T) {
+	roleSent := false
+	_ = cursorTextDeltaJSON("a", false, &roleSent)
+	again := cursorTextDeltaJSON("b", false, &roleSent)
+	if again != `{"content":"b"}` {
+		t.Fatalf("second delta = %s, want no role field", again)
+	}
+}
+
+func TestCursorTextDeltaJSONEscapesText(t *testing.T) {
+	roleSent := true
+	got := cursorTextDeltaJSON("line1\nline2", false, &roleSent)
+	if got != `{"content":"line1\nline2"}` {
+		t.Fatalf("delta = %s", got)
+	}
+}
+
+func TestCursorDoneMarkerSkipsOpenAIFormats(t *testing.T) {
+	// OpenAI-format handlers write "data: [DONE]" themselves via
+	// ForwardStream.WriteDone; an executor-emitted marker would duplicate it.
+	if got := cursorDoneMarker(false); got != nil {
+		t.Fatalf("cursorDoneMarker(false) = %q, want nil", got)
+	}
+	if got := cursorDoneMarker(true); string(got) != "data: [DONE]\n" {
+		t.Fatalf("cursorDoneMarker(true) = %q, want the translator marker", got)
+	}
+}

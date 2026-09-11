@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -525,6 +526,8 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 		s.coreManager.RegisterExecutor(executor.NewGitLabExecutor(s.cfg))
 	case "bt":
 		s.coreManager.RegisterExecutor(executor.NewBTExecutor(s.cfg))
+	case "freebuff":
+		s.coreManager.RegisterExecutor(executor.NewFreebuffExecutor(s.cfg))
 	case "qoder":
 		qoderExecutor := executor.NewQoderExecutor(s.cfg)
 		qoderExecutor.SetAuthMetadataUpdater(func(ctx context.Context, id string, updates map[string]any, deletes []string) error {
@@ -1456,6 +1459,15 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 			excluded = entry.ExcludedModels
 		}
 		models = applyExcludedModels(models, excluded)
+	case "freebuff":
+		models = registry.GetFreebuffModels()
+		if entry := s.resolveConfigFreebuffKey(a); entry != nil {
+			if len(entry.Models) > 0 {
+				models = buildFreebuffConfigModels(entry)
+			}
+			excluded = entry.ExcludedModels
+		}
+		models = applyExcludedModels(models, excluded)
 	case "qoder":
 		catalog := fetchQoderCatalog(context.Background(), a, s.cfg)
 		if len(catalog.Models) > 0 {
@@ -2109,6 +2121,45 @@ func buildBTConfigModels(entry *config.BTKey) []*ModelInfo {
 		return nil
 	}
 	return buildConfigModels(entry.Models, "bt", "bt")
+}
+
+// resolveConfigFreebuffKey matches a synthesized Freebuff auth back to its config entry.
+func (s *Service) resolveConfigFreebuffKey(auth *coreauth.Auth) *config.FreebuffKey {
+	if auth == nil || s.cfg == nil {
+		return nil
+	}
+	attrKey, attrBase := "", ""
+	if auth.Attributes != nil {
+		attrKey = strings.TrimSpace(auth.Attributes[coreauth.AttributeAPIKey])
+		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+		if rawIndex := strings.TrimSpace(auth.Attributes["config_index"]); rawIndex != "" {
+			if index, err := strconv.Atoi(rawIndex); err == nil && index >= 0 && index < len(s.cfg.FreebuffKey) {
+				entry := &s.cfg.FreebuffKey[index]
+				if entry.MatchesCredential(attrKey, auth.ProxyURL) &&
+					(attrBase == "" || strings.EqualFold(strings.TrimSpace(entry.BaseURL), attrBase)) {
+					return entry
+				}
+				return nil
+			}
+		}
+	}
+	for i := range s.cfg.FreebuffKey {
+		entry := &s.cfg.FreebuffKey[i]
+		if !entry.MatchesCredential(attrKey, auth.ProxyURL) {
+			continue
+		}
+		if attrBase == "" || strings.EqualFold(strings.TrimSpace(entry.BaseURL), attrBase) {
+			return entry
+		}
+	}
+	return nil
+}
+
+func buildFreebuffConfigModels(entry *config.FreebuffKey) []*ModelInfo {
+	if entry == nil {
+		return nil
+	}
+	return buildConfigModels(entry.Models, "freebuff", "freebuff")
 }
 
 func rewriteModelInfoName(name, oldID, newID string) string {

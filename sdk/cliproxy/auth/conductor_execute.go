@@ -1137,6 +1137,8 @@ func (m *Manager) applyAPIKeyModelAlias(auth *Auth, requestedModel string) strin
 		upstreamModel = resolveUpstreamModelForCodexAPIKey(cfg, auth, requestedModel)
 	case "vertex":
 		upstreamModel = resolveUpstreamModelForVertexAPIKey(cfg, auth, requestedModel)
+	case "freebuff":
+		upstreamModel = resolveUpstreamModelForFreebuffAPIKey(cfg, auth, requestedModel)
 	default:
 		upstreamModel = resolveUpstreamModelForOpenAICompatAPIKey(cfg, auth, requestedModel)
 	}
@@ -1221,6 +1223,40 @@ func resolveVertexAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internal
 	return resolveAPIKeyConfig(cfg.VertexCompatAPIKey, auth)
 }
 
+// resolveFreebuffAPIKeyConfig matches a Freebuff auth to its config entry.
+// Freebuff credentials may be nested under api-key-entries, so matching falls
+// back to the credential key and proxy URL rather than the legacy single key.
+func resolveFreebuffAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalconfig.FreebuffKey {
+	if cfg == nil || auth == nil {
+		return nil
+	}
+	attrKey, attrBase := "", ""
+	if auth.Attributes != nil {
+		attrKey = strings.TrimSpace(auth.Attributes[AttributeAPIKey])
+		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+		if rawIndex := strings.TrimSpace(auth.Attributes["config_index"]); rawIndex != "" {
+			if index, errIndex := strconv.Atoi(rawIndex); errIndex == nil && index >= 0 && index < len(cfg.FreebuffKey) {
+				entry := &cfg.FreebuffKey[index]
+				if entry.MatchesCredential(attrKey, auth.ProxyURL) &&
+					(attrBase == "" || strings.EqualFold(strings.TrimSpace(entry.BaseURL), attrBase)) {
+					return entry
+				}
+				return nil
+			}
+		}
+	}
+	for i := range cfg.FreebuffKey {
+		entry := &cfg.FreebuffKey[i]
+		if !entry.MatchesCredential(attrKey, auth.ProxyURL) {
+			continue
+		}
+		if attrBase == "" || strings.EqualFold(strings.TrimSpace(entry.BaseURL), attrBase) {
+			return entry
+		}
+	}
+	return nil
+}
+
 func resolveUpstreamModelForGeminiAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
 	entry := resolveGeminiAPIKeyConfig(cfg, auth)
 	if entry == nil {
@@ -1247,6 +1283,14 @@ func resolveUpstreamModelForCodexAPIKey(cfg *internalconfig.Config, auth *Auth, 
 
 func resolveUpstreamModelForVertexAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
 	entry := resolveVertexAPIKeyConfig(cfg, auth)
+	if entry == nil {
+		return ""
+	}
+	return resolveModelAliasFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
+}
+
+func resolveUpstreamModelForFreebuffAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
+	entry := resolveFreebuffAPIKeyConfig(cfg, auth)
 	if entry == nil {
 		return ""
 	}

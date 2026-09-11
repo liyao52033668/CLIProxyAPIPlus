@@ -65,6 +65,9 @@ type APIKeyClientResult struct {
 
 	// OpenAICompatCount is the number of OpenAI compatibility API keys loaded
 	OpenAICompatCount int
+
+	// FreebuffKeyCount is the number of Freebuff API keys loaded
+	FreebuffKeyCount int
 }
 
 // WatcherFactory creates a watcher for configuration and token changes.

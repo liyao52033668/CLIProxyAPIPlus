@@ -158,6 +158,9 @@ type Config struct {
 	// Used for services that use Vertex AI-style paths but with simple API key authentication.
 	VertexCompatAPIKey []VertexCompatKey `yaml:"vertex-api-key" json:"vertex-api-key"`
 
+	// FreebuffKey defines Freebuff (Codebuff) API key configurations.
+	FreebuffKey []FreebuffKey `yaml:"freebuff-api-key" json:"freebuff-api-key"`
+
 	// AmpCode contains Amp CLI upstream configuration, management restrictions, and model mappings.
 	AmpCode AmpCode `yaml:"ampcode" json:"ampcode"`
 
@@ -784,6 +787,101 @@ type BTKey struct {
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
 }
 
+// FreebuffKey represents a Freebuff (Codebuff) API credential.
+// Freebuff exposes an OpenAI-compatible upstream gated behind a per-account
+// session, so each key maps to one Freebuff CLI account.
+type FreebuffKey struct {
+	// APIKey is the Freebuff API key. Prefer APIKeyEntries when set.
+	APIKey string `yaml:"api-key,omitempty" json:"api-key,omitempty"`
+
+	// Comment is an optional human-readable note for this credential.
+	Comment string `yaml:"comment,omitempty" json:"comment,omitempty"`
+
+	// Priority controls selection preference. Higher values are preferred; defaults to 0.
+	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
+
+	// Prefix optionally namespaces model aliases for this provider.
+	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
+
+	// BaseURL is the Freebuff upstream base URL. Defaults to https://www.codebuff.com.
+	BaseURL string `yaml:"base-url,omitempty" json:"base-url,omitempty"`
+
+	// ProxyURL overrides the global proxy setting for this credential if provided.
+	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+
+	// Models defines client alias to upstream model/agent mappings.
+	Models []FreebuffModel `yaml:"models,omitempty" json:"models,omitempty"`
+
+	// Headers optionally adds extra HTTP headers for requests sent to this provider.
+	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+
+	// ExcludedModels defines models to exclude from listing.
+	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
+
+	// DisableCooling disables auth/model cooldown scheduling for this credential when true.
+	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+
+	// APIKeyEntries defines multiple API keys with optional per-key proxy configuration.
+	APIKeyEntries []OpenAICompatibilityAPIKey `yaml:"api-key-entries,omitempty" json:"api-key-entries,omitempty"`
+}
+
+func (k FreebuffKey) GetAPIKey() string   { return k.APIKey }
+func (k FreebuffKey) GetBaseURL() string  { return k.BaseURL }
+func (k FreebuffKey) GetPrefix() string   { return k.Prefix }
+func (k FreebuffKey) GetProxyURL() string { return k.ProxyURL }
+
+// ContainsAPIKey reports whether the credential matches the given API key.
+func (k FreebuffKey) ContainsAPIKey(apiKey string) bool {
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return false
+	}
+	if strings.TrimSpace(k.APIKey) == apiKey {
+		return true
+	}
+	for i := range k.APIKeyEntries {
+		if strings.TrimSpace(k.APIKeyEntries[i].APIKey) == apiKey {
+			return true
+		}
+	}
+	return false
+}
+
+// MatchesCredential reports whether the credential matches both the API key and proxy URL.
+func (k FreebuffKey) MatchesCredential(apiKey, proxyURL string) bool {
+	apiKey = strings.TrimSpace(apiKey)
+	proxyURL = strings.TrimSpace(proxyURL)
+	if apiKey == "" {
+		return false
+	}
+	if strings.TrimSpace(k.APIKey) == apiKey {
+		return strings.TrimSpace(k.ProxyURL) == proxyURL
+	}
+	for i := range k.APIKeyEntries {
+		entry := k.APIKeyEntries[i]
+		if strings.TrimSpace(entry.APIKey) == apiKey {
+			return strings.TrimSpace(entry.ProxyURL) == proxyURL
+		}
+	}
+	return false
+}
+
+// FreebuffModel maps a client alias to a Freebuff model and root agent.
+type FreebuffModel struct {
+	Name             string `yaml:"name" json:"name"`
+	Alias            string `yaml:"alias" json:"alias"`
+	AgentID          string `yaml:"agent-id" json:"agent-id"`
+	DisplayName      string `yaml:"display-name,omitempty" json:"display-name,omitempty"`
+	MaxContextLength int    `yaml:"max-context-length,omitempty" json:"max-context-length,omitempty"`
+	ForceMapping     bool   `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
+}
+
+func (m FreebuffModel) GetName() string          { return m.Name }
+func (m FreebuffModel) GetAlias() string         { return m.Alias }
+func (m FreebuffModel) GetDisplayName() string   { return m.DisplayName }
+func (m FreebuffModel) GetMaxContextLength() int { return m.MaxContextLength }
+func (m FreebuffModel) GetForceMapping() bool    { return m.ForceMapping }
+
 // KiroFingerprintConfig defines a global fingerprint configuration for Kiro requests.
 // When configured, all Kiro requests will use this fixed fingerprint instead of random generation.
 // Empty fields will fall back to random selection from built-in pools.
@@ -1055,6 +1153,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Sanitize BT keys: trim whitespace from credential fields
 	cfg.SanitizeBTKeys()
 
+	// Sanitize Freebuff keys: trim whitespace and fold legacy api-key entries
+	cfg.SanitizeFreebuffKeys()
+
 	// Sanitize OpenAI compatibility providers: drop entries without base-url
 	cfg.SanitizeOpenAICompatibility()
 
@@ -1242,6 +1343,66 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 		}
 	}
 	cfg.OAuthModelAlias = out
+}
+
+// FoldFreebuffLegacyAPIKey makes api-key-entries the single source of truth.
+// A legacy top-level api-key is folded into APIKeyEntries when entries exist.
+func FoldFreebuffLegacyAPIKey(entry *FreebuffKey) {
+	if entry == nil {
+		return
+	}
+	legacy := strings.TrimSpace(entry.APIKey)
+	if legacy == "" || len(entry.APIKeyEntries) == 0 {
+		return
+	}
+	for i := range entry.APIKeyEntries {
+		if strings.TrimSpace(entry.APIKeyEntries[i].APIKey) == legacy {
+			entry.APIKey = ""
+			return
+		}
+	}
+	entry.APIKeyEntries = append([]OpenAICompatibilityAPIKey{{
+		APIKey:   legacy,
+		ProxyURL: strings.TrimSpace(entry.ProxyURL),
+	}}, entry.APIKeyEntries...)
+	entry.APIKey = ""
+}
+
+// SanitizeFreebuffKeys trims whitespace from Freebuff credential fields,
+// folds legacy api-key values into api-key-entries, and drops empty entries.
+func (cfg *Config) SanitizeFreebuffKeys() {
+	if cfg == nil {
+		return
+	}
+	out := make([]FreebuffKey, 0, len(cfg.FreebuffKey))
+	for _, entry := range cfg.FreebuffKey {
+		entry.APIKey = strings.TrimSpace(entry.APIKey)
+		entry.Comment = strings.TrimSpace(entry.Comment)
+		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+		nested := make([]OpenAICompatibilityAPIKey, 0, len(entry.APIKeyEntries))
+		for _, apiKeyEntry := range entry.APIKeyEntries {
+			apiKeyEntry.APIKey = strings.TrimSpace(apiKeyEntry.APIKey)
+			apiKeyEntry.ProxyURL = strings.TrimSpace(apiKeyEntry.ProxyURL)
+			if apiKeyEntry.APIKey != "" {
+				nested = append(nested, apiKeyEntry)
+			}
+		}
+		entry.APIKeyEntries = nested
+		FoldFreebuffLegacyAPIKey(&entry)
+		entry.Prefix = normalizeModelPrefix(entry.Prefix)
+		entry.Headers = NormalizeHeaders(entry.Headers)
+		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
+		for i := range entry.Models {
+			entry.Models[i].Name = strings.TrimSpace(entry.Models[i].Name)
+			entry.Models[i].Alias = strings.TrimSpace(entry.Models[i].Alias)
+			entry.Models[i].AgentID = strings.TrimSpace(entry.Models[i].AgentID)
+		}
+		if entry.APIKey != "" || len(entry.APIKeyEntries) > 0 {
+			out = append(out, entry)
+		}
+	}
+	cfg.FreebuffKey = out
 }
 
 // SanitizeOpenAICompatibility removes OpenAI-compatibility provider entries that are

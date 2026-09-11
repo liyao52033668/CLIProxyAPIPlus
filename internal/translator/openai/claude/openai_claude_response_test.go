@@ -103,6 +103,51 @@ func lastStopReason(events []sseEvent) string {
 
 const streamReq = `{"stream":true}`
 
+// TestConvertOpenAIResponseToClaude_StreamReasoningContentEmitsThinkingBlocks
+// covers the cursor stream shape after the executor stopped wrapping reasoning
+// in literal <think> tags: reasoning arrives as a reasoning_content field and
+// must surface as thinking_delta blocks without any tag text leaking into the
+// user-visible text, and the thinking block must be closed on [DONE].
+func TestConvertOpenAIResponseToClaude_StreamReasoningContentEmitsThinkingBlocks(t *testing.T) {
+	events := runStream(t,
+		streamReq,
+		`{"id":"chatcmpl_1","model":"cursor-model","created":1,"choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"let me think"},"finish_reason":null}]}`,
+		`{"id":"chatcmpl_1","model":"cursor-model","created":1,"choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}`,
+		`{"id":"chatcmpl_1","model":"cursor-model","created":1,"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+	)
+
+	var thinkingText, textText strings.Builder
+	for _, e := range events {
+		switch e.Type {
+		case "content_block_delta":
+			switch gjson.Get(e.Payload, "delta.type").String() {
+			case "thinking_delta":
+				thinkingText.WriteString(gjson.Get(e.Payload, "delta.thinking").String())
+			case "text_delta":
+				textText.WriteString(gjson.Get(e.Payload, "delta.text").String())
+			}
+		}
+	}
+
+	if thinkingText.String() != "let me think" {
+		t.Fatalf("thinking text = %q", thinkingText.String())
+	}
+	if textText.String() != "hi" {
+		t.Fatalf("text = %q", textText.String())
+	}
+	for _, leaked := range []string{"<think>", "</think>"} {
+		for _, e := range events {
+			if strings.Contains(e.Payload, leaked) {
+				t.Fatalf("tag %q leaked into %s: %s", leaked, e.Type, e.Payload)
+			}
+		}
+	}
+	// Both the thinking block and the text block must be closed by [DONE].
+	if got := countByType(events, "content_block_stop"); got < 2 {
+		t.Fatalf("content_block_stop count = %d, want >= 2 (thinking + text)", got)
+	}
+}
+
 func TestConvertOpenAIResponseToClaude_StreamIgnoresNullToolNameDelta(t *testing.T) {
 	originalRequest := []byte(streamReq)
 	var param any

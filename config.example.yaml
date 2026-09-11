@@ -426,6 +426,32 @@ nonstream-keepalive-interval: 0
 #       - "imagen-3.0-generate-002"
 #       - "imagen-*"
 
+# Freebuff (Codebuff) API keys
+# Each key maps to one Freebuff CLI account. The executor keeps one reusable
+# Freebuff session per credential and drives the run lifecycle upstream.
+# The upstream model catalog is compiled into the official client and has no
+# list endpoint, so agent ids are configured per model. Current harness is
+# base3 (e.g. base3-free-glm-5-3-flash); base2 ids are the rollback path.
+# freebuff-api-key:
+#   - api-key: "fb-..."                             # Freebuff API key
+#     base-url: "https://www.codebuff.com"          # optional: upstream base URL
+#     prefix: "freebuff"                            # optional: namespace model aliases
+#     proxy-url: "socks5://proxy.example.com:1080"  # optional: per-key proxy override
+#     headers:
+#       X-Custom-Header: "custom-value"
+#     models:                                       # optional: alias -> model/agent mapping
+#       - name: "z-ai/glm-5.3-flash"                # upstream model name
+#         alias: "glm-5.3-flash"                    # client-visible alias
+#         agent-id: "base3-free-glm-5-3-flash"      # root agent id used for the run
+#       - name: "deepseek/deepseek-v4-flash"
+#         alias: "deepseek-v4.1-flash"
+#         agent-id: "base3-free-deepseek-flash"
+#     excluded-models: []                           # optional: models to exclude from listing
+#     priority: 0                                   # optional: selection priority (higher preferred)
+#     api-key-entries:                              # optional: multiple keys with per-key proxy
+#       - api-key: "fb-...a1"
+#         proxy-url: "socks5://proxy.example.com:1080"
+
 # Amp Integration
 # ampcode:
 #   # Configure upstream URL for Amp CLI OAuth and management features
