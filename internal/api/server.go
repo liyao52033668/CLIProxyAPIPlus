@@ -1088,6 +1088,13 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/freebuff-api-key", s.mgmt.PatchFreebuffKey)
 		mgmt.DELETE("/freebuff-api-key", s.mgmt.DeleteFreebuffKey)
 
+		// Freebuff device-flow login: start returns a browser login URL, poll
+		// checks authorization once per call, complete verifies and appends
+		// the token to the freebuff-api-key configuration.
+		mgmt.POST("/freebuff-auth/login", s.mgmt.StartFreebuffLogin)
+		mgmt.POST("/freebuff-auth/login/poll", s.mgmt.PollFreebuffLogin)
+		mgmt.POST("/freebuff-auth/login/complete", s.mgmt.CompleteFreebuffLogin)
+
 		// Freebuff publishes no upstream model list, so the UI reads this
 		// compiled-in catalog instead of proxying /v1/models.
 		mgmt.GET("/freebuff/models", s.mgmt.GetFreebuffCatalog)

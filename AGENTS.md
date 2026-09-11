@@ -12,6 +12,7 @@ go build -o cli-proxy-api ./cmd/server # Build
 go run ./cmd/server # Run dev server
 go test ./... # Run all tests
 go test -v -run TestName ./path/to/pkg # Run single test
+go run ./cmd/sync_freebuff_catalog -write   # Regenerate the freebuff model from the upstream TS constants.
 go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRED after changes)
 ```
 - Common flags: `--config <path>`, `--tui`, `--standalone`, `--local-model`, `--no-browser`, `--oauth-callback-port <port>`

@@ -41,7 +41,7 @@ func TestBuildFreebuffPayloadAddsLifecycleMetadataAndBuffyMarker(t *testing.T) {
 		"runId":"caller-top",
 		"cost_mode":"paid",
 		"codebuff_metadata":{"run_id":"caller","cost_mode":"paid"}
-	}`), "deepseek/deepseek-v4-flash", "base2-free-deepseek-flash", "run-1", "instance-1")
+	}`), "deepseek/deepseek-v4-flash", "run-1", "instance-1", "client-1")
 	if err != nil {
 		t.Fatalf("buildFreebuffPayload() error = %v", err)
 	}
@@ -50,11 +50,15 @@ func TestBuildFreebuffPayloadAddsLifecycleMetadataAndBuffyMarker(t *testing.T) {
 		`"model":"deepseek/deepseek-v4-flash"`,
 		`"stream":true`,
 		`"include_usage":true`,
+		`"provider":{"data_collection":"deny"}`,
+		`"stop":["\"cb_easp\""]`,
 		`"run_id":"run-1"`,
-		`"n":"base2-free-deepseek-flash"`,
+		`"client_id":"client-1"`,
+		`"trace_session_id"`,
 		`"cost_mode":"free"`,
 		`"freebuff_instance_id":"instance-1"`,
 		freebuffMarker,
+		`"cache_control":{"type":"ephemeral"}`,
 	} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("payload missing %q: %s", expected, body)
@@ -62,6 +66,11 @@ func TestBuildFreebuffPayloadAddsLifecycleMetadataAndBuffyMarker(t *testing.T) {
 	}
 	if strings.Contains(body, `"run_id":"caller"`) || strings.Contains(body, `"cost_mode":"paid"`) {
 		t.Fatalf("caller metadata was not replaced: %s", body)
+	}
+	for _, legacy := range []string{`"llm_step_number"`, `"n":"`} {
+		if strings.Contains(body, legacy) {
+			t.Fatalf("payload contains legacy metadata %s: %s", legacy, body)
+		}
 	}
 	var decoded map[string]any
 	if err := json.Unmarshal(payload, &decoded); err != nil {
@@ -72,6 +81,25 @@ func TestBuildFreebuffPayloadAddsLifecycleMetadataAndBuffyMarker(t *testing.T) {
 	}
 	if _, exists := decoded["cost_mode"]; exists {
 		t.Fatalf("caller top-level cost_mode survived: %s", body)
+	}
+}
+
+func TestBuildFreebuffPayloadKeepsClientStop(t *testing.T) {
+	payload, err := buildFreebuffPayload([]byte(`{
+		"model":"m",
+		"messages":[{"role":"user","content":"hello"}],
+		"stop":["END"]
+	}`), "m", "run-1", "instance-1", "client-1")
+	if err != nil {
+		t.Fatalf("buildFreebuffPayload() error = %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	stop, ok := decoded["stop"].([]any)
+	if !ok || len(stop) != 1 || stop[0] != "END" {
+		t.Fatalf("stop = %#v, want client value preserved", decoded["stop"])
 	}
 }
 
@@ -278,14 +306,56 @@ func TestReadFreebuffBodyTruncates(t *testing.T) {
 	}
 }
 
-func TestFreebuffErrorMessageDoesNotLeakUpstreamBody(t *testing.T) {
-	body := []byte(`{"error":{"code":"session_expired","message":"leaked"},"api_key":"leaked"}`)
-	message := freebuffErrorMessage(body)
-	if message != "freebuff: upstream error session_expired" {
+func TestFreebuffErrorMessageRedactsSecretsButSurfacesGuidance(t *testing.T) {
+	body := []byte(`{"error":{"code":"session_expired","message":"session no longer valid"},"api_key":"sk-secret"}`)
+	message := freebuffErrorMessage(body, "sk-secret")
+	if message != "freebuff: upstream error session_expired: session no longer valid" {
 		t.Fatalf("message = %q", message)
 	}
-	if strings.Contains(message, "leaked") {
-		t.Fatalf("message leaked upstream secret: %q", message)
+	if strings.Contains(message, "sk-secret") {
+		t.Fatalf("message leaked the API key: %q", message)
+	}
+}
+
+func TestFreebuffErrorMessageSurfacesAccountSuspendedGuidance(t *testing.T) {
+	body := []byte(`{"error":"account_suspended","message":"Your account has been suspended for using a third-party client or proxy to access Freebuff.","key":"sk-secret"}`)
+	message := freebuffErrorMessage(body, "sk-secret")
+	if !strings.Contains(message, "freebuff: upstream error account_suspended: Your account has been suspended") {
+		t.Fatalf("message = %q", message)
+	}
+	if strings.Contains(message, "sk-secret") {
+		t.Fatalf("message leaked the API key: %q", message)
+	}
+}
+
+func TestFreebuffErrorMessageShowsRedactedSnippetWhenCodeMissing(t *testing.T) {
+	body := []byte("{\"message\":\"max_tokens too large: 128000\",\"key\":\"sk-secret-key\"}")
+	message := freebuffErrorMessage(body, "sk-secret-key")
+	if !strings.Contains(message, "freebuff: upstream request failed:") {
+		t.Fatalf("message = %q", message)
+	}
+	if !strings.Contains(message, "max_tokens too large: 128000") {
+		t.Fatalf("message dropped upstream detail: %q", message)
+	}
+	if strings.Contains(message, "sk-secret-key") {
+		t.Fatalf("message leaked the API key: %q", message)
+	}
+	if !strings.Contains(message, "[redacted]") {
+		t.Fatalf("message missing redaction marker: %q", message)
+	}
+}
+
+func TestFreebuffBodySnippetCapsAndCompacts(t *testing.T) {
+	long := strings.Repeat("x", freebuffErrorSnippetMax+50)
+	snippet := freebuffBodySnippet([]byte(long), "")
+	if len(snippet) != freebuffErrorSnippetMax+len("...[truncated]") {
+		t.Fatalf("snippet length = %d", len(snippet))
+	}
+	if got := freebuffBodySnippet([]byte("a\nb\tc  d"), ""); got != "a b c  d" {
+		t.Fatalf("snippet = %q", got)
+	}
+	if got := freebuffBodySnippet(nil, ""); got != "empty body" {
+		t.Fatalf("empty snippet = %q", got)
 	}
 }
 
@@ -329,8 +399,8 @@ func TestFreebuffSessionUnknownStatusDoesNotReflectValue(t *testing.T) {
 
 func TestFreebuffSessionUsesCanonicalUserAgent(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("User-Agent"); got != freebuffUserAgent {
-			t.Fatalf("User-Agent = %q, want %q", got, freebuffUserAgent)
+		if got := r.Header.Get("User-Agent"); got != freebuffJSONUserAgent {
+			t.Fatalf("User-Agent = %q, want %q", got, freebuffJSONUserAgent)
 		}
 		_, _ = io.WriteString(w, `{"status":"none"}`)
 	}))
@@ -633,13 +703,16 @@ func TestFreebuffHTTPErrorTreatsNotFoundAsRequestScoped(t *testing.T) {
 	if !ok || scoped == nil || !scoped.IsRequestScoped() {
 		t.Fatalf("IsRequestScoped() = %v %v, want true", ok, err)
 	}
-	if strings.Contains(err.Error(), "unknown tool") {
-		t.Fatalf("error leaked upstream body: %q", err)
+	if !strings.Contains(err.Error(), "unknown tool") {
+		t.Fatalf("error should surface upstream detail for diagnosis: %q", err)
 	}
 
-	authErr := freebuffHTTPError(http.StatusUnauthorized, nil, nil)
+	authErr := freebuffHTTPError(http.StatusUnauthorized, nil, nil, "sk-secret")
 	if authScoped, authOK := errors.AsType[cliproxyexecutor.RequestScopedError](authErr); authOK && authScoped != nil && authScoped.IsRequestScoped() {
 		t.Fatal("401 must keep credential cooldown")
+	}
+	if strings.Contains(authErr.Error(), "sk-secret") {
+		t.Fatalf("error leaked the API key: %q", authErr)
 	}
 }
 
@@ -788,7 +861,7 @@ func TestFreebuffResolveModelKeepsExplicitConfigAgentID(t *testing.T) {
 
 func TestFreebuffSessionAdmissionCoercesToAdmittedModel(t *testing.T) {
 	var startBodies []string
-	var chatModels []string
+	var chatPayloads []string
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/freebuff/session", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
@@ -808,7 +881,8 @@ func TestFreebuffSessionAdmissionCoercesToAdmittedModel(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"runId": "run-coerced"})
 	})
 	mux.HandleFunc("/api/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
-		chatModels = append(chatModels, r.Header.Get("x-freebuff-model"))
+		body, _ := io.ReadAll(r.Body)
+		chatPayloads = append(chatPayloads, string(body))
 		_, _ = io.WriteString(w, "data: [DONE]\n\n")
 	})
 	server := httptest.NewServer(mux)
@@ -836,12 +910,12 @@ func TestFreebuffSessionAdmissionCoercesToAdmittedModel(t *testing.T) {
 	if len(startBodies) != 1 || !strings.Contains(startBodies[0], `"agentId":"agent-b"`) {
 		t.Fatalf("START bodies = %v, want agent-b for the admitted model", startBodies)
 	}
-	if len(chatModels) != 1 || chatModels[0] != "model-b" {
-		t.Fatalf("chat x-freebuff-model headers = %v, want model-b", chatModels)
+	if len(chatPayloads) != 1 || !strings.Contains(chatPayloads[0], `"model":"model-b"`) {
+		t.Fatalf("chat payloads = %v, want coerced model-b", chatPayloads)
 	}
 	body := string(payload)
-	if !strings.Contains(body, `"model":"model-b"`) || !strings.Contains(body, `"n":"agent-b"`) {
-		t.Fatalf("payload = %s, want coerced model and agent", body)
+	if !strings.Contains(body, `"model":"model-b"`) {
+		t.Fatalf("payload = %s, want coerced model", body)
 	}
 }
 

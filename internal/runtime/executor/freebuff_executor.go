@@ -32,12 +32,18 @@ import (
 
 const (
 	freebuffDefaultBaseURL = "https://www.codebuff.com"
-	freebuffUserAgent      = "ai-sdk/openai-compatible/1.0.0/codebuff"
-	freebuffMarker         = "You are Buffy, the strategic coding assistant."
-	freebuffMaxErrorBody   = 1 << 20
-	freebuffMaxNonStream   = 64 << 20
-	freebuffCleanupTimeout = 5 * time.Second
-	freebuffHeartbeatEvery = 45 * time.Second
+	// The official CLI is a Bun binary; its JSON endpoints send a bare Bun UA
+	// while chat/completions goes through the browser AI SDK stack (captured
+	// from official-client traffic by the freebuff2api reference project).
+	freebuffJSONUserAgent = "Bun/1.3.11"
+	freebuffChatUserAgent = "ai-sdk/openai-compatible/0.0.0-test/codebuff ai-sdk/provider-utils/3.0.25 runtime/browser"
+	freebuffMarker        = "You are Buffy, the strategic coding assistant. You are the AI agent behind the product, Freebuff, a tool where users can chat with you to code with AI for free."
+	freebuffMaxErrorBody  = 1 << 20
+	freebuffMaxNonStream  = 64 << 20
+
+	freebuffCleanupTimeout  = 5 * time.Second
+	freebuffHeartbeatEvery  = 45 * time.Second
+	freebuffErrorSnippetMax = 300
 )
 
 type FreebuffExecutor struct {
@@ -106,7 +112,7 @@ func (e *FreebuffExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.A
 	}
 	util.ApplyCustomHeadersFromAttrs(req, freebuffAttrs(auth))
 	req.Header.Set("Authorization", "Bearer "+key)
-	req.Header.Set("User-Agent", freebuffUserAgent)
+	req.Header.Set("User-Agent", freebuffChatUserAgent)
 	return helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0).Do(req)
 }
 
@@ -154,7 +160,7 @@ func (e *FreebuffExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 		}
 		body, _ := readFreebuffBody(httpResp.Body, freebuffMaxErrorBody)
 		_ = httpResp.Body.Close()
-		upstreamErr := freebuffHTTPError(httpResp.StatusCode, body, retryAfter(httpResp.Header))
+		upstreamErr := freebuffHTTPError(httpResp.StatusCode, body, retryAfter(httpResp.Header), freebuffAPIKey(auth))
 		e.finishRunDetached(ctx, auth, run, "failed", "", upstreamErr)
 		if attempt == 0 && isFreebuffEndingSessionError(httpResp.StatusCode, body) {
 			e.invalidateSession(state)
@@ -197,7 +203,7 @@ func (e *FreebuffExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 			reporter.Publish(ctx, usage)
 		}
 		return nil
-	}); err != nil {
+	}, freebuffAPIKey(auth)); err != nil {
 		return resp, err
 	}
 	body := acc.response(model)
@@ -248,7 +254,7 @@ func (e *FreebuffExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 		}
 		body, _ := readFreebuffBody(httpResp.Body, freebuffMaxErrorBody)
 		_ = httpResp.Body.Close()
-		upstreamErr := freebuffHTTPError(httpResp.StatusCode, body, retryAfter(httpResp.Header))
+		upstreamErr := freebuffHTTPError(httpResp.StatusCode, body, retryAfter(httpResp.Header), freebuffAPIKey(auth))
 		e.finishRunDetached(ctx, auth, run, "failed", "", upstreamErr)
 		if attempt == 0 && isFreebuffEndingSessionError(httpResp.StatusCode, body) {
 			e.invalidateSession(state)
@@ -286,7 +292,7 @@ func (e *FreebuffExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 				completed = true
 			}
 			return nil
-		})
+		}, freebuffAPIKey(auth))
 		status := "completed"
 		var finishErr error
 		if streamErr != nil {
@@ -627,12 +633,12 @@ func (e *FreebuffExecutor) openChat(ctx context.Context, auth *cliproxyauth.Auth
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
-	payload, err := buildFreebuffPayload(basePayload, sessionModel, sessionAgent, run.id, session.instanceID)
+	payload, err := buildFreebuffPayload(basePayload, sessionModel, run.id, session.instanceID, freebuffClientID(auth))
 	if err != nil {
 		e.finishRunDetached(ctx, auth, run, "failed", "", err)
 		return nil, nil, nil, nil, err
 	}
-	resp, err := e.chat(ctx, auth, sessionModel, session.instanceID, payload)
+	resp, err := e.chat(ctx, auth, payload)
 	if err != nil {
 		status := "failed"
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -806,7 +812,7 @@ func (e *FreebuffExecutor) sessionRequest(ctx context.Context, auth *cliproxyaut
 	req.Header.Set("Authorization", "Bearer "+freebuffAPIKey(auth))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-freebuff-model", model)
-	req.Header.Set("User-Agent", freebuffUserAgent)
+	req.Header.Set("User-Agent", freebuffJSONUserAgent)
 	if instanceID != "" {
 		req.Header.Set("x-freebuff-instance-id", instanceID)
 	}
@@ -823,7 +829,7 @@ func (e *FreebuffExecutor) sessionRequest(ctx context.Context, auth *cliproxyaut
 		return &freebuffSession{model: model}, "none", nil
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, "", freebuffHTTPError(resp.StatusCode, body, retryAfter(resp.Header))
+		return nil, "", freebuffHTTPError(resp.StatusCode, body, retryAfter(resp.Header), freebuffAPIKey(auth))
 	}
 	var raw map[string]any
 	if err := json.Unmarshal(body, &raw); err != nil {
@@ -846,16 +852,16 @@ func (e *FreebuffExecutor) sessionRequest(ctx context.Context, auth *cliproxyaut
 		session.model = model
 	}
 	if status == "rate_limited" || status == "spend_limited" || status == "ip_capped" {
-		return nil, status, statusErr{code: http.StatusTooManyRequests, msg: freebuffErrorMessage(body), retryAfter: retryAfterFromJSON(raw)}
+		return nil, status, statusErr{code: http.StatusTooManyRequests, msg: freebuffErrorMessage(body, freebuffAPIKey(auth)), retryAfter: retryAfterFromJSON(raw)}
 	}
 	if status == "country_blocked" || status == "banned" {
-		return nil, status, statusErr{code: http.StatusForbidden, msg: freebuffErrorMessage(body)}
+		return nil, status, statusErr{code: http.StatusForbidden, msg: freebuffErrorMessage(body, freebuffAPIKey(auth))}
 	}
 	if status == "model_unavailable" {
-		return nil, status, statusErr{code: http.StatusServiceUnavailable, msg: freebuffErrorMessage(body)}
+		return nil, status, statusErr{code: http.StatusServiceUnavailable, msg: freebuffErrorMessage(body, freebuffAPIKey(auth))}
 	}
 	if status == "premium_slot_taken" || status == "session_limit_reached" {
-		return nil, status, statusErr{code: http.StatusConflict, msg: freebuffErrorMessage(body), retryAfter: retryAfterFromJSON(raw)}
+		return nil, status, statusErr{code: http.StatusConflict, msg: freebuffErrorMessage(body, freebuffAPIKey(auth)), retryAfter: retryAfterFromJSON(raw)}
 	}
 	switch status {
 	case "active", "queued", "none", "ended", "superseded", "model_locked":
@@ -873,7 +879,7 @@ func (e *FreebuffExecutor) startRun(ctx context.Context, auth *cliproxyauth.Auth
 		return nil, err
 	}
 	if status < 200 || status >= 300 {
-		return nil, freebuffHTTPError(status, raw, nil)
+		return nil, freebuffHTTPError(status, raw, nil, freebuffAPIKey(auth))
 	}
 	var response map[string]any
 	if err := json.Unmarshal(raw, &response); err != nil {
@@ -934,7 +940,7 @@ func (e *FreebuffExecutor) finishRun(ctx context.Context, auth *cliproxyauth.Aut
 		if code >= 200 && code < 300 {
 			return nil
 		}
-		last = freebuffHTTPError(code, raw, nil)
+		last = freebuffHTTPError(code, raw, nil, freebuffAPIKey(auth))
 		if attempt == 0 && code >= 500 {
 			continue
 		}
@@ -955,7 +961,7 @@ func freebuffCleanupContext(parent context.Context) (context.Context, context.Ca
 	return context.WithTimeout(context.WithoutCancel(parent), freebuffCleanupTimeout)
 }
 
-func (e *FreebuffExecutor) chat(ctx context.Context, auth *cliproxyauth.Auth, model, instanceID string, payload []byte) (*http.Response, error) {
+func (e *FreebuffExecutor) chat(ctx context.Context, auth *cliproxyauth.Auth, payload []byte) (*http.Response, error) {
 	url := e.baseURL(auth) + "/api/v1/chat/completions"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
@@ -964,12 +970,8 @@ func (e *FreebuffExecutor) chat(ctx context.Context, auth *cliproxyauth.Auth, mo
 	util.ApplyCustomHeadersFromAttrs(req, freebuffAttrs(auth))
 	req.Header.Set("Authorization", "Bearer "+freebuffAPIKey(auth))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "text/event-stream")
-	req.Header.Set("User-Agent", freebuffUserAgent)
-	req.Header.Set("x-freebuff-model", model)
-	if instanceID != "" {
-		req.Header.Set("x-freebuff-instance-id", instanceID)
-	}
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("User-Agent", freebuffChatUserAgent)
 	return helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0).Do(req)
 }
 
@@ -982,7 +984,7 @@ func (e *FreebuffExecutor) postJSON(ctx context.Context, auth *cliproxyauth.Auth
 	util.ApplyCustomHeadersFromAttrs(req, freebuffAttrs(auth))
 	req.Header.Set("Authorization", "Bearer "+freebuffAPIKey(auth))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", freebuffUserAgent)
+	req.Header.Set("User-Agent", freebuffJSONUserAgent)
 	resp, err := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0).Do(req)
 	if err != nil {
 		return nil, 0, err
@@ -1031,6 +1033,18 @@ func freebuffAPIKey(auth *cliproxyauth.Auth) string {
 	return strings.TrimSpace(auth.Attributes["api_key"])
 }
 
+// freebuffClientID derives a stable per-credential client id. The official
+// client keeps one client_id per installation, so a fresh id per request is an
+// obvious anomaly; deriving it from the key keeps it stable without state.
+func freebuffClientID(auth *cliproxyauth.Auth) string {
+	key := freebuffAPIKey(auth)
+	if key == "" {
+		return newFreebuffID()
+	}
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:6])
+}
+
 func freebuffAttrs(auth *cliproxyauth.Auth) map[string]string {
 	if auth == nil {
 		return nil
@@ -1038,7 +1052,7 @@ func freebuffAttrs(auth *cliproxyauth.Auth) map[string]string {
 	return auth.Attributes
 }
 
-func buildFreebuffPayload(input []byte, model, agentID, runID, instanceID string) ([]byte, error) {
+func buildFreebuffPayload(input []byte, model, runID, instanceID, clientID string) ([]byte, error) {
 	var payload map[string]any
 	if err := json.Unmarshal(input, &payload); err != nil {
 		return nil, fmt.Errorf("freebuff: invalid translated request: %w", err)
@@ -1048,9 +1062,16 @@ func buildFreebuffPayload(input []byte, model, agentID, runID, instanceID string
 	payload["model"] = model
 	payload["stream"] = true
 	payload["stream_options"] = map[string]any{"include_usage": true}
+	payload["provider"] = map[string]any{"data_collection": "deny"}
+	if _, exists := payload["stop"]; !exists {
+		payload["stop"] = []any{`"cb_easp"`}
+	}
 	payload["codebuff_metadata"] = map[string]any{
-		"run_id": runID, "client_id": newFreebuffID(), "cost_mode": "free",
-		"freebuff_instance_id": instanceID, "llm_step_number": "1", "n": agentID,
+		"freebuff_instance_id": instanceID,
+		"trace_session_id":     newFreebuffID(),
+		"run_id":               runID,
+		"client_id":            clientID,
+		"cost_mode":            "free",
 	}
 	ensureBuffyMarker(&payload)
 	return json.Marshal(payload)
@@ -1065,13 +1086,26 @@ func ensureBuffyMarker(payload *map[string]any) {
 	if len(messages) > 0 {
 		if first, ok := messages[0].(map[string]any); ok && stringValue(first, "role") == "system" {
 			first["content"] = prefixContent(first["content"], prefix)
+			markSystemMessageCached(first)
 			messages[0] = first
 			(*payload)["messages"] = messages
 			return
 		}
 	}
-	messages = append([]any{map[string]any{"role": "system", "content": prefix[:len(prefix)-2]}}, messages...)
+	messages = append([]any{map[string]any{
+		"role":          "system",
+		"content":       prefix[:len(prefix)-2],
+		"cache_control": map[string]any{"type": "ephemeral"},
+	}}, messages...)
 	(*payload)["messages"] = messages
+}
+
+// markSystemMessageCached mirrors the official client, which tags its system
+// message with an ephemeral cache_control hint.
+func markSystemMessageCached(message map[string]any) {
+	if _, exists := message["cache_control"]; !exists {
+		message["cache_control"] = map[string]any{"type": "ephemeral"}
+	}
 }
 
 func prefixContent(content any, prefix string) any {
@@ -1099,7 +1133,7 @@ func prefixContent(content any, prefix string) any {
 	}
 }
 
-func consumeFreebuffSSE(r io.Reader, fn func([]byte, map[string]any) error) error {
+func consumeFreebuffSSE(r io.Reader, fn func([]byte, map[string]any) error, secrets ...string) error {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), 50*1024*1024)
 	var data []string
@@ -1127,7 +1161,7 @@ func consumeFreebuffSSE(r io.Reader, fn func([]byte, map[string]any) error) erro
 		}
 		value = unwrapFreebuffChunk(value)
 		if event == "error" || value["error"] != nil {
-			return statusErr{code: http.StatusBadGateway, msg: freebuffErrorMessage(raw)}
+			return statusErr{code: http.StatusBadGateway, msg: freebuffErrorMessage(raw, secrets...)}
 		}
 		normalizeFreebuffChunk(value)
 		if hasFinishedChunk(value) {
@@ -1446,15 +1480,15 @@ func retryAfterFromJSON(raw map[string]any) *time.Duration {
 	return nil
 }
 
-func freebuffHTTPError(code int, body []byte, retry *time.Duration) error {
+func freebuffHTTPError(code int, body []byte, retry *time.Duration, secrets ...string) error {
 	if code == http.StatusNotFound {
 		return freebuffRequestError{statusErr{
 			code:       http.StatusBadRequest,
-			msg:        freebuffErrorMessage(body),
+			msg:        freebuffErrorMessage(body, secrets...),
 			retryAfter: retry,
 		}}
 	}
-	return statusErr{code: code, msg: freebuffErrorMessage(body), retryAfter: retry}
+	return statusErr{code: code, msg: freebuffErrorMessage(body, secrets...), retryAfter: retry}
 }
 
 type freebuffRequestError struct {
@@ -1463,26 +1497,74 @@ type freebuffRequestError struct {
 
 func (e freebuffRequestError) IsRequestScoped() bool { return true }
 
-func freebuffErrorMessage(body []byte) string {
-	if code := freebuffErrorCode(body); code != "" {
+func freebuffErrorMessage(body []byte, secrets ...string) string {
+	code, message := freebuffErrorDetail(body)
+	if code != "" {
+		if message != "" {
+			return "freebuff: upstream error " + code + ": " + freebuffBodySnippet([]byte(message), secrets...)
+		}
 		return "freebuff: upstream error " + code
 	}
-	return "freebuff: upstream request failed"
+	return "freebuff: upstream request failed: " + freebuffBodySnippet(body, secrets...)
+}
+
+// freebuffBodySnippet compacts an upstream error body into a short excerpt so
+// unstructured rejections stay diagnosable. Known secrets (the API key) are
+// redacted before the size cap because upstream bodies may echo credentials.
+func freebuffBodySnippet(body []byte, secrets ...string) string {
+	snippet := strings.Map(func(char rune) rune {
+		if char == '\n' || char == '\r' || char == '\t' {
+			return ' '
+		}
+		return char
+	}, string(body))
+	for _, secret := range secrets {
+		if secret != "" {
+			snippet = strings.ReplaceAll(snippet, secret, "[redacted]")
+		}
+	}
+	snippet = strings.TrimSpace(snippet)
+	if snippet == "" {
+		return "empty body"
+	}
+	if len(snippet) > freebuffErrorSnippetMax {
+		return snippet[:freebuffErrorSnippetMax] + "...[truncated]"
+	}
+	return snippet
 }
 
 func freebuffErrorCode(body []byte) string {
+	code, _ := freebuffErrorDetail(body)
+	return code
+}
+
+// freebuffErrorDetail extracts a machine code and the human-readable message
+// from an upstream error body. The message is surfaced alongside the code
+// because upstream guidance (e.g. account_suspended) is otherwise invisible
+// to clients; callers must redact secrets before exposing it.
+func freebuffErrorDetail(body []byte) (string, string) {
 	var raw map[string]any
 	if json.Unmarshal(body, &raw) != nil {
-		return ""
+		return "", ""
 	}
+	code := ""
+	message := ""
 	for {
-		if code := firstString(raw, "code", "error_code"); validFreebuffErrorCode(code) {
-			return code
+		if message == "" {
+			message = firstString(raw, "message")
+		}
+		if code == "" {
+			if candidate := firstString(raw, "code", "error_code"); validFreebuffErrorCode(candidate) {
+				code = candidate
+			}
 		}
 		switch value := raw["error"].(type) {
 		case string:
 			if validFreebuffErrorCode(value) {
-				return value
+				if code == "" {
+					code = value
+				}
+				return code, message
 			}
 		case map[string]any:
 			raw = value
@@ -1492,7 +1574,7 @@ func freebuffErrorCode(body []byte) string {
 			raw = nested
 			continue
 		}
-		return ""
+		return code, message
 	}
 }
 
