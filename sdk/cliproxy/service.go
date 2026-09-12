@@ -1328,7 +1328,6 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 				excluded = entry.ExcludedModels
 			}
 		}
-		models = applyExcludedModels(models, excluded)
 	case "vertex":
 		// Vertex AI Gemini supports the same model identifiers as Gemini.
 		models = registry.GetGeminiVertexModels()
@@ -1340,17 +1339,13 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 				excluded = entry.ExcludedModels
 			}
 		}
-		models = applyExcludedModels(models, excluded)
 	case "gemini-cli":
 		models = registry.GetGeminiCLIModels()
-		models = applyExcludedModels(models, excluded)
 	case "aistudio":
 		models = registry.GetAIStudioModels()
-		models = applyExcludedModels(models, excluded)
 	case "antigravity":
 		models = registry.GetAntigravityModels()
 		models = applyAntigravityFetchedModelCapabilities(models, s.fetchAntigravityModelCapabilityHintsForAuth(context.Background(), a))
-		models = applyExcludedModels(models, excluded)
 	case "claude":
 		models = registry.GetClaudeModels()
 		if entry := s.resolveConfigClaudeKey(a); entry != nil {
@@ -1361,7 +1356,6 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 				excluded = entry.ExcludedModels
 			}
 		}
-		models = applyExcludedModels(models, excluded)
 	case "codex":
 		codexPlanType := ""
 		if a.Attributes != nil {
@@ -1387,10 +1381,8 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 				excluded = entry.ExcludedModels
 			}
 		}
-		models = applyExcludedModels(models, excluded)
 	case "kimi":
 		models = registry.GetKimiModels()
-		models = applyExcludedModels(models, excluded)
 	case "cursor":
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -1398,7 +1390,6 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		// Advertise Anthropic-style aliases (claude-sonnet-4-6, ...) for the
 		// claude-family models Cursor actually offers, before exclusions apply.
 		models = helps.ExpandCursorModelAliases(models)
-		models = applyExcludedModels(models, excluded)
 	case "github-copilot":
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -1413,41 +1404,32 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		if !hasCopilotAuto {
 			models = append(models, registry.GetGitHubCopilotAutoModel())
 		}
-		models = applyExcludedModels(models, excluded)
 	case "kiro":
 		models = s.fetchKiroModels(a)
-		models = applyExcludedModels(models, excluded)
 	case "kilo":
 		models = executor.FetchKiloModels(context.Background(), a, s.cfg)
-		models = applyExcludedModels(models, excluded)
 	case "commandcode":
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		models = executor.FetchCommandCodeModels(ctx, a, s.cfg)
-		models = applyExcludedModels(models, excluded)
 	case "codearts":
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		models = executor.FetchCodeArtsModels(ctx, a, s.cfg)
-		models = applyExcludedModels(models, excluded)
 	case "joycode":
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		models = executor.FetchJoyCodeModels(ctx, a, s.cfg)
-		models = applyExcludedModels(models, excluded)
 	case "gitlab":
 		models = executor.GitLabModelsFromAuth(a)
-		models = applyExcludedModels(models, excluded)
 	case "codebuddy":
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		models = executor.FetchCodeBuddyModels(ctx, a, s.cfg)
-		models = applyExcludedModels(models, excluded)
 	case "codebuddy-ai":
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		models = executor.FetchCodeBuddyAIModels(ctx, a, s.cfg)
-		models = applyExcludedModels(models, excluded)
 	case "bt":
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -1458,7 +1440,6 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 			}
 			excluded = entry.ExcludedModels
 		}
-		models = applyExcludedModels(models, excluded)
 	case "freebuff":
 		models = registry.GetFreebuffModels()
 		if entry := s.resolveConfigFreebuffKey(a); entry != nil {
@@ -1467,7 +1448,6 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 			}
 			excluded = entry.ExcludedModels
 		}
-		models = applyExcludedModels(models, excluded)
 	case "qoder":
 		catalog := fetchQoderCatalog(context.Background(), a, s.cfg)
 		if len(catalog.Models) > 0 {
@@ -1479,7 +1459,6 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		}
 	case "xai":
 		models = registry.GetXAIModels()
-		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
 		if s.cfg != nil {
@@ -1547,7 +1526,12 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 			}
 		}
 	}
+	// Exclusions are applied twice: once against raw catalog IDs (legacy
+	// configs may reference them) and once after OAuth model aliasing, so
+	// entries written with user-visible aliased names also match.
+	models = applyExcludedModels(models, excluded)
 	models = applyOAuthModelAlias(s.cfg, provider, authKind, models)
+	models = applyExcludedModels(models, excluded)
 	log.Debugf("registerModelsForAuth: provider=%s, authKind=%s, authID=%s, authProvider=%s, models=%d, compatDetected=%v", provider, authKind, a.ID, a.Provider, len(models), compatDetected)
 	if len(models) > 0 {
 		key := provider

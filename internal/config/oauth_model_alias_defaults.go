@@ -23,17 +23,18 @@ func defaultKiroAliases() []OAuthModelAlias {
 
 func defaultQoderAliases() []OAuthModelAlias {
 	return []OAuthModelAlias{
+		{Name: "smodel", Alias: "sonus"},
 		{Name: "cmodel", Alias: "cantus"},
 		{Name: "qmodel_38max", Alias: "qwen3.8-max"},
 		{Name: "qfmodel", Alias: "qwen3.8-flash"},
 		{Name: "qmodel_latest", Alias: "qwen3.7-max"},
 		{Name: "qmodel", Alias: "qwen3.7-plus"},
 		{Name: "dmodel", Alias: "deepseek-v4-pro"},
-		{Name: "dfmodel", Alias: "deepseek-v4-flash"},
+		{Name: "dfmodel", Alias: "deepseek-v4.1-flash"},
 		{Name: "gmodel", Alias: "glm-5.3"},
 		{Name: "gfmodel", Alias: "glm-5.3-flash"},
 		{Name: "kmodel_latest", Alias: "kimi-k3"},
-		{Name: "kmodel", Alias: "kimi-k2.7-code"},
+		{Name: "kmodel", Alias: "kimi-k2.8-code"},
 		{Name: "mmodel", Alias: "minimax-m3"},
 	}
 }

@@ -2,6 +2,7 @@ package cliproxy
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	internalregistry "github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -107,5 +108,47 @@ func TestRegisterModelsForAuth_NonQoderClearsStaleQoderContracts(t *testing.T) {
 	service.registerModelsForAuth(auth)
 	if _, ok := executor.LoadQoderModelContract(auth.ID, "stale-model"); ok {
 		t.Fatal("expected non-qoder registration to clear stale qoder contract cache")
+	}
+}
+
+// TestRegisterModelsForAuth_QoderExcludesAliasedOAuthModels locks in the
+// exclusion ordering: OAuth excluded-model entries are written with the
+// user-visible (aliased) model names, so the filter must also run after
+// OAuth model aliasing, not only on the raw catalog IDs.
+func TestRegisterModelsForAuth_QoderExcludesAliasedOAuthModels(t *testing.T) {
+	previousFetchQoderCatalog := fetchQoderCatalog
+	fetchQoderCatalog = func(ctx context.Context, auth *coreauth.Auth, cfg *config.Config) executor.QoderModelCatalog {
+		return executor.QoderModelCatalog{}
+	}
+	defer func() {
+		fetchQoderCatalog = previousFetchQoderCatalog
+	}()
+
+	service := &Service{cfg: &config.Config{
+		OAuthExcludedModels: map[string][]string{"qoder": {"cantus"}},
+		OAuthModelAlias: map[string][]config.OAuthModelAlias{
+			"qoder": {{Name: "cmodel", Alias: "cantus"}},
+		},
+	}}
+	auth := &coreauth.Auth{ID: "qoder-alias-excluded.json", Provider: "qoder", Status: coreauth.StatusActive}
+
+	registry := internalregistry.GetGlobalRegistry()
+	registry.UnregisterClient(auth.ID)
+	t.Cleanup(func() {
+		registry.UnregisterClient(auth.ID)
+	})
+
+	service.registerModelsForAuth(auth)
+	models := registry.GetModelsForClient(auth.ID)
+	if len(models) == 0 {
+		t.Fatal("expected static qoder fallback models to be registered")
+	}
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		if strings.EqualFold(model.ID, "cantus") || strings.EqualFold(model.ID, "cmodel") {
+			t.Fatalf("expected aliased excluded model to be dropped, got %q", model.ID)
+		}
 	}
 }
