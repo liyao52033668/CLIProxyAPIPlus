@@ -9,7 +9,9 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -21,18 +23,16 @@ import (
 const (
 	BaseURL       = "https://www.codebuddy.ai"
 	DefaultDomain = "www.codebuddy.ai"
-	// IDEVersion is the CodeBuddyIDE (standalone IDE) build version that the
-	// config API expects from IDE clients.
-	IDEVersion = "4.10.4"
-	// PluginVersion is the chat plugin build version impersonated on the
-	// chat completions path.
-	PluginVersion = "1.100.0"
-	UserAgent     = "CodeBuddy/" + PluginVersion
-	// The config API only serves the full IDE config payload (including
-	// data.models) to clients whose User-Agent identifies a CodeBuddyIDE
-	// build; the plain UserAgent above receives a product-features-only
-	// body instead.
-	ConfigUserAgent = "CodeBuddy/" + IDEVersion + " CodeBuddyIDE/" + IDEVersion
+	// defaultWorkBuddyAIVersion is the fallback WorkBuddy AI desktop build
+	// version used when the live version cannot be fetched from the public
+	// changelog. The UA brand (WorkBuddyAI) selects the /v3/config catalog
+	// payload, the version number itself is not version-gated.
+	defaultWorkBuddyAIVersion = "5.5.6"
+	// The WorkBuddy AI desktop release notes page; its latest heading yields
+	// the desktop build version impersonated on upstream requests.
+	workBuddyAIChangelogURL        = "https://www.codebuddy.cn/docs/workbuddy/Changelog"
+	workBuddyAIVersionPattern      = `(\d+\.\d+\.\d+)\s*版本发布`
+	workBuddyAIVersionRefreshEvery = 24 * time.Hour
 	// The chat upstream validates that the first message is a system prompt
 	// and has no fallback when the client sends none.
 	DefaultSystemPrompt = "You are CodeBuddy, an AI programming assistant."
@@ -45,6 +45,80 @@ const (
 	codeLoginPending = 11217
 	codeSuccess      = 0
 )
+
+var (
+	workBuddyAIVersionMu        sync.Mutex
+	workBuddyAIVersionCached    string
+	workBuddyAIVersionFetchedAt time.Time
+	workBuddyAIVersionRe        = regexp.MustCompile(workBuddyAIVersionPattern)
+)
+
+// WorkBuddyAIVersion returns the cached desktop build version, falling back
+// to defaultWorkBuddyAIVersion when the changelog has never been fetched
+// successfully.
+func WorkBuddyAIVersion() string {
+	workBuddyAIVersionMu.Lock()
+	defer workBuddyAIVersionMu.Unlock()
+	if workBuddyAIVersionCached != "" {
+		return workBuddyAIVersionCached
+	}
+	return defaultWorkBuddyAIVersion
+}
+
+// WorkBuddyAIUserAgent returns the desktop build User-Agent used on the
+// model catalog and chat completions paths.
+func WorkBuddyAIUserAgent() string {
+	return "WorkBuddyAI/" + WorkBuddyAIVersion()
+}
+
+// RefreshWorkBuddyAIVersion refreshes the cached desktop version from the
+// public changelog at most once per refresh interval. Failures keep the
+// previous value and are logged at debug level only.
+func RefreshWorkBuddyAIVersion(ctx context.Context, cfg *config.Config) {
+	workBuddyAIVersionMu.Lock()
+	defer workBuddyAIVersionMu.Unlock()
+	if !workBuddyAIVersionFetchedAt.IsZero() && time.Since(workBuddyAIVersionFetchedAt) < workBuddyAIVersionRefreshEvery {
+		return
+	}
+	workBuddyAIVersionFetchedAt = time.Now()
+
+	httpClient := &http.Client{Timeout: 15 * time.Second}
+	if cfg != nil {
+		httpClient = util.SetProxy(&cfg.SDKConfig, httpClient)
+	}
+	req, errReq := http.NewRequestWithContext(ctx, http.MethodGet, workBuddyAIChangelogURL, nil)
+	if errReq != nil {
+		log.Debugf("codebuddy-ai: changelog request build failed: %v", errReq)
+		return
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml")
+	resp, errDo := httpClient.Do(req)
+	if errDo != nil {
+		log.Debugf("codebuddy-ai: changelog fetch failed: %v", errDo)
+		return
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Errorf("codebuddy-ai changelog: close body error: %v", errClose)
+		}
+	}()
+	bodyBytes, errRead := io.ReadAll(resp.Body)
+	if errRead != nil || resp.StatusCode != http.StatusOK {
+		log.Debugf("codebuddy-ai: changelog read failed (status %d): %v", resp.StatusCode, errRead)
+		return
+	}
+	match := workBuddyAIVersionRe.FindSubmatch(bodyBytes)
+	if match == nil {
+		log.Debugf("codebuddy-ai: no release version found in changelog")
+		return
+	}
+	latest := string(match[1])
+	if latest != workBuddyAIVersionCached {
+		workBuddyAIVersionCached = latest
+		log.Infof("codebuddy-ai: WorkBuddy AI desktop version refreshed to %s", latest)
+	}
+}
 
 type CodeBuddyAIAuth struct {
 	httpClient *http.Client
@@ -78,7 +152,7 @@ func (a *CodeBuddyAIAuth) FetchAuthState(ctx context.Context) (*AuthState, error
 	req.Header.Set("X-No-Authorization", "true")
 	req.Header.Set("X-No-User-Id", "true")
 	req.Header.Set("X-No-Enterprise-Id", "true")
-	req.Header.Set("User-Agent", UserAgent)
+	req.Header.Set("User-Agent", WorkBuddyAIUserAgent())
 
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
@@ -151,7 +225,7 @@ func (a *CodeBuddyAIAuth) PollForToken(ctx context.Context, state string) (*Code
 		}
 		req.Header.Set("Accept", "application/json")
 		req.Header.Set("X-No-Authorization", "true")
-		req.Header.Set("User-Agent", UserAgent)
+		req.Header.Set("User-Agent", WorkBuddyAIUserAgent())
 
 		resp, err := a.httpClient.Do(req)
 		if err != nil {
@@ -237,7 +311,7 @@ func (a *CodeBuddyAIAuth) RefreshToken(ctx context.Context, accessToken, refresh
 	req.Header.Set("X-Auth-Refresh-Source", "ide-main")
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("X-User-Id", userID)
-	req.Header.Set("User-Agent", UserAgent)
+	req.Header.Set("User-Agent", WorkBuddyAIUserAgent())
 
 	resp, err := a.httpClient.Do(req)
 	if err != nil {

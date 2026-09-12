@@ -9,7 +9,9 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -22,8 +24,16 @@ import (
 const (
 	BaseURL       = "https://copilot.tencent.com"
 	DefaultDomain = "www.codebuddy.cn"
-	UserAgent     = "CodeBuddyIDE/4.12.0 CodeBuddy/4.12.0"
-	IDEVersion    = "4.12.0"
+	// defaultIDEVersion is the fallback CodeBuddy IDE build version used
+	// when the live version cannot be fetched from the public release
+	// notes. The executor refreshes it dynamically on the model refresh
+	// cycle.
+	defaultIDEVersion = "4.12.0"
+	// The CodeBuddy IDE release notes page; its latest entry heading yields
+	// the IDE build version impersonated on upstream requests.
+	ideReleaseNotesURL     = "https://www.codebuddy.cn/docs/ide/release-notes/release-notes"
+	ideVersionPattern      = `(\d+\.\d+\.\d+)\s*\(\d{4}-\d{2}-\d{2}\)`
+	ideVersionRefreshEvery = 24 * time.Hour
 
 	codeBuddyStatePath   = "/v2/plugin/auth/state"
 	codeBuddyTokenPath   = "/v2/plugin/auth/token"
@@ -34,9 +44,77 @@ const (
 	codeSuccess          = 0
 )
 
+var (
+	ideVersionMu        sync.Mutex
+	ideVersionCached    string
+	ideVersionFetchedAt time.Time
+	ideVersionRe        = regexp.MustCompile(ideVersionPattern)
+)
+
+// IDEVersion returns the cached IDE build version, falling back to
+// defaultIDEVersion when the release notes have never been fetched
+// successfully.
+func IDEVersion() string {
+	ideVersionMu.Lock()
+	defer ideVersionMu.Unlock()
+	if ideVersionCached != "" {
+		return ideVersionCached
+	}
+	return defaultIDEVersion
+}
+
 // GetUserAgent returns the protocol User-Agent expected by CodeBuddy APIs.
 func GetUserAgent() string {
-	return UserAgent
+	return "CodeBuddyIDE/" + IDEVersion() + " CodeBuddy/" + IDEVersion()
+}
+
+// RefreshIDEVersion refreshes the cached IDE version from the public
+// release notes at most once per refresh interval. Failures keep the
+// previous value and are logged at debug level only.
+func RefreshIDEVersion(ctx context.Context, cfg *config.Config) {
+	ideVersionMu.Lock()
+	defer ideVersionMu.Unlock()
+	if !ideVersionFetchedAt.IsZero() && time.Since(ideVersionFetchedAt) < ideVersionRefreshEvery {
+		return
+	}
+	ideVersionFetchedAt = time.Now()
+
+	httpClient := &http.Client{Timeout: 15 * time.Second}
+	if cfg != nil {
+		httpClient = util.SetProxy(&cfg.SDKConfig, httpClient)
+	}
+	req, errReq := http.NewRequestWithContext(ctx, http.MethodGet, ideReleaseNotesURL, nil)
+	if errReq != nil {
+		log.Debugf("codebuddy: release notes request build failed: %v", errReq)
+		return
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml")
+	resp, errDo := httpClient.Do(req)
+	if errDo != nil {
+		log.Debugf("codebuddy: release notes fetch failed: %v", errDo)
+		return
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Errorf("codebuddy ide version: close body error: %v", errClose)
+		}
+	}()
+	bodyBytes, errRead := io.ReadAll(resp.Body)
+	if errRead != nil || resp.StatusCode != http.StatusOK {
+		log.Debugf("codebuddy: release notes read failed (status %d): %v", resp.StatusCode, errRead)
+		return
+	}
+	match := ideVersionRe.FindSubmatch(bodyBytes)
+	if match == nil {
+		log.Debugf("codebuddy: no release version found in release notes")
+		return
+	}
+	latest := string(match[1])
+	if latest != ideVersionCached {
+		ideVersionCached = latest
+		log.Infof("codebuddy: IDE version refreshed to %s", latest)
+	}
 }
 
 type CodeBuddyAuth struct {

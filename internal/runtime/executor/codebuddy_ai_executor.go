@@ -287,14 +287,14 @@ func (e *CodeBuddyAIExecutor) applyHeaders(req *http.Request, accessToken, userI
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", codebuddy_ai.UserAgent)
+	req.Header.Set("User-Agent", codebuddy_ai.WorkBuddyAIUserAgent())
 	req.Header.Set("X-User-Id", userID)
 	req.Header.Set("X-Domain", domain)
-	req.Header.Set("X-IDE-Type", "IDE")
-	req.Header.Set("X-IDE-Name", "CodeBuddy")
-	req.Header.Set("X-IDE-Version", codebuddy_ai.PluginVersion)
+	req.Header.Set("X-IDE-Type", "WorkBuddyAI")
+	req.Header.Set("X-IDE-Name", "WorkBuddy")
+	req.Header.Set("X-IDE-Version", codebuddy_ai.WorkBuddyAIVersion())
 	req.Header.Set("X-Product", "cloud")
-	req.Header.Set("X-Product-Version", codebuddy_ai.PluginVersion)
+	req.Header.Set("X-Product-Version", codebuddy_ai.WorkBuddyAIVersion())
 }
 
 var codeBuddyAIInternalModelPrefixes = []string{
@@ -318,54 +318,16 @@ func isCodeBuddyAIInternalModel(id string) bool {
 	return false
 }
 
-func FetchCodeBuddyAIModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config) []*registry.ModelInfo {
-	accessToken, userID, domain := codeBuddyAICredentials(auth)
-	if accessToken == "" {
-		log.Infof("codebuddy-ai: no access token found, using static model list")
-		return registry.GetCodeBuddyAIModels()
-	}
-
-	log.Debugf("codebuddy-ai: fetching dynamic models from /v3/config API")
-
-	headers := make(http.Header)
-	headers.Set("User-Agent", codebuddy_ai.ConfigUserAgent)
-	headers.Set("Accept", "application/json, text/plain, */*")
-	headers.Set("X-Requested-With", "XMLHttpRequest")
-	headers.Set("Authorization", "Bearer "+accessToken)
-	headers.Set("X-User-Id", userID)
-	headers.Set("X-Domain", domain)
-	headers.Set("X-IDE-Type", "CodeBuddyIDE")
-	headers.Set("X-IDE-Name", "CodeBuddyIDE")
-	headers.Set("X-IDE-Version", codebuddy_ai.IDEVersion)
-	headers.Set("X-Product-Version", codebuddy_ai.IDEVersion)
-	headers.Set("X-Env-ID", "production")
-	headers.Set("X-Product", "SaaS")
-
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, 15*time.Second)
-	_, body, _, errDo := helps.DoJSON(ctx, cfg, helps.UpstreamRequest{
-		Provider: "codebuddy-ai",
-		Auth:     auth,
-		Method:   http.MethodGet,
-		URL:      codebuddy_ai.BaseURL + "/v3/config",
-		Headers:  headers,
-		Client:   httpClient,
-	})
-	if errDo != nil {
-		log.Warnf("codebuddy-ai: using static models (/v3/config API fetch failed: %v)", errDo)
-		return registry.GetCodeBuddyAIModels()
-	}
-
-	// The /v3/config API returns models in data.models array
+// parseCodeBuddyAIModels extracts the chat-capable models from a
+// /v3/config payload. Non-chat entries (image/video generation tags) and
+// internal IDE helper models are skipped.
+func parseCodeBuddyAIModels(body []byte, now int64) []*registry.ModelInfo {
 	modelsResult := gjson.GetBytes(body, "data.models")
 	if !modelsResult.Exists() || !modelsResult.IsArray() {
-		log.Warn("codebuddy-ai: /v3/config API response missing data.models array")
-		return registry.GetCodeBuddyAIModels()
+		return nil
 	}
 
-	var dynamicModels []*registry.ModelInfo
-	now := time.Now().Unix()
-	count := 0
-
+	var models []*registry.ModelInfo
 	modelsResult.ForEach(func(key, value gjson.Result) bool {
 		id := value.Get("id").String()
 		if id == "" {
@@ -376,10 +338,11 @@ func FetchCodeBuddyAIModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 			return true
 		}
 
-		// Non-chat models (e.g. text-to-image) cannot be served through the
-		// chat completions endpoint.
+		// Non-chat models (image/video generation) cannot be served through
+		// the chat completions endpoint.
 		for _, tag := range value.Get("tags").Array() {
-			if tag.String() == "text-to-image" {
+			switch tag.String() {
+			case "text-to-image", "image-to-image", "text-to-video", "image-to-video":
 				return true
 			}
 		}
@@ -420,13 +383,22 @@ func FetchCodeBuddyAIModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 		var thinkingSupport *registry.ThinkingSupport
 		if supportsReasoning || onlyReasoning {
 			thinkingSupport = &registry.ThinkingSupport{ZeroAllowed: true}
+			// The catalog ships two reasoning shapes: a single fixed effort
+			// (reasoning.effort) or a supported effort list. Dynamic effort
+			// switching is allowed whenever a medium/high effort is offered.
 			reasoningEffort := value.Get("reasoning.effort").String()
 			if reasoningEffort == "medium" || reasoningEffort == "high" {
 				thinkingSupport.DynamicAllowed = true
 			}
+			for _, effort := range value.Get("reasoning.supportedEfforts").Array() {
+				switch effort.String() {
+				case "medium", "high":
+					thinkingSupport.DynamicAllowed = true
+				}
+			}
 		}
 
-		dynamicModels = append(dynamicModels, &registry.ModelInfo{
+		models = append(models, &registry.ModelInfo{
 			ID:                  id,
 			Object:              "model",
 			Created:             now,
@@ -439,17 +411,56 @@ func FetchCodeBuddyAIModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 			Thinking:            thinkingSupport,
 			SupportedEndpoints:  []string{"/chat/completions"},
 		})
-		count++
 		return true
 	})
 
-	count = len(dynamicModels)
+	return models
+}
 
-	log.Infof("codebuddy-ai: fetched %d models from /v3/config API", count)
-	if count == 0 {
-		log.Warn("codebuddy-ai: no models parsed from /v3/config API, using static fallback")
+func FetchCodeBuddyAIModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config) []*registry.ModelInfo {
+	accessToken, userID, domain := codeBuddyAICredentials(auth)
+	if accessToken == "" {
+		log.Infof("codebuddy-ai: no access token found, using static model list")
 		return registry.GetCodeBuddyAIModels()
 	}
 
+	// Best-effort refresh of the desktop version from the public changelog;
+	// the UA brand selects the catalog payload, the version is cosmetic.
+	codebuddy_ai.RefreshWorkBuddyAIVersion(ctx, cfg)
+
+	// The WorkBuddy AI desktop build's catalog carries the newest vendor
+	// lineup (e.g. gpt-6-astra, deepseek-v4.1-flash); the brand in the
+	// User-Agent, not the query string, selects the catalog payload.
+	headers := make(http.Header)
+	headers.Set("User-Agent", codebuddy_ai.WorkBuddyAIUserAgent())
+	headers.Set("Accept", "application/json, text/plain, */*")
+	headers.Set("X-Requested-With", "XMLHttpRequest")
+	headers.Set("Authorization", "Bearer "+accessToken)
+	headers.Set("X-User-Id", userID)
+	headers.Set("X-Domain", domain)
+	headers.Set("X-Env-ID", "production")
+	headers.Set("X-Product", "SaaS")
+
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, 15*time.Second)
+	_, body, _, errDo := helps.DoJSON(ctx, cfg, helps.UpstreamRequest{
+		Provider: "codebuddy-ai",
+		Auth:     auth,
+		Method:   http.MethodGet,
+		URL:      codebuddy_ai.BaseURL + "/v3/config",
+		Headers:  headers,
+		Client:   httpClient,
+	})
+	if errDo != nil {
+		log.Warnf("codebuddy-ai: using static models (/v3/config fetch failed: %v)", errDo)
+		return registry.GetCodeBuddyAIModels()
+	}
+
+	dynamicModels := parseCodeBuddyAIModels(body, time.Now().Unix())
+	if len(dynamicModels) == 0 {
+		log.Warn("codebuddy-ai: no models parsed from /v3/config, using static fallback")
+		return registry.GetCodeBuddyAIModels()
+	}
+
+	log.Infof("codebuddy-ai: fetched %d models from /v3/config", len(dynamicModels))
 	return dynamicModels
 }

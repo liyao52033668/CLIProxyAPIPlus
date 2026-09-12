@@ -335,8 +335,8 @@ func (e *CodeBuddyExecutor) applyHeaders(req *http.Request, accessToken, userID,
 	req.Header.Set("X-Product", "SaaS")
 	req.Header.Set("X-IDE-Type", "CodeBuddyIDE")
 	req.Header.Set("X-IDE-Name", "CodeBuddyIDE")
-	req.Header.Set("X-IDE-Version", codebuddy.IDEVersion)
-	req.Header.Set("X-Product-Version", codebuddy.IDEVersion)
+	req.Header.Set("X-IDE-Version", codebuddy.IDEVersion())
+	req.Header.Set("X-Product-Version", codebuddy.IDEVersion())
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
 }
 
@@ -713,6 +713,9 @@ func FetchCodeBuddyModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *con
 		return registry.GetCodeBuddyModels()
 	}
 
+	// Best-effort refresh of the IDE version from the public release notes.
+	codebuddy.RefreshIDEVersion(ctx, cfg)
+
 	log.Debugf("codebuddy: fetching dynamic models from config API")
 
 	headers := make(http.Header)
@@ -721,8 +724,8 @@ func FetchCodeBuddyModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *con
 	headers.Set("X-Requested-With", "XMLHttpRequest")
 	headers.Set("X-IDE-Type", "CodeBuddyIDE")
 	headers.Set("X-IDE-Name", "CodeBuddyIDE")
-	headers.Set("X-IDE-Version", codebuddy.IDEVersion)
-	headers.Set("X-Product-Version", codebuddy.IDEVersion)
+	headers.Set("X-IDE-Version", codebuddy.IDEVersion())
+	headers.Set("X-Product-Version", codebuddy.IDEVersion())
 	headers.Set("X-Env-ID", "production")
 	headers.Set("Authorization", "Bearer "+accessToken)
 	headers.Set("X-User-Id", userID)

@@ -38,8 +38,8 @@ func TestFetchAuthState_Success(t *testing.T) {
 		if got := r.URL.Query().Get("platform"); got != "CLI" {
 			t.Errorf("expected platform=CLI, got %s", got)
 		}
-		if got := r.Header.Get("User-Agent"); got != UserAgent {
-			t.Errorf("expected User-Agent %s, got %s", UserAgent, got)
+		if got := r.Header.Get("User-Agent"); got != GetUserAgent() {
+			t.Errorf("expected User-Agent %s, got %s", GetUserAgent(), got)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
