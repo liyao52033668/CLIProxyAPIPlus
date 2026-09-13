@@ -219,6 +219,21 @@ func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (ava
 	return available, cooldownCount, earliest
 }
 
+type prevalidatedAuthCandidatesKey struct{}
+
+// getSelectorAvailableAuths filters candidates for built-in selectors. When the
+// manager marked the context as prevalidated, each credential's upstream model
+// was already resolved and cooldown filtering already ran; rechecking the alias
+// or an empty model would apply unrelated cooldowns.
+func getSelectorAvailableAuths(ctx context.Context, auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
+	if ctx != nil {
+		if validated, _ := ctx.Value(prevalidatedAuthCandidatesKey{}).(bool); validated && len(auths) > 0 {
+			return auths, nil
+		}
+	}
+	return getAvailableAuths(auths, provider, model, now)
+}
+
 func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
 	if len(auths) == 0 {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
@@ -260,7 +275,7 @@ func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]
 func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	_ = opts
 	now := time.Now()
-	available, err := getAvailableAuths(auths, provider, model, now)
+	available, err := getSelectorAvailableAuths(ctx, auths, provider, model, now)
 	if err != nil {
 		return nil, err
 	}
@@ -383,7 +398,7 @@ func groupByVirtualParent(auths []*Auth) (map[string][]*Auth, []string) {
 func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	_ = opts
 	now := time.Now()
-	available, err := getAvailableAuths(auths, provider, model, now)
+	available, err := getSelectorAvailableAuths(ctx, auths, provider, model, now)
 	if err != nil {
 		return nil, err
 	}
@@ -397,6 +412,9 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	}
 	if auth.Disabled || auth.Status == StatusDisabled {
 		return true, blockReasonDisabled, time.Time{}
+	}
+	if hasUnauthorizedAuthFailure(auth) {
+		return true, blockReasonOther, time.Time{}
 	}
 	if exp, ok := auth.AccessTokenExpirationTime(); ok && !exp.IsZero() && !exp.After(now) {
 		return true, blockReasonOther, time.Time{}
@@ -435,9 +453,18 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 				return false, blockReasonNone, time.Time{}
 			}
 		}
-		return false, blockReasonNone, time.Time{}
+		// No model-specific state found; fall through to auth-level check.
+		// When the auth has model states but this specific model lacks one,
+		// the auth-level unavailability was caused by model-specific failures
+		// on other models. Do not propagate that cooldown to models without
+		// their own failure state.
+		if len(auth.ModelStates) > 0 {
+			return false, blockReasonNone, time.Time{}
+		}
 	}
-	if auth.Unavailable && auth.NextRetryAfter.After(now) {
+	hasAuthCooldown := auth.Unavailable && auth.NextRetryAfter.After(now)
+	hasQuotaCooldown := auth.Quota.Exceeded && !auth.Quota.NextRecoverAt.IsZero() && auth.Quota.NextRecoverAt.After(now)
+	if hasAuthCooldown || hasQuotaCooldown {
 		next := auth.NextRetryAfter
 		if !auth.Quota.NextRecoverAt.IsZero() && auth.Quota.NextRecoverAt.After(now) {
 			next = auth.Quota.NextRecoverAt
@@ -516,7 +543,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	}
 
 	now := time.Now()
-	available, err := getAvailableAuths(auths, provider, model, now)
+	available, err := getSelectorAvailableAuths(ctx, auths, provider, model, now)
 	if err != nil {
 		return nil, err
 	}

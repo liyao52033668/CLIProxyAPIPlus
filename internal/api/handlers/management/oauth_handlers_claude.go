@@ -102,12 +102,23 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 
 		// Create token storage
 		tokenStorage := anthropicAuth.CreateTokenStorage(bundle)
+		metadata := map[string]any{"email": tokenStorage.Email}
+		if tokenStorage.AccountUUID != "" {
+			metadata["account_uuid"] = tokenStorage.AccountUUID
+		}
+		if tokenStorage.OrganizationUUID != "" {
+			metadata["organization_uuid"] = tokenStorage.OrganizationUUID
+		}
+		if tokenStorage.OrganizationName != "" {
+			metadata["organization_name"] = tokenStorage.OrganizationName
+		}
+		fileName := claude.CredentialFileName(tokenStorage.Email, tokenStorage.OrganizationUUID, tokenStorage.AccountUUID)
 		record := &coreauth.Auth{
-			ID:       fmt.Sprintf("claude-%s.json", tokenStorage.Email),
+			ID:       fileName,
 			Provider: "claude",
-			FileName: fmt.Sprintf("claude-%s.json", tokenStorage.Email),
+			FileName: fileName,
 			Storage:  tokenStorage,
-			Metadata: map[string]any{"email": tokenStorage.Email},
+			Metadata: metadata,
 		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {

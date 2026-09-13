@@ -6,7 +6,6 @@
 package gemini
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -59,74 +58,92 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		rawJSON, _ = sjson.DeleteBytes(rawJSON, "request.system_instruction")
 	}
 
-	// Normalize roles in request.contents: default to valid values if missing/invalid
+	rawJSON = normalizeGeminiGenerationConfigResponseSchema(rawJSON)
+
+	// Normalize roles in request.contents: default to valid values if missing/invalid.
+	// The contents array is only materialized when a role actually changes; copying
+	// every content up front duplicates the whole payload for large inline data.
 	contents := util.GetGJSONBytesNoCopy(rawJSON, "request.contents")
-	if contents.Exists() {
-		prevRole := ""
-		idx := 0
-		contents.ForEach(func(_ gjson.Result, value gjson.Result) bool {
+	if contents.IsArray() && geminiContentRolesNeedNormalization(contents) {
+		contentItems := translatorcommon.NewRawArrayItems(contents.Get("#").Int())
+		previousRole := ""
+		contents.ForEach(func(_, value gjson.Result) bool {
 			role := value.Get("role").String()
-			valid := role == "user" || role == "model"
-			if role == "" || !valid {
-				var newRole string
+			content := []byte(value.Raw)
+			if role != "user" && role != "model" {
 				if translatorcommon.ContentHasGeminiFunctionResponse([]byte(value.Raw)) {
-					// Tool results must always stay on a user turn so the upstream
-					// API can pair them with the preceding model functionCall turn.
-					newRole = "user"
-				} else if prevRole == "" {
-					newRole = "user"
-				} else if prevRole == "user" {
-					newRole = "model"
+					role = "user"
+				} else if previousRole == "" || previousRole == "model" {
+					role = "user"
 				} else {
-					newRole = "user"
+					role = "model"
 				}
-				path := fmt.Sprintf("request.contents.%d.role", idx)
-				rawJSON, _ = sjson.SetBytes(rawJSON, path, newRole)
-				role = newRole
+				content, _ = sjson.SetBytes(content, "role", role)
 			}
-			prevRole = role
-			idx++
+			previousRole = role
+			contentItems = append(contentItems, content)
 			return true
 		})
+		rawJSON, _ = sjson.SetRawBytes(rawJSON, "request.contents", translatorcommon.JoinRawArray(contentItems))
 	}
 
 	toolsResult := util.GetGJSONBytesNoCopy(rawJSON, "request.tools")
 	if toolsResult.IsArray() {
 		seenFunctionNames := make(map[string]struct{})
-		for toolIndex := range toolsResult.Array() {
+		toolsChanged := false
+		var toolItems [][]byte
+		toolsResult.ForEach(func(toolIndex, tool gjson.Result) bool {
+			toolJSON := []byte(tool.Raw)
+			toolChanged := false
 			for _, key := range []string{"functionDeclarations", "function_declarations"} {
-				path := fmt.Sprintf("request.tools.%d.%s", toolIndex, key)
-				declarations := gjson.GetBytes(rawJSON, path)
+				declarations := tool.Get(key)
 				if !declarations.IsArray() {
 					continue
 				}
 
-				parts := make([]string, 0, len(declarations.Array()))
-				for _, declaration := range declarations.Array() {
-					name := declaration.Get("name").String()
-					mappedName := util.MapSanitizedFunctionName(functionNameMap, name)
+				declarationsChanged := false
+				var declarationItems [][]byte
+				declarations.ForEach(func(_, declaration gjson.Result) bool {
+					nameResult := declaration.Get("name")
+					originalName := nameResult.String()
+					mappedName := util.MapSanitizedFunctionName(functionNameMap, originalName)
 					if mappedName != "" {
 						if _, exists := seenFunctionNames[mappedName]; exists {
-							continue
+							declarationsChanged = true
+							return true
 						}
 						seenFunctionNames[mappedName] = struct{}{}
 					}
 
 					declarationJSON := []byte(declaration.Raw)
-					declarationJSON, _ = sjson.SetBytes(declarationJSON, "name", mappedName)
+					if nameResult.Type != gjson.String || mappedName != originalName {
+						declarationJSON, _ = sjson.SetBytes(declarationJSON, "name", mappedName)
+						declarationsChanged = true
+					}
 					if parameters := declaration.Get("parameters"); parameters.Exists() {
 						declarationJSON, _ = sjson.SetRawBytes(declarationJSON, "parametersJsonSchema", []byte(parameters.Raw))
 						declarationJSON, _ = sjson.DeleteBytes(declarationJSON, "parameters")
+						declarationsChanged = true
 					}
-					parts = append(parts, string(declarationJSON))
-				}
-				deduplicated := []byte("[" + strings.Join(parts, ",") + "]")
-				var errSet error
-				rawJSON, errSet = sjson.SetRawBytes(rawJSON, path, deduplicated)
-				if errSet != nil {
-					log.Warnf("failed to normalize function declarations in tool %d: %v", toolIndex, errSet)
+					declarationItems = append(declarationItems, declarationJSON)
+					return true
+				})
+				if declarationsChanged {
+					var errSet error
+					toolJSON, errSet = sjson.SetRawBytes(toolJSON, key, translatorcommon.JoinRawArray(declarationItems))
+					if errSet != nil {
+						log.Warnf("failed to normalize function declarations in tool %d: %v", toolIndex.Int(), errSet)
+					} else {
+						toolChanged = true
+					}
 				}
 			}
+			toolsChanged = toolsChanged || toolChanged
+			toolItems = append(toolItems, toolJSON)
+			return true
+		})
+		if toolsChanged {
+			rawJSON, _ = sjson.SetRawBytes(rawJSON, "request.tools", translatorcommon.JoinRawArray(toolItems))
 		}
 		rawJSON = removeEmptyGeminiFunctionTools(rawJSON)
 	}
@@ -139,6 +156,42 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	}
 
 	return common.AttachDefaultSafetySettings(rawJSON, "request.safetySettings")
+}
+
+// normalizeGeminiGenerationConfigResponseSchema converts generationConfig.responseJsonSchema
+// (and snake_case response_json_schema) to generationConfig.responseSchema for Antigravity compatibility.
+func normalizeGeminiGenerationConfigResponseSchema(rawJSON []byte) []byte {
+	for _, container := range []string{"request.generationConfig", "request.generation_config"} {
+		if !util.GetGJSONBytesNoCopy(rawJSON, container).Exists() {
+			continue
+		}
+		for _, schemaKey := range []string{"responseJsonSchema", "response_json_schema"} {
+			oldPath := container + "." + schemaKey
+			if schema := util.GetGJSONBytesNoCopy(rawJSON, oldPath); schema.Exists() {
+				targetPath := container + ".responseSchema"
+				if !util.GetGJSONBytesNoCopy(rawJSON, targetPath).Exists() {
+					rawJSON, _ = sjson.SetRawBytes(rawJSON, targetPath, []byte(schema.Raw))
+				}
+				rawJSON, _ = sjson.DeleteBytes(rawJSON, oldPath)
+			}
+		}
+	}
+	return rawJSON
+}
+
+// geminiContentRolesNeedNormalization reports whether any content role is missing
+// or invalid and therefore requires rebuilding the contents array.
+func geminiContentRolesNeedNormalization(contents gjson.Result) bool {
+	needsNormalization := false
+	contents.ForEach(func(_, value gjson.Result) bool {
+		role := value.Get("role").String()
+		if role != "user" && role != "model" {
+			needsNormalization = true
+			return false
+		}
+		return true
+	})
+	return needsNormalization
 }
 
 func removeEmptyGeminiFunctionTools(rawJSON []byte) []byte {
@@ -172,47 +225,7 @@ func removeEmptyGeminiFunctionTools(rawJSON []byte) []byte {
 		rawJSON, _ = sjson.DeleteBytes(rawJSON, "request.tools")
 		return rawJSON
 	}
-	rawJSON, _ = sjson.SetRawBytes(rawJSON, "request.tools", util.JoinRawArrayBytes(cleanedTools))
-	return rawJSON
-}
-
-func rewriteGeminiFunctionNames(rawJSON []byte, functionNameMap map[string]string) []byte {
-	contents := util.GetGJSONBytesNoCopy(rawJSON, "request.contents")
-	// Rebuilding the contents array copies every content and part, so only pay for
-	// it once a name actually needs rewriting.
-	if geminiFunctionNamesNeedRewrite(contents, functionNameMap) {
-		for contentIndex, content := range contents.Array() {
-			for partIndex, part := range content.Get("parts").Array() {
-				for _, field := range []string{"functionCall", "functionResponse", "function_call", "function_response"} {
-					nameResult := part.Get(field + ".name")
-					name := nameResult.String()
-					if name == "" {
-						continue
-					}
-					mappedName := util.MapSanitizedFunctionName(functionNameMap, name)
-					if nameResult.Type == gjson.String && mappedName == name {
-						continue
-					}
-					path := fmt.Sprintf("request.contents.%d.parts.%d.%s.name", contentIndex, partIndex, field)
-					rawJSON, _ = sjson.SetBytes(rawJSON, path, mappedName)
-				}
-			}
-		}
-	}
-	for _, allowedPath := range []string{
-		"request.toolConfig.functionCallingConfig.allowedFunctionNames",
-		"request.tool_config.function_calling_config.allowed_function_names",
-	} {
-		allowedNames := util.GetGJSONBytesNoCopy(rawJSON, allowedPath)
-		for index, name := range allowedNames.Array() {
-			mappedName := util.MapSanitizedFunctionName(functionNameMap, name.String())
-			if name.Type == gjson.String && mappedName == name.String() {
-				continue
-			}
-			path := fmt.Sprintf("%s.%d", allowedPath, index)
-			rawJSON, _ = sjson.SetBytes(rawJSON, path, mappedName)
-		}
-	}
+	rawJSON, _ = sjson.SetRawBytes(rawJSON, "request.tools", translatorcommon.JoinRawArray(cleanedTools))
 	return rawJSON
 }
 
@@ -244,65 +257,163 @@ func geminiFunctionNamesNeedRewrite(contents gjson.Result, functionNameMap map[s
 	return needsRewrite
 }
 
+func rewriteGeminiFunctionNames(rawJSON []byte, functionNameMap map[string]string) []byte {
+	contents := util.GetGJSONBytesNoCopy(rawJSON, "request.contents")
+	canBatchContents := contents.IsArray()
+	if canBatchContents {
+		contents.ForEach(func(_, content gjson.Result) bool {
+			parts := content.Get("parts")
+			if parts.Exists() && !parts.IsArray() {
+				canBatchContents = false
+				return false
+			}
+			return true
+		})
+	}
+	// Rebuilding the contents array copies every content and part, so only pay for
+	// it once a name actually needs rewriting.
+	if canBatchContents && geminiFunctionNamesNeedRewrite(contents, functionNameMap) {
+		contentItems := translatorcommon.NewRawArrayItems(contents.Get("#").Int())
+		contents.ForEach(func(_, content gjson.Result) bool {
+			contentJSON := []byte(content.Raw)
+			partsChanged := false
+			partItems := make([][]byte, 0, 4)
+			content.Get("parts").ForEach(func(_, part gjson.Result) bool {
+				partJSON := []byte(part.Raw)
+				for _, field := range geminiFunctionNameFields {
+					nameResult := part.Get(field + ".name")
+					name := nameResult.String()
+					if name == "" {
+						continue
+					}
+					mappedName := util.MapSanitizedFunctionName(functionNameMap, name)
+					if nameResult.Type == gjson.String && mappedName == name {
+						continue
+					}
+					partJSON, _ = sjson.SetBytes(partJSON, field+".name", mappedName)
+					partsChanged = true
+				}
+				partItems = append(partItems, partJSON)
+				return true
+			})
+			if partsChanged {
+				contentJSON, _ = sjson.SetRawBytes(contentJSON, "parts", translatorcommon.JoinRawArray(partItems))
+			}
+			contentItems = append(contentItems, contentJSON)
+			return true
+		})
+		rawJSON, _ = sjson.SetRawBytes(rawJSON, "request.contents", translatorcommon.JoinRawArray(contentItems))
+	} else if !canBatchContents {
+		for contentIndex, content := range contents.Array() {
+			for partIndex, part := range content.Get("parts").Array() {
+				for _, field := range geminiFunctionNameFields {
+					nameResult := part.Get(field + ".name")
+					name := nameResult.String()
+					if name == "" {
+						continue
+					}
+					mappedName := util.MapSanitizedFunctionName(functionNameMap, name)
+					if nameResult.Type == gjson.String && mappedName == name {
+						continue
+					}
+					path := fmt.Sprintf("request.contents.%d.parts.%d.%s.name", contentIndex, partIndex, field)
+					rawJSON, _ = sjson.SetBytes(rawJSON, path, mappedName)
+				}
+			}
+		}
+	}
+
+	for _, allowedPath := range []string{
+		"request.toolConfig.functionCallingConfig.allowedFunctionNames",
+		"request.tool_config.function_calling_config.allowed_function_names",
+	} {
+		allowedNames := util.GetGJSONBytesNoCopy(rawJSON, allowedPath)
+		if allowedNames.IsArray() {
+			namesChanged := false
+			nameItems := make([][]byte, 0, 4)
+			allowedNames.ForEach(func(_, name gjson.Result) bool {
+				mappedName := util.MapSanitizedFunctionName(functionNameMap, name.String())
+				namesChanged = namesChanged || name.Type != gjson.String || mappedName != name.String()
+				mappedNameJSON, _ := json.Marshal(mappedName)
+				nameItems = append(nameItems, mappedNameJSON)
+				return true
+			})
+			if namesChanged {
+				rawJSON, _ = sjson.SetRawBytes(rawJSON, allowedPath, translatorcommon.JoinRawArray(nameItems))
+			}
+		} else {
+			for index, name := range allowedNames.Array() {
+				mappedName := util.MapSanitizedFunctionName(functionNameMap, name.String())
+				if name.Type == gjson.String && mappedName == name.String() {
+					continue
+				}
+				path := fmt.Sprintf("%s.%d", allowedPath, index)
+				rawJSON, _ = sjson.SetBytes(rawJSON, path, mappedName)
+			}
+		}
+	}
+	return rawJSON
+}
+
 func SanitizeAntigravityClaudeGeminiRequestSignatures(modelName string, rawJSON []byte) []byte {
-	var root map[string]any
-	decoder := json.NewDecoder(bytes.NewReader(rawJSON))
-	decoder.UseNumber()
-	if err := decoder.Decode(&root); err != nil {
-		log.WithError(err).Debug("antigravity gemini translator: failed to parse request for Claude signature sanitize")
+	contents := util.GetGJSONBytesNoCopy(rawJSON, "request.contents")
+	if !contents.IsArray() {
 		return rawJSON
 	}
 
-	request, ok := root["request"].(map[string]any)
-	if !ok {
-		return rawJSON
-	}
-	contents, ok := request["contents"].([]any)
-	if !ok {
-		return rawJSON
-	}
-
+	contentsArray := contents.Array()
 	changed := false
-	rewrittenContents := make([]any, 0, len(contents))
-	for contentIndex, contentValue := range contents {
-		content, ok := contentValue.(map[string]any)
-		if !ok {
-			rewrittenContents = append(rewrittenContents, contentValue)
+	rewrittenContents := make([][]byte, 0, len(contentsArray))
+
+	for contentIndex, content := range contentsArray {
+		parts := content.Get("parts")
+		if !parts.IsArray() {
+			rewrittenContents = append(rewrittenContents, []byte(content.Raw))
 			continue
 		}
 
-		parts, ok := content["parts"].([]any)
-		if !ok {
-			rewrittenContents = append(rewrittenContents, content)
-			continue
-		}
+		isModelTurn := content.Get("role").String() == "model"
+		partsArray := parts.Array()
+		contentChanged := false
+		rewrittenParts := make([][]byte, 0, len(partsArray))
 
-		isModelTurn := content["role"] == "model"
-		rewrittenParts := make([]any, 0, len(parts))
-		for partIndex, partValue := range parts {
-			part, ok := partValue.(map[string]any)
-			if !ok {
-				rewrittenParts = append(rewrittenParts, partValue)
+		for partIndex, partResult := range partsArray {
+			var part map[string]any
+			decoder := json.NewDecoder(strings.NewReader(partResult.Raw))
+			decoder.UseNumber()
+			if err := decoder.Decode(&part); err != nil {
+				rewrittenParts = append(rewrittenParts, []byte(partResult.Raw))
 				continue
 			}
 
-			rawSignature, hasSignature := antigravityClaudeGeminiPartThoughtSignature(part)
+			rawSignature, hasStringSignature := antigravityClaudeGeminiPartThoughtSignature(part)
+			hasSignatureKey := hasStringSignature || antigravityClaudeGeminiPartHasThoughtSignatureKey(part) || antigravityClaudeGeminiPartHasThoughtSignatureKeyInRaw(partResult.Raw)
+
 			if hasFunctionResponsePart(part) {
-				if hasSignature {
+				if hasSignatureKey {
 					changed = true
+					contentChanged = true
 					deleteAntigravityClaudeGeminiPartThoughtSignatureFields(part)
 					logAntigravityClaudeGeminiSignatureSanitize(modelName, "drop_signature", "functionResponse parts cannot replay Claude thinking signatures", contentIndex, partIndex, rawSignature)
+					partBytes, _ := json.Marshal(part)
+					rewrittenParts = append(rewrittenParts, partBytes)
+				} else {
+					rewrittenParts = append(rewrittenParts, []byte(partResult.Raw))
 				}
-				rewrittenParts = append(rewrittenParts, part)
 				continue
 			}
+
 			if !isModelTurn {
-				if hasSignature {
+				if hasSignatureKey {
 					changed = true
+					contentChanged = true
 					deleteAntigravityClaudeGeminiPartThoughtSignatureFields(part)
 					logAntigravityClaudeGeminiSignatureSanitize(modelName, "drop_signature", "non-model parts cannot replay Claude thinking signatures", contentIndex, partIndex, rawSignature)
+					partBytes, _ := json.Marshal(part)
+					rewrittenParts = append(rewrittenParts, partBytes)
+				} else {
+					rewrittenParts = append(rewrittenParts, []byte(partResult.Raw))
 				}
-				rewrittenParts = append(rewrittenParts, part)
 				continue
 			}
 
@@ -310,50 +421,154 @@ func SanitizeAntigravityClaudeGeminiRequestSignatures(modelName string, rawJSON 
 				normalized, compatible := signature.CompatibleAntigravityClaudeThinkingSignature(rawSignature)
 				if !compatible {
 					changed = true
+					contentChanged = true
 					logAntigravityClaudeGeminiSignatureSanitize(modelName, "drop_thinking_block", "missing_or_incompatible_signature", contentIndex, partIndex, rawSignature)
 					continue
 				}
-				if text, _ := part["text"].(string); strings.TrimSpace(text) == "" {
+				text, _ := part["text"].(string)
+				if strings.TrimSpace(text) == "" {
 					changed = true
+					contentChanged = true
 					logAntigravityClaudeGeminiSignatureSanitize(modelName, "drop_thinking_block", "empty_thinking_text", contentIndex, partIndex, rawSignature)
 					continue
 				}
 				if normalized != rawSignature {
 					changed = true
+					contentChanged = true
 					logAntigravityClaudeGeminiSignatureSanitize(modelName, "normalize_signature", "compatible_claude_signature", contentIndex, partIndex, rawSignature)
 				}
 				deleteAntigravityClaudeGeminiPartThoughtSignatureFields(part)
 				part["thoughtSignature"] = normalized
-				rewrittenParts = append(rewrittenParts, part)
+				partBytes, _ := json.Marshal(part)
+				rewrittenParts = append(rewrittenParts, partBytes)
 				continue
 			}
 
-			if hasSignature {
+			if hasSignatureKey {
 				changed = true
+				contentChanged = true
 				deleteAntigravityClaudeGeminiPartThoughtSignatureFields(part)
 				logAntigravityClaudeGeminiSignatureSanitize(modelName, "drop_signature", "non-thinking parts should not carry Claude thinking signatures", contentIndex, partIndex, rawSignature)
+				partBytes, _ := json.Marshal(part)
+				rewrittenParts = append(rewrittenParts, partBytes)
+			} else {
+				rewrittenParts = append(rewrittenParts, []byte(partResult.Raw))
 			}
-			rewrittenParts = append(rewrittenParts, part)
 		}
 
 		if len(rewrittenParts) == 0 {
 			changed = true
 			continue
 		}
-		content["parts"] = rewrittenParts
-		rewrittenContents = append(rewrittenContents, content)
+		if contentChanged || len(rewrittenParts) != len(partsArray) {
+			contentBytes := []byte(content.Raw)
+			contentBytes, _ = sjson.SetRawBytes(contentBytes, "parts", translatorcommon.JoinRawArray(rewrittenParts))
+			rewrittenContents = append(rewrittenContents, contentBytes)
+		} else {
+			rewrittenContents = append(rewrittenContents, []byte(content.Raw))
+		}
 	}
 
 	if !changed {
 		return rawJSON
 	}
-	request["contents"] = rewrittenContents
-	out, err := json.Marshal(root)
-	if err != nil {
-		log.WithError(err).Debug("antigravity gemini translator: failed to marshal Claude signature sanitize")
+	out, errSet := sjson.SetRawBytes(rawJSON, "request.contents", translatorcommon.JoinRawArray(rewrittenContents))
+	if errSet != nil {
 		return rawJSON
 	}
 	return out
+}
+
+func antigravityClaudeGeminiPartHasThoughtSignatureKeyInRaw(raw string) bool {
+	dec := json.NewDecoder(strings.NewReader(raw))
+	dec.UseNumber()
+	var stack []bool
+	expectKey := false
+
+	for {
+		t, err := dec.Token()
+		if err != nil {
+			break
+		}
+
+		switch v := t.(type) {
+		case json.Delim:
+			switch v {
+			case '{':
+				stack = append(stack, true)
+				expectKey = true
+			case '}':
+				if len(stack) > 0 {
+					stack = stack[:len(stack)-1]
+				}
+				if len(stack) > 0 && stack[len(stack)-1] {
+					expectKey = true
+				} else {
+					expectKey = false
+				}
+			case '[':
+				stack = append(stack, false)
+				expectKey = false
+			case ']':
+				if len(stack) > 0 {
+					stack = stack[:len(stack)-1]
+				}
+				if len(stack) > 0 && stack[len(stack)-1] {
+					expectKey = true
+				} else {
+					expectKey = false
+				}
+			}
+		case string:
+			if expectKey && len(stack) > 0 && stack[len(stack)-1] {
+				if v == "thoughtSignature" || v == "thought_signature" {
+					return true
+				}
+				expectKey = false
+			} else {
+				if len(stack) > 0 && stack[len(stack)-1] {
+					expectKey = true
+				}
+			}
+		default:
+			if len(stack) > 0 && stack[len(stack)-1] {
+				expectKey = true
+			}
+		}
+	}
+	return false
+}
+
+func antigravityClaudeGeminiPartHasThoughtSignatureKey(part map[string]any) bool {
+	for _, path := range [][]string{
+		{"thoughtSignature"},
+		{"thought_signature"},
+		{"functionCall", "thoughtSignature"},
+		{"functionCall", "thought_signature"},
+		{"functionResponse", "thoughtSignature"},
+		{"functionResponse", "thought_signature"},
+		{"extra_content", "google", "thought_signature"},
+	} {
+		if hasKeyAtPath(part, path...) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasKeyAtPath(value map[string]any, path ...string) bool {
+	var current any = value
+	for _, key := range path {
+		m, ok := current.(map[string]any)
+		if !ok {
+			return false
+		}
+		if _, exists := m[key]; !exists {
+			return false
+		}
+		current = m[key]
+	}
+	return true
 }
 
 func antigravityClaudeGeminiPartThoughtSignature(part map[string]any) (string, bool) {
@@ -388,11 +603,10 @@ func deleteAntigravityClaudeGeminiPartThoughtSignatureFields(part map[string]any
 }
 
 func hasFunctionResponsePart(part map[string]any) bool {
-	_, ok := part["functionResponse"]
-	if ok {
+	if _, ok := part["functionResponse"]; ok {
 		return true
 	}
-	_, ok = part["function_response"]
+	_, ok := part["function_response"]
 	return ok
 }
 
@@ -467,6 +681,7 @@ func normalizeAntigravityInlineDataPart(part gjson.Result) ([]byte, bool) {
 		mimeType = inline.Get("mime_type").String()
 	}
 	if mimeType == "" {
+		// Cloud Code Assist ignores inlineData without mimeType.
 		mimeType = "image/png"
 	}
 	out := []byte(`{"inlineData":{"mimeType":"","data":""}}`)
@@ -480,12 +695,15 @@ func attachInlineDataToFunctionResponse(response gjson.Result, images [][]byte) 
 		return response
 	}
 	target := []byte(response.Raw)
-	for _, image := range images {
-		target, _ = sjson.SetRawBytes(target, "functionResponse.parts.-1", image)
+	for _, img := range images {
+		target, _ = sjson.SetRawBytes(target, "functionResponse.parts.-1", img)
 	}
 	return gjson.ParseBytes(target)
 }
 
+// collectFunctionResponsesWithSiblingInlineData keeps functionResponse parts and
+// moves sibling inline_data/inlineData onto the nearest preceding functionResponse.
+// Leading images before the first functionResponse attach to that first response.
 func collectFunctionResponsesWithSiblingInlineData(parts gjson.Result) []gjson.Result {
 	responses := make([]gjson.Result, 0)
 	leadingImages := make([][]byte, 0)
@@ -506,9 +724,9 @@ func collectFunctionResponsesWithSiblingInlineData(parts gjson.Result) []gjson.R
 		}
 		if current >= 0 {
 			responses[current] = attachInlineDataToFunctionResponse(responses[current], [][]byte{imagePart})
-		} else {
-			leadingImages = append(leadingImages, imagePart)
+			return true
 		}
+		leadingImages = append(leadingImages, imagePart)
 		return true
 	})
 	return responses
@@ -575,12 +793,10 @@ func fixCLIToolResponse(input []byte) ([]byte, error) {
 	// Extract the contents array which contains the conversation messages
 	contents := parsed.Get("request.contents")
 	if !contents.Exists() {
-		// log.Debugf(string(input))
+		// log.Debugf(input)
 		return input, fmt.Errorf("contents not found in input")
 	}
 
-	// Fast path: history without function responses does not need grouping, so
-	// return the input unchanged to avoid rebuilding (and copying) the payload.
 	needsGrouping := false
 	allContentsAreObjects := true
 	contents.ForEach(func(_, content gjson.Result) bool {
@@ -602,9 +818,23 @@ func fixCLIToolResponse(input []byte) ([]byte, error) {
 	}
 
 	// Initialize data structures for processing and grouping
-	contentsWrapper := []byte(`{"contents":[]}`)
+	contentItems := translatorcommon.NewRawArrayItems(contents.Get("#").Int())
 	var pendingGroups []*FunctionCallGroup // Groups awaiting completion with responses
 	var collectedResponses []gjson.Result  // Standalone responses to be matched
+	appendFunctionResponses := func(responses []gjson.Result, callNames []string) {
+		partItems := make([][]byte, 0, len(responses))
+		for responseIndex, response := range responses {
+			partRaw := parseFunctionResponseRaw(response, callNames[responseIndex])
+			if partRaw != "" {
+				partItems = append(partItems, []byte(partRaw))
+			}
+		}
+		if len(partItems) > 0 {
+			functionResponseContent := []byte(`{"parts":[],"role":"function"}`)
+			functionResponseContent, _ = sjson.SetRawBytes(functionResponseContent, "parts", translatorcommon.JoinRawArray(partItems))
+			contentItems = append(contentItems, functionResponseContent)
+		}
+	}
 
 	// Process each content object in the conversation
 	// This iterates through messages and groups function calls with their responses
@@ -612,7 +842,7 @@ func fixCLIToolResponse(input []byte) ([]byte, error) {
 		role := value.Get("role").String()
 		parts := value.Get("parts")
 
-		// Check if this content has function responses
+		// Collect function responses and attach sibling inlineData to the nearest one.
 		responsePartsInThisContent := collectFunctionResponsesWithSiblingInlineData(parts)
 
 		// If this content has function responses, collect them
@@ -628,18 +858,7 @@ func fixCLIToolResponse(input []byte) ([]byte, error) {
 				groupResponses := collectedResponses[:group.ResponsesNeeded]
 				collectedResponses = collectedResponses[group.ResponsesNeeded:]
 
-				// Create merged function response content
-				functionResponseContent := []byte(`{"parts":[],"role":"function"}`)
-				for ri, response := range groupResponses {
-					partRaw := parseFunctionResponseRaw(response, group.CallNames[ri])
-					if partRaw != "" {
-						functionResponseContent, _ = sjson.SetRawBytes(functionResponseContent, "parts.-1", []byte(partRaw))
-					}
-				}
-
-				if gjson.GetBytes(functionResponseContent, "parts.#").Int() > 0 {
-					contentsWrapper, _ = sjson.SetRawBytes(contentsWrapper, "contents.-1", functionResponseContent)
-				}
+				appendFunctionResponses(groupResponses, group.CallNames)
 			}
 
 			return true // Skip adding this content, responses are merged
@@ -661,7 +880,7 @@ func fixCLIToolResponse(input []byte) ([]byte, error) {
 					log.Warnf("failed to parse model content")
 					return true
 				}
-				contentsWrapper, _ = sjson.SetRawBytes(contentsWrapper, "contents.-1", []byte(value.Raw))
+				contentItems = append(contentItems, []byte(value.Raw))
 
 				// Create a new group for tracking responses
 				group := &FunctionCallGroup{
@@ -675,7 +894,7 @@ func fixCLIToolResponse(input []byte) ([]byte, error) {
 					log.Warnf("failed to parse content")
 					return true
 				}
-				contentsWrapper, _ = sjson.SetRawBytes(contentsWrapper, "contents.-1", []byte(value.Raw))
+				contentItems = append(contentItems, []byte(value.Raw))
 			}
 		} else {
 			// Non-model content (user, etc.)
@@ -683,7 +902,7 @@ func fixCLIToolResponse(input []byte) ([]byte, error) {
 				log.Warnf("failed to parse content")
 				return true
 			}
-			contentsWrapper, _ = sjson.SetRawBytes(contentsWrapper, "contents.-1", []byte(value.Raw))
+			contentItems = append(contentItems, []byte(value.Raw))
 		}
 
 		return true
@@ -695,22 +914,12 @@ func fixCLIToolResponse(input []byte) ([]byte, error) {
 			groupResponses := collectedResponses[:group.ResponsesNeeded]
 			collectedResponses = collectedResponses[group.ResponsesNeeded:]
 
-			functionResponseContent := []byte(`{"parts":[],"role":"function"}`)
-			for ri, response := range groupResponses {
-				partRaw := parseFunctionResponseRaw(response, group.CallNames[ri])
-				if partRaw != "" {
-					functionResponseContent, _ = sjson.SetRawBytes(functionResponseContent, "parts.-1", []byte(partRaw))
-				}
-			}
-
-			if gjson.GetBytes(functionResponseContent, "parts.#").Int() > 0 {
-				contentsWrapper, _ = sjson.SetRawBytes(contentsWrapper, "contents.-1", functionResponseContent)
-			}
+			appendFunctionResponses(groupResponses, group.CallNames)
 		}
 	}
 
 	// Update the original JSON with the new contents
-	result, _ := sjson.SetRawBytes(input, "request.contents", []byte(gjson.GetBytes(contentsWrapper, "contents").Raw))
+	result, _ := sjson.SetRawBytes(input, "request.contents", translatorcommon.JoinRawArray(contentItems))
 
 	return result, nil
 }

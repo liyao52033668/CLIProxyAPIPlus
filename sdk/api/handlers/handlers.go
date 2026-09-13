@@ -47,6 +47,9 @@ type ErrorDetail struct {
 
 	// Code is a short code identifying the error, if applicable.
 	Code string `json:"code,omitempty"`
+
+	// Retryable optionally indicates whether a retry might fix the issue automatically.
+	Retryable *bool `json:"retryable,omitempty"`
 }
 
 const idempotencyKeyMetadataKey = "idempotency_key"
@@ -107,6 +110,13 @@ func WithDisallowFreeAuth(ctx context0.Context) context0.Context {
 // BuildErrorResponseBody builds an OpenAI-compatible JSON error response body.
 // If errText is already valid JSON, it is returned as-is to preserve upstream error payloads.
 func BuildErrorResponseBody(status int, errText string) []byte {
+	return BuildErrorResponseBodyWithError(status, errText, nil)
+}
+
+// BuildErrorResponseBodyWithError builds an OpenAI-compatible JSON error response body,
+// preserving structured classifications (such as terminal upstream auth failures and retryable flags)
+// present in err.
+func BuildErrorResponseBodyWithError(status int, errText string, err error) []byte {
 	if status <= 0 {
 		status = http.StatusInternalServerError
 	}
@@ -115,6 +125,36 @@ func BuildErrorResponseBody(status int, errText string) []byte {
 	}
 
 	trimmed := strings.TrimSpace(errText)
+
+	if coreauth.IsTerminalAuthError(err) {
+		message := errText
+		if trimmed != "" && json.Valid([]byte(trimmed)) {
+			var parsed map[string]any
+			if errUnmarshal := json.Unmarshal([]byte(trimmed), &parsed); errUnmarshal == nil {
+				if msg, ok := parsed["message"].(string); ok && msg != "" {
+					message = msg
+				} else if errMap, ok := parsed["error"].(map[string]any); ok {
+					if msg, ok := errMap["message"].(string); ok && msg != "" {
+						message = msg
+					}
+				}
+			}
+		}
+		r := false
+		payload, errMarshal := json.Marshal(ErrorResponse{
+			Error: ErrorDetail{
+				Message:   message,
+				Type:      "authentication_error",
+				Code:      "upstream_authentication_required",
+				Retryable: &r,
+			},
+		})
+		if errMarshal != nil {
+			return []byte(fmt.Sprintf(`{"error":{"message":%q,"type":"authentication_error","code":"upstream_authentication_required","retryable":false}}`, message))
+		}
+		return payload
+	}
+
 	if trimmed != "" && json.Valid([]byte(trimmed)) {
 		return []byte(trimmed)
 	}
@@ -908,7 +948,7 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 	parsed := thinking.ParseSuffix(resolvedModelName)
 	baseModel := strings.TrimSpace(parsed.ModelName)
 
-	if strings.EqualFold(routeModelBaseName(baseModel), "gpt-image-2") && !allowImageModel {
+	if isOpenAIImageOnlyModel(baseModel) && !allowImageModel {
 		return nil, "", false, &interfaces.ErrorMessage{
 			StatusCode: http.StatusServiceUnavailable,
 			Error:      fmt.Errorf("model %s is only supported on /v1/images/generations and /v1/images/edits", routeModelBaseName(baseModel)),
@@ -938,6 +978,21 @@ func routeModelBaseName(model string) string {
 		return strings.TrimSpace(model[idx+1:])
 	}
 	return model
+}
+
+// isOpenAIImageOnlyModel reports whether the model can only run on the images
+// endpoints, including the gpt-image-2 family and its 2.5 variants.
+func isOpenAIImageOnlyModel(model string) bool {
+	base := routeModelBaseName(model)
+	if strings.EqualFold(base, "gpt-image-2") {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(base)) {
+	case "gpt-image-2.5", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst":
+		return true
+	default:
+		return false
+	}
 }
 
 func cloneBytes(src []byte) []byte {
@@ -1009,12 +1064,16 @@ func enrichAuthSelectionError(err error, providers []string, model string) error
 		status = http.StatusServiceUnavailable
 	}
 
-	return &coreauth.Error{
+	enriched := &coreauth.Error{
 		Code:       authErr.Code,
 		Message:    detail,
 		Retryable:  authErr.Retryable,
 		HTTPStatus: status,
 	}
+	if coreauth.IsTerminalAuthError(err) {
+		return coreauth.NewTerminalAuthError(enriched, err)
+	}
+	return enriched
 }
 
 // WriteErrorResponse writes an error message to the response writer using the HTTP status embedded in the message.
@@ -1042,7 +1101,11 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 		}
 	}
 
-	body := BuildErrorResponseBody(status, errText)
+	var errCause error
+	if msg != nil {
+		errCause = msg.Error
+	}
+	body := BuildErrorResponseBodyWithError(status, errText, errCause)
 	// Append first to preserve upstream response logs, then drop duplicate payloads if already recorded.
 	var previous []byte
 	if existing, exists := c.Get("API_RESPONSE"); exists {

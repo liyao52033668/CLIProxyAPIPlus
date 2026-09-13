@@ -314,6 +314,7 @@ func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeMode
 
 	availableByPriority := make(map[int][]*Auth)
 	cooldownCount := 0
+	unauthorizedCount := 0
 	var earliest time.Time
 	for _, candidate := range auths {
 		checkModel := m.selectionModelForAuth(candidate, routeModel)
@@ -328,6 +329,10 @@ func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeMode
 			if !next.IsZero() && (earliest.IsZero() || next.Before(earliest)) {
 				earliest = next
 			}
+			continue
+		}
+		if hasUnauthorizedAuthFailure(candidate) {
+			unauthorizedCount++
 		}
 	}
 
@@ -339,6 +344,9 @@ func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeMode
 			}
 			resetIn := max(earliest.Sub(now), 0)
 			return nil, newModelCooldownError(routeModel, providerForError, resetIn)
+		}
+		if unauthorizedCount == len(auths) && len(auths) > 0 {
+			return nil, newTerminalAuthUnavailableError(latestUnauthorizedCandidateError(auths))
 		}
 		return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
 	}

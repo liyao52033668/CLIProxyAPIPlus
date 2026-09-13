@@ -45,6 +45,20 @@ func (m *Manager) routeAwareSelectionRequired(auth *Auth, routeModel string) boo
 	return m.selectionModelKeyForAuth(auth, routeModel) != canonicalModelKey(routeModel)
 }
 
+// selectorContextForAvailableAuths marks the selector context so built-in
+// selectors can skip re-filtering candidates the manager already validated.
+func selectorContextForAvailableAuths(ctx context.Context, selector Selector) context.Context {
+	if !isBuiltInSelector(selector) {
+		if _, sessionAffinity := selector.(*SessionAffinitySelector); !sessionAffinity {
+			return ctx
+		}
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, prevalidatedAuthCandidatesKey{}, true)
+}
+
 func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
 	if m.HomeEnabled() {
 		auth, exec, _, err := m.pickNextViaHome(ctx, model, opts, tried)
@@ -97,7 +111,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		m.mu.RUnlock()
 		return nil, nil, errAvailable
 	}
-	selected, errPick := m.selector.Pick(ctx, provider, selectionArgForSelector(m.selector, model), opts, available)
+	selected, errPick := m.selector.Pick(selectorContextForAvailableAuths(ctx, m.selector), provider, selectionArgForSelector(m.selector, model), opts, available)
 	if errPick != nil {
 		m.mu.RUnlock()
 		return nil, nil, errPick
@@ -288,7 +302,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		m.mu.RUnlock()
 		return nil, nil, "", errAvailable
 	}
-	selected, errPick := m.selector.Pick(ctx, "mixed", selectionArgForSelector(m.selector, model), opts, available)
+	selected, errPick := m.selector.Pick(selectorContextForAvailableAuths(ctx, m.selector), "mixed", selectionArgForSelector(m.selector, model), opts, available)
 	if errPick != nil {
 		m.mu.RUnlock()
 		return nil, nil, "", errPick

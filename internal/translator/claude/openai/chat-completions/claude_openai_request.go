@@ -296,6 +296,23 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 		}
 	}
 
+	// Structured output: Claude has no native response_format support, so the
+	// requested JSON format is injected as explicit system instructions.
+	if formatInstruction := common.BuildClaudeStructuredOutputInstruction(root.Get("response_format")); formatInstruction != "" {
+		systemBlock := []byte(`{"type":"text","text":""}`)
+		systemBlock, _ = sjson.SetBytes(systemBlock, "text", formatInstruction)
+		out, _ = sjson.SetRawBytes(out, "system.-1", systemBlock)
+	}
+
+	// Preserve a minimal conversational turn for system-only inputs (including
+	// injected structured-output instructions).
+	if len(gjson.GetBytes(out, "messages").Array()) == 0 {
+		if system := gjson.GetBytes(out, "system"); system.Exists() && system.IsArray() && len(system.Array()) > 0 {
+			fallbackMsg := []byte(`{"role":"user","content":[{"type":"text","text":""}]}`)
+			out, _ = sjson.SetRawBytes(out, "messages.-1", fallbackMsg)
+		}
+	}
+
 	// Tools mapping: OpenAI tools -> Claude Code tools
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() && len(tools.Array()) > 0 {
 		hasAnthropicTools := false

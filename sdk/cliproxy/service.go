@@ -110,6 +110,13 @@ type Service struct {
 
 	homeClient *home.Client
 	homeCancel context.CancelFunc
+
+	// authUpdateMu serializes revision tracking for auth updates.
+	authUpdateMu sync.Mutex
+	// authRevisions tracks the last applied watcher revision per auth ID so
+	// out-of-order (stale) updates can be dropped instead of overwriting
+	// newer runtime state.
+	authRevisions map[string]uint64
 }
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
@@ -224,6 +231,9 @@ func (s *Service) handleAuthUpdate(ctx context.Context, update watcher.AuthUpdat
 	if s == nil {
 		return
 	}
+	if !s.trackAuthUpdateRevision(&update) {
+		return
+	}
 	s.cfgMu.RLock()
 	cfg := s.cfg
 	s.cfgMu.RUnlock()
@@ -248,6 +258,38 @@ func (s *Service) handleAuthUpdate(ctx context.Context, update watcher.AuthUpdat
 	default:
 		log.Debugf("received unknown auth update action: %v", update.Action)
 	}
+}
+
+// trackAuthUpdateRevision records the watcher revision of an auth update and reports
+// whether it should be applied. Updates carrying a revision older than the last
+// applied revision for the same auth ID are stale out-of-order events and are dropped.
+// Unversioned updates (revision 0) are always applied.
+func (s *Service) trackAuthUpdateRevision(update *watcher.AuthUpdate) bool {
+	if s == nil || update == nil {
+		return true
+	}
+	id := update.ID
+	if id == "" && update.Auth != nil {
+		id = update.Auth.ID
+	}
+	if id == "" {
+		return true
+	}
+	rev := update.Revision()
+	if rev == 0 {
+		return true
+	}
+	s.authUpdateMu.Lock()
+	defer s.authUpdateMu.Unlock()
+	if s.authRevisions == nil {
+		s.authRevisions = make(map[string]uint64)
+	}
+	if prevRev, exists := s.authRevisions[id]; exists && rev <= prevRev {
+		log.Debugf("skipping stale auth update for %s: rev %d <= processed %d", id, rev, prevRev)
+		return false
+	}
+	s.authRevisions[id] = rev
+	return true
 }
 
 func (s *Service) ensureWebsocketGateway() {

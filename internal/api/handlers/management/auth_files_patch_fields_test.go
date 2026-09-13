@@ -270,3 +270,94 @@ func TestPatchAuthFileFields_OmittedHeadersIsNoop(t *testing.T) {
 		t.Fatalf("metadata.headers.X-Kee = %#v, want %q", got, "1")
 	}
 }
+
+func TestPatchAuthFileFields_SyncsPlanTypeFromIDToken(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	record := &coreauth.Auth{
+		ID:       "codex-plan-patch.json",
+		FileName: "codex-plan-patch.json",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"path":      "/tmp/codex-plan-patch.json",
+			"plan_type": "pro",
+		},
+		Metadata: map[string]any{"type": "codex"},
+	}
+	if _, errRegister := manager.Register(context.Background(), record); errRegister != nil {
+		t.Fatalf("failed to register auth record: %v", errRegister)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+
+	// Synthetic JWT containing CodexAuthInfo claims with chatgpt_plan_type: team
+	teamIDToken := "eyJhbGciOiJub25lIn0.eyJlbWFpbCI6ICJ1c2VyQGV4YW1wbGUuY29tIiwgImh0dHBzOi8vYXBpLm9wZW5haS5jb20vYXV0aCI6IHsiY2hhdGdwdF9wbGFuX3R5cGUiOiAidGVhbSIsICJjaGF0Z3B0X2FjY291bnRfaWQiOiAiYWNjLTEyMyJ9fQ.sig"
+	body := `{"name":"codex-plan-patch.json","id_token":"` + teamIDToken + `"}`
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/fields", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+	h.PatchAuthFileFields(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	auth, ok := manager.GetByID("codex-plan-patch.json")
+	if !ok || auth == nil {
+		t.Fatalf("expected auth record to exist after patch")
+	}
+	if got := auth.Attributes["plan_type"]; got != "team" {
+		t.Fatalf("auth plan_type attribute = %q, want team", got)
+	}
+}
+
+func TestPatchAuthFileFields_ClearsPlanTypeWhenRemoved(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	record := &coreauth.Auth{
+		ID:       "codex-clear-plan.json",
+		FileName: "codex-clear-plan.json",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"path":      "/tmp/codex-clear-plan.json",
+			"plan_type": "free",
+		},
+		Metadata: map[string]any{
+			"type":      "codex",
+			"plan_type": "free",
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), record); errRegister != nil {
+		t.Fatalf("failed to register auth record: %v", errRegister)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+
+	body := `{"name":"codex-clear-plan.json","plan_type":null}`
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/fields", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+	h.PatchAuthFileFields(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	auth, ok := manager.GetByID("codex-clear-plan.json")
+	if !ok || auth == nil {
+		t.Fatalf("expected auth record to exist after patch")
+	}
+	if _, exists := auth.Attributes["plan_type"]; exists {
+		t.Fatalf("expected plan_type attribute to be deleted after clearing plan_type, got %q", auth.Attributes["plan_type"])
+	}
+}

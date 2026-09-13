@@ -52,15 +52,18 @@ type Watcher struct {
 	lastConfigHash     string
 	authQueue          chan<- AuthUpdate
 	currentAuths       map[string]*coreauth.Auth
+	authRevisions      map[string]uint64 // Includes deletion tombstones; guarded by clientsMutex.
+	fileObservations   map[string]uint64 // Tracks file events even when content is unchanged.
+	activeAuthScans    int               // Guarded by clientsMutex.
 	runtimeAuths       map[string]*coreauth.Auth
 	dispatchMu         sync.Mutex
 	dispatchCond       *sync.Cond
 	pendingUpdates     map[string]AuthUpdate
 	pendingOrder       []string
 	dispatchCancel     context.CancelFunc
-	storePersister     storePersister
-	mirroredAuthDir    string
-	oldConfigYaml      []byte
+	storePersister
+	mirroredAuthDir string
+	oldConfigYaml   []byte
 }
 
 // AuthUpdateAction represents the type of change detected in auth sources.
@@ -78,6 +81,20 @@ type AuthUpdate struct {
 	ID      string
 	Auth    *coreauth.Auth
 	Applied chan struct{}
+
+	revision uint64 // Watcher-local monotonic ordering, stamped on dispatch.
+}
+
+// Revision returns the monotonic watcher revision assigned to this update.
+func (u AuthUpdate) Revision() uint64 {
+	return u.revision
+}
+
+// SetRevision updates the revision counter for this update.
+func (u *AuthUpdate) SetRevision(rev uint64) {
+	if u != nil {
+		u.revision = rev
+	}
 }
 
 // InvalidAuthEntry describes an auth file that could not be loaded into a valid auth entry.

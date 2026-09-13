@@ -234,6 +234,84 @@ func qualifyResponsesNamespaceToolName(namespaceName, childName string) string {
 	return namespaceName + "__" + childName
 }
 
+// canonicalResponsesToolName restores an omitted namespace only when the current
+// request declares exactly one matching local name. Exact emitted names win;
+// ambiguous names remain unresolved rather than being dispatched to another tool.
+func canonicalResponsesToolName(requestRawJSON []byte, name string) string {
+	if name == "" {
+		return name
+	}
+	root := gjson.ParseBytes(requestRawJSON)
+	candidate := ""
+	ambiguous := false
+	exact := false
+	seen := make(map[string]struct{})
+	visit := func(tool gjson.Result, namespaceName string) {
+		switch strings.TrimSpace(tool.Get("type").String()) {
+		case "", "function", "custom":
+		default:
+			return
+		}
+		localName := responsesToolName(tool)
+		if localName == "" {
+			return
+		}
+		chatName := qualifyResponsesNamespaceToolName(namespaceName, localName)
+		if _, duplicate := seen[chatName]; duplicate {
+			return
+		}
+		seen[chatName] = struct{}{}
+		if chatName == name {
+			exact = true
+			return
+		}
+		if localName != name {
+			return
+		}
+		if candidate != "" {
+			ambiguous = true
+			return
+		}
+		candidate = chatName
+	}
+	var scan func(tools gjson.Result)
+	scan = func(tools gjson.Result) {
+		if !tools.Exists() || !tools.IsArray() {
+			return
+		}
+		tools.ForEach(func(_, tool gjson.Result) bool {
+			if strings.TrimSpace(tool.Get("type").String()) == "namespace" {
+				if children := tool.Get("tools"); children.Exists() && children.IsArray() {
+					namespaceName := strings.TrimSpace(tool.Get("name").String())
+					children.ForEach(func(_, child gjson.Result) bool {
+						visit(child, namespaceName)
+						return true
+					})
+				}
+				return true
+			}
+			visit(tool, "")
+			return true
+		})
+	}
+	scan(root.Get("tools"))
+	if input := root.Get("input"); input.Exists() && input.IsArray() {
+		input.ForEach(func(_, item gjson.Result) bool {
+			if item.Get("type").String() == "additional_tools" {
+				scan(item.Get("tools"))
+			}
+			return true
+		})
+	}
+	if exact {
+		return name
+	}
+	if candidate != "" && !ambiguous {
+		return candidate
+	}
+	return name
+}
+
 func splitResponsesQualifiedFunctionCallFromRequest(requestRawJSON []byte, qualifiedName string) (name, namespace string) {
 	qualifiedName = strings.TrimSpace(qualifiedName)
 	if qualifiedName == "" {

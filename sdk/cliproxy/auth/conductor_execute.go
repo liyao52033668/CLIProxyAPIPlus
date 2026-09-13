@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -140,6 +141,27 @@ func (m *Manager) updateMerged(ctx context.Context, base *Auth, auth *Auth, requ
 	if !existing.Disabled && existing.Status != StatusDisabled && !auth.Disabled && auth.Status != StatusDisabled {
 		if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
 			auth.ModelStates = existing.ModelStates
+		}
+		// When credentials change, stale unauthorized failures and model cooldowns
+		// no longer describe the new credential, so clear them immediately.
+		if CredentialsChanged(existing, auth) {
+			if hasUnauthorizedAuthFailure(existing) || (auth.LastError != nil && isUnauthorizedError(auth.LastError)) {
+				auth.Unavailable = false
+				auth.LastError = nil
+				auth.StatusMessage = ""
+				auth.Status = StatusActive
+			}
+			if resumed := clearUnauthorizedModelStates(auth, time.Now()); len(resumed) > 0 {
+				now := time.Now()
+				updateAggregatedAvailability(auth, now)
+				if !hasModelError(auth, now) {
+					auth.LastError = nil
+					auth.StatusMessage = ""
+					auth.Status = StatusActive
+					auth.Unavailable = false
+					auth.NextRetryAfter = time.Time{}
+				}
+			}
 		}
 	}
 	auth.EnsureIndex()

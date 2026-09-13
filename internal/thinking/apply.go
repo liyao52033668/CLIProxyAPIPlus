@@ -212,6 +212,21 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 //  3. Numeric values: positive integers → ModeBudget, 0 → ModeNone
 //
 // If none of the above match, returns empty ThinkingConfig (treated as no config).
+// ApplyThinkingWithSummary applies canonical thinking effort while preserving
+// summary visibility extracted from the original source request.
+// Local fork: summary config is not plumbed through; delegates to ApplyThinking.
+func ApplyThinkingWithSummary(body []byte, model string, fromFormat string, toFormat string, providerKey string, summaryConfig SummaryConfig) ([]byte, error) {
+	return ApplyThinking(body, model, fromFormat, toFormat, providerKey)
+}
+
+// ApplyThinkingWithModelInfoAndSummary applies the exact configured model
+// definition with a summary intent already resolved across source translation
+// and plugin normalization.
+// Local fork: modelInfo and summary config are not plumbed through; delegates to ApplyThinking.
+func ApplyThinkingWithModelInfoAndSummary(body, sourceBody []byte, model string, fromFormat string, toFormat string, providerKey string, modelInfo *registry.ModelInfo, summaryConfig SummaryConfig) ([]byte, error) {
+	return ApplyThinking(body, model, fromFormat, toFormat, providerKey)
+}
+
 func parseSuffixToConfig(rawSuffix, provider, model string) ThinkingConfig {
 	// 1. Try special values first (none, auto, -1)
 	if mode, ok := ParseSpecialSuffix(rawSuffix); ok {

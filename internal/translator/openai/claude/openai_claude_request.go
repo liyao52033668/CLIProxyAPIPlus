@@ -171,7 +171,8 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 				contentItems := make([][]byte, 0)
 				var reasoningParts []string // Accumulate thinking text for reasoning_content
 				var toolCalls []any
-				toolResults := make([][]byte, 0) // Collect tool_result messages to emit after the main message
+				toolResults := make([][]byte, 0)       // Collect tool_result messages to emit after the main message
+				relayedToolImages := make([][]byte, 0) // Images pulled out of tool_result content for user-message relay
 
 				contentResult.ForEach(func(_, part gjson.Result) bool {
 					partType := part.Get("type").String()
@@ -221,12 +222,9 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 						// Collect tool_result to emit after the main message (ensures tool results follow tool_calls)
 						toolResultJSON := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
 						toolResultJSON, _ = sjson.SetBytes(toolResultJSON, "tool_call_id", part.Get("tool_use_id").String())
-						toolResultContent, toolResultContentRaw := convertClaudeToolResultContent(part.Get("content"))
-						if toolResultContentRaw {
-							toolResultJSON, _ = sjson.SetRawBytes(toolResultJSON, "content", []byte(toolResultContent))
-						} else {
-							toolResultJSON, _ = sjson.SetBytes(toolResultJSON, "content", toolResultContent)
-						}
+						toolResultContent, toolResultImages := convertClaudeToolResultContent(part.Get("content"))
+						toolResultJSON, _ = sjson.SetBytes(toolResultJSON, "content", toolResultContent)
+						relayedToolImages = append(relayedToolImages, toolResultImages...)
 						toolResults = append(toolResults, toolResultJSON)
 					}
 					return true
@@ -256,6 +254,29 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 				// then emit any queued system reminders, then emit the current message's content.
 				for _, toolResultJSON := range toolResults {
 					messagesJSON, _ = sjson.SetRawBytes(messagesJSON, "-1", toolResultJSON)
+				}
+
+				// OpenAI tool messages cannot carry image parts, so images returned by a tool are
+				// replayed as a user message directly after the tool results.
+				if len(relayedToolImages) > 0 {
+					relayItems := make([][]byte, 0, len(relayedToolImages)+1)
+					noticeJSON := []byte(`{"type":"text","text":""}`)
+					noticeJSON, _ = sjson.SetBytes(noticeJSON, "text", toolResultImageRelayNotice)
+					relayItems = append(relayItems, noticeJSON)
+					relayItems = append(relayItems, relayedToolImages...)
+
+					if role == "user" && hasContent {
+						// Merge into the current user message so the request keeps a single user turn.
+						contentItems = append(relayItems, contentItems...)
+					} else {
+						relayContentJSON := []byte(`[]`)
+						for _, relayItem := range relayItems {
+							relayContentJSON, _ = sjson.SetRawBytes(relayContentJSON, "-1", relayItem)
+						}
+						relayJSON := []byte(`{"role":"user"}`)
+						relayJSON, _ = sjson.SetRawBytes(relayJSON, "content", relayContentJSON)
+						messagesJSON, _ = sjson.SetRawBytes(messagesJSON, "-1", relayJSON)
+					}
 				}
 
 				if len(pendingSystemReminders) > 0 {
@@ -347,8 +368,10 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 			openAIToolJSON, _ = sjson.SetBytes(openAIToolJSON, "function.description", tool.Get("description").String())
 
 			// Convert Anthropic input_schema to OpenAI function parameters
-			if inputSchema := tool.Get("input_schema"); inputSchema.Exists() {
-				openAIToolJSON, _ = sjson.SetBytes(openAIToolJSON, "function.parameters", inputSchema.Value())
+			if inputSchema := tool.Get("input_schema"); inputSchema.Exists() && inputSchema.Type != gjson.Null {
+				openAIToolJSON, _ = sjson.SetBytes(openAIToolJSON, "function.parameters", normalizeObjectSchemaProperties(inputSchema.Value()))
+			} else {
+				openAIToolJSON, _ = sjson.SetRawBytes(openAIToolJSON, "function.parameters", []byte(`{"type":"object","properties":{}}`))
 			}
 
 			toolsJSON, _ = sjson.SetRawBytes(toolsJSON, "-1", openAIToolJSON)
@@ -385,6 +408,67 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	}
 
 	return out
+}
+
+// normalizeObjectSchemaProperties recursively normalizes a decoded JSON Schema value:
+// it guarantees object schemas carry a properties map and strips regex patterns (and
+// patternProperties keys) containing unsupported Unicode property escapes that break
+// upstream schema validation.
+func normalizeObjectSchemaProperties(schema any) any {
+	switch value := schema.(type) {
+	case map[string]any:
+		if schemaType, ok := value["type"].(string); ok && schemaType == "object" {
+			if _, ok := value["properties"]; !ok {
+				value["properties"] = map[string]any{}
+			}
+		}
+		if patternVal, ok := value["pattern"].(string); ok && util.HasUnsupportedUnicodePropertyEscape(patternVal) {
+			delete(value, "pattern")
+		}
+
+		// Inspect regex keys under patternProperties
+		if patternProps, ok := value["patternProperties"].(map[string]any); ok {
+			for patternKey, subSchema := range patternProps {
+				if util.HasUnsupportedUnicodePropertyEscape(patternKey) {
+					delete(patternProps, patternKey)
+				} else {
+					patternProps[patternKey] = normalizeObjectSchemaProperties(subSchema)
+				}
+			}
+		}
+
+		for _, mapKey := range util.SchemaMapKeywords {
+			if mapKey == "patternProperties" {
+				continue
+			}
+			if subMap, ok := value[mapKey].(map[string]any); ok {
+				for subKey, subSchema := range subMap {
+					subMap[subKey] = normalizeObjectSchemaProperties(subSchema)
+				}
+			}
+		}
+
+		for _, valKey := range util.SchemaValueKeywords {
+			if val, exists := value[valKey]; exists {
+				switch sub := val.(type) {
+				case map[string]any:
+					value[valKey] = normalizeObjectSchemaProperties(sub)
+				case []any:
+					for i, item := range sub {
+						sub[i] = normalizeObjectSchemaProperties(item)
+					}
+				}
+			}
+		}
+		return value
+	case []any:
+		for i, child := range value {
+			value[i] = normalizeObjectSchemaProperties(child)
+		}
+		return value
+	default:
+		return schema
+	}
 }
 
 func convertClaudeContentPart(part gjson.Result) (string, bool) {
@@ -438,87 +522,83 @@ func convertClaudeContentPart(part gjson.Result) (string, bool) {
 	}
 }
 
-func convertClaudeToolResultContent(content gjson.Result) (string, bool) {
+// toolResultImagePlaceholder keeps the OpenAI tool message non-empty when a Claude
+// tool_result carried nothing but images.
+const toolResultImagePlaceholder = "[Tool returned image content; the images follow in the next user message.]"
+
+// toolResultImageRelayNotice labels the user message that carries relayed tool images.
+const toolResultImageRelayNotice = "Images returned by the preceding tool call(s):"
+
+func convertClaudeToolResultContent(content gjson.Result) (string, [][]byte) {
 	if !content.Exists() {
-		return "", false
+		return "", nil
 	}
 
 	if content.Type == gjson.String {
-		return content.String(), false
+		return content.String(), nil
 	}
 
 	if content.IsArray() {
 		var parts []string
-		contentJSON := []byte(`[]`)
-		hasImagePart := false
-		allTextParts := true
-		partCount := 0
+		var images [][]byte
+		hasTextParts := false
+		hasUnrecognized := false
 		content.ForEach(func(_, item gjson.Result) bool {
-			partCount++
 			switch {
 			case item.Type == gjson.String:
-				text := item.String()
-				parts = append(parts, text)
-				textContent := []byte(`{"type":"text","text":""}`)
-				textContent, _ = sjson.SetBytes(textContent, "text", text)
-				contentJSON, _ = sjson.SetRawBytes(contentJSON, "-1", textContent)
+				parts = append(parts, item.String())
+				hasTextParts = true
+			case item.IsObject() && item.Get("type").String() == "text" && item.Get("text").Type == gjson.String:
+				parts = append(parts, item.Get("text").String())
+				hasTextParts = true
 			case item.IsObject() && item.Get("type").String() == "text":
-				textResult := item.Get("text")
-				if textResult.Type != gjson.String {
-					allTextParts = false
-				}
-				text := textResult.String()
-				parts = append(parts, text)
-				textContent := []byte(`{"type":"text","text":""}`)
-				textContent, _ = sjson.SetBytes(textContent, "text", text)
-				contentJSON, _ = sjson.SetRawBytes(contentJSON, "-1", textContent)
+				// Recognized text block but with non-string text value (e.g. null).
+				// Treat as invalid; the caller should see the raw array.
+				parts = append(parts, item.Raw)
 			case item.IsObject() && item.Get("type").String() == "image":
-				allTextParts = false
-				contentItem, ok := convertClaudeContentPart(item)
-				if ok {
-					contentJSON, _ = sjson.SetRawBytes(contentJSON, "-1", []byte(contentItem))
-					hasImagePart = true
+				if contentItem, ok := convertClaudeContentPart(item); ok {
+					images = append(images, []byte(contentItem))
 				} else {
 					parts = append(parts, item.Raw)
+					hasUnrecognized = true
 				}
 			case item.IsObject() && item.Get("text").Exists() && item.Get("text").Type == gjson.String:
-				allTextParts = false
 				parts = append(parts, item.Get("text").String())
+				hasTextParts = true
 			default:
-				allTextParts = false
 				parts = append(parts, item.Raw)
+				hasUnrecognized = true
 			}
 			return true
 		})
 
-		if hasImagePart {
-			return string(contentJSON), true
-		}
-
 		joined := strings.Join(parts, "\n\n")
-		if partCount > 0 && allTextParts {
-			return joined, false
+		if hasUnrecognized && !hasTextParts && len(images) == 0 {
+			return joined, nil
 		}
-		if strings.TrimSpace(joined) != "" {
-			return joined, false
+		if len(images) > 0 && strings.TrimSpace(joined) == "" {
+			return toolResultImagePlaceholder, images
 		}
-		return content.Raw, false
+		if hasTextParts {
+			if strings.TrimSpace(joined) == "" {
+				return joined, nil
+			}
+			return joined, images
+		}
+		return content.Raw, nil
 	}
 
 	if content.IsObject() {
 		if content.Get("type").String() == "image" {
-			contentItem, ok := convertClaudeContentPart(content)
-			if ok {
-				contentJSON := []byte(`[]`)
-				contentJSON, _ = sjson.SetRawBytes(contentJSON, "-1", []byte(contentItem))
-				return string(contentJSON), true
+			if contentItem, ok := convertClaudeContentPart(content); ok {
+				return toolResultImagePlaceholder, [][]byte{[]byte(contentItem)}
 			}
 		}
 		if text := content.Get("text"); text.Exists() && text.Type == gjson.String {
-			return text.String(), false
+			return text.String(), nil
 		}
-		return content.Raw, false
+		return content.Raw, nil
 	}
 
-	return content.Raw, false
+	return content.Raw, nil
 }

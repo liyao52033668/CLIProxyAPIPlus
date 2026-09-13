@@ -1471,7 +1471,11 @@ func writeResponsesWebsocketError(writer *responsesWebsocketWriter, wsTimelineLo
 		}
 	}
 
-	body := handlers.BuildErrorResponseBody(status, errText)
+	var errCause error
+	if errMsg != nil {
+		errCause = errMsg.Error
+	}
+	body := handlers.BuildErrorResponseBodyWithError(status, errText, errCause)
 	payload := []byte(`{}`)
 	var errSet error
 	payload, errSet = sjson.SetBytes(payload, "type", wsEventTypeError)

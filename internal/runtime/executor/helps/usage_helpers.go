@@ -25,6 +25,8 @@ type UsageReporter struct {
 	alias                      string
 	authID                     string
 	authIndex                  string
+	authMu                     sync.RWMutex
+	accessTokenHash            string
 	authType                   string
 	apiKey                     string
 	source                     string
@@ -80,6 +82,26 @@ func (r *UsageReporter) SetTranslatedReasoningEffort(payload []byte, format stri
 	r.reasoning = thinking.ExtractTranslatedReasoningEffort(payload, format)
 }
 
+// UpdateAccessTokenFingerprint records the access token hash for the auth.
+func (r *UsageReporter) UpdateAccessTokenFingerprint(auth *cliproxyauth.Auth) {
+	if r == nil {
+		return
+	}
+	r.authMu.Lock()
+	r.accessTokenHash = authAccessTokenSHA256(auth)
+	r.authMu.Unlock()
+}
+
+// accessTokenFingerprint returns the stored access token hash.
+func (r *UsageReporter) accessTokenFingerprint() string {
+	if r == nil {
+		return ""
+	}
+	r.authMu.RLock()
+	defer r.authMu.RUnlock()
+	return r.accessTokenHash
+}
+
 // TrackHTTPClient returns the client unchanged.
 // Local UsageReporter does not yet instrument per-byte TTFT transports.
 func (r *UsageReporter) TrackHTTPClient(client *http.Client) *http.Client {
@@ -115,6 +137,11 @@ func (r *UsageReporter) buildAdditionalModelRecord(model string, detail usage.De
 
 func (r *UsageReporter) PublishFailure(ctx context.Context, errs ...error) {
 	r.publishWithOutcome(ctx, usage.Detail{}, true, failFromErrors(errs...))
+}
+
+// PublishFailureWithDetail emits a failure record carrying the last observed usage detail.
+func (r *UsageReporter) PublishFailureWithDetail(ctx context.Context, detail usage.Detail, errs ...error) {
+	r.publishWithOutcome(ctx, detail, true, failFromErrors(errs...))
 }
 
 func (r *UsageReporter) TrackFailure(ctx context.Context, errPtr *error) {
@@ -518,9 +545,120 @@ func ParseClaudeStreamUsage(line []byte) (usage.Detail, bool) {
 	}
 	usageNode := gjson.GetBytes(payload, "usage")
 	if !usageNode.Exists() {
+		usageNode = gjson.GetBytes(payload, "message.usage")
+	}
+	if !usageNode.Exists() {
 		return usage.Detail{}, false
 	}
 	return parseClaudeUsageNode(usageNode), true
+}
+
+// StreamUsageBuffer keeps the latest usage detail observed in a stream.
+type StreamUsageBuffer struct {
+	detail usage.Detail
+	ok     bool
+}
+
+// Observe records detail when ok is true, allowing the final stream usage to win.
+func (b *StreamUsageBuffer) Observe(detail usage.Detail, ok bool) {
+	if b == nil || !ok {
+		return
+	}
+	responseServiceTier := strings.TrimSpace(detail.ResponseServiceTier)
+	if responseServiceTier == "" || hasNonZeroTokenUsage(detail) {
+		preservedTier := b.detail.ResponseServiceTier
+		b.detail = detail
+		if b.detail.ResponseServiceTier == "" {
+			b.detail.ResponseServiceTier = preservedTier
+		}
+	} else {
+		b.detail.ResponseServiceTier = responseServiceTier
+	}
+	b.ok = true
+}
+
+// ObserveClaudeStream records and merges usage from a Claude SSE line.
+func (b *StreamUsageBuffer) ObserveClaudeStream(line []byte) {
+	if b == nil {
+		return
+	}
+	if detail, ok := ParseClaudeStreamUsage(line); ok {
+		ObserveMergedStreamUsage(b, detail)
+	}
+}
+
+// Publish emits the latest observed usage detail, if any.
+func (b *StreamUsageBuffer) Publish(ctx context.Context, reporter *UsageReporter) bool {
+	if b == nil || !b.ok || reporter == nil {
+		return false
+	}
+	reporter.Publish(ctx, b.detail)
+	return true
+}
+
+// PublishFailure emits the latest observed usage detail together with failure details.
+func (b *StreamUsageBuffer) PublishFailure(ctx context.Context, reporter *UsageReporter, errs ...error) bool {
+	if b == nil || reporter == nil {
+		return false
+	}
+	reporter.PublishFailureWithDetail(ctx, b.detail, errs...)
+	return true
+}
+
+// Detail returns the latest observed usage detail.
+func (b *StreamUsageBuffer) Detail() (usage.Detail, bool) {
+	if b == nil || !b.ok {
+		return usage.Detail{}, false
+	}
+	return b.detail, true
+}
+
+// ObserveMergedStreamUsage updates buffer with merged usage details.
+func ObserveMergedStreamUsage(buffer *StreamUsageBuffer, update usage.Detail) {
+	if buffer == nil {
+		return
+	}
+	if existing, ok := buffer.Detail(); ok {
+		merged := MergeStreamUsageDetail(existing, update)
+		buffer.Observe(merged, true)
+		return
+	}
+	buffer.Observe(update, true)
+}
+
+// MergeStreamUsageDetail merges existing stream usage with a newer update.
+func MergeStreamUsageDetail(existing, update usage.Detail) usage.Detail {
+	merged := update
+	if merged.InputTokens == 0 && existing.InputTokens > 0 {
+		merged.InputTokens = existing.InputTokens
+	}
+	if merged.CachedTokens == 0 && existing.CachedTokens > 0 {
+		merged.CachedTokens = existing.CachedTokens
+	}
+	if merged.CacheReadTokens == 0 && existing.CacheReadTokens > 0 {
+		merged.CacheReadTokens = existing.CacheReadTokens
+	}
+	if merged.CacheCreationTokens == 0 && existing.CacheCreationTokens > 0 {
+		merged.CacheCreationTokens = existing.CacheCreationTokens
+	}
+	if merged.OutputTokens == 0 && existing.OutputTokens > 0 {
+		merged.OutputTokens = existing.OutputTokens
+	}
+	if merged.ReasoningTokens == 0 && existing.ReasoningTokens > 0 {
+		merged.ReasoningTokens = existing.ReasoningTokens
+	}
+	if merged.ResponseServiceTier == "" {
+		merged.ResponseServiceTier = existing.ResponseServiceTier
+	}
+	cached := merged.CacheReadTokens + merged.CacheCreationTokens
+	if cached == 0 {
+		cached = merged.CachedTokens
+	}
+	calculatedTotal := merged.InputTokens + merged.OutputTokens + cached
+	if merged.TotalTokens == 0 || merged.TotalTokens < calculatedTotal {
+		merged.TotalTokens = calculatedTotal
+	}
+	return merged
 }
 
 func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {

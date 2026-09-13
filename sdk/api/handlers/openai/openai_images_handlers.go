@@ -27,6 +27,9 @@ import (
 const (
 	defaultImagesMainModel      = "gpt-5.4-mini"
 	defaultImagesToolModel      = "gpt-image-2"
+	gptImage25FlareModel        = "gpt-image-2.5-flare"
+	gptImage25SunburstModel     = "gpt-image-2.5-sunburst"
+	gptImage25Model             = "gpt-image-2.5"
 	defaultXAIImagesModel       = "grok-imagine-image"
 	xaiImagesQualityModel       = "grok-imagine-image-quality"
 	xaiImagesHandlerType        = "openai-image"
@@ -142,14 +145,26 @@ func isXAIImagesModel(model string) bool {
 
 func isSupportedImagesModel(model string) bool {
 	baseModel := imagesModelBase(model)
-	if baseModel == defaultImagesToolModel {
+	if baseModel == defaultImagesToolModel || isGPTImage25Model(baseModel) {
 		return true
 	}
 	return isXAIImagesModel(model) || isOpenAICompatImagesModel(model)
 }
 
 func isDefaultImagesToolModel(model string) bool {
-	return imagesModelBase(model) == defaultImagesToolModel
+	baseModel := imagesModelBase(model)
+	return baseModel == defaultImagesToolModel || isGPTImage25Model(baseModel)
+}
+
+// isGPTImage25Model reports whether the base model is one of the GPT Image 2.5
+// variants handled like the default Codex image tool model.
+func isGPTImage25Model(baseModel string) bool {
+	switch baseModel {
+	case gptImage25FlareModel, gptImage25SunburstModel, gptImage25Model:
+		return true
+	default:
+		return false
+	}
 }
 
 func isOpenAICompatImagesModel(model string) bool {
@@ -168,7 +183,7 @@ func rejectUnsupportedImagesModel(c *gin.Context, model string) bool {
 
 	c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
 		Error: handlers.ErrorDetail{
-			Message: fmt.Sprintf("Model %s is not supported on %s or %s. Use %s, %s, %s, or a configured openai-compatibility image model.", model, imagesGenerationsPath, imagesEditsPath, defaultImagesToolModel, defaultXAIImagesModel, xaiImagesQualityModel),
+			Message: fmt.Sprintf("Model %s is not supported on %s or %s. Use %s, %s, %s, %s, %s, %s, or a configured openai-compatibility image model.", model, imagesGenerationsPath, imagesEditsPath, defaultImagesToolModel, gptImage25FlareModel, gptImage25SunburstModel, gptImage25Model, defaultXAIImagesModel, xaiImagesQualityModel),
 			Type:    "invalid_request_error",
 		},
 	})

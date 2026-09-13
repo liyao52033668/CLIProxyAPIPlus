@@ -350,6 +350,9 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 			action = "countTokens"
 		}
 	}
+	if action != "countTokens" {
+		body = helps.EnsureGeminiTrailingUserContent(body, "contents")
+	}
 	baseURL := vertexBaseURL(location)
 	url := fmt.Sprintf("%s/%s/projects/%s/locations/%s/publishers/google/models/%s:%s", baseURL, vertexAPIVersion, projectID, location, baseModel, action)
 	if opts.Alt != "" && action != "countTokens" {
@@ -446,6 +449,9 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(ctx context.Context, auth *clip
 			action = "countTokens"
 		}
 	}
+	if action != "countTokens" {
+		body = helps.EnsureGeminiTrailingUserContent(body, "contents")
+	}
 
 	// For API key auth, use simpler URL format without project/location
 	if baseURL == "" {
@@ -525,7 +531,7 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body = helps.StripVertexOpenAIResponsesToolCallIDs(body, from.String())
-	body = helps.EnsureGeminiLeadingUserContent(body, "contents")
+	body = helps.EnsureGeminiBoundaryUserContent(body, "contents")
 
 	action := getVertexAction(baseModel, true)
 	baseURL := vertexBaseURL(location)
@@ -647,7 +653,7 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body = helps.StripVertexOpenAIResponsesToolCallIDs(body, from.String())
-	body = helps.EnsureGeminiLeadingUserContent(body, "contents")
+	body = helps.EnsureGeminiBoundaryUserContent(body, "contents")
 
 	action := getVertexAction(baseModel, true)
 	// For API key auth, use simpler URL format without project/location

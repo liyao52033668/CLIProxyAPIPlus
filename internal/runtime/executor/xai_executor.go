@@ -243,6 +243,9 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 	prepared.body, _ = sjson.DeleteBytes(prepared.body, "stream")
 	prepared.body, _ = sjson.DeleteBytes(prepared.body, "tools")
 	prepared.body = xaiRemoveInputItemsByType(prepared.body, "compaction_trigger")
+	if previousResponseID := strings.TrimSpace(gjson.GetBytes(req.Payload, "previous_response_id").String()); previousResponseID != "" {
+		prepared.body, _ = sjson.SetBytes(prepared.body, "previous_response_id", previousResponseID)
+	}
 
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), prepared.baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)

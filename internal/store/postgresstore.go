@@ -223,7 +223,10 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 		return "", fmt.Errorf("postgres store: missing file path attribute for %s", auth.ID)
 	}
 
-	if auth.Disabled {
+	// Runtime updates must not recreate a disabled credential whose source file
+	// was deliberately removed. Login and migration callers explicitly mark the
+	// save when creating a missing disabled credential is intentional.
+	if auth.Disabled && !cliproxyauth.HasAuthCreationIntent(ctx) {
 		if _, statErr := os.Stat(path); errors.Is(statErr, fs.ErrNotExist) {
 			return "", nil
 		}
@@ -324,6 +327,73 @@ func (s *PostgresStore) List(ctx context.Context) ([]*cliproxyauth.Auth, error) 
 		provider := strings.TrimSpace(valueAsString(metadata["type"]))
 		if provider == "" {
 			provider = "unknown"
+		}
+		attr := map[string]string{"path": path}
+		if email := strings.TrimSpace(valueAsString(metadata["email"])); email != "" {
+			attr["email"] = email
+		}
+		auth := &cliproxyauth.Auth{
+			ID:               normalizeAuthID(id),
+			Provider:         provider,
+			FileName:         normalizeAuthID(id),
+			Label:            labelFor(metadata),
+			Status:           cliproxyauth.StatusActive,
+			Attributes:       attr,
+			Metadata:         metadata,
+			CreatedAt:        createdAt,
+			UpdatedAt:        updatedAt,
+			LastRefreshedAt:  time.Time{},
+			NextRefreshAfter: time.Time{},
+		}
+		cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
+		if disabled, ok := metadata["disabled"].(bool); ok && disabled {
+			auth.Disabled = true
+			auth.Status = cliproxyauth.StatusDisabled
+		}
+		auths = append(auths, auth)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres store: iterate auth rows: %w", err)
+	}
+	return auths, nil
+}
+
+// ListByProvider enumerates auth records whose provider matches the given
+// value, filtering at the database level to avoid loading all records.
+func (s *PostgresStore) ListByProvider(ctx context.Context, provider string) ([]*cliproxyauth.Auth, error) {
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		return nil, nil
+	}
+	tableName := s.fullTableName(s.cfg.AuthTable)
+	query := "SELECT id, content, created_at, updated_at FROM " + tableName +
+		" WHERE content->>'type' = $1 ORDER BY id"
+	rows, err := s.db.QueryContext(ctx, query, provider)
+	if err != nil {
+		return nil, fmt.Errorf("postgres store: list auth by provider: %w", err)
+	}
+	defer rows.Close()
+
+	auths := make([]*cliproxyauth.Auth, 0, 16)
+	for rows.Next() {
+		var (
+			id        string
+			payload   string
+			createdAt time.Time
+			updatedAt time.Time
+		)
+		if err = rows.Scan(&id, &payload, &createdAt, &updatedAt); err != nil {
+			return nil, fmt.Errorf("postgres store: scan auth row: %w", err)
+		}
+		path, errPath := s.absoluteAuthPath(id)
+		if errPath != nil {
+			log.WithError(errPath).Warnf("postgres store: skipping auth %s outside spool", id)
+			continue
+		}
+		metadata := make(map[string]any)
+		if err = json.Unmarshal([]byte(payload), &metadata); err != nil {
+			log.WithError(err).Warnf("postgres store: skipping auth %s with invalid json", id)
+			continue
 		}
 		attr := map[string]string{"path": path}
 		if email := strings.TrimSpace(valueAsString(metadata["email"])); email != "" {

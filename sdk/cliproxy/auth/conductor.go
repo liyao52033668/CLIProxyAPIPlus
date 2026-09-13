@@ -72,6 +72,9 @@ const (
 	// hint is zero or sub-second, preventing 429 retry thrash against credentials.
 	minQuotaCooldownFloor        = 10 * time.Second
 	autoModelFailoverMaxAttempts = 3
+	// transientErrorCooldown is the legacy default cooldown for transient
+	// upstream errors (408/500/502/503/504/520-526).
+	transientErrorCooldown = time.Minute
 )
 
 var quotaCooldownDisabled atomic.Bool
@@ -438,6 +441,7 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 	if !cfg.Home.Enabled {
 		m.clearHomeRuntimeAuths()
 	}
+	transientErrorCooldownSeconds.Store(int64(cfg.TransientErrorCooldownSeconds))
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 }
 

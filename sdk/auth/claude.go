@@ -201,9 +201,18 @@ waitForCallback:
 		return nil, fmt.Errorf("claude token storage missing account information")
 	}
 
-	fileName := fmt.Sprintf("claude-%s.json", tokenStorage.Email)
+	fileName := claude.CredentialFileName(tokenStorage.Email, tokenStorage.OrganizationUUID, tokenStorage.AccountUUID)
 	metadata := map[string]any{
 		"email": tokenStorage.Email,
+	}
+	if tokenStorage.AccountUUID != "" {
+		metadata["account_uuid"] = tokenStorage.AccountUUID
+	}
+	if tokenStorage.OrganizationUUID != "" {
+		metadata["organization_uuid"] = tokenStorage.OrganizationUUID
+	}
+	if tokenStorage.OrganizationName != "" {
+		metadata["organization_name"] = tokenStorage.OrganizationName
 	}
 
 	fmt.Println("Claude authentication successful")

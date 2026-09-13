@@ -143,6 +143,9 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			action = "countTokens"
 		}
 	}
+	if action != "countTokens" {
+		body = helps.EnsureGeminiTrailingUserContent(body, "contents")
+	}
 	baseURL := resolveGeminiBaseURL(auth)
 	url := fmt.Sprintf("%s/%s/models/%s:%s", baseURL, glAPIVersion, baseModel, action)
 	if opts.Alt != "" && action != "countTokens" {
@@ -214,7 +217,7 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body = capGeminiMaxOutputTokens(body, baseModel)
-	body = helps.EnsureGeminiLeadingUserContent(body, "contents")
+	body = helps.EnsureGeminiBoundaryUserContent(body, "contents")
 
 	baseURL := resolveGeminiBaseURL(auth)
 	url := fmt.Sprintf("%s/%s/models/%s:%s", baseURL, glAPIVersion, baseModel, "streamGenerateContent")

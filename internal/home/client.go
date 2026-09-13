@@ -38,12 +38,13 @@ const (
 )
 
 var (
-	ErrDisabled       = errors.New("home client disabled")
-	ErrNotConnected   = errors.New("home not connected")
-	ErrEmptyResponse  = errors.New("home returned empty response")
-	ErrAuthNotFound   = errors.New("home auth not found")
-	ErrConfigNotFound = errors.New("home config not found")
-	ErrModelsNotFound = errors.New("home models not found")
+	ErrDisabled                  = errors.New("home client disabled")
+	ErrNotConnected              = errors.New("home not connected")
+	ErrEmptyResponse             = errors.New("home returned empty response")
+	ErrAuthNotFound              = errors.New("home auth not found")
+	ErrConfigNotFound            = errors.New("home config not found")
+	ErrModelsNotFound            = errors.New("home models not found")
+	ErrCompareAndSwapUnsupported = errors.New("home compare-and-swap is unsupported")
 )
 
 type clusterNode struct {

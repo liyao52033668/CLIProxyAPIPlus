@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/big"
+	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
@@ -37,7 +38,7 @@ var (
 // - max_output_tokens -> max_tokens
 // - stream passthrough via parameter
 func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte, stream bool) []byte {
-	rawJSON := inputRawJSON
+	rawJSON := normalizeCodexAgentMessages(inputRawJSON)
 
 	if account == "" {
 		u, _ := uuid.NewRandom()
@@ -100,6 +101,46 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 		}
 		msg := []byte(`{"role":"assistant","content":[]}`)
 		msg, _ = sjson.SetRawBytes(msg, "content.-1", partJSON)
+		out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
+	}
+
+	// appendUserParts merges consecutive user-role messages by appending
+	// new content parts to the last message when its role matches.
+	appendUserParts := func(role string, newParts [][]byte) {
+		if len(newParts) == 0 {
+			return
+		}
+		messageCount := int(gjson.GetBytes(out, "messages.#").Int())
+		if messageCount > 0 {
+			lastPath := fmt.Sprintf("messages.%d", messageCount-1)
+			if gjson.GetBytes(out, lastPath+".role").String() == role {
+				lastContent := gjson.GetBytes(out, lastPath+".content")
+				if lastContent.IsArray() {
+					for _, p := range newParts {
+						out, _ = sjson.SetRawBytes(out, lastPath+".content.-1", p)
+					}
+					return
+				}
+				if lastContent.Type == gjson.String {
+					content := []byte(`[]`)
+					if text := lastContent.String(); text != "" {
+						textPart := []byte(`{"type":"text","text":""}`)
+						textPart, _ = sjson.SetBytes(textPart, "text", text)
+						content, _ = sjson.SetRawBytes(content, "-1", textPart)
+					}
+					for _, p := range newParts {
+						content, _ = sjson.SetRawBytes(content, "-1", p)
+					}
+					out, _ = sjson.SetRawBytes(out, lastPath+".content", content)
+					return
+				}
+			}
+		}
+		msg := []byte(`{"role":"","content":[]}`)
+		msg, _ = sjson.SetBytes(msg, "role", role)
+		for _, p := range newParts {
+			msg, _ = sjson.SetRawBytes(msg, "content.-1", p)
+		}
 		out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
 	}
 
@@ -228,6 +269,14 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 		})
 	}
 
+	formatResult := root.Get("text.format")
+	if !formatResult.Exists() {
+		formatResult = root.Get("response_format")
+	}
+	if formatInstruction := common.BuildClaudeStructuredOutputInstruction(formatResult); formatInstruction != "" {
+		appendSystemText(formatInstruction, gjson.Result{})
+	}
+
 	// input array processing
 	if input := root.Get("input"); input.Exists() && input.IsArray() {
 		input.ForEach(func(_, item gjson.Result) bool {
@@ -245,8 +294,6 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				var role string
 				var textAggregate strings.Builder
 				var partsJSON []string
-				hasImage := false
-				hasFile := false
 				if parts := item.Get("content"); parts.Exists() && parts.IsArray() {
 					parts.ForEach(func(_, part gjson.Result) bool {
 						ptype := part.Get("type").String()
@@ -309,7 +356,6 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 									if role == "" {
 										role = "user"
 									}
-									hasImage = true
 								}
 							}
 						case "input_file":
@@ -334,7 +380,6 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 								if role == "" {
 									role = "user"
 								}
-								hasFile = true
 							}
 						}
 						return true
@@ -360,21 +405,21 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 							appendAssistantPart([]byte(partJSON))
 						}
 					} else {
-						msg := []byte(`{"role":"","content":[]}`)
-						msg, _ = sjson.SetBytes(msg, "role", role)
-						textPart := gjson.Parse(partsJSON[0])
-						hasPartCacheControl := textPart.Get("cache_control").Exists()
-						if len(partsJSON) == 1 && !hasImage && !hasFile && !hasPartCacheControl && !textPart.Get("citations").Exists() && !item.Get("cache_control").Exists() {
-							msg, _ = sjson.DeleteBytes(msg, "content")
-							textPart := gjson.Parse(partsJSON[0])
-							msg, _ = sjson.SetBytes(msg, "content", textPart.Get("text").String())
-						} else {
-							for _, partJSON := range partsJSON {
-								msg, _ = sjson.SetRawBytes(msg, "content.-1", []byte(partJSON))
+						var newParts [][]byte
+						for _, partJSON := range partsJSON {
+							newParts = append(newParts, []byte(partJSON))
+						}
+						appendUserParts(role, newParts)
+						// Attach message-level cache control to the last message.
+						messageCount := int(gjson.GetBytes(out, "messages.#").Int())
+						if messageCount > 0 {
+							lastPath := fmt.Sprintf("messages.%d", messageCount-1)
+							lastMsg := gjson.GetBytes(out, lastPath)
+							if lastMsg.Exists() {
+								updated := common.AttachMessageCacheControl([]byte(lastMsg.Raw), item)
+								out, _ = sjson.SetRawBytes(out, lastPath, updated)
 							}
 						}
-						msg = common.AttachMessageCacheControl(msg, item)
-						out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
 					}
 				} else if textAggregate.Len() > 0 {
 					if role == "assistant" {
@@ -382,10 +427,9 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 						textPart, _ = sjson.SetBytes(textPart, "text", textAggregate.String())
 						appendAssistantPart(textPart)
 					} else {
-						msg := []byte(`{"role":"","content":""}`)
-						msg, _ = sjson.SetBytes(msg, "role", role)
-						msg, _ = sjson.SetBytes(msg, "content", textAggregate.String())
-						out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
+						textPart := []byte(`{"type":"text","text":""}`)
+						textPart, _ = sjson.SetBytes(textPart, "text", textAggregate.String())
+						appendUserParts(role, [][]byte{textPart})
 					}
 				}
 
@@ -1043,4 +1087,57 @@ func responsesReasoningPartsText(parts gjson.Result) string {
 		return true
 	})
 	return builder.String()
+}
+
+// normalizeCodexAgentMessages rewrites Codex multi-agent v2 "agent_message"
+// input items into plain user "message" items so the Claude translator does
+// not drop the delegated task text. Encrypted content parts are surfaced as
+// input_text, mirroring the multi-agent v2 optimizer used for other upstreams.
+func normalizeCodexAgentMessages(payload []byte) []byte {
+	input := gjson.GetBytes(payload, "input")
+	if !input.IsArray() {
+		return payload
+	}
+	updated := payload
+	changed := false
+	for itemIndex, item := range input.Array() {
+		if strings.TrimSpace(item.Get("type").String()) != "agent_message" {
+			continue
+		}
+		itemPath := "input." + strconv.Itoa(itemIndex)
+		var errSet error
+		if content := item.Get("content"); content.IsArray() {
+			for partIndex, part := range content.Array() {
+				if strings.TrimSpace(part.Get("type").String()) != "encrypted_content" {
+					continue
+				}
+				enc := part.Get("encrypted_content")
+				if enc.Type != gjson.String {
+					continue
+				}
+				partPath := itemPath + ".content." + strconv.Itoa(partIndex)
+				if updated, errSet = sjson.SetBytes(updated, partPath+".type", "input_text"); errSet != nil {
+					return payload
+				}
+				if updated, errSet = sjson.SetBytes(updated, partPath+".text", enc.String()); errSet != nil {
+					return payload
+				}
+				var errDelete error
+				if updated, errDelete = sjson.DeleteBytes(updated, partPath+".encrypted_content"); errDelete != nil {
+					return payload
+				}
+			}
+		}
+		if updated, errSet = sjson.SetBytes(updated, itemPath+".role", "user"); errSet != nil {
+			return payload
+		}
+		if updated, errSet = sjson.SetBytes(updated, itemPath+".type", "message"); errSet != nil {
+			return payload
+		}
+		changed = true
+	}
+	if !changed {
+		return payload
+	}
+	return updated
 }

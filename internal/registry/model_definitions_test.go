@@ -74,8 +74,8 @@ func assertKimiLevelOnlyThinking(t *testing.T, model *ModelInfo, wantLevels []st
 	if model.Thinking == nil {
 		t.Fatalf("%s thinking support is nil", model.ID)
 	}
-	if model.Thinking.ZeroAllowed {
-		t.Fatalf("%s zero_allowed = true, want false", model.ID)
+	if !model.Thinking.ZeroAllowed {
+		t.Fatalf("%s zero_allowed = false, want true", model.ID)
 	}
 	if model.Thinking.DynamicAllowed {
 		t.Fatalf("%s dynamic_allowed = true, want false/absent", model.ID)
@@ -342,6 +342,49 @@ func assertGPT55ModelInfo(t *testing.T, source string, model *ModelInfo) {
 	for i, level := range want {
 		if model.Thinking.Levels[i] != level {
 			t.Fatalf("%s thinking level %d mismatch: got %q, want %q", source, i, model.Thinking.Levels[i], level)
+		}
+	}
+}
+
+func TestWithCodexBuiltinsIncludesImage25Models(t *testing.T) {
+	models := WithCodexBuiltins(nil)
+	expectedModels := map[string]string{
+		"gpt-image-2.5-flare":    "GPT Image 2.5 Flare",
+		"gpt-image-2.5-sunburst": "GPT Image 2.5 Sunburst",
+		"gpt-image-2.5":          "GPT Image 2.5",
+	}
+
+	found := make(map[string]*ModelInfo)
+	for _, model := range models {
+		if model != nil {
+			if _, ok := expectedModels[model.ID]; ok {
+				found[model.ID] = model
+			}
+		}
+	}
+
+	for id, wantDisplayName := range expectedModels {
+		model, ok := found[id]
+		if !ok {
+			t.Fatalf("expected builtin model %s in WithCodexBuiltins", id)
+		}
+		if model.DisplayName != wantDisplayName {
+			t.Errorf("model %s DisplayName = %q, want %q", id, model.DisplayName, wantDisplayName)
+		}
+		if model.Object != "model" {
+			t.Errorf("model %s Object = %q, want model", id, model.Object)
+		}
+		if model.OwnedBy != "openai" {
+			t.Errorf("model %s OwnedBy = %q, want openai", id, model.OwnedBy)
+		}
+		if model.Type != "openai" {
+			t.Errorf("model %s Type = %q, want openai", id, model.Type)
+		}
+		if model.Version != id {
+			t.Errorf("model %s Version = %q, want %q", id, model.Version, id)
+		}
+		if model.Created != 1704067200 {
+			t.Errorf("model %s Created = %d, want 1704067200", id, model.Created)
 		}
 	}
 }

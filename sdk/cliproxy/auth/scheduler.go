@@ -223,6 +223,37 @@ func (s *authScheduler) upsertAuth(auth *Auth) {
 	s.upsertAuthLocked(auth, time.Now())
 }
 
+// upsertAuthResult updates the scheduler after a request result. When the result
+// is model-scoped and target shards are known, only those shards are refreshed so
+// unrelated shards keep their built state; credential-scoped results (or unknown
+// targets) fall back to a full sync across every shard.
+func (s *authScheduler) upsertAuthResult(auth *Auth, targetModels []string, credentialScope bool) {
+	if s == nil || auth == nil {
+		return
+	}
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if credentialScope || len(targetModels) == 0 {
+		s.upsertAuthLocked(auth, now)
+		return
+	}
+	authID := strings.TrimSpace(auth.ID)
+	providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
+	if authID == "" || providerKey == "" || auth.Disabled {
+		s.removeAuthLocked(authID)
+		return
+	}
+	if previousProvider := s.authProviders[authID]; previousProvider != "" && previousProvider != providerKey {
+		if previousState := s.providers[previousProvider]; previousState != nil {
+			previousState.removeAuthLocked(authID)
+		}
+	}
+	meta := buildScheduledAuthMeta(auth)
+	s.authProviders[authID] = providerKey
+	s.ensureProviderLocked(providerKey).upsertAuthResultLocked(meta, targetModels, now)
+}
+
 // pickSingle returns the next auth for a single provider/model request using scheduler state.
 func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, error) {
 	if s == nil {
@@ -419,6 +450,7 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 	now := time.Now()
 	total := 0
 	cooldownCount := 0
+	unauthorizedCount := 0
 	earliest := time.Time{}
 	for _, providerKey := range providers {
 		providerState := s.providers[providerKey]
@@ -429,9 +461,10 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 		if shard == nil {
 			continue
 		}
-		localTotal, localCooldownCount, localEarliest := shard.availabilitySummaryLocked(triedPredicate(tried))
+		localTotal, localCooldownCount, localUnauthorizedCount, localEarliest := shard.availabilitySummaryLocked(triedPredicate(tried))
 		total += localTotal
 		cooldownCount += localCooldownCount
+		unauthorizedCount += localUnauthorizedCount
 		if !localEarliest.IsZero() && (earliest.IsZero() || localEarliest.Before(earliest)) {
 			earliest = localEarliest
 		}
@@ -443,7 +476,32 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 		resetIn := max(earliest.Sub(now), 0)
 		return newModelCooldownError(model, "", resetIn)
 	}
+	if unauthorizedCount == total {
+		return newTerminalAuthUnavailableError(s.latestUnauthorizedErrorLocked(providers, model, tried))
+	}
 	return &Error{Code: "auth_unavailable", Message: "no auth available"}
+}
+
+// latestUnauthorizedErrorLocked returns the most recent LastError among
+// unauthorized-failed candidates across the given provider shards.
+func (s *authScheduler) latestUnauthorizedErrorLocked(providers []string, model string, tried map[string]struct{}) error {
+	predicate := triedPredicate(tried)
+	now := time.Now()
+	var latestErr error
+	for _, providerKey := range providers {
+		providerState := s.providers[providerKey]
+		if providerState == nil {
+			continue
+		}
+		shard := providerState.ensureModelLocked(canonicalModelKey(model), now)
+		if shard == nil {
+			continue
+		}
+		if errUnauthorized := shard.latestUnauthorizedErrorLocked(predicate); errUnauthorized != nil && latestErr == nil {
+			latestErr = errUnauthorized
+		}
+	}
+	return latestErr
 }
 
 // triedPredicate builds a filter that excludes auths already attempted for the current request.
@@ -593,6 +651,33 @@ func (p *providerScheduler) upsertAuthLocked(meta *scheduledAuthMeta, now time.T
 	}
 }
 
+// upsertAuthResultLocked updates only the targeted model shards after a
+// model-scoped request result, leaving unrelated shards untouched.
+func (p *providerScheduler) upsertAuthResultLocked(meta *scheduledAuthMeta, targetModels []string, now time.Time) {
+	if p == nil || meta == nil || meta.auth == nil {
+		return
+	}
+	p.auths[meta.auth.ID] = meta
+	for _, targetModel := range targetModels {
+		modelKey := canonicalModelKey(targetModel)
+		if modelKey == "" {
+			continue
+		}
+		shard, ok := p.modelShards[modelKey]
+		if !ok || shard == nil {
+			// The shard has not been built yet; building it now from all provider
+			// auths keeps the result correct while staying targeted.
+			p.ensureModelLocked(modelKey, now)
+			continue
+		}
+		if !meta.supportsModel(modelKey) {
+			shard.removeEntryLocked(meta.auth.ID)
+			continue
+		}
+		shard.upsertEntryLocked(meta, now)
+	}
+}
+
 // removeAuthLocked removes an auth from all model shards owned by the provider scheduler.
 func (p *providerScheduler) removeAuthLocked(authID string) {
 	if p == nil || authID == "" {
@@ -614,6 +699,7 @@ func (p *providerScheduler) ensureModelLocked(modelKey string, now time.Time) *m
 	modelKey = canonicalModelKey(modelKey)
 	if shard, ok := p.modelShards[modelKey]; ok && shard != nil {
 		shard.promoteExpiredLocked(now)
+		shard.refreshStaleEntriesLocked(p.auths, now)
 		return shard
 	}
 	shard := &modelScheduler{
@@ -629,6 +715,38 @@ func (p *providerScheduler) ensureModelLocked(modelKey string, now time.Time) *m
 	}
 	p.modelShards[modelKey] = shard
 	return shard
+}
+
+// refreshStaleEntriesLocked updates any shard entry whose meta pointer differs
+// from the canonical meta in providerAuths, but only when the provider-level
+// meta is newer (by UpdatedAt). This handles the case where a route-model
+// (alias) shard was created by the pick path but later upsertAuthResult calls
+// only updated upstream-model shards, leaving the alias shard with a stale
+// auth snapshot. It avoids downgrading a shard that already has a newer
+// snapshot (out-of-order result delivery).
+func (m *modelScheduler) refreshStaleEntriesLocked(providerAuths map[string]*scheduledAuthMeta, now time.Time) {
+	if m == nil || len(providerAuths) == 0 {
+		return
+	}
+	for authID, entry := range m.entries {
+		if entry == nil || entry.meta == nil {
+			continue
+		}
+		latestMeta, ok := providerAuths[authID]
+		if !ok || latestMeta == nil {
+			continue
+		}
+		if entry.meta == latestMeta {
+			continue
+		}
+		// Only refresh when the provider-level meta is strictly newer so that
+		// out-of-order result delivery cannot downgrade a shard that already
+		// observed a newer snapshot.
+		if latestMeta.auth.UpdatedAt.Before(entry.meta.auth.UpdatedAt) {
+			continue
+		}
+		m.upsertEntryLocked(latestMeta, now)
+	}
 }
 
 // supportsModel reports whether the auth metadata currently supports modelKey.
@@ -868,7 +986,7 @@ func (m *modelScheduler) readyCountAtPriorityLocked(preferWebsocket bool, priori
 // unavailableErrorLocked returns the correct unavailable or cooldown error for the shard.
 func (m *modelScheduler) unavailableErrorLocked(provider, model string, predicate func(*scheduledAuth) bool) error {
 	now := time.Now()
-	total, cooldownCount, earliest := m.availabilitySummaryLocked(predicate)
+	total, cooldownCount, unauthorizedCount, earliest := m.availabilitySummaryLocked(predicate)
 	if total == 0 {
 		return &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
@@ -880,16 +998,21 @@ func (m *modelScheduler) unavailableErrorLocked(provider, model string, predicat
 		resetIn := max(earliest.Sub(now), 0)
 		return newModelCooldownError(model, providerForError, resetIn)
 	}
+	if unauthorizedCount == total {
+		return newTerminalAuthUnavailableError(m.latestUnauthorizedErrorLocked(predicate))
+	}
 	return &Error{Code: "auth_unavailable", Message: "no auth available"}
 }
 
-// availabilitySummaryLocked summarizes total candidates, cooldown count, and earliest retry time.
-func (m *modelScheduler) availabilitySummaryLocked(predicate func(*scheduledAuth) bool) (int, int, time.Time) {
+// availabilitySummaryLocked summarizes total candidates, cooldown count,
+// unauthorized-failure count, and earliest retry time.
+func (m *modelScheduler) availabilitySummaryLocked(predicate func(*scheduledAuth) bool) (int, int, int, time.Time) {
 	if m == nil {
-		return 0, 0, time.Time{}
+		return 0, 0, 0, time.Time{}
 	}
 	total := 0
 	cooldownCount := 0
+	unauthorizedCount := 0
 	earliest := time.Time{}
 	for _, entry := range m.entries {
 		if predicate != nil && !predicate(entry) {
@@ -899,15 +1022,44 @@ func (m *modelScheduler) availabilitySummaryLocked(predicate func(*scheduledAuth
 		if entry == nil || entry.auth == nil {
 			continue
 		}
-		if entry.state != scheduledStateCooldown {
+		if entry.state == scheduledStateCooldown {
+			cooldownCount++
+			if !entry.nextRetryAt.IsZero() && (earliest.IsZero() || entry.nextRetryAt.Before(earliest)) {
+				earliest = entry.nextRetryAt
+			}
 			continue
 		}
-		cooldownCount++
-		if !entry.nextRetryAt.IsZero() && (earliest.IsZero() || entry.nextRetryAt.Before(earliest)) {
-			earliest = entry.nextRetryAt
+		if hasUnauthorizedAuthFailure(entry.auth) {
+			unauthorizedCount++
 		}
 	}
-	return total, cooldownCount, earliest
+	return total, cooldownCount, unauthorizedCount, earliest
+}
+
+// latestUnauthorizedErrorLocked returns the most recent LastError among
+// unauthorized-failed candidates in this shard.
+func (m *modelScheduler) latestUnauthorizedErrorLocked(predicate func(*scheduledAuth) bool) error {
+	if m == nil {
+		return nil
+	}
+	var latest time.Time
+	var latestErr error
+	for _, entry := range m.entries {
+		if entry == nil || entry.auth == nil || entry.auth.LastError == nil {
+			continue
+		}
+		if predicate != nil && !predicate(entry) {
+			continue
+		}
+		if !hasUnauthorizedAuthFailure(entry.auth) {
+			continue
+		}
+		if latestErr == nil || entry.auth.UpdatedAt.After(latest) {
+			latest = entry.auth.UpdatedAt
+			latestErr = entry.auth.LastError
+		}
+	}
+	return latestErr
 }
 
 // rebuildIndexesLocked reconstructs ready and blocked views from the current entry map.

@@ -3,26 +3,11 @@ package common
 import (
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
-
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 )
 
 // IsGeminiThoughtPart reports whether a Gemini part contains hidden model thought.
 func IsGeminiThoughtPart(part gjson.Result) bool {
 	return part.Get("thought").Bool()
-}
-
-// ContentHasGeminiFunctionResponse reports whether a Gemini content turn contains any functionResponse part.
-func ContentHasGeminiFunctionResponse(content []byte) bool {
-	hasFR := false
-	gjson.GetBytes(content, "parts").ForEach(func(_, part gjson.Result) bool {
-		if part.Get("functionResponse").Exists() || part.Get("function_response").Exists() {
-			hasFR = true
-			return false
-		}
-		return true
-	})
-	return hasFR
 }
 
 // MergeAdjacentGeminiContents merges consecutive user Content turns.
@@ -58,7 +43,8 @@ func MergeAdjacentGeminiContents(contents [][]byte) [][]byte {
 				for _, p := range partsResult.Array() {
 					combinedParts = append(combinedParts, []byte(p.Raw))
 				}
-				updated, err := sjson.SetRawBytes(lastJSON, "parts", util.JoinRawArrayBytes(combinedParts))
+				combinedParts = ReorderGeminiUserParts(combinedParts)
+				updated, err := sjson.SetRawBytes(lastJSON, "parts", JoinRawArray(combinedParts))
 				if err == nil {
 					merged[lastIndex] = updated
 					continue
@@ -68,6 +54,52 @@ func MergeAdjacentGeminiContents(contents [][]byte) [][]byte {
 		merged = append(merged, content)
 	}
 	return merged
+}
+
+// ContentHasGeminiFunctionResponse reports whether a Gemini content turn contains any functionResponse part.
+func ContentHasGeminiFunctionResponse(content []byte) bool {
+	hasFR := false
+	gjson.GetBytes(content, "parts").ForEach(func(_, part gjson.Result) bool {
+		if part.Get("functionResponse").Exists() || part.Get("function_response").Exists() {
+			hasFR = true
+			return false
+		}
+		return true
+	})
+	return hasFR
+}
+
+// ReorderGeminiUserParts reorders parts within a Gemini user turn so that
+// text parts (such as prompt text and system reminders) precede functionResponse
+// parts. This resolves upstream provider validation failures (such as Google Cloud
+// Vertex AI returning 400 "Requests ending with a model turn are not supported" when
+// functionResponse is followed by text in the same turn).
+func ReorderGeminiUserParts(parts [][]byte) [][]byte {
+	hasFR := false
+	hasTrailingText := false
+	for _, p := range parts {
+		isFR := gjson.GetBytes(p, "functionResponse").Exists() || gjson.GetBytes(p, "function_response").Exists()
+		if isFR {
+			hasFR = true
+		} else if hasFR && gjson.GetBytes(p, "text").Exists() {
+			hasTrailingText = true
+			break
+		}
+	}
+	if !hasFR || !hasTrailingText {
+		return parts
+	}
+
+	promptParts := make([][]byte, 0, len(parts))
+	toolParts := make([][]byte, 0, len(parts))
+	for _, p := range parts {
+		if gjson.GetBytes(p, "text").Exists() {
+			promptParts = append(promptParts, p)
+		} else {
+			toolParts = append(toolParts, p)
+		}
+	}
+	return append(promptParts, toolParts...)
 }
 
 // MergeAdjacentGeminiUserContents merges consecutive user Content turns,
@@ -100,7 +132,7 @@ func MergeAdjacentGeminiUserContents(contents [][]byte) [][]byte {
 				for _, p := range currentParts {
 					combinedParts = append(combinedParts, []byte(p.Raw))
 				}
-				updated, err := sjson.SetRawBytes(lastJSON, "parts", util.JoinRawArrayBytes(combinedParts))
+				updated, err := sjson.SetRawBytes(lastJSON, "parts", JoinRawArray(combinedParts))
 				if err == nil {
 					merged[lastIndex] = updated
 					continue

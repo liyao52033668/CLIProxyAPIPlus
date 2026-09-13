@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 
+	claudeauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
@@ -214,9 +216,29 @@ func (m *Manager) Login(ctx context.Context, provider string, cfg *config.Config
 		}
 	}
 
-	savedPath, err := m.store.Save(ctx, record)
+	legacyClaudeCredential, errLegacy := claudeauth.FindMatchingLegacyCredential(ctx, m.store, record)
+	if errLegacy != nil {
+		return record, "", errLegacy
+	}
+	if legacyClaudeCredential != nil {
+		coreauth.MergeExistingAuthMetadata(record, legacyClaudeCredential.Metadata)
+	}
+
+	savedPath, err := m.store.Save(coreauth.WithAuthCreationIntent(ctx), record)
 	if err != nil {
 		return record, "", err
+	}
+	if legacyClaudeCredential != nil {
+		if strings.TrimSpace(savedPath) == "" {
+			return record, "", fmt.Errorf("cliproxy auth: canonical Claude credential was not persisted; legacy credential retained")
+		}
+		legacyID := strings.TrimSpace(legacyClaudeCredential.ID)
+		if legacyID == "" {
+			legacyID = strings.TrimSpace(legacyClaudeCredential.FileName)
+		}
+		if errDelete := m.store.Delete(ctx, legacyID); errDelete != nil {
+			return record, savedPath, fmt.Errorf("cliproxy auth: canonical Claude credential saved but legacy credential cleanup failed: %w", errDelete)
+		}
 	}
 	return record, savedPath, nil
 }

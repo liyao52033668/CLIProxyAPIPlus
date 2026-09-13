@@ -23,6 +23,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -338,12 +339,12 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			helps.RecordAPIResponseError(ctx, e.cfg, errValidate)
 			return resp, errValidate
 		}
+		var streamUsage helps.StreamUsageBuffer
 		lines := bytes.Split(data, []byte("\n"))
 		for _, line := range lines {
-			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
-				reporter.Publish(ctx, detail)
-			}
+			streamUsage.ObserveClaudeStream(line)
 		}
+		streamUsage.Publish(ctx, reporter)
 	} else {
 		reporter.Publish(ctx, helps.ParseClaudeUsage(data))
 	}
@@ -472,6 +473,8 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	go func() {
 		defer close(out)
 		defer helps.CloseResponseBody(e.Identifier(), decodedBody)
+		var streamUsage helps.StreamUsageBuffer
+		defer streamUsage.Publish(ctx, reporter)
 
 		// If from == to (Claude → Claude), directly forward the SSE stream without translation
 		if from == to {
@@ -480,9 +483,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			for scanner.Scan() {
 				line := scanner.Bytes()
 				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-				if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
-					reporter.Publish(ctx, detail)
-				}
+				streamUsage.ObserveClaudeStream(line)
 				line = restoreClaudeOAuthToolNamesFromStreamLine(line, claudeToolPrefix, auth.ToolPrefixDisabled(), oauthToolNamesReverseMap)
 				line = e.restoreResponseModel(line, req.Model)
 				// Forward the line as-is to preserve SSE format
@@ -497,12 +498,15 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			}
 			if errScan := scanner.Err(); errScan != nil {
 				helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-				reporter.PublishFailure(ctx, errScan)
+				streamUsage.PublishFailure(ctx, reporter, errScan)
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
 				case <-ctx.Done():
 				}
 			}
+			// Flush the aggregated usage before EnsurePublished so the merged
+			// input+output counts win the once-only publish.
+			streamUsage.Publish(ctx, reporter)
 			reporter.EnsurePublished(ctx)
 			return
 		}
@@ -514,9 +518,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
-				reporter.Publish(ctx, detail)
-			}
+			streamUsage.ObserveClaudeStream(line)
 			line = restoreClaudeOAuthToolNamesFromStreamLine(line, claudeToolPrefix, auth.ToolPrefixDisabled(), oauthToolNamesReverseMap)
 			line = e.restoreResponseModel(line, req.Model)
 			chunks := sdktranslator.TranslateStream(
@@ -539,12 +541,15 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}
 		if errScan := scanner.Err(); errScan != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.PublishFailure(ctx, errScan)
+			streamUsage.PublishFailure(ctx, reporter, errScan)
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
 			case <-ctx.Done():
 			}
 		}
+		// Flush the aggregated usage before EnsurePublished so the merged
+		// input+output counts win the once-only publish.
+		streamUsage.Publish(ctx, reporter)
 		reporter.EnsurePublished(ctx)
 	}()
 	result := &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}
@@ -646,7 +651,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	url := helps.JoinBaseURL(baseURL, "/v1/messages/count_tokens?beta=true")
 	headers := make(http.Header)
 	tmpReq := (&http.Request{Header: headers}).WithContext(ctx)
-	applyClaudeHeaders(tmpReq, auth, apiKey, false, extraBetas, e.cfg, opts.Headers, body)
+	applyClaudeHeadersForCountTokens(tmpReq, auth, apiKey, extraBetas, e.cfg, opts.Headers, body)
 	headers = tmpReq.Header
 
 	_, data, respHeaders, errDo := helps.DoJSON(ctx, e.cfg, helps.UpstreamRequest{
@@ -907,7 +912,20 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 	return body, nil
 }
 
+// applyClaudeHeaders applies the Claude Code transport headers, assembling the
+// Anthropic-Beta baseline dynamically to match Claude Code 2.1.258.
 func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, cfg *config.Config, incomingHeaders http.Header, body []byte) {
+	applyClaudeHeadersWithBaseline(r, auth, apiKey, stream, extraBetas, cfg, incomingHeaders, body, "")
+}
+
+// applyClaudeHeadersForCountTokens applies the Claude headers with the fixed
+// beta baseline that /v1/messages/count_tokens used before the dynamic
+// assembly; inference-only betas stay off the counting endpoint.
+func applyClaudeHeadersForCountTokens(r *http.Request, auth *cliproxyauth.Auth, apiKey string, extraBetas []string, cfg *config.Config, incomingHeaders http.Header, body []byte) {
+	applyClaudeHeadersWithBaseline(r, auth, apiKey, false, extraBetas, cfg, incomingHeaders, body, claudeLegacyBaseBetas)
+}
+
+func applyClaudeHeadersWithBaseline(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, cfg *config.Config, incomingHeaders http.Header, body []byte, baseline string) {
 	hdrDefault := func(cfgVal, fallback string) string {
 		if cfgVal != "" {
 			return cfgVal
@@ -941,15 +959,73 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		deviceProfile = helps.ResolveClaudeDeviceProfile(auth, apiKey, incomingHeaders, cfg)
 	}
 
-	baseBetas := "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,structured-outputs-2025-12-15,fast-mode-2026-02-01,redact-thinking-2026-02-12,token-efficient-tools-2026-03-28"
-	if val := strings.TrimSpace(strings.Join(incomingHeaders.Values("Anthropic-Beta"), ",")); val != "" {
-		baseBetas = val
-		if !strings.Contains(val, "oauth") {
-			baseBetas += ",oauth-2025-04-20"
+	// Collect the caller-requested betas: the incoming Anthropic-Beta header
+	// plus the betas extracted from the request body.
+	requested := make(map[string]bool)
+	var incomingBetas []string
+	if incomingHeaders != nil {
+		for _, rawVal := range incomingHeaders.Values("Anthropic-Beta") {
+			for _, beta := range strings.Split(rawVal, ",") {
+				if beta = strings.TrimSpace(beta); beta != "" {
+					requested[beta] = true
+					incomingBetas = append(incomingBetas, beta)
+				}
+			}
 		}
 	}
-	if !strings.Contains(baseBetas, "interleaved-thinking") {
-		baseBetas += ",interleaved-thinking-2025-05-14"
+	for _, beta := range extraBetas {
+		if beta = strings.TrimSpace(beta); beta != "" {
+			requested[beta] = true
+		}
+	}
+
+	baseBetas := baseline
+	if baseBetas == "" {
+		// Dynamic per-request assembly matching Claude Code 2.1.258.
+		baseBetas = claudeCodeCLIBetas(body, requested, isClaudeOAuthToken(apiKey))
+		// Forward unmanaged caller betas: newer-client features the pinned
+		// profile predates keep working (#5738). Managed betas stay governed
+		// by the assembled baseline.
+		for _, beta := range incomingBetas {
+			if !isManagedClaudeBeta(beta) {
+				baseBetas = appendClaudeBetaOnce(baseBetas, beta)
+			}
+		}
+		for _, beta := range extraBetas {
+			if beta = strings.TrimSpace(beta); beta != "" && !isManagedClaudeBeta(beta) {
+				baseBetas = appendClaudeBetaOnce(baseBetas, beta)
+			}
+		}
+	} else {
+		// Fixed legacy baseline: keep the previous override/merge semantics.
+		if incomingHeaders != nil {
+			if val := strings.TrimSpace(strings.Join(incomingHeaders.Values("Anthropic-Beta"), ",")); val != "" {
+				baseBetas = val
+				if !strings.Contains(val, "oauth") {
+					baseBetas += ",oauth-2025-04-20"
+				}
+			}
+		}
+		if !strings.Contains(baseBetas, "interleaved-thinking") {
+			baseBetas += ",interleaved-thinking-2025-05-14"
+		}
+		// Merge extra betas from request body and request flags.
+		if len(extraBetas) > 0 {
+			existingSet := make(map[string]bool)
+			for b := range strings.SplitSeq(baseBetas, ",") {
+				betaName := strings.TrimSpace(b)
+				if betaName != "" {
+					existingSet[betaName] = true
+				}
+			}
+			for _, beta := range extraBetas {
+				beta = strings.TrimSpace(beta)
+				if beta != "" && !existingSet[beta] {
+					baseBetas += "," + beta
+					existingSet[beta] = true
+				}
+			}
+		}
 	}
 
 	hasClaude1MHeader := false
@@ -970,23 +1046,6 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		baseBetas += "," + gitLabContext1MBeta
 	}
 
-	// Merge extra betas from request body and request flags.
-	if len(extraBetas) > 0 {
-		existingSet := make(map[string]bool)
-		for b := range strings.SplitSeq(baseBetas, ",") {
-			betaName := strings.TrimSpace(b)
-			if betaName != "" {
-				existingSet[betaName] = true
-			}
-		}
-		for _, beta := range extraBetas {
-			beta = strings.TrimSpace(beta)
-			if beta != "" && !existingSet[beta] {
-				baseBetas += "," + beta
-				existingSet[beta] = true
-			}
-		}
-	}
 	// redact-thinking-2026-02-12 and thinking.display are mutually exclusive
 	// (Claude Code 2.1.220 rule). Sending both makes Anthropic honour the
 	// redaction and return thinking blocks with an empty thinking field, so a
@@ -994,7 +1053,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	if claudeThinkingDisplaySet(body) {
 		var kept []string
 		for b := range strings.SplitSeq(baseBetas, ",") {
-			if beta := strings.TrimSpace(b); beta != "" && beta != "redact-thinking-2026-02-12" {
+			if beta := strings.TrimSpace(b); beta != "" && beta != claudeRedactThinkingBeta {
 				kept = append(kept, beta)
 			}
 		}
@@ -2535,4 +2594,66 @@ func ensureModelMaxTokens(body []byte, modelID string) []byte {
 	}
 
 	return body
+}
+
+func shouldSanitizeClaudeMessagesForUpstream(baseModel string) bool {
+	return sigcompat.SignatureProviderFromModelName(baseModel) == sigcompat.SignatureProviderClaude
+}
+
+func sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx context.Context, body []byte, baseModel string, preserveEmptyThinkingBlocks ...bool) []byte {
+	sanitized := body
+	preserveEmpty := len(preserveEmptyThinkingBlocks) > 0 && preserveEmptyThinkingBlocks[0]
+	if shouldSanitizeClaudeMessagesForUpstream(baseModel) || preserveEmpty {
+		var report sigcompat.SignatureSanitizeReport
+		sanitized, report = sigcompat.SanitizeClaudeMessagesForClaudeUpstream(body, baseModel)
+		logClaudeSignatureSanitizeReport(ctx, baseModel, report)
+	}
+	return sanitizeClaudeWebSearchDomains(sanitized)
+}
+
+func sanitizeClaudeWebSearchDomains(body []byte) []byte {
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.Exists() || !tools.IsArray() {
+		return body
+	}
+	tools.ForEach(func(index, tool gjson.Result) bool {
+		if !strings.HasPrefix(tool.Get("type").String(), "web_search_") {
+			return true
+		}
+		for _, field := range []string{"allowed_domains", "blocked_domains"} {
+			value := tool.Get(field)
+			if value.Exists() && value.IsArray() && len(value.Array()) == 0 {
+				path := fmt.Sprintf("tools.%d.%s", index.Int(), field)
+				if updated, errDelete := sjson.DeleteBytes(body, path); errDelete == nil {
+					body = updated
+				}
+			}
+		}
+		return true
+	})
+	return body
+}
+
+func logClaudeSignatureSanitizeReport(ctx context.Context, baseModel string, report sigcompat.SignatureSanitizeReport) {
+	if report.DroppedBlocks == 0 && report.DroppedSignatures == 0 && report.ReplacedSignatures == 0 {
+		return
+	}
+	fields := log.Fields{
+		"component":       "signature_sanitizer",
+		"executor":        "claude",
+		"action":          "sanitize_claude_messages",
+		"target_provider": string(report.TargetProvider),
+		"target_model":    baseModel,
+		"preserved":       report.Preserved,
+	}
+	if report.DroppedBlocks > 0 {
+		fields["dropped_blocks"] = report.DroppedBlocks
+	}
+	if report.DroppedSignatures > 0 {
+		fields["dropped_signatures"] = report.DroppedSignatures
+	}
+	if report.ReplacedSignatures > 0 {
+		fields["replaced_signatures"] = report.ReplacedSignatures
+	}
+	log.WithFields(fields).Debug("claude executor: sanitized messages for upstream")
 }

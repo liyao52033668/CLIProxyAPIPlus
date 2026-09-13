@@ -8,10 +8,15 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+// ContentBlockTextBuffer accumulates streamed text fragments and transparently
+// decodes content-block arrays that some providers stringify on the wire.
 type ContentBlockTextBuffer struct {
 	pending strings.Builder
 }
 
+// Text returns the decoded text for the given JSON result. When the result
+// looks like a partial content-block array the fragment is buffered until a
+// subsequent call completes it.
 func (b *ContentBlockTextBuffer) Text(result gjson.Result) string {
 	if !result.Exists() || result.Type == gjson.Null {
 		return ""
@@ -39,6 +44,7 @@ func (b *ContentBlockTextBuffer) Text(result gjson.Result) string {
 	return text
 }
 
+// Flush drains any buffered partial content-block fragment.
 func (b *ContentBlockTextBuffer) Flush() string {
 	if b.pending.Len() == 0 {
 		return ""
@@ -68,6 +74,8 @@ func looksLikeContentBlocksPrefix(text string) bool {
 	return strings.Contains(text, `"type"`) || strings.Contains(text, `"text"`) || strings.Contains(text, `"output_text"`)
 }
 
+// TextFromContentBlocks extracts plain text from a gjson result that may be a
+// content-block array, a stringified content-block array, or a plain string.
 func TextFromContentBlocks(result gjson.Result) string {
 	if !result.Exists() || result.Type == gjson.Null {
 		return ""
@@ -128,6 +136,8 @@ func textFromPossiblyStringifiedContentBlocks(text string) string {
 	return text
 }
 
+// WrapGeminiCLIResponse wraps a Gemini CLI response body inside a
+// {"response": ...} envelope expected by downstream translators.
 func WrapGeminiCLIResponse(response []byte) []byte {
 	out, err := sjson.SetRawBytes([]byte(`{"response":{}}`), "response", response)
 	if err != nil {
@@ -154,6 +164,54 @@ func ClaudeInputTokensJSON(count int64) []byte {
 	return out
 }
 
+// NewRawArrayItems creates a raw item slice sized for the expected input.
+func NewRawArrayItems(capacity int64) [][]byte {
+	if capacity <= 0 {
+		return nil
+	}
+	return make([][]byte, 0, int(capacity))
+}
+
+func JoinRawArray(items [][]byte) []byte {
+	if len(items) == 0 {
+		return []byte("[]")
+	}
+	size := len(items) + 1
+	for _, item := range items {
+		size += len(item)
+	}
+	out := make([]byte, 0, size)
+	out = append(out, '[')
+	for i, item := range items {
+		if i > 0 {
+			out = append(out, ',')
+		}
+		out = append(out, item...)
+	}
+	return append(out, ']')
+}
+
+// SetRawArrayItems replaces an empty JSON array at path with raw items.
+// The single-item path avoids allocating an intermediate joined array.
+func SetRawArrayItems(data []byte, path string, items [][]byte) []byte {
+	if len(items) == 0 {
+		return data
+	}
+	if len(items) == 1 {
+		array := gjson.GetBytes(data, path)
+		if array.Raw == "[]" && array.Index >= 0 && array.Index+len(array.Raw) <= len(data) {
+			out := make([]byte, 0, len(data)+len(items[0]))
+			out = append(out, data[:array.Index]...)
+			out = append(out, '[')
+			out = append(out, items[0]...)
+			out = append(out, ']')
+			return append(out, data[array.Index+len(array.Raw):]...)
+		}
+	}
+	data, _ = sjson.SetRawBytes(data, path, JoinRawArray(items))
+	return data
+}
+
 func SSEEventData(event string, payload []byte) []byte {
 	out := make([]byte, 0, len(event)+len(payload)+14)
 	out = append(out, "event: "...)
@@ -170,7 +228,7 @@ func AppendSSEEventString(out []byte, event, payload string, trailingNewlines in
 	out = append(out, '\n')
 	out = append(out, "data: "...)
 	out = append(out, payload...)
-	for range trailingNewlines {
+	for i := 0; i < trailingNewlines; i++ {
 		out = append(out, '\n')
 	}
 	return out
@@ -182,7 +240,7 @@ func AppendSSEEventBytes(out []byte, event string, payload []byte, trailingNewli
 	out = append(out, '\n')
 	out = append(out, "data: "...)
 	out = append(out, payload...)
-	for range trailingNewlines {
+	for i := 0; i < trailingNewlines; i++ {
 		out = append(out, '\n')
 	}
 	return out

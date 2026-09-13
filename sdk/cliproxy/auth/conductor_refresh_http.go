@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
@@ -73,10 +72,7 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 	}
 
 	ctx, cancelCtx := context.WithCancel(parent)
-	workers := refreshMaxConcurrency
-	if cfg, ok := m.runtimeConfig.Load().(*internalconfig.Config); ok && cfg != nil && cfg.AuthAutoRefreshWorkers > 0 {
-		workers = cfg.AuthAutoRefreshWorkers
-	}
+	workers := m.refreshWorkers()
 	loop := newAuthAutoRefreshLoop(m, interval, workers)
 
 	m.mu.Lock()

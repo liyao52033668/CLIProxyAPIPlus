@@ -427,3 +427,39 @@ func TestConvertCodexResponseToOpenAI_NonStreamReasoningSummaryAndContent(t *tes
 		t.Fatalf("expected reasoning_content %q, got %q; payload=%s", "Summary part and Content part", got.String(), string(out))
 	}
 }
+
+func TestConvertCodexResponseToOpenAI_RestoresNormalizedToolNames(t *testing.T) {
+	ctx := context.Background()
+	originalName := "mcp.server:search tool"
+	normalizedName := "mcp_server_search_tool"
+	originalRequest := []byte(`{
+		"tools": [
+			{
+				"type": "function",
+				"function": {
+					"name": "` + originalName + `"
+				}
+			}
+		]
+	}`)
+
+	// Test non-stream response
+	rawNonStream := []byte(`{"type":"response.completed","response":{"id":"resp_1","created_at":1700000000,"model":"gpt-5.6-sol","status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2},"output":[{"type":"function_call","call_id":"call_1","name":"` + normalizedName + `","arguments":"{}"}]}}`)
+	outNonStream := ConvertCodexResponseToOpenAINonStream(ctx, "gpt-5.6-sol", originalRequest, nil, rawNonStream, nil)
+	gotNameNonStream := gjson.GetBytes(outNonStream, "choices.0.message.tool_calls.0.function.name").String()
+	if gotNameNonStream != originalName {
+		t.Fatalf("non-stream expected restored name %q, got %q", originalName, gotNameNonStream)
+	}
+
+	// Test stream response
+	var param any
+	rawStreamAdded := []byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_1","name":"` + normalizedName + `"}}`)
+	streamChunks := ConvertCodexResponseToOpenAI(ctx, "gpt-5.6-sol", originalRequest, nil, rawStreamAdded, &param)
+	if len(streamChunks) != 1 {
+		t.Fatalf("expected 1 stream chunk, got %d", len(streamChunks))
+	}
+	gotNameStream := gjson.GetBytes(streamChunks[0], "choices.0.delta.tool_calls.0.function.name").String()
+	if gotNameStream != originalName {
+		t.Fatalf("stream expected restored name %q, got %q", originalName, gotNameStream)
+	}
+}

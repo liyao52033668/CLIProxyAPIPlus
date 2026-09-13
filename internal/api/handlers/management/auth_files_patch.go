@@ -12,9 +12,12 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	log "github.com/sirupsen/logrus"
 
 	// "github.com/router-for-me/CLIProxyAPI/v7/internal/browser"
 
+	claudeauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -104,6 +107,8 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		UsingAPI       json.RawMessage   `json:"using_api"`
 		Note           *string           `json:"note"`
 		SessionToken   *string           `json:"session_token"`
+		PlanType       json.RawMessage   `json:"plan_type"`
+		IDToken        json.RawMessage   `json:"id_token"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
@@ -138,6 +143,7 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	}
 
 	changed := false
+	planTypeTouched := false
 	if req.Prefix != nil {
 		prefix := strings.TrimSpace(*req.Prefix)
 		targetAuth.Prefix = prefix
@@ -242,7 +248,7 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 			changed = true
 		}
 	}
-	if req.Priority != nil || req.ExcludedModels != nil || len(req.DisableCooling) > 0 || len(req.Websockets) > 0 || len(req.UsingAPI) > 0 || req.Note != nil || req.SessionToken != nil {
+	if req.Priority != nil || req.ExcludedModels != nil || len(req.DisableCooling) > 0 || len(req.Websockets) > 0 || len(req.UsingAPI) > 0 || req.Note != nil || req.SessionToken != nil || len(req.PlanType) > 0 || len(req.IDToken) > 0 {
 		if targetAuth.Metadata == nil {
 			targetAuth.Metadata = make(map[string]any)
 		}
@@ -366,6 +372,29 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 				}
 			}
 		}
+		if len(req.PlanType) > 0 {
+			// Codex only: explicit plan_type override synced into the plan_type attribute.
+			var planTypeValue string
+			if errUnmarshal := json.Unmarshal(req.PlanType, &planTypeValue); errUnmarshal == nil && strings.TrimSpace(planTypeValue) != "" {
+				targetAuth.Metadata["plan_type"] = strings.TrimSpace(planTypeValue)
+			} else {
+				delete(targetAuth.Metadata, "plan_type")
+			}
+			planTypeTouched = true
+		}
+		if len(req.IDToken) > 0 {
+			var idTokenValue string
+			if errUnmarshal := json.Unmarshal(req.IDToken, &idTokenValue); errUnmarshal == nil && strings.TrimSpace(idTokenValue) != "" {
+				targetAuth.Metadata["id_token"] = strings.TrimSpace(idTokenValue)
+			} else {
+				delete(targetAuth.Metadata, "id_token")
+				delete(targetAuth.Metadata, "idToken")
+			}
+			planTypeTouched = true
+		}
+		if planTypeTouched {
+			syncAuthFilePlanTypeAttribute(targetAuth)
+		}
 		changed = true
 	}
 
@@ -458,10 +487,75 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 	if store == nil {
 		return "", fmt.Errorf("token store unavailable")
 	}
+	legacyClaudeCredential, errLegacy := claudeauth.FindMatchingLegacyCredential(ctx, store, record)
+	if errLegacy != nil {
+		return "", errLegacy
+	}
+	if legacyClaudeCredential != nil {
+		coreauth.MergeExistingAuthMetadata(record, legacyClaudeCredential.Metadata)
+	}
 	if h.postAuthHook != nil {
 		if err := h.postAuthHook(ctx, record); err != nil {
 			return "", fmt.Errorf("post-auth hook failed: %w", err)
 		}
 	}
-	return store.Save(ctx, record)
+	savedPath, errSave := store.Save(coreauth.WithAuthCreationIntent(ctx), record)
+	if errSave != nil {
+		return savedPath, errSave
+	}
+	if legacyClaudeCredential != nil {
+		if strings.TrimSpace(savedPath) == "" {
+			return "", fmt.Errorf("canonical Claude credential was not persisted; legacy credential retained")
+		}
+		legacyID := strings.TrimSpace(legacyClaudeCredential.ID)
+		if legacyID == "" {
+			legacyID = strings.TrimSpace(legacyClaudeCredential.FileName)
+		}
+		if errDelete := store.Delete(ctx, legacyID); errDelete != nil {
+			// The new canonical credential was already persisted successfully.
+			// Failing the whole request would mislead the caller into retrying
+			// (creating duplicate credentials) while the legacy file stays behind.
+			// Log the cleanup failure and let the operation succeed.
+			log.Warnf("canonical Claude credential saved at %q but legacy credential %q cleanup failed: %v", savedPath, legacyID, errDelete)
+		}
+	}
+	return savedPath, nil
+}
+
+// syncAuthFilePlanTypeAttribute derives the codex plan_type attribute from the
+// explicit plan_type metadata field or the JWT id_token claims.
+func syncAuthFilePlanTypeAttribute(auth *coreauth.Auth) {
+	if auth == nil {
+		return
+	}
+	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	newPlanType := ""
+	if auth.Metadata != nil {
+		if ptRaw, ok := auth.Metadata["plan_type"].(string); ok && strings.TrimSpace(ptRaw) != "" {
+			newPlanType = strings.TrimSpace(ptRaw)
+		} else if auth.Metadata["plan_type"] != nil {
+			// Handle non-string plan_type values (e.g. numbers from manual edits or older code)
+			// by converting them to their string representation instead of discarding them.
+			newPlanType = strings.TrimSpace(fmt.Sprintf("%v", auth.Metadata["plan_type"]))
+		}
+		if newPlanType == "" {
+			if idTokenRaw, ok := auth.Metadata["id_token"].(string); ok && strings.TrimSpace(idTokenRaw) != "" {
+				if claims, errParse := codex.ParseJWTToken(idTokenRaw); errParse == nil && claims != nil {
+					if pt := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType); pt != "" {
+						newPlanType = pt
+					}
+				}
+			}
+		}
+	}
+	if newPlanType != "" {
+		auth.Attributes["plan_type"] = newPlanType
+	} else {
+		delete(auth.Attributes, "plan_type")
+	}
 }

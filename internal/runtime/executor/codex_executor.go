@@ -34,7 +34,7 @@ import (
 )
 
 const (
-	codexUserAgent             = "codex_cli_rs/0.144.1 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9"
+	codexUserAgent             = "codex_cli_rs/0.154.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9"
 	codexOriginator            = "codex_cli_rs"
 	codexDefaultImageToolModel = "gpt-image-2"
 	codexResponsesLiteHeader   = "X-OpenAI-Internal-Codex-Responses-Lite"
@@ -59,6 +59,21 @@ func newCodexIncompleteStreamError() codexIncompleteStreamError {
 }
 
 func (codexIncompleteStreamError) IsRequestScoped() bool {
+	return true
+}
+
+type codexEmptyIncompleteStreamError struct {
+	statusErr
+}
+
+func newCodexEmptyIncompleteStreamError() codexEmptyIncompleteStreamError {
+	return codexEmptyIncompleteStreamError{statusErr: statusErr{
+		code: http.StatusBadGateway,
+		msg:  helps.CodexEmptyIncompleteStreamMessage,
+	}}
+}
+
+func (codexEmptyIncompleteStreamError) IsRequestScoped() bool {
 	return true
 }
 
@@ -157,11 +172,15 @@ func patchCodexCompletedOutput(eventData []byte, outputItemsByIndex map[int64][]
 }
 
 func codexTerminalFailureErr(eventData []byte) (statusErr, []byte, bool) {
+	return codexTerminalFailureErrWithCooling(eventData, false)
+}
+
+func codexTerminalFailureErrWithCooling(eventData []byte, modelLevelCooling bool) (statusErr, []byte, bool) {
 	body, ok := codexTerminalFailureBody(eventData)
 	if !ok {
 		return statusErr{}, nil, false
 	}
-	return newCodexStatusErr(codexTerminalFailureStatus(body), body), body, true
+	return newCodexStatusErrWithCooling(codexTerminalFailureStatus(body), body, modelLevelCooling), body, true
 }
 
 func codexTerminalFailureStatus(body []byte) int {
@@ -174,6 +193,10 @@ func codexTerminalFailureStatus(body []byte) int {
 	errorType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.type").String()))
 	errorCode := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.code").String()))
 	switch {
+	// Model not found must be classified before generic invalid request types so
+	// the auth layer can cool down the model and rotate credentials (see dde250f1).
+	case errorType == "not_found_error", errorCode == "not_found", errorCode == "model_not_found":
+		return http.StatusNotFound
 	case errorType == "invalid_request_error", errorType == "bad_request_error",
 		errorCode == "context_length_exceeded", errorCode == "context_too_large",
 		errorCode == "thinking_signature_invalid", errorCode == "previous_response_not_found":
@@ -182,8 +205,6 @@ func codexTerminalFailureStatus(body []byte) int {
 		return http.StatusUnauthorized
 	case errorType == "permission_error", errorCode == "forbidden", errorCode == "permission_denied":
 		return http.StatusForbidden
-	case errorType == "not_found_error", errorCode == "not_found", errorCode == "model_not_found":
-		return http.StatusNotFound
 	case errorType == "rate_limit_error", errorType == "usage_limit_reached",
 		errorCode == "rate_limit_exceeded", errorCode == "usage_limit_reached":
 		return http.StatusTooManyRequests
@@ -245,6 +266,9 @@ func codexTerminalFailureBody(eventData []byte) ([]byte, bool) {
 			message = "upstream stream failed without error details"
 		}
 		body, _ = sjson.SetBytes(body, "error.message", message)
+	}
+	if seq := gjson.GetBytes(eventData, "sequence_number"); seq.Exists() {
+		body, _ = sjson.SetBytes(body, "sequence_number", seq.Int())
 	}
 	return body, true
 }
@@ -339,6 +363,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	}
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, e.Identifier(), body)
 	body = normalizeCodexParallelToolCalls(body, opts.Headers)
+	body = helps.NormalizeCodexToolSchemas(body)
 	body, replayScope, err := applyCodexReasoningReplayCache(ctx, from, req, opts, body)
 	if err != nil {
 		return resp, err
@@ -361,7 +386,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	})
 	if errDo != nil {
 		if ue, ok := errDo.(helps.UpstreamStatusError); ok {
-			return resp, newCodexStatusErr(ue.Code, []byte(ue.Msg))
+			return resp, newCodexStatusErrWithCooling(ue.Code, []byte(ue.Msg), e.modelLevelCooling())
 		}
 		return resp, errDo
 	}
@@ -370,6 +395,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	lines := bytes.Split(data, []byte("\n"))
 	outputItemsByIndex := make(map[int64][]byte)
 	var outputItemsFallback [][]byte
+	sawOutputDelta := false
 	for _, line := range lines {
 		if !bytes.HasPrefix(line, dataTag) {
 			continue
@@ -377,6 +403,10 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 
 		eventData := bytes.TrimSpace(line[5:])
 		eventType := gjson.GetBytes(eventData, "type").String()
+
+		if helps.HasMeaningfulCodexOutputDelta(eventData) {
+			sawOutputDelta = true
+		}
 
 		if eventType == "response.output_item.done" {
 			itemResult := gjson.GetBytes(eventData, "item")
@@ -399,6 +429,11 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		}
 		if eventType != "response.completed" && eventType != "response.incomplete" {
 			continue
+		}
+
+		if helps.IsCodexTerminalEmptyIncomplete(eventData, len(outputItemsByIndex)+len(outputItemsFallback), sawOutputDelta) {
+			err = newCodexEmptyIncompleteStreamError()
+			return resp, err
 		}
 
 		if detail, ok := helps.ParseCodexUsage(eventData); ok {
@@ -457,6 +492,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	// focused on history + compaction_trigger.
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, e.Identifier(), body)
 	body = normalizeCodexParallelToolCalls(body, opts.Headers)
+	body = helps.NormalizeCodexToolSchemas(body)
 
 	url := helps.JoinBaseURL(baseURL, "/responses/compact")
 	httpReq, body, err := e.cacheHelper(ctx, from, url, req, body)
@@ -475,7 +511,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	})
 	if errDo != nil {
 		if ue, ok := errDo.(helps.UpstreamStatusError); ok {
-			return resp, newCodexStatusErr(ue.Code, []byte(ue.Msg))
+			return resp, newCodexStatusErrWithCooling(ue.Code, []byte(ue.Msg), e.modelLevelCooling())
 		}
 		return resp, errDo
 	}
@@ -533,6 +569,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, e.Identifier(), body)
 	body = normalizeCodexParallelToolCalls(body, opts.Headers)
+	body = helps.NormalizeCodexToolSchemas(body)
 	body, replayScope, err := applyCodexReasoningReplayCache(ctx, from, req, opts, body)
 	if err != nil {
 		return nil, err
@@ -555,7 +592,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	})
 	if errDo != nil {
 		if ue, ok := errDo.(helps.UpstreamStatusError); ok {
-			return nil, newCodexStatusErr(ue.Code, []byte(ue.Msg))
+			return nil, newCodexStatusErrWithCooling(ue.Code, []byte(ue.Msg), e.modelLevelCooling())
 		}
 		return nil, errDo
 	}
@@ -568,6 +605,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		var param any
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
+		sawOutputDelta := false
 		buffering := e.cfg != nil && e.cfg.Streaming.CodexStreamBootstrapBuffering
 		streamStarted := !buffering
 		bufferedChunks := make([]cliproxyexecutor.StreamChunk, 0, codexBootstrapMaxBufferedEvents)
@@ -608,6 +646,19 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					}
 					select {
 					case out <- cliproxyexecutor.StreamChunk{Err: terminalErr}:
+					case <-ctx.Done():
+					}
+					return
+				}
+				if helps.HasMeaningfulCodexOutputDelta(data) {
+					sawOutputDelta = true
+				}
+				if helps.IsCodexTerminalEmptyIncomplete(data, len(outputItemsByIndex)+len(outputItemsFallback), sawOutputDelta) {
+					streamErr := newCodexEmptyIncompleteStreamError()
+					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
+					reporter.PublishFailure(ctx, streamErr)
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
 					case <-ctx.Done():
 					}
 					return
@@ -1028,16 +1079,31 @@ func applyModelHeaderOverrides(headers http.Header, modelName string) {
 }
 
 func newCodexStatusErr(statusCode int, body []byte) statusErr {
+	return newCodexStatusErrWithCooling(statusCode, body, false)
+}
+
+func newCodexStatusErrWithCooling(statusCode int, body []byte, modelLevelCooling bool) statusErr {
 	errCode := statusCode
-	if isCodexModelCapacityError(body) {
+	isUsageLimit := isCodexUsageLimitError(body)
+	credentialScoped := isUsageLimit && !modelLevelCooling
+	if isCodexModelCapacityError(body) || isUsageLimit {
 		errCode = http.StatusTooManyRequests
 	}
 	body = classifyCodexStatusError(errCode, body)
-	err := statusErr{code: errCode, msg: string(body)}
+	err := statusErr{code: errCode, msg: string(body), credentialScoped: credentialScoped}
 	if retryAfter := parseCodexRetryAfter(errCode, body, time.Now()); retryAfter != nil {
 		err.retryAfter = retryAfter
 	}
 	return err
+}
+
+// modelLevelCooling reports whether usage_limit_reached quota cooldowns should be
+// scoped to the requested model instead of the entire credential.
+func (e *CodexExecutor) modelLevelCooling() bool {
+	if e == nil || e.cfg == nil {
+		return false
+	}
+	return e.cfg.CodexModelLevelCooling
 }
 
 func classifyCodexStatusError(statusCode int, body []byte) []byte {
@@ -2061,8 +2127,9 @@ func isCodexModelCapacityError(errorBody []byte) bool {
 		if lower == "" {
 			continue
 		}
-		if strings.Contains(lower, "selected model is at capacity") ||
-			strings.Contains(lower, "model is at capacity. please try a different model") {
+		if strings.Contains(lower, "model is at capacity") ||
+			strings.Contains(lower, "model_at_capacity") ||
+			strings.Contains(lower, "model_is_at_capacity") {
 			return true
 		}
 	}
@@ -2081,31 +2148,72 @@ func isCodexHandshakeMetadataEvent(eventType string) bool {
 }
 
 func isCodexOverloadBootstrapFailure(body []byte) bool {
+	if isCodexModelCapacityError(body) {
+		return true
+	}
 	errorType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.type").String()))
 	errorCode := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.code").String()))
-	return errorType == "service_unavailable_error" || errorCode == "server_is_overloaded" ||
-		errorType == "rate_limit_error" || errorCode == "rate_limit_exceeded"
+	errorMessage := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.message").String()))
+	if errorMessage == "" {
+		errorMessage = strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "message").String()))
+	}
+	switch {
+	case errorType == "service_unavailable_error", errorCode == "server_is_overloaded":
+		return true
+	case errorType == "rate_limit_error", errorCode == "rate_limit_exceeded":
+		return true
+	case (errorType == "server_error" || errorCode == "server_error") && strings.Contains(errorMessage, "you can retry your request"):
+		return true
+	default:
+		return false
+	}
 }
 
 func parseCodexRetryAfter(statusCode int, errorBody []byte, now time.Time) *time.Duration {
 	if statusCode != http.StatusTooManyRequests || len(errorBody) == 0 {
 		return nil
 	}
-	if strings.TrimSpace(gjson.GetBytes(errorBody, "error.type").String()) != "usage_limit_reached" {
-		return nil
-	}
-	if resetsAt := gjson.GetBytes(errorBody, "error.resets_at").Int(); resetsAt > 0 {
-		resetAtTime := time.Unix(resetsAt, 0)
-		if resetAtTime.After(now) {
-			retryAfter := resetAtTime.Sub(now)
+	// Codex emits quota resets either nested under "error" or at the top level;
+	// match both layouts case-insensitively.
+	for _, quota := range []gjson.Result{gjson.GetBytes(errorBody, "error"), gjson.ParseBytes(errorBody)} {
+		if !strings.EqualFold(strings.TrimSpace(quota.Get("type").String()), "usage_limit_reached") {
+			continue
+		}
+		if resetsAt := quota.Get("resets_at").Int(); resetsAt > 0 {
+			resetAtTime := time.Unix(resetsAt, 0)
+			if resetAtTime.After(now) {
+				retryAfter := resetAtTime.Sub(now)
+				return &retryAfter
+			}
+		}
+		if resetsInSeconds := quota.Get("resets_in_seconds").Int(); resetsInSeconds > 0 {
+			retryAfter := time.Duration(resetsInSeconds) * time.Second
 			return &retryAfter
 		}
 	}
-	if resetsInSeconds := gjson.GetBytes(errorBody, "error.resets_in_seconds").Int(); resetsInSeconds > 0 {
-		retryAfter := time.Duration(resetsInSeconds) * time.Second
-		return &retryAfter
-	}
 	return nil
+}
+
+// isCodexUsageLimitError reports whether the error body represents a Codex
+// quota/plan-limit exhaustion (error.type == "usage_limit_reached"). This is the
+// signal Codex emits when a credential's usage quota is depleted, and it carries
+// reset timing (resets_at/resets_in_seconds) parsed by parseCodexRetryAfter.
+// Transient per-minute rate limits (rate_limit_error/rate_limit_exceeded) are
+// intentionally excluded, as they should be retried rather than cooled down.
+func isCodexUsageLimitError(errorBody []byte) bool {
+	if len(errorBody) == 0 {
+		return false
+	}
+	candidates := []string{
+		gjson.GetBytes(errorBody, "error.type").String(),
+		gjson.GetBytes(errorBody, "type").String(),
+	}
+	for _, candidate := range candidates {
+		if strings.EqualFold(strings.TrimSpace(candidate), "usage_limit_reached") {
+			return true
+		}
+	}
+	return false
 }
 
 func codexCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {

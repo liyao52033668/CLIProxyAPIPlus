@@ -53,7 +53,10 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 		return "", fmt.Errorf("auth filestore: missing file path attribute for %s", auth.ID)
 	}
 
-	if auth.Disabled {
+	// Runtime updates must not recreate a disabled credential whose source file
+	// was deliberately removed. Login and migration callers explicitly mark the
+	// save when creating a missing disabled credential is intentional.
+	if auth.Disabled && !cliproxyauth.HasAuthCreationIntent(ctx) {
 		if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
 			return "", nil
 		}
@@ -160,6 +163,28 @@ func (s *FileTokenStore) List(ctx context.Context) ([]*cliproxyauth.Auth, error)
 		return nil, err
 	}
 	return entries, nil
+}
+
+// ListByProvider enumerates auth records whose Provider matches the given
+// value. The file store reads every JSON file to determine the provider,
+// so this filters in memory after the walk; the benefit over List is that
+// callers receive only the matching subset without post-processing.
+func (s *FileTokenStore) ListByProvider(ctx context.Context, provider string) ([]*cliproxyauth.Auth, error) {
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		return nil, nil
+	}
+	all, err := s.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]*cliproxyauth.Auth, 0, len(all))
+	for _, auth := range all {
+		if auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), provider) {
+			filtered = append(filtered, auth)
+		}
+	}
+	return filtered, nil
 }
 
 // Delete removes the auth file.

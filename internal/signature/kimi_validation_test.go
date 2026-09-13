@@ -11,12 +11,6 @@ import (
 	"testing"
 )
 
-// observedFable5Sample is a real harvested Claude CAIS thinking signature used to
-// pin the ordering invariant: the size-only Kimi probe must never claim another
-// provider's self-describing signature. It is shared across the provider
-// detection tests.
-const observedFable5Sample = "CAISqwIKiAEIEBgCKkBHRlRBsNiptQUWfPoOhuQKwi5LnncZVO9bB5jqOs76D7uBtgktML0zqJtNmLHXHHcgD6lk4MQu4QBXzFd1lbC3Mg5jbGF1ZGUtZmFibGUtNTgBQgh0aGlua2luZ1okZDk3NDM5NzUtNGJiMC00OTM2LTllMjgtZDViMGQyMWJkYzQ4EgxCGh+XVFFFeySAjtAaDL/A1LltGu6MMJ+eXSIwsN0oBpDrqLv22UBfkMnTotnIbkvkOyb9xZHgigG6OZVHaI3gThm+maLKmgO5PrFLKlDFYp+YZksy/wKwszJlnLTPzAK+NUlfzagOE1ymtZTXhAYK260XyFYmg/te/C231+Fr/hoX+EJoUBnrn0gD7hqMISOT+TaFEuOXYsN517GfaxgB"
-
 // kimiSignatureCorpusPath locates the harvested Kimi signature corpus. The
 // corpus lives with the collection skill that produced it and is not tracked in
 // this repository, matching how the Grok and Gemini native corpora are handled:
@@ -222,10 +216,8 @@ func TestInspectKimiThinkingSignature_RejectsSelfDescribingEnvelope(t *testing.T
 // resolve to Kimi after the envelope probes decline, and a real envelope must
 // never be captured by the size probe.
 func TestDetectSignatureProvider_KimiRunsAfterEnvelopeProbes(t *testing.T) {
-	// The envelope probes run before the size probe, so a signature whose length
-	// is not a Kimi code-path constant must not resolve to Kimi.
-	if got := DetectSignatureProvider(observedFable5Sample); got != SignatureProviderUnknown {
-		t.Fatalf("DetectSignatureProvider = %q, want %q for a non-Kimi-length sample", got, SignatureProviderUnknown)
+	if got := DetectSignatureProvider(observedFable5Sample); got != SignatureProviderClaude {
+		t.Fatalf("DetectSignatureProvider = %q, want %q for a Claude CAIS sample", got, SignatureProviderClaude)
 	}
 
 	var checked int

@@ -202,7 +202,7 @@ func buildResponsesCompletedEvent(st *oaiToResponsesState, requestRawJSON []byte
 				item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("ctc_%s", callID))
 				item, _ = sjson.SetBytes(item, "input", unwrapCustomToolInput(args))
 				item, _ = sjson.SetBytes(item, "call_id", callID)
-				item, _ = sjson.SetBytes(item, "name", name)
+				item = applyResponsesFunctionCallNamespaceFields(item, requestRawJSON, name, "")
 				outputItems = append(outputItems, completedOutputItem{index: st.FuncOutputIx[key], raw: item})
 				continue
 			}
@@ -330,7 +330,8 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 			return
 		}
 		callID := st.FuncCallIDs[key]
-		name := st.FuncNames[key]
+		name := canonicalResponsesToolName(requestForNamespace, st.FuncNames[key])
+		st.FuncNames[key] = name
 		if !force && (callID == "" || name == "") {
 			return
 		}
@@ -354,7 +355,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 			item, _ = sjson.SetBytes(item, "output_index", outputIndex)
 			item, _ = sjson.SetBytes(item, "item.id", fmt.Sprintf("ctc_%s", callID))
 			item, _ = sjson.SetBytes(item, "item.call_id", callID)
-			item, _ = sjson.SetBytes(item, "item.name", name)
+			item = applyResponsesFunctionCallNamespaceFields(item, requestForNamespace, name, "item")
 			out = append(out, emitRespEvent("response.output_item.added", item))
 		} else {
 			item := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"function_call","status":"in_progress","arguments":"","call_id":"","name":""}}`)
@@ -453,7 +454,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		outputItemDone, _ = sjson.SetBytes(outputItemDone, "sequence_number", nextSeq())
 		outputItemDone, _ = sjson.SetBytes(outputItemDone, "item.id", st.ReasoningID)
 		outputItemDone, _ = sjson.SetBytes(outputItemDone, "output_index", st.ReasoningIndex)
-		outputItemDone, _ = sjson.SetBytes(outputItemDone, "item.summary.text", text)
+		outputItemDone, _ = sjson.SetBytes(outputItemDone, "item.summary.0.text", text)
 		out = append(out, emitRespEvent("response.output_item.done", outputItemDone))
 
 		st.Reasonings = append(st.Reasonings, oaiToResponsesStateReasoning{ReasoningID: st.ReasoningID, ReasoningData: text, OutputIndex: st.ReasoningIndex})
@@ -466,6 +467,40 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 			idx := int(choice.Get("index").Int())
 			delta := choice.Get("delta")
 			if delta.Exists() {
+				// reasoning_content (OpenAI reasoning incremental text)
+				rc := delta.Get("reasoning_content")
+				if !rc.Exists() || rc.String() == "" {
+					rc = delta.Get("reasoning")
+				}
+				if rc.Exists() {
+					reasoningText := st.ReasoningBuffer.Text(rc)
+					if reasoningText != "" {
+						// On first appearance, add reasoning item and part
+						if st.ReasoningID == "" {
+							st.ReasoningID = fmt.Sprintf("rs_%s_%d", st.ResponseID, idx)
+							st.ReasoningIndex = allocOutputIndex()
+							item := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"reasoning","status":"in_progress","summary":[]}}`)
+							item, _ = sjson.SetBytes(item, "sequence_number", nextSeq())
+							item, _ = sjson.SetBytes(item, "output_index", st.ReasoningIndex)
+							item, _ = sjson.SetBytes(item, "item.id", st.ReasoningID)
+							out = append(out, emitRespEvent("response.output_item.added", item))
+							part := []byte(`{"type":"response.reasoning_summary_part.added","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":""}}`)
+							part, _ = sjson.SetBytes(part, "sequence_number", nextSeq())
+							part, _ = sjson.SetBytes(part, "item_id", st.ReasoningID)
+							part, _ = sjson.SetBytes(part, "output_index", st.ReasoningIndex)
+							out = append(out, emitRespEvent("response.reasoning_summary_part.added", part))
+						}
+						// Append incremental text to reasoning buffer
+						st.ReasoningBuf.WriteString(reasoningText)
+						msg := []byte(`{"type":"response.reasoning_summary_text.delta","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"delta":""}`)
+						msg, _ = sjson.SetBytes(msg, "sequence_number", nextSeq())
+						msg, _ = sjson.SetBytes(msg, "item_id", st.ReasoningID)
+						msg, _ = sjson.SetBytes(msg, "output_index", st.ReasoningIndex)
+						msg, _ = sjson.SetBytes(msg, "delta", reasoningText)
+						out = append(out, emitRespEvent("response.reasoning_summary_text.delta", msg))
+					}
+				}
+
 				if c := delta.Get("content"); c.Exists() {
 					textBuffer := st.MsgTextBuffers[idx]
 					if textBuffer == nil {
@@ -513,40 +548,6 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 							st.MsgTextBuf[idx] = &strings.Builder{}
 						}
 						st.MsgTextBuf[idx].WriteString(contentText)
-					}
-				}
-
-				// reasoning_content (OpenAI reasoning incremental text)
-				rc := delta.Get("reasoning_content")
-				if !rc.Exists() || rc.String() == "" {
-					rc = delta.Get("reasoning")
-				}
-				if rc.Exists() {
-					reasoningText := st.ReasoningBuffer.Text(rc)
-					if reasoningText != "" {
-						// On first appearance, add reasoning item and part
-						if st.ReasoningID == "" {
-							st.ReasoningID = fmt.Sprintf("rs_%s_%d", st.ResponseID, idx)
-							st.ReasoningIndex = allocOutputIndex()
-							item := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"reasoning","status":"in_progress","summary":[]}}`)
-							item, _ = sjson.SetBytes(item, "sequence_number", nextSeq())
-							item, _ = sjson.SetBytes(item, "output_index", st.ReasoningIndex)
-							item, _ = sjson.SetBytes(item, "item.id", st.ReasoningID)
-							out = append(out, emitRespEvent("response.output_item.added", item))
-							part := []byte(`{"type":"response.reasoning_summary_part.added","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":""}}`)
-							part, _ = sjson.SetBytes(part, "sequence_number", nextSeq())
-							part, _ = sjson.SetBytes(part, "item_id", st.ReasoningID)
-							part, _ = sjson.SetBytes(part, "output_index", st.ReasoningIndex)
-							out = append(out, emitRespEvent("response.reasoning_summary_part.added", part))
-						}
-						// Append incremental text to reasoning buffer
-						st.ReasoningBuf.WriteString(reasoningText)
-						msg := []byte(`{"type":"response.reasoning_summary_text.delta","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"delta":""}`)
-						msg, _ = sjson.SetBytes(msg, "sequence_number", nextSeq())
-						msg, _ = sjson.SetBytes(msg, "item_id", st.ReasoningID)
-						msg, _ = sjson.SetBytes(msg, "output_index", st.ReasoningIndex)
-						msg, _ = sjson.SetBytes(msg, "delta", reasoningText)
-						out = append(out, emitRespEvent("response.reasoning_summary_text.delta", msg))
 					}
 				}
 
@@ -702,7 +703,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 							itemDone, _ = sjson.SetBytes(itemDone, "item.id", fmt.Sprintf("ctc_%s", callID))
 							itemDone, _ = sjson.SetBytes(itemDone, "item.input", input)
 							itemDone, _ = sjson.SetBytes(itemDone, "item.call_id", callID)
-							itemDone, _ = sjson.SetBytes(itemDone, "item.name", st.FuncNames[key])
+							itemDone = applyResponsesFunctionCallNamespaceFields(itemDone, requestForNamespace, st.FuncNames[key], "item")
 							out = append(out, emitRespEvent("response.output_item.done", itemDone))
 							st.FuncItemDone[key] = true
 							st.FuncArgsDone[key] = true
@@ -901,7 +902,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 							// function_call item stays usable for Codex round-trips.
 							callID = fmt.Sprintf("call_%s_%d_%d", id, choice.Get("index").Int(), tcIndex.Int())
 						}
-						name := tc.Get("function.name").String()
+						name := canonicalResponsesToolName(requestForNamespace, tc.Get("function.name").String())
 						args := tc.Get("function.arguments").String()
 						if _, isCustomTool := customToolNames[name]; isCustomTool {
 							toolStatus := "completed"
@@ -913,7 +914,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 							item, _ = sjson.SetBytes(item, "status", toolStatus)
 							item, _ = sjson.SetBytes(item, "input", unwrapCustomToolInput(args))
 							item, _ = sjson.SetBytes(item, "call_id", callID)
-							item, _ = sjson.SetBytes(item, "name", name)
+							item = applyResponsesFunctionCallNamespaceFields(item, requestForNamespace, name, "")
 							outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
 							return true
 						}

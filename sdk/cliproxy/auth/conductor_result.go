@@ -239,6 +239,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					state.Unavailable = true
 					state.Status = StatusError
 					state.UpdatedAt = now
+					prevModelRetryAfter := state.NextRetryAfter
 					if result.Error != nil {
 						state.LastError = cloneError(result.Error)
 						state.StatusMessage = result.Error.Message
@@ -248,8 +249,12 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 
 					statusCode := statusCodeFromResult(result.Error)
 					if isModelSupportResultError(result.Error) {
-						next := now.Add(12 * time.Hour)
-						state.NextRetryAfter = next
+						if disableCooling {
+							state.NextRetryAfter = time.Time{}
+						} else {
+							next := now.Add(12 * time.Hour)
+							state.NextRetryAfter = next
+						}
 						suspendReason = "model_not_supported"
 						shouldSuspendModel = true
 					} else {
@@ -290,11 +295,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 									if cooldown < minQuotaCooldownFloor {
 										cooldown = minQuotaCooldownFloor
 									}
-									next = now.Add(cooldown)
+									next = now.Add(cooldown).Round(0)
 								} else {
 									cooldown, nextLevel := nextQuotaCooldown(backoffLevel, disableCooling)
 									if cooldown > 0 {
-										next = now.Add(cooldown)
+										next = now.Add(cooldown).Round(0)
 									}
 									backoffLevel = nextLevel
 								}
@@ -311,16 +316,19 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								shouldSuspendModel = true
 								setModelQuota = true
 							}
-						case 408, 500, 502, 503, 504:
-							if disableCooling {
-								state.NextRetryAfter = time.Time{}
-							} else {
-								next := now.Add(1 * time.Minute)
-								state.NextRetryAfter = next
-							}
+						case 408, 500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526:
+							state.NextRetryAfter = recoverableFailureRetryAfterWithHint(now, result.RetryAfter, disableCooling)
+							state.Unavailable = !state.NextRetryAfter.IsZero()
 						default:
 							state.NextRetryAfter = time.Time{}
 						}
+					}
+
+					// A later failure only extends a still-live cooldown; it never
+					// shortens one. A deliberate zero write (disableCooling) still
+					// clears the deadline.
+					if !state.NextRetryAfter.IsZero() && prevModelRetryAfter.After(state.NextRetryAfter) && prevModelRetryAfter.After(now) {
+						state.NextRetryAfter = prevModelRetryAfter
 					}
 
 					auth.Status = StatusError
@@ -344,7 +352,15 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	}
 	m.mu.Unlock()
 	if m.scheduler != nil && authSnapshot != nil {
-		m.scheduler.upsertAuth(authSnapshot)
+		// Model-scoped results only touch the affected shard; auth-level results
+		// are credential-scoped and re-sync every shard.
+		var targetModels []string
+		if result.Model != "" {
+			if modelKey := canonicalModelKey(result.Model); modelKey != "" {
+				targetModels = append(targetModels, modelKey)
+			}
+		}
+		m.scheduler.upsertAuthResult(authSnapshot, targetModels, result.Model == "")
 	}
 
 	if clearModelQuota && result.Model != "" {
@@ -604,6 +620,104 @@ func hasUnauthorizedAuthFailure(auth *Auth) bool {
 	return false
 }
 
+// CredentialsChanged reports whether authentication credentials (tokens or API keys)
+// differ between two Auth records.
+func CredentialsChanged(existing, incoming *Auth) bool {
+	if existing == nil || incoming == nil {
+		return false
+	}
+	if authAccessToken(existing) != authAccessToken(incoming) {
+		return true
+	}
+	if authRefreshToken(existing) != authRefreshToken(incoming) {
+		return true
+	}
+	existingIDToken := authMetadataString(existing, "id_token")
+	if existingIDToken == "" {
+		existingIDToken = authMetadataString(existing, "idToken")
+	}
+	incomingIDToken := authMetadataString(incoming, "id_token")
+	if incomingIDToken == "" {
+		incomingIDToken = authMetadataString(incoming, "idToken")
+	}
+	if existingIDToken != incomingIDToken {
+		return true
+	}
+	existingKey := ""
+	if existing.Attributes != nil {
+		existingKey = existing.Attributes[AttributeAPIKey]
+	}
+	if existingKey == "" {
+		existingKey = authMetadataString(existing, "api_key")
+	}
+	incomingKey := ""
+	if incoming.Attributes != nil {
+		incomingKey = incoming.Attributes[AttributeAPIKey]
+	}
+	if incomingKey == "" {
+		incomingKey = authMetadataString(incoming, "api_key")
+	}
+	if existingKey != incomingKey {
+		return true
+	}
+	return false
+}
+
+// ClearUnauthorizedModelStates resets model states whose last error was an unauthorized failure.
+func ClearUnauthorizedModelStates(auth *Auth, now time.Time) []string {
+	return clearUnauthorizedModelStates(auth, now)
+}
+
+func clearUnauthorizedModelStates(auth *Auth, now time.Time) []string {
+	if auth == nil || len(auth.ModelStates) == 0 {
+		return nil
+	}
+	var resumed []string
+	for model, state := range auth.ModelStates {
+		if state == nil {
+			continue
+		}
+		isUnauth := false
+		if state.LastError != nil {
+			if state.LastError.StatusCode() == http.StatusUnauthorized || strings.EqualFold(state.LastError.Code, "unauthorized") || isUnauthorizedError(state.LastError) {
+				isUnauth = true
+			}
+		}
+		if !isUnauth && strings.Contains(strings.ToLower(state.StatusMessage), "unauthorized") {
+			isUnauth = true
+		}
+		if !isUnauth {
+			continue
+		}
+		resetModelState(state, now)
+		resumed = append(resumed, model)
+	}
+	return resumed
+}
+
+// latestUnauthorizedCandidateError returns the most recent unauthorized
+// failure error among the given candidates, for use as a terminal error cause.
+func latestUnauthorizedCandidateError(auths []*Auth) error {
+	var latestTime time.Time
+	var latestAuthID string
+	var latestErr error
+
+	for _, candidate := range auths {
+		if candidate == nil || !hasUnauthorizedAuthFailure(candidate) {
+			continue
+		}
+		curTime := candidate.UpdatedAt
+		if candidate.LastError != nil {
+			if latestErr == nil || curTime.After(latestTime) || (curTime.Equal(latestTime) && candidate.ID > latestAuthID) {
+				latestTime = curTime
+				latestAuthID = candidate.ID
+				latestErr = candidate.LastError
+			}
+		}
+	}
+	return latestErr
+}
+
 func refreshErrorFromError(err error) *Error {
 	if err == nil {
 		return nil
@@ -674,8 +788,11 @@ func isModelSupportError(err error) bool {
 	if err == nil {
 		return false
 	}
+	if isExplicitModelNotFoundError(err) {
+		return true
+	}
 	status := statusCodeFromError(err)
-	if status != http.StatusBadRequest && status != http.StatusUnprocessableEntity {
+	if status != http.StatusBadRequest && status != http.StatusUnprocessableEntity && status != http.StatusNotFound {
 		return false
 	}
 	return isModelSupportErrorMessage(err.Error())
@@ -685,11 +802,59 @@ func isModelSupportResultError(err *Error) bool {
 	if err == nil {
 		return false
 	}
+	if isExplicitModelNotFoundError(err) {
+		return true
+	}
 	status := statusCodeFromResult(err)
-	if status != http.StatusBadRequest && status != http.StatusUnprocessableEntity {
+	if status != http.StatusBadRequest && status != http.StatusUnprocessableEntity && status != http.StatusNotFound {
 		return false
 	}
 	return isModelSupportErrorMessage(err.Message)
+}
+
+// isModelNotFoundIdentifier reports whether the structured error code explicitly
+// identifies a missing or unknown model.
+func isModelNotFoundIdentifier(code string) bool {
+	switch strings.ToLower(strings.TrimSpace(code)) {
+	case "model_not_found", "model_not_found_error", "unknown_model":
+		return true
+	default:
+		return false
+	}
+}
+
+// isExplicitModelNotFoundMessage reports whether the message carries an explicit
+// model-not-found indication. References to the request body ("model not found
+// in request body") describe caller input, not credential-model capability.
+func isExplicitModelNotFoundMessage(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" {
+		return false
+	}
+	if strings.Contains(lower, "in request") || strings.Contains(lower, "in body") || strings.Contains(lower, "request body") {
+		return false
+	}
+	if clienterror.HasModelNotFoundCodeBody(message) {
+		return true
+	}
+	normalized := strings.NewReplacer("-", "_").Replace(lower)
+	return strings.Contains(normalized, "model_not_found") || strings.Contains(normalized, "unknown_model")
+}
+
+// isExplicitModelNotFoundError reports whether the error explicitly identifies a
+// missing or unknown model, either through a structured error code or a
+// structured/plain-text message body.
+func isExplicitModelNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var authErr *Error
+	if errors.As(err, &authErr) && authErr != nil {
+		if isModelNotFoundIdentifier(authErr.Code) || isExplicitModelNotFoundMessage(authErr.Message) || isExplicitModelNotFoundMessage(authErr.Error()) {
+			return true
+		}
+	}
+	return isExplicitModelNotFoundMessage(err.Error())
 }
 
 func isRequestScopedNotFoundMessage(message string) bool {
@@ -760,6 +925,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	if auth == nil {
 		return
 	}
+	prevAuthRetryAfter := auth.NextRetryAfter
 	if isRequestScopedResultError(resultErr) {
 		// The request itself is at fault (e.g. cyber_policy, context_length_exceeded,
 		// store=false item miss). The credential stays healthy: do not mark it
@@ -818,28 +984,30 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 				if cooldown < minQuotaCooldownFloor {
 					cooldown = minQuotaCooldownFloor
 				}
-				next = now.Add(cooldown)
+				next = now.Add(cooldown).Round(0)
 			} else {
 				cooldown, nextLevel := nextQuotaCooldown(auth.Quota.BackoffLevel, disableCooling)
 				if cooldown > 0 {
-					next = now.Add(cooldown)
+					next = now.Add(cooldown).Round(0)
 				}
 				auth.Quota.BackoffLevel = nextLevel
 			}
 		}
 		auth.Quota.NextRecoverAt = next
 		auth.NextRetryAfter = next
-	case 408, 500, 502, 503, 504:
+	case 408, 500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526:
 		auth.StatusMessage = "transient upstream error"
-		if disableCooling {
-			auth.NextRetryAfter = time.Time{}
-		} else {
-			auth.NextRetryAfter = now.Add(1 * time.Minute)
-		}
+		auth.NextRetryAfter = recoverableFailureRetryAfterWithHint(now, retryAfter, disableCooling)
+		auth.Unavailable = !auth.NextRetryAfter.IsZero()
 	default:
 		if auth.StatusMessage == "" {
 			auth.StatusMessage = "request failed"
 		}
+	}
+	// A later failure only extends a still-live credential cooldown; a
+	// deliberate zero write (disableCooling) still clears it.
+	if !auth.NextRetryAfter.IsZero() && prevAuthRetryAfter.After(auth.NextRetryAfter) && prevAuthRetryAfter.After(now) {
+		auth.NextRetryAfter = prevAuthRetryAfter
 	}
 }
 

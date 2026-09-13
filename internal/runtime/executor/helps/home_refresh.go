@@ -100,3 +100,31 @@ func statusFromHomeErrorCode(code string) int {
 		return http.StatusBadGateway
 	}
 }
+
+func authAccessTokenSHA256(auth *cliproxyauth.Auth) string {
+	return cliproxyauth.AccessTokenSHA256(auth)
+}
+
+func parseHomeRefreshAuth(raw []byte) (*cliproxyauth.Auth, string, error) {
+	var rawObject map[string]json.RawMessage
+	if errUnmarshal := json.Unmarshal(raw, &rawObject); errUnmarshal != nil {
+		return nil, "", errUnmarshal
+	}
+	if _, ok := rawObject["auth"]; ok {
+		var envelope homeRefreshAuthEnvelope
+		if errUnmarshal := json.Unmarshal(raw, &envelope); errUnmarshal != nil {
+			return nil, "", errUnmarshal
+		}
+		return &envelope.Auth, strings.TrimSpace(envelope.AuthIndex), nil
+	}
+	var updated cliproxyauth.Auth
+	if errUnmarshal := json.Unmarshal(raw, &updated); errUnmarshal != nil {
+		return nil, "", errUnmarshal
+	}
+	return &updated, "", nil
+}
+
+type homeRefreshAuthEnvelope struct {
+	Auth      cliproxyauth.Auth `json:"auth"`
+	AuthIndex string            `json:"auth_index"`
+}

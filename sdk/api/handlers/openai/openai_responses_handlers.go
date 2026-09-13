@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
@@ -694,6 +695,95 @@ func (h *OpenAIResponsesAPIHandler) forwardChatAsResponsesStream(c *gin.Context,
 	})
 }
 
+func isResponsesStreamSensitiveKey(key string) bool {
+	k := strings.ToLower(strings.TrimSpace(key))
+	k = strings.ReplaceAll(k, "-", "_")
+	if strings.Contains(k, "tokens") || strings.Contains(k, "token_count") || strings.Contains(k, "token_limit") || strings.Contains(k, "token_usage") {
+		return false
+	}
+	switch k {
+	case "authorization", "secret", "password", "passwd", "api_key", "apikey", "token", "access_token", "refresh_token", "id_token", "auth_token", "session_token", "api_token", "client_secret", "client_key":
+		return true
+	}
+	return strings.HasSuffix(k, "_secret") ||
+		strings.HasSuffix(k, "_password") ||
+		strings.HasSuffix(k, "_api_key") ||
+		strings.HasSuffix(k, "_token")
+}
+
+func sanitizeResponsesStreamErrorNode(val any) any {
+	switch v := val.(type) {
+	case string:
+		return v
+	case map[string]any:
+		cleaned := make(map[string]any, len(v))
+		for k, item := range v {
+			if isResponsesStreamSensitiveKey(k) {
+				cleaned[k] = "[REDACTED]"
+				continue
+			}
+			cleaned[k] = sanitizeResponsesStreamErrorNode(item)
+		}
+		return cleaned
+	case []any:
+		cleaned := make([]any, len(v))
+		for i, item := range v {
+			cleaned[i] = sanitizeResponsesStreamErrorNode(item)
+		}
+		return cleaned
+	default:
+		return val
+	}
+}
+
+// responsesStreamErrorText normalizes a raw upstream error payload for the Responses
+// streaming error chunks: JSON payloads keep their nested structure with sensitive keys
+// redacted recursively, while non-JSON text is passed through unchanged.
+func responsesStreamErrorText(errText string, status int) string {
+	trimmed := strings.TrimSpace(errText)
+	if trimmed == "" {
+		trimmed = http.StatusText(status)
+	}
+	if !json.Valid([]byte(trimmed)) {
+		return trimmed
+	}
+
+	var root map[string]any
+	dec := json.NewDecoder(bytes.NewReader([]byte(trimmed)))
+	dec.UseNumber()
+	if errUnmarshal := dec.Decode(&root); errUnmarshal != nil {
+		return trimmed
+	}
+
+	errorNode, hasError := root["error"].(map[string]any)
+	if !hasError {
+		if resp, ok := root["response"].(map[string]any); ok {
+			errorNode, hasError = resp["error"].(map[string]any)
+		}
+	}
+
+	if hasError {
+		cleanedError := sanitizeResponsesStreamErrorNode(errorNode)
+		out := map[string]any{
+			"error": cleanedError,
+		}
+		if seq, ok := root["sequence_number"]; ok {
+			out["sequence_number"] = seq
+		}
+		data, errMarshal := json.Marshal(out)
+		if errMarshal == nil {
+			return string(data)
+		}
+	}
+
+	cleanedRoot := sanitizeResponsesStreamErrorNode(root)
+	data, errMarshal := json.Marshal(cleanedRoot)
+	if errMarshal == nil {
+		return string(data)
+	}
+	return http.StatusText(status)
+}
+
 func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, framer *responsesSSEFramer) {
 	if framer == nil {
 		framer = &responsesSSEFramer{}
@@ -715,7 +805,11 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
 			if errMsg.Error != nil && errMsg.Error.Error() != "" {
 				errText = errMsg.Error.Error()
 			}
-			chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(status, errText, 0)
+			seq := 0
+			if origSeq := gjson.Get(errText, "sequence_number"); origSeq.Exists() {
+				seq = int(origSeq.Int())
+			}
+			chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(status, responsesStreamErrorText(errText, status), seq)
 			_, _ = fmt.Fprintf(c.Writer, "\nevent: error\ndata: %s\n\n", string(chunk))
 		},
 		WriteDone: func() {

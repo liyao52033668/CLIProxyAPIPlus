@@ -437,6 +437,14 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	return s
 }
 
+// Handler returns the HTTP handler used by the server.
+func (s *Server) Handler() http.Handler {
+	if s == nil || s.server == nil {
+		return nil
+	}
+	return s.server.Handler
+}
+
 func (s *Server) homeHeartbeatMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if s == nil || s.cfg == nil || !s.cfg.Home.Enabled {
@@ -1113,6 +1121,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/auth-files/models", s.mgmt.GetAuthFileModels)
 		mgmt.POST("/auth-files/test", s.mgmt.TestAuthFileModel)
 		mgmt.POST("/auth-files/refresh", s.mgmt.RefreshAuthFile)
+		mgmt.POST("/auth-files/refresh-all", s.mgmt.RefreshAuthFiles)
 		mgmt.GET("/model-definitions/:channel", s.mgmt.GetStaticModelDefinitions)
 		mgmt.GET("/auth-files/download", secretExport, s.mgmt.DownloadAuthFile)
 		mgmt.POST("/auth-files", s.mgmt.UploadAuthFile)

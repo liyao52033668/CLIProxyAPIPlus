@@ -243,7 +243,13 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				}
 
 				if name := item.Get("name"); name.Exists() {
-					toolCall, _ = sjson.SetBytes(toolCall, "function.name", name.String())
+					functionName := name.String()
+					if namespace := strings.TrimSpace(item.Get("namespace").String()); namespace != "" {
+						functionName = qualifyResponsesNamespaceToolName(namespace, functionName)
+					} else {
+						functionName = canonicalResponsesToolName(inputRawJSON, functionName)
+					}
+					toolCall, _ = sjson.SetBytes(toolCall, "function.name", functionName)
 				}
 
 				if arguments := item.Get("arguments"); arguments.Exists() {
@@ -270,7 +276,13 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			case "custom_tool_call":
 				toolCall := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
 				toolCall, _ = sjson.SetBytes(toolCall, "id", item.Get("call_id").String())
-				toolCall, _ = sjson.SetBytes(toolCall, "function.name", item.Get("name").String())
+				functionName := item.Get("name").String()
+				if namespace := item.Get("namespace").String(); namespace != "" {
+					functionName = qualifyResponsesNamespaceToolName(namespace, functionName)
+				} else {
+					functionName = canonicalResponsesToolName(inputRawJSON, functionName)
+				}
+				toolCall, _ = sjson.SetBytes(toolCall, "function.name", functionName)
 				wrappedArgs, _ := sjson.SetBytes([]byte(`{"input":""}`), "input", item.Get("input").String())
 				toolCall, _ = sjson.SetBytes(toolCall, "function.arguments", string(wrappedArgs))
 				pendingToolCalls = append(pendingToolCalls, gjson.ParseBytes(toolCall).Value())

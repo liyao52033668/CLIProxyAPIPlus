@@ -319,6 +319,22 @@ func TestCodexTerminalFailureErr(t *testing.T) {
 			wantStatus: http.StatusBadGateway,
 			wantType:   "server_error",
 		},
+		{
+			// Model not found must map to 404 even when typed as a generic invalid
+			// request error, so the auth layer cools the model and rotates credentials.
+			name:       "model not found with invalid_request_error type maps to 404",
+			event:      `{"type":"error","error":{"type":"invalid_request_error","code":"model_not_found","message":"The model gpt-5.5 does not exist or you do not have access to it."}}`,
+			wantStatus: http.StatusNotFound,
+			wantType:   "invalid_request_error",
+			wantCode:   "model_not_found",
+		},
+		{
+			name:       "sequence_number is preserved",
+			event:      `{"type":"error","error":{"type":"invalid_request_error","code":"invalid_value","message":"Invalid input."},"sequence_number":7}`,
+			wantStatus: http.StatusBadRequest,
+			wantType:   "invalid_request_error",
+			wantCode:   "invalid_value",
+		},
 	}
 
 	for _, tc := range tests {
@@ -337,5 +353,36 @@ func TestCodexTerminalFailureErr(t *testing.T) {
 				t.Fatalf("error code = %q, want %q; body=%s", got, tc.wantCode, string(body))
 			}
 		})
+	}
+}
+
+func TestIsCodexOverloadBootstrapFailure(t *testing.T) {
+	overloadBodies := []string{
+		`{"error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}`,
+		`{"error":{"type":"rate_limit_error","code":"rate_limit_exceeded"}}`,
+		// Model capacity rejections are eligible for bootstrap failover.
+		`{"error":{"message":"Selected model is at capacity. Please try a different model."}}`,
+		`{"error":{"message":"Selected Model is at capacity"}}`,
+		`{"error":{"message":"model_is_at_capacity"}}`,
+		// server_error with explicit retry advice is eligible for bootstrap failover.
+		`{"error":{"type":"server_error","code":"server_error","message":"An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists."}}`,
+		`{"error":{"type":"server_error","code":"server_error","message":"You can retry your request"}}`,
+	}
+	for _, body := range overloadBodies {
+		if !isCodexOverloadBootstrapFailure([]byte(body)) {
+			t.Fatalf("expected overload bootstrap failure: %s", body)
+		}
+	}
+
+	notOverload := []string{
+		`{"error":{"type":"invalid_request_error","code":"invalid_value"}}`,
+		`{"error":{"type":"authentication_error","code":"invalid_api_key"}}`,
+		`{"error":{"type":"upstream_error","code":"unknown"}}`,
+		`{"error":{"type":"server_error","code":"server_error","message":"An internal error occurred without retry advice"}}`,
+	}
+	for _, body := range notOverload {
+		if isCodexOverloadBootstrapFailure([]byte(body)) {
+			t.Fatalf("expected non-overload bootstrap failure: %s", body)
+		}
 	}
 }

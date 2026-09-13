@@ -262,10 +262,11 @@ func TestKimiExecutorClaudeStreamForwardsAnthropicBetaAndLogsUpstream(t *testing
 
 	cfg := &config.Config{SDKConfig: config.SDKConfig{RequestLog: true}}
 	executor := NewKimiExecutor(cfg)
+	oauthToken := "sk-ant-oat" + "-fixture"
 	auth := &cliproxyauth.Auth{
 		ID:         "kimi-test-auth",
 		Attributes: map[string]string{},
-		Metadata:   map[string]any{"access_token": "test-token"},
+		Metadata:   map[string]any{"access_token": oauthToken},
 	}
 	payload := []byte(`{"model":"kimi-k3","max_tokens":32,"messages":[{"role":"user","content":"hello"}]}`)
 	result, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
@@ -414,6 +415,16 @@ func TestNormalizeKimiUpstreamModel(t *testing.T) {
 		{"  kimi-k3[1m](high)  ", "k3(high)"},
 		{"KIMI-K3[1M](High)", "k3(High)"},
 		{"kimi-k3[1m](high)", "k3(high)"},
+		{"kimi-k2.8", "kimi-for-coding"},
+		{"kimi-k2.8-code", "kimi-for-coding"},
+		{"Kimi-K2.8", "kimi-for-coding"},
+		{"Kimi-K2.8-Code", "kimi-for-coding"},
+		{"k2.8", "kimi-for-coding"},
+		{"k2.8-code", "kimi-for-coding"},
+		{"kimi-k2.8-preview", "kimi-for-coding"},
+		{"k2.8-preview", "kimi-for-coding"},
+		{"kimi-k2.8(max)", "kimi-for-coding(max)"},
+		{"kimi-k2.8-code[1m](high)", "kimi-for-coding(high)"},
 		{"kimi-k2.7-code", "kimi-for-coding"},
 		{"kimi-k2.7-code-highspeed", "kimi-for-coding-highspeed"},
 		{"Kimi-K2.7-Code", "kimi-for-coding"},
@@ -754,5 +765,70 @@ func TestNormalizeKimiToolMessageLinks_PreservesAssistantWithToolLinkOrReasoning
 	}
 	if got := messages[3].Get("content.0.text").String(); got != " visible " {
 		t.Fatalf("messages.3.content.0.text = %q, want %q", got, " visible ")
+	}
+}
+
+func TestNormalizeKimiTemperature(t *testing.T) {
+	tests := []struct {
+		name      string
+		body      string
+		wantExist bool
+		wantVal   float64
+	}{
+		{
+			name:      "absent temperature passes through",
+			body:      `{"model":"kimi-for-coding"}`,
+			wantExist: false,
+		},
+		{
+			name:      "thinking enabled keeps valid temperature 1.0",
+			body:      `{"model":"kimi-for-coding","thinking":{"type":"enabled","effort":"high"},"temperature":1.0}`,
+			wantExist: true,
+			wantVal:   1.0,
+		},
+		{
+			name:      "thinking enabled strips invalid temperature 0.7",
+			body:      `{"model":"kimi-for-coding","thinking":{"type":"enabled","effort":"high"},"temperature":0.7}`,
+			wantExist: false,
+		},
+		{
+			name:      "thinking enabled strips invalid temperature 0.6",
+			body:      `{"model":"kimi-for-coding","thinking":{"type":"enabled","effort":"high"},"temperature":0.6}`,
+			wantExist: false,
+		},
+		{
+			name:      "thinking disabled keeps valid temperature 0.6",
+			body:      `{"model":"kimi-for-coding","thinking":{"type":"disabled"},"temperature":0.6}`,
+			wantExist: true,
+			wantVal:   0.6,
+		},
+		{
+			name:      "thinking disabled strips invalid temperature 1.0",
+			body:      `{"model":"kimi-for-coding","thinking":{"type":"disabled"},"temperature":1.0}`,
+			wantExist: false,
+		},
+		{
+			name:      "thinking disabled strips invalid temperature 0.7",
+			body:      `{"model":"kimi-for-coding","thinking":{"type":"disabled"},"temperature":0.7}`,
+			wantExist: false,
+		},
+		{
+			name:      "implicit enabled strips invalid temperature 0.5",
+			body:      `{"model":"kimi-for-coding","temperature":0.5}`,
+			wantExist: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeKimiTemperature([]byte(tt.body))
+			res := gjson.GetBytes(got, "temperature")
+			if res.Exists() != tt.wantExist {
+				t.Fatalf("temperature.Exists() = %v, want %v; body=%s", res.Exists(), tt.wantExist, string(got))
+			}
+			if tt.wantExist && res.Float() != tt.wantVal {
+				t.Fatalf("temperature = %v, want %v; body=%s", res.Float(), tt.wantVal, string(got))
+			}
+		})
 	}
 }

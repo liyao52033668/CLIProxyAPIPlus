@@ -12,3 +12,13 @@ type Store interface {
 	// Delete removes the auth record identified by id.
 	Delete(ctx context.Context, id string) error
 }
+
+// ProviderLister is an optional interface that Store implementations may
+// satisfy to support filtered listing by provider. When a Store implements
+// this interface, callers can avoid loading all records just to filter by
+// provider in memory.
+type ProviderLister interface {
+	// ListByProvider returns only the auth records whose Provider matches
+	// the given provider (case-insensitive comparison).
+	ListByProvider(ctx context.Context, provider string) ([]*Auth, error)
+}

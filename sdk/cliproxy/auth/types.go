@@ -634,6 +634,14 @@ func authAccessToken(auth *Auth) string {
 	return authMetadataString(auth, "accessToken")
 }
 
+// authRefreshToken returns the current refresh token string from auth metadata.
+func authRefreshToken(auth *Auth) string {
+	if token := authMetadataString(auth, "refresh_token"); token != "" {
+		return token
+	}
+	return authMetadataString(auth, "refreshToken")
+}
+
 // AccessTokenExpirationTime returns the expiration time of the specific access_token.
 // If the access_token is a JWT, its exp claim takes strict precedence.
 func (a *Auth) AccessTokenExpirationTime() (time.Time, bool) {
@@ -709,6 +717,11 @@ func expirationFromMap(meta map[string]any) (time.Time, bool) {
 			}
 		}
 	}
+	if expiresIn, okExpiresIn := parseRelativeExpirySeconds(meta); okExpiresIn {
+		if timestamp, okTimestamp := parseRelativeExpiryTimestamp(meta); okTimestamp {
+			return timestamp.Add(time.Duration(expiresIn) * time.Second), true
+		}
+	}
 	for _, nestedKey := range []string{"token", "Token"} {
 		if nested, ok := meta[nestedKey]; ok {
 			switch val := nested.(type) {
@@ -724,6 +737,28 @@ func expirationFromMap(meta map[string]any) (time.Time, bool) {
 				if ts, ok1 := expirationFromMap(temp); ok1 {
 					return ts, true
 				}
+			}
+		}
+	}
+	return time.Time{}, false
+}
+
+func parseRelativeExpirySeconds(meta map[string]any) (int, bool) {
+	for _, key := range []string{"expires_in", "expiresIn"} {
+		if value, ok := meta[key]; ok {
+			if seconds, okSeconds := parseIntAny(value); okSeconds && seconds > 0 {
+				return seconds, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func parseRelativeExpiryTimestamp(meta map[string]any) (time.Time, bool) {
+	for _, key := range []string{"timestamp", "issued_at", "issuedAt"} {
+		if value, ok := meta[key]; ok {
+			if timestamp, okTimestamp := parseTimeValue(value); okTimestamp && !timestamp.IsZero() {
+				return timestamp, true
 			}
 		}
 	}

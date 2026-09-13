@@ -163,6 +163,9 @@ disable-cooling: false
    # codex-websocket-idle-seconds: 300
    # codex-websocket-handshake-seconds: 30
    # codex-net-dial-seconds: 30
+   # When true, scope Codex usage_limit_reached quota cooldowns to the requested
+   # model rather than cooling down the entire credential across all sibling models.
+   # codex-model-level-cooling: false
 
    # WebSocket relay session
    # ws-relay-read-seconds: 60
@@ -192,6 +195,10 @@ disable-image-generation: false
 # Core auth auto-refresh worker pool size (OAuth/file-based auth token refresh).
 # When > 0, overrides the default worker count (16).
 # auth-auto-refresh-workers: 16
+
+# Cooldown duration in seconds for transient upstream errors (408/500/502/503/504/520-526).
+# 0 = legacy default (60s); -1 disables transient-error cooldowns.
+# transient-error-cooldown-seconds: 60
 
 # Quota exceeded behavior
 quota-exceeded:

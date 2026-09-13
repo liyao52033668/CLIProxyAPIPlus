@@ -13,9 +13,10 @@ import (
 // It intentionally mirrors helps.UpstreamStatusError so auth conductor can
 // inspect StatusCode()/RetryAfter() uniformly for both types.
 type statusErr struct {
-	code       int
-	msg        string
-	retryAfter *time.Duration
+	code             int
+	msg              string
+	retryAfter       *time.Duration
+	credentialScoped bool
 }
 
 func (e statusErr) Error() string {
@@ -27,6 +28,10 @@ func (e statusErr) Error() string {
 
 func (e statusErr) StatusCode() int            { return e.code }
 func (e statusErr) RetryAfter() *time.Duration { return e.retryAfter }
+
+// IsCredentialScoped reports whether the error must cool down the entire
+// credential instead of a single model (e.g. Codex usage_limit_reached).
+func (e statusErr) IsCredentialScoped() bool { return e.credentialScoped }
 
 // toStatusErr converts a helps.UpstreamStatusError into the local statusErr
 // shape when a call site still needs the package-local type.

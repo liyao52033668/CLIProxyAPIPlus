@@ -65,6 +65,19 @@ func (r *Registry) TranslateRequest(from, to Format, model string, rawJSON []byt
 	return rawJSON
 }
 
+// HasRequestTransformer indicates whether a request translator exists.
+func (r *Registry) HasRequestTransformer(from, to Format) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if byTarget, ok := r.requests[from]; ok {
+		if _, isOk := byTarget[to]; isOk {
+			return true
+		}
+	}
+	return false
+}
+
 // HasResponseTransformer indicates whether a response translator exists.
 func (r *Registry) HasResponseTransformer(from, to Format) bool {
 	r.mu.RLock()
@@ -132,6 +145,11 @@ func Register(from, to Format, request RequestTransform, response ResponseTransf
 // TranslateRequest is a helper on the default registry.
 func TranslateRequest(from, to Format, model string, rawJSON []byte, stream bool) []byte {
 	return defaultRegistry.TranslateRequest(from, to, model, rawJSON, stream)
+}
+
+// HasRequestTransformer inspects the default registry.
+func HasRequestTransformer(from, to Format) bool {
+	return defaultRegistry.HasRequestTransformer(from, to)
 }
 
 // HasResponseTransformer inspects the default registry.

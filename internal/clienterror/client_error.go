@@ -53,6 +53,11 @@ func IsRequestFault(status int, err error) bool {
 	if status == http.StatusUnauthorized && hasAuthenticationErrorBody(err) {
 		return false
 	}
+	// Model not found indicates a credential-model capability mismatch rather than
+	// a caller request error. Preserve rotation and cooldown for the model.
+	if hasModelNotFoundErrorBody(err) {
+		return false
+	}
 	if hasRequestFaultBody(err) {
 		return true
 	}
@@ -85,12 +90,43 @@ func IsItemNotPersisted(message string) bool {
 		strings.Contains(lower, "items are not persisted when `store` is set to false")
 }
 
+// HasModelNotFoundCodeBody reports whether a JSON body carries a structured
+// model_not_found (or model_not_found_error) error code.
+func HasModelNotFoundCodeBody(body string) bool {
+	body = strings.TrimSpace(body)
+	// Fast path: skip non-JSON strings without paying for json.Valid.
+	if body == "" || body[0] != '{' {
+		return false
+	}
+	if !json.Valid([]byte(body)) {
+		return false
+	}
+	for _, path := range []string{"error.code", "code", "response.error.code", "body.error.code"} {
+		code := strings.ToLower(strings.TrimSpace(gjson.Get(body, path).String()))
+		if code == "model_not_found" || code == "model_not_found_error" {
+			return true
+		}
+	}
+	return false
+}
+
+func hasModelNotFoundErrorBody(err error) bool {
+	if err == nil {
+		return false
+	}
+	return HasModelNotFoundCodeBody(err.Error())
+}
+
 func hasAuthenticationErrorBody(err error) bool {
 	if err == nil {
 		return false
 	}
 	body := strings.TrimSpace(err.Error())
-	if body == "" || !json.Valid([]byte(body)) {
+	// Fast path: skip non-JSON strings without paying for json.Valid.
+	if body == "" || body[0] != '{' {
+		return false
+	}
+	if !json.Valid([]byte(body)) {
 		return false
 	}
 	for _, path := range []string{"error.type", "type", "response.error.type", "body.error.type"} {

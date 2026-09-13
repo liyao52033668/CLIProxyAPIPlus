@@ -222,10 +222,7 @@ func TestSanitizeAntigravityRequestSchemasMatchesWholePayloadCleaning(t *testing
 	for _, useAntigravitySchema := range []bool{false, true} {
 		for name, schema := range shapes {
 			doc := `{"request":{"tools":[{"functionDeclarations":[{"name":"t","parameters":` + schema + `}]}]}}`
-			whole := util.CleanJSONSchemaForGemini(doc)
-			if useAntigravitySchema {
-				whole = util.CleanJSONSchemaForAntigravity(doc)
-			}
+			whole := util.CleanJSONSchemaForAntigravityTool(doc, useAntigravitySchema)
 			want := gjson.Get(whole, schemaPath).Raw
 			got := gjson.Get(sanitizeAntigravityRequestSchemas(doc, useAntigravitySchema), schemaPath).Raw
 			if want != got {
@@ -240,6 +237,152 @@ func TestSanitizeAntigravityRequestSchemasMatchesWholePayloadCleaning(t *testing
 	got := gjson.Get(sanitizeAntigravityRequestSchemas(doc, true), schemaPath)
 	if req := got.Get("required").Array(); len(req) != 1 || req[0].String() != "_" {
 		t.Errorf("Claude VALIDATED placeholder missing for an optional-only schema: %s", got.Raw)
+	}
+}
+
+func TestSanitizeAntigravityRequestSchemasKeepsResponseSchemasPlaceholderFree(t *testing.T) {
+	payload := `{"request":{
+		"tools":[{"functionDeclarations":[{"name":"tool","parameters":{"type":"object","properties":{"value":{"type":"string"}}}}]}],
+		"generationConfig":{"responseSchema":{"type":"object","properties":{
+			"empty":{"type":"object"},
+			"optional":{"type":"object","properties":{"value":{"type":"string"}}}
+		}}}
+	}}`
+
+	got := sanitizeAntigravityRequestSchemas(payload, true)
+	toolSchema := gjson.Get(got, "request.tools.0.functionDeclarations.0.parameters")
+	if required := toolSchema.Get("required.0").String(); required != "_" {
+		t.Fatalf("tool schema lost VALIDATED placeholder, required[0] = %q: %s", required, got)
+	}
+
+	responseSchema := gjson.Get(got, "request.generationConfig.responseSchema")
+	for _, path := range []string{
+		"required",
+		"properties._",
+		"properties.reason",
+		"properties.empty.required",
+		"properties.empty.properties.reason",
+		"properties.optional.required",
+		"properties.optional.properties._",
+	} {
+		if responseSchema.Get(path).Exists() {
+			t.Errorf("response schema gained tool-only field %s: %s", path, responseSchema.Raw)
+		}
+	}
+}
+
+func TestSanitizeAntigravityRequestSchemasProjectsUnionsAndPreservesEnumTypes(t *testing.T) {
+	payload := `{"request":{
+		"tools":[{"functionDeclarations":[{"name":"tool","parameters":{"type":"object","properties":{
+			"choice":{"anyOf":[{"type":"string"},{"type":"null"}]},
+			"level":{"type":"number","enum":[1,2]}
+		}}}]}],
+		"generationConfig":{"responseSchema":{"type":"object","properties":{
+			"action":{"anyOf":[
+				{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]},
+				{"type":"null"}
+			]},
+			"conviction":{"type":"number","enum":[0.25,0.5,1]}
+		}}}
+	}}`
+
+	got := sanitizeAntigravityRequestSchemas(payload, true)
+	responseSchema := gjson.Get(got, "request.generationConfig.responseSchema")
+	action := responseSchema.Get("properties.action")
+	if action.Get("anyOf").Exists() || action.Get("type").String() != "object" || !action.Get("nullable").Bool() {
+		t.Errorf("response anyOf was not projected to nullable object: %s", responseSchema.Raw)
+	}
+	conviction := responseSchema.Get("properties.conviction")
+	if gotType := conviction.Get("type").String(); gotType != "number" {
+		t.Errorf("response enum type = %q, want number: %s", gotType, responseSchema.Raw)
+	}
+	for _, enumValue := range conviction.Get("enum").Array() {
+		if enumValue.Type != gjson.String {
+			t.Errorf("response enum value is not a string: %s", conviction.Raw)
+		}
+	}
+
+	toolSchema := gjson.Get(got, "request.tools.0.functionDeclarations.0.parameters")
+	if toolSchema.Get("properties.choice.anyOf").Exists() {
+		t.Errorf("tool anyOf union was not flattened: %s", toolSchema.Raw)
+	}
+	if gotType := toolSchema.Get("properties.level.type").String(); gotType != "number" {
+		t.Errorf("tool enum type = %q, want number: %s", gotType, toolSchema.Raw)
+	}
+}
+
+func TestSanitizeAntigravityToolSchemasKeepNativeTypeAndNullableOnBothPaths(t *testing.T) {
+	payload := `{"request":{"tools":[{"functionDeclarations":[{"name":"tool","parameters":{
+		"type":"object",
+		"properties":{
+			"level":{"type":"number","enum":[1,2]},
+			"note":{"type":["string","null"]}
+		},
+		"required":["level","note"]
+	}}]}]}}`
+
+	for _, requirePlaceholder := range []bool{false, true} {
+		got := sanitizeAntigravityRequestSchemas(payload, requirePlaceholder)
+		schema := gjson.Get(got, "request.tools.0.functionDeclarations.0.parameters")
+		if schema.Get("properties.level.type").String() != "number" {
+			t.Fatalf("placeholder=%v changed numeric tool argument type: %s", requirePlaceholder, schema.Raw)
+		}
+		for _, member := range schema.Get("properties.level.enum").Array() {
+			if member.Type != gjson.String {
+				t.Fatalf("placeholder=%v left non-string proto enum: %s", requirePlaceholder, schema.Raw)
+			}
+		}
+		if !schema.Get("properties.note.nullable").Bool() || schema.Get("required.1").String() != "note" {
+			t.Fatalf("placeholder=%v lost native nullable/required semantics: %s", requirePlaceholder, schema.Raw)
+		}
+	}
+}
+
+func TestAntigravityBuildRequestKeepsJSONObjectMimeOnly(t *testing.T) {
+	input := []byte(`{"model":"gemini-3.1-pro-low","messages":[{"role":"user","content":"hi"}],"response_format":{"type":"json_object"}}`)
+	translated := antigravitychat.ConvertOpenAIRequestToAntigravity("gemini-3.1-pro-low", input, false)
+	body := buildRequestBodyFromRawPayload(t, "gemini-3.1-pro-low", translated)
+	encoded, errMarshal := json.Marshal(body)
+	if errMarshal != nil {
+		t.Fatal(errMarshal)
+	}
+
+	generationConfig := gjson.GetBytes(encoded, "request.generationConfig")
+	if got := generationConfig.Get("responseMimeType").String(); got != "application/json" {
+		t.Fatalf("responseMimeType = %q, want application/json: %s", got, encoded)
+	}
+	if generationConfig.Get("responseSchema").Exists() {
+		t.Fatalf("responseSchema should not be set for json_object: %s", encoded)
+	}
+}
+
+func TestAntigravityBuildRequestPreservesGenerationResponseSchemaMetadata(t *testing.T) {
+	payload := []byte(`{"request":{"generationConfig":{"responseSchema":{
+		"type":"object",
+		"nullable":true,
+		"properties":{"_":{"type":"string","nullable":true}},
+		"required":["_"]
+	}}}}`)
+
+	for _, modelName := range []string{"gemini-3.6-flash-high", "gemini-3.1-pro-low"} {
+		t.Run(modelName, func(t *testing.T) {
+			body := buildRequestBodyFromRawPayload(t, modelName, payload)
+			encoded, errMarshal := json.Marshal(body)
+			if errMarshal != nil {
+				t.Fatal(errMarshal)
+			}
+
+			schema := gjson.GetBytes(encoded, "request.generationConfig.responseSchema")
+			if !schema.Get("nullable").Bool() || !schema.Get("properties._.nullable").Bool() {
+				t.Fatalf("response schema nullable metadata was removed: %s", schema.Raw)
+			}
+			if !schema.Get("properties._").Exists() {
+				t.Fatalf("legitimate underscore property was removed: %s", schema.Raw)
+			}
+			if required := schema.Get("required.0").String(); required != "_" {
+				t.Fatalf("required[0] = %q, want underscore: %s", required, schema.Raw)
+			}
+		})
 	}
 }
 
@@ -446,6 +589,27 @@ func TestAntigravityBuildRequestStripsPropertyNamesFromOutboundBody(t *testing.T
 					t.Errorf("functionCall argument named propertyNames was rewritten: %s", args.Raw)
 				}
 			})
+		}
+	}
+}
+
+// TestSanitizeAntigravityRequestSchemasStripsEncryptedMetadata covers Codex client tool parameters
+// that carry "encrypted": true or "encrypted": false markers.
+func TestSanitizeAntigravityRequestSchemasStripsEncryptedMetadata(t *testing.T) {
+	encryptedSchema := `{"type":"object","properties":{"key":{"type":"string","encrypted":true},"timeout":{"type":"integer","encrypted":false}},"required":["key"]}`
+
+	for _, declContainer := range []string{"functionDeclarations", "function_declarations"} {
+		payload := `{"request":{"tools":[{"` + declContainer + `":[{"name":"test_tool","parameters":` + encryptedSchema + `}]}]}}`
+
+		for _, useAntigravitySchema := range []bool{false, true} {
+			got := sanitizeAntigravityRequestSchemas(payload, useAntigravitySchema)
+			if strings.Contains(got, `"encrypted"`) {
+				t.Errorf("declContainer=%s antigravity=%v: 'encrypted' marker survived sanitization: %s", declContainer, useAntigravitySchema, got)
+			}
+			schema := gjson.Get(got, "request.tools.0."+declContainer+".0.parameters")
+			if !schema.Get("properties.key.type").Exists() || schema.Get("properties.key.type").String() != "string" {
+				t.Errorf("declContainer=%s antigravity=%v: key property was corrupted: %s", declContainer, useAntigravitySchema, schema.Raw)
+			}
 		}
 	}
 }

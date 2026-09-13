@@ -82,13 +82,22 @@ type Config struct {
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 
+	// TransientErrorCooldownSeconds controls cooldowns for transient upstream errors (408/500/502/503/504/520-526).
+	// 0 keeps the legacy default cooldown. Negative values disable these cooldowns.
+	TransientErrorCooldownSeconds int `yaml:"transient-error-cooldown-seconds" json:"transient-error-cooldown-seconds"`
+
 	// Timeouts contains all configurable timeout values for the application.
 	// All values are in seconds unless otherwise specified.
 	Timeouts TimeoutsConfig `yaml:"timeouts" json:"timeouts"`
 
-	// AuthAutoRefreshWorkers overrides the size of the core auth auto-refresh worker pool.
+	// AuthAutoRefreshWorkers overrides the size of the core auth auto-refresh and manual refresh-all worker pool.
 	// When <= 0, the default worker count is used.
 	AuthAutoRefreshWorkers int `yaml:"auth-auto-refresh-workers" json:"auth-auto-refresh-workers"`
+
+	// CodexModelLevelCooling scopes Codex usage_limit_reached quota cooldowns to the
+	// requested model rather than cooling down the entire credential across all
+	// sibling models.
+	CodexModelLevelCooling bool `yaml:"codex-model-level-cooling,omitempty" json:"codex-model-level-cooling,omitempty"`
 
 	// RequestRetry defines the retry times when the request failed.
 	RequestRetry int `yaml:"request-retry" json:"request-retry"`
@@ -226,6 +235,24 @@ type XAIConfig struct {
 type AntigravityConfig struct {
 	// SensitiveWords is a list of words to obfuscate with zero-width characters in system instructions.
 	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
+
+	// ConnectionPool configures upstream HTTP connection pooling behavior for Antigravity.
+	ConnectionPool AntigravityConnectionPoolConfig `yaml:"connection-pool,omitempty" json:"connection-pool,omitempty"`
+}
+
+// AntigravityConnectionPoolConfig controls upstream HTTP/1.1 connection pooling behavior for Antigravity.
+type AntigravityConnectionPoolConfig struct {
+	// Enabled controls whether upstream connection pooling is enabled.
+	// Defaults to false (short-lived connection mode). Set to true to enable connection pooling.
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+
+	// IdleConnTimeout specifies how long an idle connection stays in the pool before expiring.
+	// Defaults to "30s". Capped at 210s to prevent exceeding Google Frontend (GFE) 240s cutoff.
+	IdleConnTimeout string `yaml:"idle-conn-timeout,omitempty" json:"idle-conn-timeout,omitempty"`
+
+	// MaxIdleConnsPerHost specifies the maximum number of idle connections to retain per host per credential.
+	// Defaults to 2.
+	MaxIdleConnsPerHost *int `yaml:"max-idle-conns-per-host,omitempty" json:"max-idle-conns-per-host,omitempty"`
 }
 
 // TLSConfig holds HTTPS server settings.
