@@ -1,6 +1,7 @@
 package management
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -124,6 +125,25 @@ func (s *oauthSessionStore) Complete(state string) {
 	session.Completed = true
 	session.ExpiresAt = now.Add(s.completedTTL)
 	s.sessions[state] = session
+}
+
+// Cancel removes a pending OAuth session so IsOAuthSessionPending returns false.
+// Returns true if the session was found and removed.
+func (s *oauthSessionStore) Cancel(state string) bool {
+	state = strings.TrimSpace(state)
+	if state == "" {
+		return false
+	}
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.purgeExpiredLocked(now)
+	session, ok := s.sessions[state]
+	if !ok || session.Completed {
+		return false
+	}
+	delete(s.sessions, state)
+	return true
 }
 
 func (s *oauthSessionStore) CompleteProvider(provider string) int {
@@ -294,9 +314,47 @@ func NormalizeOAuthProvider(provider string) (string, error) {
 		return "commandcode", nil
 	case "codearts":
 		return "codearts", nil
+	case "devin", "cognition":
+		return "devin", nil
 	default:
 		return "", errUnsupportedOAuthFlow
 	}
+}
+
+// guardOAuthSessionPendingForSave verifies that the OAuth session is still pending
+// immediately before persisting credentials. This prevents a race where a cancel
+// during token exchange could save credentials for a cancelled flow.
+func guardOAuthSessionPendingForSave(state, provider string) error {
+	if IsOAuthSessionPending(state, provider) {
+		return nil
+	}
+	return errOAuthSessionNotPending
+}
+
+// watchOAuthSessionCancel cancels pollCtx once the OAuth session is no longer pending.
+func watchOAuthSessionCancel(pollCtx context.Context, cancel context.CancelFunc, state, provider string) {
+	if cancel == nil {
+		return
+	}
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-pollCtx.Done():
+			return
+		case <-ticker.C:
+			if !IsOAuthSessionPending(state, provider) {
+				cancel()
+				return
+			}
+		}
+	}
+}
+
+// CancelOAuthSession cancels a pending OAuth session by state.
+// Background callback and device-code waiters observe IsOAuthSessionPending as false and exit without saving credentials.
+func CancelOAuthSession(state string) bool {
+	return oauthSessions.Cancel(state)
 }
 
 type oauthCallbackFilePayload struct {

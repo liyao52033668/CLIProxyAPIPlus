@@ -29,6 +29,7 @@ func newAuthManager() *sdkAuth.Manager {
 		sdkAuth.NewJoyCodeAuthenticator(),
 		sdkAuth.NewXAIAuthenticator(),
 		sdkAuth.NewCommandCodeAuthenticator(),
+		sdkAuth.NewDevinAuthenticator(),
 	)
 	return manager
 }

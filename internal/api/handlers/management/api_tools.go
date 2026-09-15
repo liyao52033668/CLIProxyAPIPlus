@@ -285,6 +285,29 @@ func (h *Handler) APICall(c *gin.Context) {
 		reqHeaders[key] = strings.ReplaceAll(value, "$TOKEN$", replacement)
 	}
 
+	// Substitute $TOKEN$ in the request body as well (needed by Devin Connect-RPC quota calls).
+	if strings.Contains(body.Data, "$TOKEN$") {
+		if !tokenResolved {
+			token, tokenErr = h.resolveTokenForAuth(c.Request.Context(), auth)
+			tokenResolved = true
+		}
+		if token == "" {
+			if tokenErr != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "auth token refresh failed"})
+				return
+			}
+			c.JSON(http.StatusBadRequest, gin.H{"error": "auth token not found"})
+			return
+		}
+		replacement := token
+		if json.Valid([]byte(body.Data)) && strings.ContainsAny(token, "\"\\\r\n\t") {
+			if b, errMarshal := json.Marshal(token); errMarshal == nil && len(b) >= 2 {
+				replacement = string(b[1 : len(b)-1])
+			}
+		}
+		body.Data = strings.ReplaceAll(body.Data, "$TOKEN$", replacement)
+	}
+
 	// When caller indicates CBOR in request headers, convert JSON string payload to CBOR bytes.
 	useCBORPayload := headerContainsValue(reqHeaders, "Content-Type", "application/cbor")
 

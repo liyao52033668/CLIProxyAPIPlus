@@ -744,6 +744,29 @@ func (s *Server) setupRoutes() {
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
 	})
 
+	devinCallbackHandler := func(c *gin.Context) {
+		c.Header("Cache-Control", "no-store")
+		code := strings.TrimSpace(c.Query("code"))
+		state := strings.TrimSpace(c.Query("state"))
+		errStr := strings.TrimSpace(c.Query("error"))
+		if errStr == "" {
+			errStr = strings.TrimSpace(c.Query("error_description"))
+		}
+		if code == "" && errStr == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "code or error is required"})
+			return
+		}
+		if _, errWrite := managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "devin", state, code, errStr); errWrite != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid or expired OAuth callback"})
+			return
+		}
+		c.Header("Content-Type", "text/html; charset=utf-8")
+		c.String(http.StatusOK, oauthCallbackSuccessHTML)
+	}
+
+	s.engine.GET("/callback", devinCallbackHandler)
+	s.engine.GET("/devin/callback", devinCallbackHandler)
+
 	// Management routes are registered lazily by registerManagementRoutes when a secret is configured.
 }
 
@@ -1162,6 +1185,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/xai-auth-url", s.mgmt.RequestXAIToken)
 		mgmt.GET("/commandcode-auth-url", s.mgmt.RequestCommandCodeToken)
 		mgmt.POST("/commandcode-auth-url", s.mgmt.RequestCommandCodeToken)
+		mgmt.GET("/devin-auth-url", s.mgmt.RequestDevinToken)
 		mgmt.POST("/oauth-callback", s.mgmt.PostOAuthCallback)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
 	}

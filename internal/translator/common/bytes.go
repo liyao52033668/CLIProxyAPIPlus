@@ -1,12 +1,28 @@
 package common
 
 import (
+	"bytes"
+	"encoding/json"
 	"strconv"
 	"strings"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+// SetStringWithoutHTMLEscape sets a string value at the given JSON path without
+// HTML-escaping <, >, & characters. This is needed when the value contains HTML
+// or other characters that encoding/json.Marshal would escape to \u003c, \u003e, \u0026.
+func SetStringWithoutHTMLEscape(data []byte, path, value string) ([]byte, error) {
+	buf := &bytes.Buffer{}
+	enc := json.NewEncoder(buf)
+	enc.SetEscapeHTML(false)
+	if errEncode := enc.Encode(value); errEncode != nil {
+		return sjson.SetBytes(data, path, value)
+	}
+	raw := bytes.TrimRight(buf.Bytes(), "\n")
+	return sjson.SetRawBytes(data, path, raw)
+}
 
 // ContentBlockTextBuffer accumulates streamed text fragments and transparently
 // decodes content-block arrays that some providers stringify on the wire.

@@ -98,6 +98,11 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		changes = append(changes, fmt.Sprintf("antigravity.sensitive-words: updated (%d -> %d entries)", len(oldCfg.Antigravity.SensitiveWords), len(newCfg.Antigravity.SensitiveWords)))
 	}
 
+	// Devin sensitive words
+	if !equalStringSet(oldCfg.Devin.SensitiveWords, newCfg.Devin.SensitiveWords) {
+		changes = append(changes, fmt.Sprintf("devin.sensitive-words: updated (%d -> %d entries)", len(oldCfg.Devin.SensitiveWords), len(newCfg.Devin.SensitiveWords)))
+	}
+
 	if oldCfg.Routing.Strategy != newCfg.Routing.Strategy {
 		changes = append(changes, fmt.Sprintf("routing.strategy: %s -> %s", oldCfg.Routing.Strategy, newCfg.Routing.Strategy))
 	}

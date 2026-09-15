@@ -221,6 +221,12 @@ routing:
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: true
 
+# Devin provider behavior.
+# devin:
+#   sensitive-words:             # optional: words to obfuscate with zero-width characters in system instructions and prompts
+#     - "API"
+#     - "proxy"
+
 # xAI provider behavior.
 xai:
   # When true, inject the native x_search tool when the request does not declare it.

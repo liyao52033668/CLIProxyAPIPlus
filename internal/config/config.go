@@ -126,6 +126,9 @@ type Config struct {
 	// Antigravity configures provider-wide Antigravity request behavior.
 	Antigravity AntigravityConfig `yaml:"antigravity" json:"antigravity"`
 
+	// Devin configures provider-wide Devin request behavior.
+	Devin DevinConfig `yaml:"devin" json:"devin"`
+
 	// GeminiKey defines Gemini API key configurations with optional routing overrides.
 	GeminiKey []GeminiKey `yaml:"gemini-api-key" json:"gemini-api-key"`
 
@@ -238,6 +241,12 @@ type AntigravityConfig struct {
 
 	// ConnectionPool configures upstream HTTP connection pooling behavior for Antigravity.
 	ConnectionPool AntigravityConnectionPoolConfig `yaml:"connection-pool,omitempty" json:"connection-pool,omitempty"`
+}
+
+// DevinConfig configures provider-wide Devin request behavior.
+type DevinConfig struct {
+	// SensitiveWords is a list of words to obfuscate with zero-width characters in system prompts and messages.
+	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
 }
 
 // AntigravityConnectionPoolConfig controls upstream HTTP/1.1 connection pooling behavior for Antigravity.

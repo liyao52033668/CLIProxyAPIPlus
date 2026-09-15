@@ -570,6 +570,8 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 		s.coreManager.RegisterExecutor(executor.NewBTExecutor(s.cfg))
 	case "freebuff":
 		s.coreManager.RegisterExecutor(executor.NewFreebuffExecutor(s.cfg))
+	case "devin":
+		s.coreManager.RegisterExecutor(executor.NewDevinExecutor(s.cfg))
 	case "qoder":
 		qoderExecutor := executor.NewQoderExecutor(s.cfg)
 		qoderExecutor.SetAuthMetadataUpdater(func(ctx context.Context, id string, updates map[string]any, deletes []string) error {
@@ -1501,6 +1503,8 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		}
 	case "xai":
 		models = registry.GetXAIModels()
+	case "devin":
+		models = registry.GetDevinModels()
 	default:
 		// Handle OpenAI-compatibility providers by name using config
 		if s.cfg != nil {
