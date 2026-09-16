@@ -353,10 +353,8 @@ func (e *FreebuffExecutor) stateFor(auth *cliproxyauth.Auth) *freebuffCredential
 func freebuffCredentialKey(auth *cliproxyauth.Auth) string {
 	token := freebuffAPIKey(auth)
 	baseURL := freebuffDefaultBaseURL
-	if auth != nil && auth.Attributes != nil {
-		if value := strings.TrimSpace(auth.Attributes["base_url"]); value != "" {
-			baseURL = normalizeFreebuffBaseURL(value)
-		}
+	if value := freebuffBaseURL(auth); value != "" {
+		baseURL = normalizeFreebuffBaseURL(value)
 	}
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:]) + "\x00" + baseURL
@@ -409,41 +407,12 @@ func (s *freebuffCredentialState) release() {
 	}
 }
 
+// resolveModel maps the requested model onto the compiled-in Freebuff catalog.
+// Credentials no longer carry per-credential model mappings; the catalog's
+// first entry is the upstream default model.
 func (e *FreebuffExecutor) resolveModel(auth *cliproxyauth.Auth, model string) (string, string) {
-	model = strings.TrimSpace(model)
-	apiKey := freebuffAPIKey(auth)
-	if e.cfg != nil {
-		keys := e.cfg.FreebuffKey
-		if auth != nil && auth.Attributes != nil {
-			if rawIndex := strings.TrimSpace(auth.Attributes["config_index"]); rawIndex != "" {
-				if index, err := strconv.Atoi(rawIndex); err == nil && index >= 0 && index < len(keys) {
-					keys = keys[index : index+1]
-				}
-			}
-		}
-		proxyURL := ""
-		baseURL := ""
-		if auth != nil {
-			proxyURL = strings.TrimSpace(auth.ProxyURL)
-			if auth.Attributes != nil {
-				baseURL = strings.TrimSpace(auth.Attributes["base_url"])
-			}
-		}
-		for _, key := range keys {
-			if !key.MatchesCredential(apiKey, proxyURL) {
-				continue
-			}
-			if configuredBaseURL := strings.TrimSpace(key.BaseURL); baseURL != "" && configuredBaseURL != baseURL {
-				continue
-			}
-			for _, configured := range key.Models {
-				if configured.Alias == model || configured.Name == model {
-					return resolveFreebuffConfiguredModel(configured.Name, configured.AgentID, model)
-				}
-			}
-		}
-	}
-	return lookupFreebuffBuiltin(model)
+	_ = auth
+	return lookupFreebuffBuiltin(strings.TrimSpace(model))
 }
 
 type freebuffBuiltinModel struct {
@@ -498,26 +467,6 @@ func lookupFreebuffBuiltin(model string) (string, string) {
 		}
 	}
 	return model, ""
-}
-
-func resolveFreebuffConfiguredModel(name, agentID, requested string) (string, string) {
-	if strings.TrimSpace(agentID) != "" {
-		return name, agentID
-	}
-	canon, builtinAgent := lookupFreebuffBuiltin(name)
-	if builtinAgent == "" {
-		canon, builtinAgent = lookupFreebuffBuiltin(requested)
-	}
-	if builtinAgent == "" {
-		return name, ""
-	}
-	if isFreebuffProviderAlias(name) {
-		return canon, builtinAgent
-	}
-	if _, nameAgent := lookupFreebuffBuiltin(name); nameAgent != "" {
-		return canon, builtinAgent
-	}
-	return name, builtinAgent
 }
 
 func (e *FreebuffExecutor) ensureSession(ctx context.Context, auth *cliproxyauth.Auth, state *freebuffCredentialState, model string) (*freebuffSession, error) {
@@ -1003,10 +952,8 @@ func readFreebuffBody(r io.Reader, limit int64) ([]byte, error) {
 }
 
 func (e *FreebuffExecutor) baseURL(auth *cliproxyauth.Auth) string {
-	if attrs := freebuffAttrs(auth); attrs != nil {
-		if value := strings.TrimSpace(attrs["base_url"]); value != "" {
-			return normalizeFreebuffBaseURL(value)
-		}
+	if value := freebuffBaseURL(auth); value != "" {
+		return normalizeFreebuffBaseURL(value)
 	}
 	return freebuffDefaultBaseURL
 }
@@ -1026,11 +973,45 @@ func normalizeFreebuffBaseURL(raw string) string {
 	return strings.TrimRight(strings.TrimSuffix(raw, "/v1"), "/")
 }
 
+// freebuffAPIKey resolves the credential token. OAuth credential files carry
+// the token in metadata (access_token, or auth_token for hand-edited files);
+// config-synthesized credentials keep the legacy api_key attribute.
 func freebuffAPIKey(auth *cliproxyauth.Auth) string {
-	if auth == nil || auth.Attributes == nil {
+	if auth == nil {
+		return ""
+	}
+	for _, key := range []string{"access_token", "auth_token"} {
+		if auth.Metadata != nil {
+			if value, ok := auth.Metadata[key].(string); ok {
+				if trimmed := strings.TrimSpace(value); trimmed != "" {
+					return trimmed
+				}
+			}
+		}
+	}
+	if auth.Attributes == nil {
 		return ""
 	}
 	return strings.TrimSpace(auth.Attributes["api_key"])
+}
+
+// freebuffBaseURL returns the raw custom upstream base URL for a credential,
+// checking OAuth metadata before the legacy config attribute.
+func freebuffBaseURL(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Metadata != nil {
+		if value, ok := auth.Metadata["base_url"].(string); ok {
+			if trimmed := strings.TrimSpace(value); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	if auth.Attributes == nil {
+		return ""
+	}
+	return strings.TrimSpace(auth.Attributes["base_url"])
 }
 
 // freebuffClientID derives a stable per-credential client id. The official

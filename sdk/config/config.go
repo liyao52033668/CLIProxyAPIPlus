@@ -30,9 +30,6 @@ type OpenAICompatibility = internalconfig.OpenAICompatibility
 type OpenAICompatibilityAPIKey = internalconfig.OpenAICompatibilityAPIKey
 type OpenAICompatibilityModel = internalconfig.OpenAICompatibilityModel
 
-type FreebuffKey = internalconfig.FreebuffKey
-type FreebuffModel = internalconfig.FreebuffModel
-
 type TLS = internalconfig.TLSConfig
 
 const (

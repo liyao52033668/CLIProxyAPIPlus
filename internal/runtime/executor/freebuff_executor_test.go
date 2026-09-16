@@ -24,6 +24,13 @@ import (
 // credential states; it is never sent to a real upstream.
 const testFreebuffToken = "key-freebuff-placeholder"
 
+// Fixture tokens for OAuth credential-file metadata resolution, following the
+// same placeholder convention as testFreebuffToken.
+const (
+	testFreebuffMetadataToken = "freebuff-oauth-fixture-token"
+	testFreebuffMirrorBase    = "https://freebuff-fixture.example"
+)
+
 // freebuffTestAuth builds an auth pointing at the given base URL.
 func freebuffTestAuth(baseURL string, attributes map[string]string) *cliproxyauth.Auth {
 	merged := map[string]string{cliproxyauth.AttributeAPIKey: testFreebuffToken}
@@ -281,18 +288,6 @@ func TestFreebuffExecutorsShareCredentialStateAcrossReplacement(t *testing.T) {
 	second := NewFreebuffExecutor(&config.Config{})
 	if first.stateFor(auth) != second.stateFor(auth) {
 		t.Fatal("replacement executor created an independent credential lease")
-	}
-}
-
-func TestFreebuffResolveModelUsesSelectedConfigEntry(t *testing.T) {
-	executor := NewFreebuffExecutor(&config.Config{FreebuffKey: []config.FreebuffKey{
-		{APIKey: testFreebuffToken, Models: []config.FreebuffModel{{Name: "model-a", Alias: "shared", AgentID: "agent-a"}}},
-		{APIKey: testFreebuffToken, Models: []config.FreebuffModel{{Name: "model-b", Alias: "shared", AgentID: "agent-b"}}},
-	}})
-	auth := freebuffTestAuth("", map[string]string{"config_index": "1"})
-	model, agentID := executor.resolveModel(auth, "shared")
-	if model != "model-b" || agentID != "agent-b" {
-		t.Fatalf("resolveModel() = %q, %q", model, agentID)
 	}
 }
 
@@ -835,30 +830,6 @@ func TestFreebuffResolveModelAcceptsProviderAliasAndShortNames(t *testing.T) {
 	}
 }
 
-func TestFreebuffResolveModelFillsMissingConfigAgentID(t *testing.T) {
-	executor := NewFreebuffExecutor(&config.Config{FreebuffKey: []config.FreebuffKey{{
-		APIKey: testFreebuffToken,
-		Models: []config.FreebuffModel{{Name: "freebuff", Alias: "freebuff"}},
-	}}})
-	auth := freebuffTestAuth("", nil)
-	model, agentID := executor.resolveModel(auth, "freebuff")
-	if model != "z-ai/glm-5.3-flash" || agentID != "base3-free-glm-5-3-flash" {
-		t.Fatalf("resolveModel() = %q, %q", model, agentID)
-	}
-}
-
-func TestFreebuffResolveModelKeepsExplicitConfigAgentID(t *testing.T) {
-	executor := NewFreebuffExecutor(&config.Config{FreebuffKey: []config.FreebuffKey{{
-		APIKey: testFreebuffToken,
-		Models: []config.FreebuffModel{{Name: "custom-model", Alias: "freebuff", AgentID: "custom-agent"}},
-	}}})
-	auth := freebuffTestAuth("", nil)
-	model, agentID := executor.resolveModel(auth, "freebuff")
-	if model != "custom-model" || agentID != "custom-agent" {
-		t.Fatalf("resolveModel() = %q, %q", model, agentID)
-	}
-}
-
 func TestFreebuffSessionAdmissionCoercesToAdmittedModel(t *testing.T) {
 	var startBodies []string
 	var chatPayloads []string
@@ -869,7 +840,7 @@ func TestFreebuffSessionAdmissionCoercesToAdmittedModel(t *testing.T) {
 			_, _ = io.WriteString(w, `{"status":"none"}`)
 		case http.MethodPost:
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"status": "active", "model": "model-b", "instanceId": "coerced-instance",
+				"status": "active", "model": "deepseek/deepseek-v4-flash", "instanceId": "coerced-instance",
 			})
 		default:
 			w.WriteHeader(http.StatusNoContent)
@@ -888,12 +859,7 @@ func TestFreebuffSessionAdmissionCoercesToAdmittedModel(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	executor := NewFreebuffExecutor(&config.Config{FreebuffKey: []config.FreebuffKey{
-		{APIKey: testFreebuffToken, BaseURL: server.URL, Models: []config.FreebuffModel{
-			{Name: "model-a", Alias: "alias-a", AgentID: "agent-a"},
-			{Name: "model-b", AgentID: "agent-b"},
-		}},
-	}})
+	executor := NewFreebuffExecutor(&config.Config{})
 	auth := freebuffTestAuth(server.URL, nil)
 	state := executor.stateFor(auth)
 	session, run, payload, resp, err := executor.openChat(t.Context(), auth, state, "model-a", "agent-a", []byte(`{"model":"model-a","messages":[]}`))
@@ -901,20 +867,20 @@ func TestFreebuffSessionAdmissionCoercesToAdmittedModel(t *testing.T) {
 		t.Fatalf("openChat() error = %v", err)
 	}
 	defer resp.Body.Close()
-	if session.model != "model-b" || session.instanceID != "coerced-instance" {
-		t.Fatalf("session = %#v, want admitted model-b on coerced-instance", session)
+	if session.model != "deepseek/deepseek-v4-flash" || session.instanceID != "coerced-instance" {
+		t.Fatalf("session = %#v, want admitted deepseek model on coerced-instance", session)
 	}
 	if run == nil || run.id != "run-coerced" {
 		t.Fatalf("run = %#v, want run-coerced", run)
 	}
-	if len(startBodies) != 1 || !strings.Contains(startBodies[0], `"agentId":"agent-b"`) {
-		t.Fatalf("START bodies = %v, want agent-b for the admitted model", startBodies)
+	if len(startBodies) != 1 || !strings.Contains(startBodies[0], `"agentId":"base3-free-deepseek-flash"`) {
+		t.Fatalf("START bodies = %v, want catalog agent for the admitted model", startBodies)
 	}
-	if len(chatPayloads) != 1 || !strings.Contains(chatPayloads[0], `"model":"model-b"`) {
-		t.Fatalf("chat payloads = %v, want coerced model-b", chatPayloads)
+	if len(chatPayloads) != 1 || !strings.Contains(chatPayloads[0], `"model":"deepseek/deepseek-v4-flash"`) {
+		t.Fatalf("chat payloads = %v, want coerced model", chatPayloads)
 	}
 	body := string(payload)
-	if !strings.Contains(body, `"model":"model-b"`) {
+	if !strings.Contains(body, `"model":"deepseek/deepseek-v4-flash"`) {
 		t.Fatalf("payload = %s, want coerced model", body)
 	}
 }
@@ -1017,5 +983,79 @@ func TestFreebuffSessionAdmissionRetriesAfterModelLocked(t *testing.T) {
 	}
 	if session.instanceID != "fresh-instance" || posts != 2 || deletes != 1 {
 		t.Fatalf("session = %#v, posts = %d, deletes = %d", session, posts, deletes)
+	}
+}
+
+func TestFreebuffAPIKeyPrefersMetadataToken(t *testing.T) {
+	metadataAuth := &cliproxyauth.Auth{
+		ID:       "freebuff-file.json",
+		Metadata: map[string]any{"access_token": testFreebuffMetadataToken},
+	}
+	if got := freebuffAPIKey(metadataAuth); got != testFreebuffMetadataToken {
+		t.Fatalf("freebuffAPIKey(metadata) = %q, want %q", got, testFreebuffMetadataToken)
+	}
+	legacyAuth := &cliproxyauth.Auth{
+		ID:         "freebuff-config",
+		Attributes: map[string]string{cliproxyauth.AttributeAPIKey: testFreebuffToken},
+	}
+	if got := freebuffAPIKey(legacyAuth); got != testFreebuffToken {
+		t.Fatalf("freebuffAPIKey(attributes) = %q, want %q", got, testFreebuffToken)
+	}
+	if got := freebuffAPIKey(nil); got != "" {
+		t.Fatalf("freebuffAPIKey(nil) = %q, want empty", got)
+	}
+}
+
+func TestFreebuffBaseURLPrefersMetadata(t *testing.T) {
+	executor := NewFreebuffExecutor(&config.Config{})
+	metadataAuth := &cliproxyauth.Auth{
+		ID:       "freebuff-file.json",
+		Metadata: map[string]any{"base_url": testFreebuffMirrorBase},
+	}
+	if got := executor.baseURL(metadataAuth); got != testFreebuffMirrorBase {
+		t.Fatalf("baseURL(metadata) = %q, want fixture host", got)
+	}
+	attributeAuth := &cliproxyauth.Auth{
+		ID:         "freebuff-config",
+		Attributes: map[string]string{"base_url": testFreebuffMirrorBase},
+	}
+	if got := executor.baseURL(attributeAuth); got != testFreebuffMirrorBase {
+		t.Fatalf("baseURL(attributes) = %q, want fixture host", got)
+	}
+	if got := executor.baseURL(nil); got != freebuffDefaultBaseURL {
+		t.Fatalf("baseURL(nil) = %q, want default", got)
+	}
+}
+
+func TestFreebuffSessionUsesMetadataCredential(t *testing.T) {
+	var authHeader string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authHeader = r.Header.Get("Authorization")
+		switch r.Method {
+		case http.MethodGet:
+			_, _ = io.WriteString(w, `{"status":"none"}`)
+		default:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status": "active", "model": "model-a", "instanceId": "instance-file",
+			})
+		}
+	}))
+	defer server.Close()
+
+	executor := NewFreebuffExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:       "freebuff-file.json",
+		Metadata: map[string]any{"access_token": testFreebuffMetadataToken, "base_url": server.URL},
+	}
+	state := executor.stateFor(auth)
+	session, err := executor.ensureSession(t.Context(), auth, state, "model-a")
+	if err != nil {
+		t.Fatalf("ensureSession() error = %v", err)
+	}
+	if session.instanceID != "instance-file" {
+		t.Fatalf("session = %#v, want metadata-driven admission", session)
+	}
+	if authHeader != "Bearer "+testFreebuffMetadataToken {
+		t.Fatalf("authorization header = %q, want metadata token", authHeader)
 	}
 }

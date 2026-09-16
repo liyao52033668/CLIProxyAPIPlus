@@ -1114,21 +1114,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/vertex-api-key", s.mgmt.PatchVertexCompatKey)
 		mgmt.DELETE("/vertex-api-key", s.mgmt.DeleteVertexCompatKey)
 
-		mgmt.GET("/freebuff-api-key", secretExport, s.mgmt.GetFreebuffKeys)
-		mgmt.PUT("/freebuff-api-key", s.mgmt.PutFreebuffKeys)
-		mgmt.PATCH("/freebuff-api-key", s.mgmt.PatchFreebuffKey)
-		mgmt.DELETE("/freebuff-api-key", s.mgmt.DeleteFreebuffKey)
-
-		// Freebuff device-flow login: start returns a browser login URL, poll
-		// checks authorization once per call, complete verifies and appends
-		// the token to the freebuff-api-key configuration.
-		mgmt.POST("/freebuff-auth/login", s.mgmt.StartFreebuffLogin)
-		mgmt.POST("/freebuff-auth/login/poll", s.mgmt.PollFreebuffLogin)
-		mgmt.POST("/freebuff-auth/login/complete", s.mgmt.CompleteFreebuffLogin)
-
-		// Freebuff publishes no upstream model list, so the UI reads this
-		// compiled-in catalog instead of proxying /v1/models.
-		mgmt.GET("/freebuff/models", s.mgmt.GetFreebuffCatalog)
+		mgmt.GET("/freebuff-auth-url", s.mgmt.RequestFreebuffToken)
 
 		mgmt.GET("/oauth-excluded-models", s.mgmt.GetOAuthExcludedModels)
 		mgmt.PUT("/oauth-excluded-models", s.mgmt.PutOAuthExcludedModels)
