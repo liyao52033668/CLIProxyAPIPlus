@@ -21,19 +21,17 @@ func (h *Handler) RequestCommandCodeToken(c *gin.Context) {
 
 	authSvc := commandcodeauth.NewCommandCodeAuth()
 
-	var apiKey, sessionToken string
+	var apiKey string
 	if c.Request.Method == http.MethodPost {
 		var req struct {
-			APIKey       string `json:"api_key"`
-			Token        string `json:"token"`
-			SessionToken string `json:"session_token"`
+			APIKey string `json:"api_key"`
+			Token  string `json:"token"`
 		}
 		if err := c.ShouldBindJSON(&req); err == nil {
 			apiKey = strings.TrimSpace(req.APIKey)
 			if apiKey == "" {
 				apiKey = strings.TrimSpace(req.Token)
 			}
-			sessionToken = strings.TrimSpace(req.SessionToken)
 		}
 	}
 	if apiKey == "" {
@@ -41,9 +39,6 @@ func (h *Handler) RequestCommandCodeToken(c *gin.Context) {
 		if apiKey == "" {
 			apiKey = strings.TrimSpace(c.Query("token"))
 		}
-	}
-	if sessionToken == "" {
-		sessionToken = strings.TrimSpace(c.Query("session_token"))
 	}
 
 	if apiKey == "" {
@@ -69,7 +64,6 @@ func (h *Handler) RequestCommandCodeToken(c *gin.Context) {
 
 	ts := &commandcodeauth.CommandCodeTokenStorage{
 		APIKey:          apiKey,
-		SessionToken:    sessionToken,
 		UserID:          userID,
 		UserName:        userName,
 		KeyName:         "cli-proxy-api",
@@ -93,10 +87,6 @@ func (h *Handler) RequestCommandCodeToken(c *gin.Context) {
 	}
 	if userName != "" {
 		record.Metadata["email"] = userName
-	}
-	if sessionToken != "" {
-		record.Metadata["session_token"] = sessionToken
-		record.Metadata["sessionToken"] = sessionToken
 	}
 
 	savedPath, errSave := h.saveTokenRecord(ctx, record)

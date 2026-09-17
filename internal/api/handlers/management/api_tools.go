@@ -274,14 +274,6 @@ func (h *Handler) APICall(c *gin.Context) {
 				}
 			}
 		}
-		// Command Code internal APIs expect Cookie: __Secure-commandcode_prod_.session_token={session_token}.
-		if strings.EqualFold(strings.TrimSpace(auth.Provider), "commandcode") {
-			if strings.EqualFold(key, "Cookie") || strings.Contains(value, "__Secure-commandcode_prod_.session_token") {
-				if session := commandCodeSessionTokenValue(auth, token); session != "" {
-					replacement = session
-				}
-			}
-		}
 		reqHeaders[key] = strings.ReplaceAll(value, "$TOKEN$", replacement)
 	}
 
@@ -456,37 +448,6 @@ func extractCursorUserID(sub string) string {
 		return sub
 	}
 	return ""
-}
-
-// commandCodeSessionTokenValue returns the session token for Command Code quota querying.
-// It prioritizes sessionToken, __Secure-commandcode_prod.session_token, or falling back to the API key.
-func commandCodeSessionTokenValue(auth *coreauth.Auth, defaultToken string) string {
-	if auth == nil {
-		return defaultToken
-	}
-	if auth.Metadata != nil {
-		for _, key := range []string{"sessionToken", "session_token", "__Secure-commandcode_prod_.session_token", "cookie"} {
-			if v, ok := auth.Metadata[key].(string); ok && strings.TrimSpace(v) != "" {
-				return strings.TrimSpace(v)
-			}
-		}
-	}
-	if auth.Attributes != nil {
-		for _, key := range []string{"sessionToken", "session_token", "__Secure-commandcode_prod_.session_token", "cookie"} {
-			if v := strings.TrimSpace(auth.Attributes[key]); v != "" {
-				return v
-			}
-		}
-	}
-	if auth.Storage != nil {
-		type sessionHolder interface{ GetSessionToken() string }
-		if sh, ok := auth.Storage.(sessionHolder); ok {
-			if v := strings.TrimSpace(sh.GetSessionToken()); v != "" {
-				return v
-			}
-		}
-	}
-	return defaultToken
 }
 
 func cursorUserIDFromAuth(auth *coreauth.Auth) string {

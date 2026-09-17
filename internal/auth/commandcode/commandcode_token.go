@@ -16,9 +16,6 @@ type CommandCodeTokenStorage struct {
 	// APIKey is the Command Code API key (prefix "user_").
 	APIKey string `json:"commandcodeApiKey"`
 
-	// SessionToken is the optional Web console session token (from __Secure-commandcode_prod.session_token) for quota querying.
-	SessionToken string `json:"sessionToken,omitempty"`
-
 	// UserID is the authenticated user identifier.
 	UserID string `json:"userId,omitempty"`
 
@@ -42,16 +39,6 @@ type CommandCodeTokenStorage struct {
 // GetAPIKey returns the stored API key.
 func (ts *CommandCodeTokenStorage) GetAPIKey() string {
 	return ts.APIKey
-}
-
-// GetSessionToken returns the stored web session token.
-func (ts *CommandCodeTokenStorage) GetSessionToken() string {
-	return ts.SessionToken
-}
-
-// SetSessionToken sets the web session token.
-func (ts *CommandCodeTokenStorage) SetSessionToken(token string) {
-	ts.SessionToken = token
 }
 
 // SetMetadata allows external callers to inject metadata into the storage before saving.
