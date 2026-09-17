@@ -64,4 +64,30 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "wait"})
 }
 
+// DeleteOAuthSession cancels a pending OAuth login session.
+//
+// Endpoint:
+//
+//	DELETE /v0/management/oauth-session?state=<state>
+//
+// Once cancelled the session is no longer pending, so the background callback and
+// device-code waiters give up without saving credentials. A state that is unknown
+// or already finished is reported as cancelled=false rather than an error.
+func (h *Handler) DeleteOAuthSession(c *gin.Context) {
+	state := strings.TrimSpace(c.Query("state"))
+	if state == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "state is required"})
+		return
+	}
+
+	if err := ValidateOAuthState(state); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "invalid state"})
+		return
+	}
+
+	cancelled := CancelOAuthSession(state)
+	log.Infof("DeleteOAuthSession: state=%s, cancelled=%v", state, cancelled)
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "cancelled": cancelled})
+}
+
 // PopulateAuthContext extracts request info and adds it to the context

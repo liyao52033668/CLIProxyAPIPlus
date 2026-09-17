@@ -1174,6 +1174,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/devin-auth-url", s.mgmt.RequestDevinToken)
 		mgmt.POST("/oauth-callback", s.mgmt.PostOAuthCallback)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
+		mgmt.DELETE("/oauth-session", s.mgmt.DeleteOAuthSession)
 	}
 }
 
