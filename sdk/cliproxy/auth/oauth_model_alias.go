@@ -286,7 +286,9 @@ func modelAliasChannel(auth *Auth) string {
 // and auth kind. Returns empty string if the provider/authKind combination doesn't support
 // OAuth model alias (e.g., API key authentication).
 //
-// Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, iflow, kiro, github-copilot, kimi, codearts, joycode, gitlab, cursor, qoder, codebuddy, codebuddy-ai, kilo, bt, xai.
+// Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, iflow, kiro, github-copilot, kimi, codearts, joycode, gitlab, cursor, qoder, codebuddy, codebuddy-ai, kilo, bt, xai, commandcode, lobsterai, devin, freebuff.
+// Providers backed by OAuth auth files must be listed here, otherwise their
+// configured aliases are silently ignored (TestOAuthModelAliasChannel_PortedProviders).
 func OAuthModelAliasChannel(provider, authKind string) string {
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	authKind = strings.ToLower(strings.TrimSpace(authKind))
@@ -310,7 +312,7 @@ func OAuthModelAliasChannel(provider, authKind string) string {
 			return ""
 		}
 		return "codex"
-	case "gemini-cli", "aistudio", "antigravity", "iflow", "kiro", "github-copilot", "kimi", "codearts", "qoder", "bt", "codebuddy", "codebuddy-ai", "cursor", "kilo", "gitlab", "joycode", "xai", "commandcode":
+	case "gemini-cli", "aistudio", "antigravity", "iflow", "kiro", "github-copilot", "kimi", "codearts", "qoder", "bt", "codebuddy", "codebuddy-ai", "cursor", "kilo", "gitlab", "joycode", "xai", "commandcode", "lobsterai", "devin", "freebuff":
 		return provider
 	default:
 		return ""

@@ -254,6 +254,51 @@ func TestApplyOAuthModelAlias_XAI(t *testing.T) {
 	}
 }
 
+// Every ported provider that owns an auth file type must also be listed in
+// OAuthModelAliasChannel, otherwise its oauth-model-alias entries are silently
+// dropped (registerModelAliases and request routing both key off the channel).
+func TestOAuthModelAliasChannel_PortedProviders(t *testing.T) {
+	t.Parallel()
+
+	for _, provider := range []string{"lobsterai", "devin", "freebuff", "xai", "commandcode"} {
+		if got := OAuthModelAliasChannel(provider, "oauth"); got != provider {
+			t.Errorf("OAuthModelAliasChannel(%q, oauth) = %q, want %q", provider, got, provider)
+		}
+	}
+}
+
+func TestApplyOAuthModelAlias_PortedProviders(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		provider string
+		name     string
+		alias    string
+	}{
+		{provider: "lobsterai", name: "deepseek-v4-pro", alias: "ds-pro"},
+		{provider: "devin", name: "swe-1-7", alias: "devin-swe"},
+		{provider: "freebuff", name: "claude-sonnet-4-5", alias: "fb-sonnet"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.provider, func(t *testing.T) {
+			t.Parallel()
+
+			mgr := NewManager(nil, nil, nil)
+			mgr.SetConfig(&internalconfig.Config{})
+			mgr.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{
+				tt.provider: {{Name: tt.name, Alias: tt.alias}},
+			})
+
+			auth := &Auth{ID: tt.provider + "-auth", Provider: tt.provider, Attributes: map[string]string{"auth_kind": "oauth"}}
+			resolved := mgr.applyOAuthModelAlias(auth, tt.alias)
+			if resolved != tt.name {
+				t.Fatalf("applyOAuthModelAlias(%q) = %q, want %q", tt.alias, resolved, tt.name)
+			}
+		})
+	}
+}
+
 func TestApplyOAuthModelAlias_SuffixPreservation(t *testing.T) {
 	t.Parallel()
 

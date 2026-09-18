@@ -54,6 +54,39 @@ func TestApplyOAuthModelAlias_XAIRename(t *testing.T) {
 	}
 }
 
+// Ported OAuth providers must rename their catalog models too; a missing entry
+// in OAuthModelAliasChannel makes applyOAuthModelAlias a silent no-op.
+func TestApplyOAuthModelAlias_PortedProvidersRename(t *testing.T) {
+	cases := []struct {
+		provider string
+		name     string
+		alias    string
+	}{
+		{provider: "lobsterai", name: "deepseek-v4-pro", alias: "ds-pro"},
+		{provider: "devin", name: "swe-1-7", alias: "devin-swe"},
+		{provider: "freebuff", name: "claude-sonnet-4-5", alias: "fb-sonnet"},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.provider, func(t *testing.T) {
+			cfg := &config.Config{
+				OAuthModelAlias: map[string][]config.OAuthModelAlias{
+					tt.provider: {{Name: tt.name, Alias: tt.alias}},
+				},
+			}
+			models := []*ModelInfo{{ID: tt.name, Name: "models/" + tt.name}}
+
+			out := applyOAuthModelAlias(cfg, tt.provider, "oauth", models)
+			if len(out) != 1 {
+				t.Fatalf("expected 1 model, got %d", len(out))
+			}
+			if out[0].ID != tt.alias {
+				t.Fatalf("expected model id %q, got %q", tt.alias, out[0].ID)
+			}
+		})
+	}
+}
+
 func TestApplyOAuthModelAlias_ForkAddsAlias(t *testing.T) {
 	cfg := &config.Config{
 		OAuthModelAlias: map[string][]config.OAuthModelAlias{
