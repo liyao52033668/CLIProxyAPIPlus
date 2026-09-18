@@ -48,4 +48,7 @@ const (
 
 	// LobsterAI represents the LobsterAI (NetEase Youdao) provider identifier.
 	LobsterAI = "lobsterai"
+
+	// Alysis represents the Alysis Code Pro provider identifier.
+	Alysis = "alysis"
 )

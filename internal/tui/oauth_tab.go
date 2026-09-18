@@ -26,6 +26,7 @@ var oauthProviders = []oauthProvider{
 	{"Kimi", "kimi-auth-url", "🟫"},
 	{"xAI", "xai-auth-url", "⬛"},
 	{"Command Code", "commandcode-auth-url", "🟨"},
+	{"Alysis", "alysis-auth-url", "🟥"},
 }
 
 // oauthTabModel handles OAuth login flows.

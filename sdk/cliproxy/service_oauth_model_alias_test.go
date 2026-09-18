@@ -65,6 +65,7 @@ func TestApplyOAuthModelAlias_PortedProvidersRename(t *testing.T) {
 		{provider: "lobsterai", name: "deepseek-v4-pro", alias: "ds-pro"},
 		{provider: "devin", name: "swe-1-7", alias: "devin-swe"},
 		{provider: "freebuff", name: "claude-sonnet-4-5", alias: "fb-sonnet"},
+		{provider: "alysis", name: "deepseek-v4-flash", alias: "ds-flash"},
 	}
 
 	for _, tt := range cases {

@@ -260,7 +260,7 @@ func TestApplyOAuthModelAlias_XAI(t *testing.T) {
 func TestOAuthModelAliasChannel_PortedProviders(t *testing.T) {
 	t.Parallel()
 
-	for _, provider := range []string{"lobsterai", "devin", "freebuff", "xai", "commandcode"} {
+	for _, provider := range []string{"lobsterai", "devin", "freebuff", "xai", "commandcode", "alysis"} {
 		if got := OAuthModelAliasChannel(provider, "oauth"); got != provider {
 			t.Errorf("OAuthModelAliasChannel(%q, oauth) = %q, want %q", provider, got, provider)
 		}
@@ -278,6 +278,7 @@ func TestApplyOAuthModelAlias_PortedProviders(t *testing.T) {
 		{provider: "lobsterai", name: "deepseek-v4-pro", alias: "ds-pro"},
 		{provider: "devin", name: "swe-1-7", alias: "devin-swe"},
 		{provider: "freebuff", name: "claude-sonnet-4-5", alias: "fb-sonnet"},
+		{provider: "alysis", name: "deepseek-v4-flash", alias: "ds-flash"},
 	}
 
 	for _, tt := range tests {

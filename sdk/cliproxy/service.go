@@ -573,6 +573,8 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 		s.coreManager.RegisterExecutor(executor.NewDevinExecutor(s.cfg))
 	case "lobsterai":
 		s.coreManager.RegisterExecutor(executor.NewLobsterAIExecutor(s.cfg))
+	case "alysis":
+		s.coreManager.RegisterExecutor(executor.NewAlysisExecutor(s.cfg))
 	case "qoder":
 		qoderExecutor := executor.NewQoderExecutor(s.cfg)
 		qoderExecutor.SetAuthMetadataUpdater(func(ctx context.Context, id string, updates map[string]any, deletes []string) error {
@@ -1487,6 +1489,10 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		}
 	case "freebuff":
 		models = registry.GetFreebuffModels()
+	case "alysis":
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		models = executor.FetchAlysisModels(ctx, a, s.cfg)
 	case "qoder":
 		catalog := fetchQoderCatalog(context.Background(), a, s.cfg)
 		if len(catalog.Models) > 0 {

@@ -1121,6 +1121,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetDevinModels()
 	case "lobsterai", "lobster", "youdao":
 		return GetLobsterAIModels()
+	case "alysis":
+		return GetAlysisModels()
 	default:
 		return nil
 	}

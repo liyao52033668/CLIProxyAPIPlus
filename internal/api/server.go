@@ -1123,6 +1123,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.DELETE("/vertex-api-key", s.mgmt.DeleteVertexCompatKey)
 
 		mgmt.GET("/freebuff-auth-url", s.mgmt.RequestFreebuffToken)
+		mgmt.GET("/alysis-auth-url", s.mgmt.RequestAlysisToken)
 
 		mgmt.GET("/oauth-excluded-models", s.mgmt.GetOAuthExcludedModels)
 		mgmt.PUT("/oauth-excluded-models", s.mgmt.PutOAuthExcludedModels)
