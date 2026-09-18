@@ -1507,7 +1507,9 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	case "devin":
 		models = registry.GetDevinModels()
 	case "lobsterai":
-		models = registry.GetLobsterAIModels()
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		models = executor.FetchLobsterAIModels(ctx, a, s.cfg)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
 		if s.cfg != nil {

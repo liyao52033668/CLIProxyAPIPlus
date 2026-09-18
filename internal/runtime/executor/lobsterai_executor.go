@@ -13,6 +13,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/lobsterai"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -651,4 +652,86 @@ func sortIntsAscending(values []int) {
 			values[j], values[j-1] = values[j-1], values[j]
 		}
 	}
+}
+
+// FetchLobsterAIModels fetches the account's model catalog from the upstream
+// /api/models/available endpoint and enriches it with the static catalog's
+// metadata. Missing credentials or any fetch failure fall back to the static
+// catalog, so registration never loses its baseline model list.
+func FetchLobsterAIModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config) []*registry.ModelInfo {
+	static := registry.GetLobsterAIModels()
+	creds := lobsterai.CredentialsFromAuth(auth)
+	if strings.TrimSpace(creds.AccessToken) == "" {
+		log.Debug("lobsterai: no access token, using static model list")
+		return static
+	}
+	service := lobsterai.NewService(helps.NewProxyAwareHTTPClient(ctx, cfg, auth, 15*time.Second))
+	if creds.BaseURL != "" {
+		baseURL, errBase := resolveBaseURL(creds.BaseURL)
+		if errBase != nil {
+			log.Warnf("lobsterai: using static models (invalid base url: %v)", errBase)
+			return static
+		}
+		service.SetValidatedServerBaseURL(baseURL)
+	}
+	catalog, errCatalog := service.FetchCatalog(ctx, creds.AccessToken)
+	if errCatalog != nil {
+		if errors.Is(errCatalog, context.Canceled) || errors.Is(errCatalog, context.DeadlineExceeded) {
+			log.Warnf("lobsterai: fetch model catalog canceled: %v", errCatalog)
+		} else {
+			log.Warnf("lobsterai: using static models (catalog fetch failed: %v)", errCatalog)
+		}
+		return static
+	}
+	return mergeLobsterAICatalog(catalog, static)
+}
+
+// mergeLobsterAICatalog builds model entries from the upstream catalog. Known
+// ids (matched case-insensitively) reuse the static entry's metadata while
+// keeping the upstream identifier casing; unknown ids get minimal defaults so
+// newly added upstream models appear without a code change.
+func mergeLobsterAICatalog(catalog []lobsterai.CatalogModel, static []*registry.ModelInfo) []*registry.ModelInfo {
+	staticByID := make(map[string]*registry.ModelInfo, len(static))
+	for _, model := range static {
+		if model == nil || strings.TrimSpace(model.ID) == "" {
+			continue
+		}
+		staticByID[strings.ToLower(model.ID)] = model
+	}
+	now := time.Now().Unix()
+	models := make([]*registry.ModelInfo, 0, len(catalog))
+	for _, entry := range catalog {
+		id := strings.TrimSpace(entry.ID)
+		if id == "" {
+			continue
+		}
+		if known := staticByID[strings.ToLower(id)]; known != nil {
+			clone := *known
+			clone.ID = id
+			clone.Created = now
+			if len(known.SupportedEndpoints) > 0 {
+				clone.SupportedEndpoints = append([]string(nil), known.SupportedEndpoints...)
+			}
+			models = append(models, &clone)
+			continue
+		}
+		displayName := entry.Name
+		if displayName == "" {
+			displayName = id
+		}
+		models = append(models, &registry.ModelInfo{
+			ID:                 id,
+			Object:             "model",
+			Created:            now,
+			OwnedBy:            "lobsterai",
+			Type:               "lobsterai",
+			DisplayName:        displayName,
+			Description:        displayName + " via LobsterAI",
+			SupportedEndpoints: []string{"/chat/completions"},
+		})
+	}
+	if len(models) == 0 {
+		return static
+	}
+	return models
 }

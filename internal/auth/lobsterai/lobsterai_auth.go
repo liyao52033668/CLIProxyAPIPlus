@@ -324,6 +324,55 @@ func (s *Service) FetchUsage(ctx context.Context, accessToken string) (*Usage, e
 	return usage, nil
 }
 
+// CatalogModel is one entry from the upstream model catalog. The upstream
+// returns the official casing, which is authoritative for the registered
+// model identifier.
+type CatalogModel struct {
+	ID        string
+	Name      string
+	Provider  string
+	APIFormat string
+}
+
+// FetchCatalog reads the account's available model list from
+// /api/models/available, the same endpoint the official client uses to render
+// its model picker.
+func (s *Service) FetchCatalog(ctx context.Context, accessToken string) ([]CatalogModel, error) {
+	if strings.TrimSpace(accessToken) == "" {
+		return nil, errors.New("lobsterai: access token is required")
+	}
+	data, errData := s.getData(ctx, accessToken, "/api/models/available")
+	if errData != nil {
+		return nil, errData
+	}
+	var entries []struct {
+		ModelID   string `json:"modelId"`
+		ModelName string `json:"modelName"`
+		Provider  string `json:"provider"`
+		APIFormat string `json:"apiFormat"`
+	}
+	if errUnmarshal := json.Unmarshal(data, &entries); errUnmarshal != nil {
+		return nil, fmt.Errorf("lobsterai: parse model catalog: %w", errUnmarshal)
+	}
+	models := make([]CatalogModel, 0, len(entries))
+	for _, entry := range entries {
+		id := strings.TrimSpace(entry.ModelID)
+		if id == "" {
+			continue
+		}
+		models = append(models, CatalogModel{
+			ID:        id,
+			Name:      strings.TrimSpace(entry.ModelName),
+			Provider:  strings.TrimSpace(entry.Provider),
+			APIFormat: strings.TrimSpace(entry.APIFormat),
+		})
+	}
+	if len(models) == 0 {
+		return nil, errors.New("lobsterai: model catalog is empty")
+	}
+	return models, nil
+}
+
 // tokenRequest posts a credential request and normalizes its data payload.
 func (s *Service) tokenRequest(ctx context.Context, path string, body map[string]any) (*TokenPayload, error) {
 	data, errData := s.postData(ctx, "", path, body)

@@ -55,6 +55,70 @@ func TestSanitizeOAuthModelAlias_AllowsMultipleAliasesForSameName(t *testing.T) 
 	}
 }
 
+// Aliases are unique within a channel: when several upstream names share one
+// alias, sanitize keeps only the first. Request routing resolves alias ->
+// upstream 1:1, so duplicate aliases have no well-defined target.
+func TestSanitizeOAuthModelAlias_DropsDuplicateAliases(t *testing.T) {
+	cfg := &Config{
+		OAuthModelAlias: map[string][]OAuthModelAlias{
+			"lobsterai": {
+				{Name: "glm-5.2", Alias: "glm"},
+				{Name: "glm-5.1", Alias: "glm"},
+				{Name: "deepseek-v4-pro", Alias: "ds-pro"},
+			},
+		},
+	}
+
+	cfg.SanitizeOAuthModelAlias()
+
+	aliases := cfg.OAuthModelAlias["lobsterai"]
+	if len(aliases) != 2 {
+		t.Fatalf("expected 2 sanitized aliases, got %d", len(aliases))
+	}
+	if aliases[0].Name != "glm-5.2" || aliases[0].Alias != "glm" {
+		t.Fatalf("expected first duplicate alias to win, got name=%q alias=%q", aliases[0].Name, aliases[0].Alias)
+	}
+	if aliases[1].Name != "deepseek-v4-pro" || aliases[1].Alias != "ds-pro" {
+		t.Fatalf("expected distinct alias kept, got name=%q alias=%q", aliases[1].Name, aliases[1].Alias)
+	}
+}
+
+// "MiniMax-M3" -> "minimax-m3" differs only by case. Model names compare
+// case-insensitively across the whole pipeline (config sanitize, registration
+// rename, request routing), so such an alias is an identity mapping and is
+// dropped. The rule applies per channel independently: the same entry dies in
+// every channel, while genuinely distinct aliases coexist across channels.
+func TestSanitizeOAuthModelAlias_CaseOnlyAliasDropped(t *testing.T) {
+	cfg := &Config{
+		OAuthModelAlias: map[string][]OAuthModelAlias{
+			"lobsterai": {
+				{Name: "deepseek-v4-flash", Alias: "deepseek-v4.1-flash"},
+				{Name: "MiniMax-M3", Alias: "minimax-m3"},
+			},
+			"codebuddy": {
+				{Name: "MiniMax-M3", Alias: "minimax-m3"},
+			},
+			"qoder": {
+				{Name: "mmodel", Alias: "minimax-m3"},
+			},
+		},
+	}
+
+	cfg.SanitizeOAuthModelAlias()
+
+	lobster := cfg.OAuthModelAlias["lobsterai"]
+	if len(lobster) != 1 || lobster[0].Name != "deepseek-v4-flash" {
+		t.Fatalf("expected only the non-identity alias to survive, got %+v", lobster)
+	}
+	if _, exists := cfg.OAuthModelAlias["codebuddy"]; exists {
+		t.Fatalf("expected the case-only alias to be dropped in the codebuddy channel too")
+	}
+	qoder := cfg.OAuthModelAlias["qoder"]
+	if len(qoder) != 1 || qoder[0].Name != "mmodel" || qoder[0].Alias != "minimax-m3" {
+		t.Fatalf("expected qoder's distinct-name alias to survive, got %+v", qoder)
+	}
+}
+
 func TestSanitizeOAuthModelAlias_InjectsDefaultKiroAliases(t *testing.T) {
 	// When no kiro aliases are configured, defaults should be injected
 	cfg := &Config{

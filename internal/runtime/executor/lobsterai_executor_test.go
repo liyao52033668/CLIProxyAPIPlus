@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -518,5 +519,101 @@ func TestLobsterAIExecutorAppliesThinkingEffort(t *testing.T) {
 	// The suffix must be stripped from the wire model id.
 	if gotBody["model"] != "glm-5" {
 		t.Fatalf("model = %#v, want glm-5 without the suffix", gotBody["model"])
+	}
+}
+
+func TestFetchLobsterAIModelsUsesUpstreamCatalog(t *testing.T) {
+	allowLoopbackBaseURLForTest(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The catalog GET carries the credential headers but no Content-Type
+		// (that is chat-request specific), so assert them directly.
+		if got := r.Header.Get("Authorization"); got != "Bearer "+fixtureToken("access") {
+			t.Fatalf("upstream Authorization = %q, want the credential bearer token", got)
+		}
+		if got := r.Header.Get("X-LobsterAI-Client-Version"); got == "" {
+			t.Fatal("upstream request is missing the client version header")
+		}
+		if r.URL.Path != "/api/models/available" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":0,"data":[` +
+			`{"modelId":"MiniMax-M3","modelName":"MiniMax M3"},` +
+			`{"modelId":"minimax-m3","modelName":"Lowercase Fixture"},` +
+			`{"modelId":"brand-new-model","modelName":"Brand New"}]}`))
+	}))
+	defer server.Close()
+
+	models := FetchLobsterAIModels(context.Background(), lobsterAITestAuth(server.URL), &config.Config{})
+	if len(models) != 3 {
+		t.Fatalf("model count = %d, want 3", len(models))
+	}
+
+	// Unknown upstream ids get minimal usable defaults.
+	var fresh *registry.ModelInfo
+	var lowered *registry.ModelInfo
+	for _, model := range models {
+		switch model.ID {
+		case "brand-new-model":
+			fresh = model
+		case "minimax-m3":
+			lowered = model
+		}
+	}
+	if fresh == nil {
+		t.Fatal("brand-new-model missing from the merged catalog")
+	}
+	if fresh.Type != "lobsterai" || fresh.DisplayName != "Brand New" {
+		t.Fatalf("fresh entry = %#v, want the lobsterai type and upstream name", fresh)
+	}
+	if len(fresh.SupportedEndpoints) != 1 || fresh.SupportedEndpoints[0] != "/chat/completions" {
+		t.Fatalf("fresh endpoints = %#v, want the chat completions endpoint", fresh.SupportedEndpoints)
+	}
+	// Case-insensitive enrichment: a casing variant still reuses the static
+	// metadata while keeping the upstream identifier.
+	if lowered == nil || lowered.DisplayName != "MiniMax M3" {
+		t.Fatalf("lowercase entry = %#v, want the static metadata under the upstream casing", lowered)
+	}
+
+	// Known ids keep the static catalog metadata.
+	var enriched *registry.ModelInfo
+	for _, model := range models {
+		if model.ID == "MiniMax-M3" {
+			enriched = model
+		}
+	}
+	if enriched == nil {
+		t.Fatal("MiniMax-M3 missing from the merged catalog")
+	}
+	if enriched.DisplayName != "MiniMax M3" || enriched.ContextLength <= 0 {
+		t.Fatalf("enriched entry = %#v, want the static catalog metadata", enriched)
+	}
+	if enriched.Thinking == nil {
+		t.Fatal("enriched entry lost the static thinking metadata")
+	}
+}
+
+func TestFetchLobsterAIModelsFallsBackWithoutCredentials(t *testing.T) {
+	auth := &cliproxyauth.Auth{ID: "lobsterai-test", Provider: "lobsterai", Metadata: map[string]any{}}
+	models := FetchLobsterAIModels(context.Background(), auth, &config.Config{})
+	if len(models) != len(registry.GetLobsterAIModels()) {
+		t.Fatalf("model count = %d, want the static catalog", len(models))
+	}
+}
+
+func TestFetchLobsterAIModelsFallsBackOnFetchFailure(t *testing.T) {
+	allowLoopbackBaseURLForTest(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	models := FetchLobsterAIModels(context.Background(), lobsterAITestAuth(server.URL), &config.Config{})
+	if len(models) != len(registry.GetLobsterAIModels()) {
+		t.Fatalf("model count = %d, want the static catalog after a failed fetch", len(models))
 	}
 }

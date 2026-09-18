@@ -285,6 +285,67 @@ func TestFetchUsageReadsSummaryAndQuota(t *testing.T) {
 	}
 }
 
+func TestServiceFetchCatalog(t *testing.T) {
+	allowLoopbackForTest(t)
+
+	accessToken := fixtureToken("fixture", "access")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer "+accessToken {
+			t.Errorf("Authorization = %q, want the fixture bearer token", got)
+		}
+		if r.URL.Path != "/api/models/available" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if r.URL.Query().Get("firstKeyfrom") != DefaultKeyfrom {
+			t.Errorf("firstKeyfrom = %q, want the official keyfrom", r.URL.Query().Get("firstKeyfrom"))
+		}
+		writeEnvelope(t, w, []map[string]any{
+			{"modelId": "MiniMax-M3", "modelName": "MiniMax M3", "provider": "minimax", "apiFormat": "openai"},
+			{"modelId": "brand-new-model", "modelName": "Brand New"},
+			{"modelId": "   "},
+		})
+	}))
+	defer server.Close()
+
+	service := NewService(server.Client())
+	if errSet := service.SetServerBaseURL(server.URL); errSet != nil {
+		t.Fatalf("SetServerBaseURL: %v", errSet)
+	}
+	catalog, errCatalog := service.FetchCatalog(context.Background(), accessToken)
+	if errCatalog != nil {
+		t.Fatalf("FetchCatalog: %v", errCatalog)
+	}
+	if len(catalog) != 2 {
+		t.Fatalf("catalog length = %d, want 2 (blank ids dropped)", len(catalog))
+	}
+	if catalog[0].ID != "MiniMax-M3" || catalog[0].Name != "MiniMax M3" || catalog[0].APIFormat != "openai" {
+		t.Fatalf("entry 0 = %#v, want the upstream casing, name, and format", catalog[0])
+	}
+	if catalog[1].ID != "brand-new-model" || catalog[1].Name != "Brand New" {
+		t.Fatalf("entry 1 = %#v, want the new model", catalog[1])
+	}
+}
+
+func TestServiceFetchCatalogRejectsEmptyCatalog(t *testing.T) {
+	allowLoopbackForTest(t)
+
+	accessToken := fixtureToken("fixture", "access")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeEnvelope(t, w, []map[string]any{})
+	}))
+	defer server.Close()
+
+	service := NewService(server.Client())
+	if errSet := service.SetServerBaseURL(server.URL); errSet != nil {
+		t.Fatalf("SetServerBaseURL: %v", errSet)
+	}
+	if _, errCatalog := service.FetchCatalog(context.Background(), accessToken); errCatalog == nil {
+		t.Fatal("FetchCatalog accepted an empty catalog")
+	}
+}
+
 func TestSetServerBaseURLRejectsUnsafeValues(t *testing.T) {
 	service := NewService(nil)
 	if errSet := service.SetServerBaseURL("http://127.0.0.1:1234"); errSet == nil {
