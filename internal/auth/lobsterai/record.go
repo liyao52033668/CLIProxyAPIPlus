@@ -189,9 +189,12 @@ func Signals(usage *Usage) map[string]string {
 	if usage.CreditsRemaining > 0 {
 		signals["total_credits_remaining"] = formatCredits(usage.CreditsRemaining)
 	}
-	if usage.CreditsLimit > 0 {
-		signals["credits_limit"] = formatCredits(usage.CreditsLimit)
-		signals["credits_used"] = formatCredits(usage.CreditsUsed)
+	// Cycle counters are published under their own keys: they exclude campaign
+	// grants, so naming them like the ledger balance would invite the same
+	// conflation the quota card suffered from.
+	if usage.CycleCreditsLimit > 0 {
+		signals["cycle_credits_limit"] = formatCredits(usage.CycleCreditsLimit)
+		signals["cycle_credits_used"] = formatCredits(usage.CycleCreditsUsed)
 	}
 	if usage.PlanName != "" {
 		signals["plan"] = usage.PlanName

@@ -66,11 +66,11 @@ func TestBuildAuthRecordShape(t *testing.T) {
 		Nickname:     "Lobster User",
 	}
 	record := BuildAuthRecord(payload, "uuid-1", "", &Usage{
-		CreditsRemaining: 12.5,
-		CreditsLimit:     100,
-		CreditsUsed:      87.5,
-		PlanName:         "Standard",
-		Subscription:     "active",
+		CreditsRemaining:  12.5,
+		CycleCreditsLimit: 100,
+		CycleCreditsUsed:  87.5,
+		PlanName:          "Standard",
+		Subscription:      "active",
 	})
 	if record == nil {
 		t.Fatal("BuildAuthRecord returned nil")
@@ -107,8 +107,13 @@ func TestBuildAuthRecordShape(t *testing.T) {
 	if got := record.Quota.Signals["total_credits_remaining"]; got != "12.5" {
 		t.Fatalf("total_credits_remaining = %q, want 12.5", got)
 	}
-	if got := record.Quota.Signals["credits_limit"]; got != "100" {
-		t.Fatalf("credits_limit = %q, want 100", got)
+	// Cycle counters are published under their own keys so a reader cannot
+	// mistake them for a limit on the ledger balance.
+	if got := record.Quota.Signals["cycle_credits_limit"]; got != "100" {
+		t.Fatalf("cycle_credits_limit = %q, want 100", got)
+	}
+	if _, exists := record.Quota.Signals["credits_limit"]; exists {
+		t.Fatalf("credits_limit = %q, want the ambiguous key absent", record.Quota.Signals["credits_limit"])
 	}
 	if got := record.Quota.Signals["plan"]; got != "Standard" {
 		t.Fatalf("plan = %q, want Standard", got)
@@ -169,9 +174,9 @@ func TestSignalsSkipsEmptyValues(t *testing.T) {
 	if signals := Signals(&Usage{}); signals != nil {
 		t.Fatalf("Signals(empty) = %#v, want nil", signals)
 	}
-	signals := Signals(&Usage{CreditsRemaining: 5, CreditsLimit: 10, CreditsUsed: 5})
-	if signals["credits_used"] != "5" {
-		t.Fatalf("credits_used = %q, want 5", signals["credits_used"])
+	signals := Signals(&Usage{CreditsRemaining: 5, CycleCreditsLimit: 10, CycleCreditsUsed: 3})
+	if signals["cycle_credits_used"] != "3" {
+		t.Fatalf("cycle_credits_used = %q, want 3", signals["cycle_credits_used"])
 	}
 }
 

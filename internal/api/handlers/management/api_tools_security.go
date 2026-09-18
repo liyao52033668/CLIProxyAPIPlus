@@ -82,6 +82,9 @@ var apiCallTokenHostsByProvider = map[string]map[string]struct{}{
 	"commandcode": {
 		"api.commandcode.ai": {},
 	},
+	"lobsterai": {
+		"lobsterai-server.youdao.com": {},
+	},
 }
 
 func (h *Handler) apiCallDNSResolver() apiCallResolver {

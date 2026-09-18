@@ -1035,6 +1035,7 @@ func (s *Server) registerManagementRoutes() {
 
 		mgmt.GET("/copilot-quota", s.mgmt.GetCopilotQuota)
 		mgmt.GET("/kiro-quota", s.mgmt.GetKiroQuota)
+		mgmt.GET("/lobsterai-quota", s.mgmt.GetLobsterAIQuota)
 		s.mgmt.StartKiroQuotaRefresher()
 
 		mgmt.GET("/api-keys", secretExport, s.mgmt.GetAPIKeys)

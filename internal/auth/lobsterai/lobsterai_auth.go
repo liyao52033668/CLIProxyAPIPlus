@@ -112,13 +112,37 @@ type TokenPayload struct {
 	Nickname     string
 }
 
-// Usage is the account credit snapshot returned by the user endpoints.
-type Usage struct {
+// CreditItem is one credit bucket from the profile summary (subscription, free
+// grant, campaign bonus, invitation reward, ...).
+type CreditItem struct {
+	Type             string `json:"type"`
+	Label            string `json:"label"`
+	LabelEn          string `json:"labelEn"`
 	CreditsRemaining float64
-	CreditsLimit     float64
-	CreditsUsed      float64
-	PlanName         string
-	Subscription     string
+	// ExpiresAt is the bucket expiry in RFC3339, or empty when it never expires.
+	ExpiresAt string
+}
+
+// Usage is the account credit snapshot returned by the user endpoints.
+//
+// The two upstream endpoints use different accounting bases and must not be
+// conflated: profile-summary reports the credit ledger (the account total plus
+// its per-bucket breakdown), while the quota endpoint reports plan cycle
+// counters that exclude campaign grants. Cycle counters are therefore named
+// separately from the ledger total.
+type Usage struct {
+	// CreditsRemaining is the ledger total (free plus campaign grants) and the
+	// single authoritative balance.
+	CreditsRemaining float64
+	// CycleCreditsLimit and CycleCreditsUsed are the plan cycle counters from
+	// the quota endpoint. They use a narrower base than CreditsRemaining, so
+	// they describe consumption pace rather than a spendable balance.
+	CycleCreditsLimit float64
+	CycleCreditsUsed  float64
+	PlanName          string
+	Subscription      string
+	// Items breaks the ledger total down per credit bucket.
+	Items []CreditItem
 }
 
 // Service performs LobsterAI auth and usage calls with a caller-supplied HTTP
@@ -239,11 +263,27 @@ func (s *Service) FetchUsage(ctx context.Context, accessToken string) (*Usage, e
 	}
 	var summary struct {
 		TotalCreditsRemaining float64 `json:"totalCreditsRemaining"`
+		CreditItems           []struct {
+			Type             string  `json:"type"`
+			Label            string  `json:"label"`
+			LabelEn          string  `json:"labelEn"`
+			CreditsRemaining float64 `json:"creditsRemaining"`
+			ExpiresAt        string  `json:"expiresAt"`
+		} `json:"creditItems"`
 	}
 	if errUnmarshal := json.Unmarshal(summaryData, &summary); errUnmarshal != nil {
 		return nil, fmt.Errorf("lobsterai: parse profile summary: %w", errUnmarshal)
 	}
 	usage.CreditsRemaining = summary.TotalCreditsRemaining
+	for _, item := range summary.CreditItems {
+		usage.Items = append(usage.Items, CreditItem{
+			Type:             strings.TrimSpace(item.Type),
+			Label:            strings.TrimSpace(item.Label),
+			LabelEn:          strings.TrimSpace(item.LabelEn),
+			CreditsRemaining: item.CreditsRemaining,
+			ExpiresAt:        strings.TrimSpace(item.ExpiresAt),
+		})
+	}
 
 	quotaData, errQuota := s.getData(ctx, accessToken, "/api/user/quota")
 	if errQuota != nil {
@@ -266,19 +306,20 @@ func (s *Service) FetchUsage(ctx context.Context, accessToken string) (*Usage, e
 	}
 	usage.PlanName = strings.TrimSpace(quota.PlanName)
 	usage.Subscription = strings.TrimSpace(quota.SubscriptionStatus)
+	// Pick the cycle counter the account is actually on, most specific first.
 	switch {
 	case quota.MonthlyCreditsLimit > 0:
-		usage.CreditsLimit = quota.MonthlyCreditsLimit
-		usage.CreditsUsed = quota.MonthlyCreditsUsed
+		usage.CycleCreditsLimit = quota.MonthlyCreditsLimit
+		usage.CycleCreditsUsed = quota.MonthlyCreditsUsed
 	case quota.CreditsLimit > 0:
-		usage.CreditsLimit = quota.CreditsLimit
-		usage.CreditsUsed = quota.CreditsUsed
+		usage.CycleCreditsLimit = quota.CreditsLimit
+		usage.CycleCreditsUsed = quota.CreditsUsed
 	case quota.FreeCreditsTotal > 0:
-		usage.CreditsLimit = quota.FreeCreditsTotal
-		usage.CreditsUsed = quota.FreeCreditsUsed
+		usage.CycleCreditsLimit = quota.FreeCreditsTotal
+		usage.CycleCreditsUsed = quota.FreeCreditsUsed
 	case quota.DailyCreditsLimit > 0:
-		usage.CreditsLimit = quota.DailyCreditsLimit
-		usage.CreditsUsed = quota.DailyCreditsUsed
+		usage.CycleCreditsLimit = quota.DailyCreditsLimit
+		usage.CycleCreditsUsed = quota.DailyCreditsUsed
 	}
 	return usage, nil
 }

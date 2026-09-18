@@ -275,9 +275,10 @@ func TestFetchUsageReadsSummaryAndQuota(t *testing.T) {
 	if usage.CreditsRemaining != 5297.72 {
 		t.Fatalf("CreditsRemaining = %v, want 5297.72", usage.CreditsRemaining)
 	}
-	// Monthly counters win over the free-tier counters.
-	if usage.CreditsLimit != 5000 || usage.CreditsUsed != 200 {
-		t.Fatalf("limit/used = %v/%v, want 5000/200", usage.CreditsLimit, usage.CreditsUsed)
+	// The monthly counters are cycle counters: they live under their own names
+	// because they exclude campaign grants and are not a limit for the ledger.
+	if usage.CycleCreditsLimit != 5000 || usage.CycleCreditsUsed != 200 {
+		t.Fatalf("cycle limit/used = %v/%v, want 5000/200", usage.CycleCreditsLimit, usage.CycleCreditsUsed)
 	}
 	if usage.PlanName != "Standard" || usage.Subscription != "active" {
 		t.Fatalf("plan/subscription = %q/%q, want Standard/active", usage.PlanName, usage.Subscription)
