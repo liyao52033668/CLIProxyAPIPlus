@@ -33,6 +33,7 @@ type staticModelsJSON struct {
 	Antigravity []*ModelInfo `json:"antigravity"`
 	XAI         []*ModelInfo `json:"xai"`
 	Devin       []*ModelInfo `json:"devin"`
+	LobsterAI   []*ModelInfo `json:"lobsterai"`
 }
 
 // GetClaudeModels returns the standard Claude model definitions.
@@ -1118,6 +1119,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetXAIModels()
 	case "devin", "cognition":
 		return GetDevinModels()
+	case "lobsterai", "lobster", "youdao":
+		return GetLobsterAIModels()
 	default:
 		return nil
 	}

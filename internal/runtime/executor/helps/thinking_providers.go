@@ -11,6 +11,7 @@ import (
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/gemini"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/geminicli"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/kimi"
+	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/lobsterai"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/openai"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/xai"
 )

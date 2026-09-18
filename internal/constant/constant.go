@@ -45,4 +45,7 @@ const (
 
 	// Freebuff represents the Freebuff (Codebuff) provider identifier.
 	Freebuff = "freebuff"
+
+	// LobsterAI represents the LobsterAI (NetEase Youdao) provider identifier.
+	LobsterAI = "lobsterai"
 )

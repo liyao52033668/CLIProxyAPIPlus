@@ -277,6 +277,13 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	guard.SetBlacklist(cfg.RemoteManagement.IPBlacklist)
 	engine.Use(authGuard.Middleware())
 
+	// LobsterAI's login portal only accepts http://127.0.0.1:<port>/auth/callback
+	// as its redirect target, and the Amp module proxies the whole /auth/* tree.
+	// The callback is therefore claimed by middleware (it acts only for a pending
+	// LobsterAI session) instead of a route that would conflict with Amp's
+	// wildcard and panic at startup.
+	engine.Use(lobsterAICallbackMiddleware(cfg.AuthDir))
+
 	// Add request logging middleware (positioned after recovery, before auth)
 	// Resolve logs directory relative to the configuration file directory.
 	var requestLogger logging.RequestLogger
@@ -1172,6 +1179,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/commandcode-auth-url", s.mgmt.RequestCommandCodeToken)
 		mgmt.POST("/commandcode-auth-url", s.mgmt.RequestCommandCodeToken)
 		mgmt.GET("/devin-auth-url", s.mgmt.RequestDevinToken)
+		mgmt.GET("/lobsterai-auth-url", s.mgmt.RequestLobsterAIToken)
 		mgmt.POST("/oauth-callback", s.mgmt.PostOAuthCallback)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
 		mgmt.DELETE("/oauth-session", s.mgmt.DeleteOAuthSession)

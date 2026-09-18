@@ -30,6 +30,7 @@ func newAuthManager() *sdkAuth.Manager {
 		sdkAuth.NewXAIAuthenticator(),
 		sdkAuth.NewCommandCodeAuthenticator(),
 		sdkAuth.NewDevinAuthenticator(),
+		sdkAuth.NewLobsterAIAuthenticator(),
 	)
 	return manager
 }

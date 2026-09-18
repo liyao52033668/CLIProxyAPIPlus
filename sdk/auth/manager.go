@@ -122,6 +122,13 @@ var providerMetadata = map[string]ProviderInfo{
 		FlowType:        "browser_oauth",
 		AuthURLEndpoint: "/commandcode-auth-url",
 	},
+	"lobsterai": {
+		Key:             "lobsterai",
+		DisplayName:     "LobsterAI",
+		FlowType:        "browser_oauth",
+		AuthURLEndpoint: "/lobsterai-auth-url",
+		Aliases:         []string{"lobster", "youdao"},
+	},
 }
 
 func (m *Manager) ListProviders() []ProviderInfo {

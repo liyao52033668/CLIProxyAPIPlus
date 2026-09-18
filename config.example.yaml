@@ -227,6 +227,24 @@ ws-auth: true
 #     - "API"
 #     - "proxy"
 
+# LobsterAI provider behavior.
+# LobsterAI (NetEase Youdao) is driven entirely by auth files created through the
+# browser login flow (GET /v0/management/lobsterai-auth-url); there is no config
+# section. Each auth file is a JSON object with "type": "lobsterai":
+#   {
+#     "type": "lobsterai",
+#     "access_token": "...",                  # Bearer token for /api/proxy/v1/chat/completions
+#     "refresh_token": "...",                 # rotated automatically ~30min before expiry
+#     "expires_at": "2026-10-18T00:00:00Z",   # RFC3339; schedules the proactive refresh
+#     "installation_uuid": "...",             # sent with exchange/refresh requests
+#     "user_id": "...",                       # Youdao account id (optional)
+#     "nickname": "...",                      # used for the auth file name (optional)
+#     "base_url": "..."                       # optional API host override (https, public hosts only)
+#   }
+# The login portal only accepts http://127.0.0.1:<server port>/auth/callback as
+# its redirect target, so the browser must run on the same machine as this server
+# unless the callback URL is submitted through POST /oauth-callback.
+
 # xAI provider behavior.
 xai:
   # When true, inject the native x_search tool when the request does not declare it.

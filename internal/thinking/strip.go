@@ -44,6 +44,8 @@ func StripThinkingConfig(body []byte, provider string) []byte {
 		}
 	case "codex", "xai":
 		paths = []string{"reasoning.effort"}
+	case "lobsterai":
+		paths = []string{"reasoning_effort"}
 	case "commandcode":
 		paths = []string{"params.reasoning_effort"}
 	default:
