@@ -16,6 +16,7 @@ var knownDevinSuffixes = []string{
 	"-xhigh",
 	"-max",
 	"-fast",
+	"-slow",
 	"-priority",
 	"-low-priority",
 	"-medium-priority",
@@ -132,6 +133,16 @@ func ResolveDevinChatModelUID(rawModel string, thinkingLevel string, budgetToken
 
 	// 7. Special base models that default to bare name unless specific variant requested
 	switch canonicalBase {
+	case "swe-1-7":
+		if effort == "medium" {
+			return "swe-1-7-medium"
+		}
+		return "swe-1-7"
+	case "swe-1-6":
+		if effort == "fast" {
+			return "swe-1-6-fast"
+		}
+		return "swe-1-6"
 	case "glm-5-2":
 		if effort == "none" {
 			return "glm-5-2-none"

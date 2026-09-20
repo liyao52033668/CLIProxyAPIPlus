@@ -218,16 +218,16 @@ func TestResolveDevinChatModelUID(t *testing.T) {
 			want:          "deepseek-v4-1-flash-max",
 		},
 		{
-			name:          "swe-1-7 default maps to swe-1-7-high",
+			name:          "swe-1-7 default maps to swe-1-7",
 			rawModel:      "devin/swe-1-7",
 			thinkingLevel: "",
-			want:          "swe-1-7-high",
+			want:          "swe-1-7",
 		},
 		{
-			name:          "swe-1-7 with medium clamps to swe-1-7-high",
+			name:          "swe-1-7 with medium maps to swe-1-7-medium",
 			rawModel:      "devin/swe-1-7:medium",
 			thinkingLevel: "",
-			want:          "swe-1-7-high",
+			want:          "swe-1-7-medium",
 		},
 		{
 			name:          "claude-haiku-4-5 maps to MODEL_PRIVATE_11",
@@ -380,16 +380,40 @@ func TestResolveDevinChatModelUID(t *testing.T) {
 			want:          "nemotron-3-ultra-high",
 		},
 		{
-			name:          "swe-1-6 default maps to swe-1-6-medium",
+			name:          "swe-1-6 default maps to swe-1-6",
 			rawModel:      "devin/swe-1-6",
 			thinkingLevel: "",
-			want:          "swe-1-6-medium",
+			want:          "swe-1-6",
 		},
 		{
-			name:          "swe-1-6 with fast clamps to swe-1-6-medium",
+			name:          "swe-1-6 with fast maps to swe-1-6-fast",
 			rawModel:      "devin/swe-1-6:fast",
 			thinkingLevel: "",
-			want:          "swe-1-6-medium",
+			want:          "swe-1-6-fast",
+		},
+		{
+			name:          "swe-1-6-slow default maps to swe-1-6-slow",
+			rawModel:      "devin/swe-1-6-slow",
+			thinkingLevel: "",
+			want:          "swe-1-6-slow",
+		},
+		{
+			name:          "swe-1-6-slow without prefix maps to swe-1-6-slow",
+			rawModel:      "swe-1-6-slow",
+			thinkingLevel: "",
+			want:          "swe-1-6-slow",
+		},
+		{
+			name:          "swe-1-6-slow with low maps to swe-1-6-slow",
+			rawModel:      "devin/swe-1-6-slow:low",
+			thinkingLevel: "",
+			want:          "swe-1-6-slow",
+		},
+		{
+			name:          "swe-1-6-slow with high maps to swe-1-6-slow",
+			rawModel:      "devin/swe-1-6-slow:high",
+			thinkingLevel: "",
+			want:          "swe-1-6-slow",
 		},
 		{
 			name:          "kimi-k2-6 default maps to kimi-k2-6",
@@ -443,7 +467,7 @@ func TestResolveDevinChatModelUID_AllCatalogModels(t *testing.T) {
 			}
 			// If model defines thinking levels, resolved UID must have an effort suffix
 			if m.Thinking != nil && len(m.Thinking.Levels) > 0 {
-				if !HasDevinEffortSuffix(resolved) && baseID != "glm-5-2" {
+				if !HasDevinEffortSuffix(resolved) && baseID != "swe-1-7" && baseID != "glm-5-2" && baseID != "swe-1-6-slow" {
 					t.Errorf("thinking model %q with effort %q resolved to bare UID %q without effort suffix", baseID, eff, resolved)
 				}
 			}

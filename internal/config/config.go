@@ -156,6 +156,9 @@ type Config struct {
 	// XAI configures provider-wide xAI request behavior.
 	XAI XAIConfig `yaml:"xai" json:"xai"`
 
+	// Claude configures provider-wide Claude request behavior.
+	Claude ClaudeConfig `yaml:"claude" json:"claude"`
+
 	// ClaudeKey defines a list of Claude API key configurations as specified in the YAML configuration file.
 	ClaudeKey []ClaudeKey `yaml:"claude-api-key" json:"claude-api-key"`
 
@@ -229,6 +232,13 @@ type CodexHeaderDefaults struct {
 type XAIConfig struct {
 	// InjectXSearch injects xAI's native x_search tool when the request does not declare it.
 	InjectXSearch bool `yaml:"inject-x-search" json:"inject-x-search"`
+}
+
+// ClaudeConfig configures provider-wide Claude request behavior.
+type ClaudeConfig struct {
+	// ModelLevelCooling scopes Claude quota cooldowns to the requested model
+	// rather than cooling down the entire credential across all sibling models.
+	ModelLevelCooling bool `yaml:"model-level-cooling" json:"model-level-cooling"`
 }
 
 // AntigravityConfig configures provider-wide Antigravity request behavior.

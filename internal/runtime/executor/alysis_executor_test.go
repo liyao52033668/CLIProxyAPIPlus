@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/tidwall/gjson"
 )
 
 func TestAlysisCredentialsPrefersMetadata(t *testing.T) {
@@ -53,6 +55,38 @@ func TestAlysisPrepareRequestDropsEmptyAuth(t *testing.T) {
 	}
 	if got := req.Header.Get("Authorization"); got != "" {
 		t.Fatalf("expected Authorization cleared, got %q", got)
+	}
+}
+
+func TestClampAlysisMaxTokens(t *testing.T) {
+	// 128k context window, ~10 input tokens → budget ≈ 128000*0.95 - 10 ≈ 121590
+	// max_tokens 384000 > budget → clamped
+	payload := []byte(`{"model":"deepseek-v4-flash","max_tokens":384000,"messages":[{"role":"user","content":"hi"}]}`)
+	clamped := clampAlysisMaxTokens(payload, "deepseek-v4-flash")
+	got := gjson.GetBytes(clamped, "max_tokens").Int()
+	if got <= 0 || got > 128000 {
+		t.Fatalf("expected max_tokens clamped to <=128000, got %d", got)
+	}
+	if !gjson.GetBytes(clamped, "model").Exists() {
+		t.Fatal("clamping must not drop other fields")
+	}
+
+	// At or under the budget the payload must be returned unchanged.
+	unchanged := []byte(`{"model":"deepseek-v4-flash","max_tokens":1000,"messages":[{"role":"user","content":"hi"}]}`)
+	if got := clampAlysisMaxTokens(unchanged, "deepseek-v4-flash"); !bytes.Equal(got, unchanged) {
+		t.Fatalf("expected payload unchanged under budget, got %s", got)
+	}
+
+	// Missing max_tokens is left alone.
+	noTokens := []byte(`{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}]}`)
+	if got := clampAlysisMaxTokens(noTokens, "deepseek-v4-flash"); !bytes.Equal(got, noTokens) {
+		t.Fatalf("expected payload unchanged without max_tokens, got %s", got)
+	}
+
+	// Unknown model: no registered context length, payload untouched.
+	unknown := []byte(`{"model":"mystery","max_tokens":999999}`)
+	if got := clampAlysisMaxTokens(unknown, "mystery"); !bytes.Equal(got, unknown) {
+		t.Fatalf("expected payload unchanged for unknown model, got %s", got)
 	}
 }
 

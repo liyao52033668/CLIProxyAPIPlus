@@ -495,3 +495,17 @@ func isRecognizedGeminiProviderSignature(rawSignature string, blockKind Signatur
 	}
 	return false
 }
+
+// IsRecognizedReasoningSignature reports whether rawSignature is a structurally valid
+// reasoning signature or encrypted_content payload from any known provider
+// (GPT, Claude, Gemini, Kimi, Grok, Devin).
+func IsRecognizedReasoningSignature(rawSignature string) bool {
+	sig := strings.TrimSpace(rawSignature)
+	if sig == "" {
+		return false
+	}
+	if DetectSignatureProvider(sig) != SignatureProviderUnknown {
+		return true
+	}
+	return IsValidGrokEncryptedContent(sig)
+}

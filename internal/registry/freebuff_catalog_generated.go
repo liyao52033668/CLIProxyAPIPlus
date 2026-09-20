@@ -68,14 +68,6 @@ var freebuffCatalog = []FreebuffCatalogEntry{
 		Thinking:      &ThinkingSupport{Levels: []string{"minimal", "low", "medium", "high", "xhigh"}},
 	},
 	{
-		ID:            "anthropic/claude-fable-5",
-		DisplayName:   "Claude Fable 5",
-		AgentID:       "base3-free-fable",
-		LegacyAgentID: "base2-free-fable",
-		ContextLength: 131072,
-		Thinking:      &ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh", "max"}},
-	},
-	{
 		ID:            "google/gemini-3.8-flash",
 		DisplayName:   "Gemini 3.8 Flash",
 		AgentID:       "base3-free-gemini-3-8-flash",

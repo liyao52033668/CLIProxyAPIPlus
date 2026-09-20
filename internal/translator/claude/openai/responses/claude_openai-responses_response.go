@@ -342,7 +342,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 				msg, _ = sjson.SetBytes(msg, "sequence_number", nextSeq())
 				msg, _ = sjson.SetBytes(msg, "item_id", fmt.Sprintf("fc_%s", st.CurrentFCID))
 				msg, _ = sjson.SetBytes(msg, "output_index", idx)
-				msg, _ = sjson.SetBytes(msg, "delta", pj.String())
+				msg, _ = translatorcommon.SetStringWithoutHTMLEscape(msg, "delta", pj.String())
 				out = append(out, emitEvent("response.function_call_arguments.delta", msg))
 			}
 		} else if dt == "thinking_delta" {
@@ -415,13 +415,13 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 				fcDone, _ = sjson.SetBytes(fcDone, "sequence_number", nextSeq())
 				fcDone, _ = sjson.SetBytes(fcDone, "item_id", fmt.Sprintf("fc_%s", st.CurrentFCID))
 				fcDone, _ = sjson.SetBytes(fcDone, "output_index", idx)
-				fcDone, _ = sjson.SetBytes(fcDone, "arguments", args)
+				fcDone, _ = translatorcommon.SetStringWithoutHTMLEscape(fcDone, "arguments", args)
 				out = append(out, emitEvent("response.function_call_arguments.done", fcDone))
 				itemDone := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}}`)
 				itemDone, _ = sjson.SetBytes(itemDone, "sequence_number", nextSeq())
 				itemDone, _ = sjson.SetBytes(itemDone, "output_index", idx)
 				itemDone, _ = sjson.SetBytes(itemDone, "item.id", fmt.Sprintf("fc_%s", st.CurrentFCID))
-				itemDone, _ = sjson.SetBytes(itemDone, "item.arguments", args)
+				itemDone, _ = translatorcommon.SetStringWithoutHTMLEscape(itemDone, "item.arguments", args)
 				itemDone, _ = sjson.SetBytes(itemDone, "item.call_id", st.CurrentFCID)
 				itemDone, _ = sjson.SetBytes(itemDone, "item.name", st.FuncNames[idx])
 				out = append(out, emitEvent("response.output_item.done", itemDone))
@@ -614,7 +614,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 				} else {
 					item := []byte(`{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`)
 					item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("fc_%s", callID))
-					item, _ = sjson.SetBytes(item, "arguments", args)
+					item, _ = translatorcommon.SetStringWithoutHTMLEscape(item, "arguments", args)
 					item, _ = sjson.SetBytes(item, "call_id", callID)
 					item, _ = sjson.SetBytes(item, "name", name)
 					outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)

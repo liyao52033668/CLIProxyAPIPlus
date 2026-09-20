@@ -2,6 +2,7 @@ package executor
 
 import (
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
@@ -46,4 +47,28 @@ func toStatusErr(err error) error {
 		return statusErr{code: ue.Code, msg: ue.Msg, retryAfter: ue.RetryAfter()}
 	}
 	return err
+}
+
+// classifyClaudeUpstreamError converts an upstream Claude error into a statusErr
+// enriched with Anthropic rate-limit reset timing and credential-scoped flag.
+// When modelLevelCooling is true, unified/shared-window rejections are scoped
+// to the requested model rather than cooling the entire credential.
+func classifyClaudeUpstreamError(err error, headers http.Header, modelLevelCooling bool) error {
+	if err == nil {
+		return nil
+	}
+	ue, ok := err.(helps.UpstreamStatusError)
+	if !ok {
+		return err
+	}
+	se := statusErr{code: ue.Code, msg: ue.Msg}
+	if ue.Code == http.StatusTooManyRequests || (ue.Code >= 400 && ue.Code < 600) {
+		se.retryAfter = helps.ParseClaudeRateLimitReset(headers, time.Now())
+	}
+	if ue.Code == http.StatusTooManyRequests {
+		if !modelLevelCooling && helps.ClaudeHeadersIndicateUnifiedRateLimitRejection(headers) {
+			se.credentialScoped = true
+		}
+	}
+	return se
 }

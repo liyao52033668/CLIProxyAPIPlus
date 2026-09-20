@@ -17,8 +17,10 @@ func TestDevinOAuthRoutes(t *testing.T) {
 	server := newTestServer(t)
 
 	w := httptest.NewRecorder()
-	server.engine.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/v0/management/devin-auth-url", nil))
-	if w.Code != http.StatusUnauthorized && w.Code != http.StatusForbidden {
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/devin-auth-url", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	server.engine.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("unprotected login route: %d", w.Code)
 	}
 	registered := false

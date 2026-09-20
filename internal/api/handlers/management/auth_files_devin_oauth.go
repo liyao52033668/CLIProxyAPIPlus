@@ -105,7 +105,7 @@ func (h *Handler) completeDevinOAuth(ctx context.Context, authDir, state, codeVe
 
 	token, errExchange := authSvc.ExchangeCodeForToken(ctx, result.Code, codeVerifier)
 	if errExchange != nil || strings.TrimSpace(token) == "" {
-		// Upstream errors can be tokens or authorization codes; never expose them.
+		// Upstream errors can contain tokens or authorization codes; never expose them.
 		if IsOAuthSessionPending(state, "devin") {
 			SetOAuthSessionError(state, "Failed to exchange authorization code for tokens")
 		}

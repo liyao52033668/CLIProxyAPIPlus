@@ -25,6 +25,19 @@ import (
 // single thinking token still emits the full 12946. The two values are code-path
 // constants, not size classes.
 //
+// Empirical basis for treating the pair as complete:
+//   - All 8 Kimi models exposed upstream (k2, k2.5, k2.6, k2-thinking, k2.7-code,
+//     k2.7-code-highspeed, k3, k3-256k) x streaming/non-streaming = 16 combinations,
+//     no exceptions.
+//   - Additional paths that produced no third value: thinking budget 128..12000,
+//     absent thinking field, max_tokens truncation mid-thinking, non-English
+//     prompts, 135k-character inputs, multi-turn replay of signed history, tool
+//     calls, tool_result continuation, and the interleaved-thinking beta header.
+//   - Two independent collection paths agree: CPA request logs (57 unique samples)
+//     and the mitmproxy harvest in
+//     .agents/skills/cpa-signature-catalog-and-collection/data/signatures/kimi/
+//     (61 unique samples) both yield exactly {4340, 12946}.
+//
 // Cross-family safety: across 1027 catalog signatures plus 215 native Grok
 // samples, no Claude, Gemini, GPT or Grok value lands on either length. The
 // nearest miss is a 4344-character GPT token, which the gAAAA probe claims long
@@ -108,18 +121,23 @@ func InspectKimiThinkingSignature(raw string) (*KimiThinkingSignatureInfo, error
 	if _, _, ok := SplitSignatureProviderPrefix(sig); ok {
 		return nil, fmt.Errorf("invalid Kimi thinking signature: carries another provider's cache prefix")
 	}
-	// Defense in depth. The self-describing probes run before this validator in
-	// DetectSignatureProviderForBlock, but this validator is exported and callers
+	// Defense in depth. DetectSignatureProviderForBlock already runs the
+	// self-describing probes first, but this validator is exported and callers
 	// may reach it directly, so a foreign envelope of coincidentally matching
 	// length must not be accepted here either.
-	if IsValidGPTReasoningSignature(sig) {
-		return nil, fmt.Errorf("Kimi thinking signature looks like GPT/Codex reasoning signature")
-	}
-	if IsValidClaudeThinkingSignature(sig, ClaudeSignatureValidationOptions{Strict: true}) {
-		return nil, fmt.Errorf("Kimi thinking signature looks like Claude thinking signature")
-	}
-	if IsValidGeminiThoughtSignature(sig, GeminiThoughtSignatureValidationOptions{RequireKnownEnvelope: true}) {
-		return nil, fmt.Errorf("Kimi thinking signature looks like Gemini thoughtSignature")
+	if maybeSelfDescribingSignatureEnvelope(sig) {
+		if strings.HasPrefix(sig, "gAAAA") {
+			return nil, fmt.Errorf("Kimi thinking signature looks like GPT/Codex reasoning signature")
+		}
+		if IsValidClaudeCAISSignature(sig) {
+			return nil, fmt.Errorf("Kimi thinking signature looks like Claude CAIS thinking signature")
+		}
+		if IsValidClaudeThinkingSignature(sig, ClaudeSignatureValidationOptions{Strict: true}) {
+			return nil, fmt.Errorf("Kimi thinking signature looks like Claude thinking signature")
+		}
+		if IsValidGeminiThoughtSignature(sig, GeminiThoughtSignatureValidationOptions{RequireKnownEnvelope: true}) {
+			return nil, fmt.Errorf("Kimi thinking signature looks like Gemini thoughtSignature")
+		}
 	}
 	decoded, err := base64.RawStdEncoding.DecodeString(sig)
 	if err != nil {

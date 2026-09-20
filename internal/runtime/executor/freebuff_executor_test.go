@@ -819,7 +819,7 @@ func TestFreebuffResolveModelAcceptsProviderAliasAndShortNames(t *testing.T) {
 		{"glm-5.3-flash", "z-ai/glm-5.3-flash", "base3-free-glm-5-3-flash"},
 		{"deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-flash", "base3-free-deepseek-flash"},
 		{"solar-pro4", "upstage/solar-pro4", "base3-free-solar-pro4"},
-		{"claude-fable-5", "anthropic/claude-fable-5", "base3-free-fable"},
+		{"mimo-v2.5", "mimo/mimo-v2.5", "base3-free-mimo"},
 		{"openai/gpt-5.6-luna", "openai/gpt-5.6-luna", "base3-free-luna"},
 	}
 	for _, tc := range cases {

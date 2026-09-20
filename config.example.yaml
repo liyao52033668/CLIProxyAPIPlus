@@ -251,6 +251,13 @@ xai:
   # The injected tool is also added to tool_choice.allowed_tools when applicable.
   inject-x-search: false
 
+# Claude provider behavior.
+claude:
+  # When true, scope Claude quota cooldowns to the requested model rather than
+  # cooling down the entire credential across all sibling models.
+  # Default is false (cool the entire credential on any model's quota hit).
+  model-level-cooling: false
+
 # When true, enable Gemini CLI internal endpoints (/v1internal:*).
 # Default is false for safety.
 enable-gemini-cli-endpoint: false

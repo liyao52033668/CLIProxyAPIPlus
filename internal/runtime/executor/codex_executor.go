@@ -1005,6 +1005,7 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	}
 	misc.EnsureHeader(r.Header, ginHeaders, "Version", "")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Codex-Turn-Metadata", "")
+	misc.EnsureHeader(r.Header, ginHeaders, "X-Codex-Turn-State", "")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Client-Request-Id", "")
 	cfgUserAgent, _ := codexHeaderDefaults(cfg, auth)
 	ensureHeaderWithConfigPrecedence(r.Header, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)

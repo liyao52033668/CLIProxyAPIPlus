@@ -22,6 +22,7 @@ import (
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // AlysisExecutor forwards OpenAI-compatible requests to the Alysis Code Pro
@@ -103,6 +104,11 @@ func (e *AlysisExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if err != nil {
 		return resp, err
 	}
+
+	// The Alysis gateway rejects requests whose max_tokens exceeds the model's
+	// context window (and refuses with a 400 that the conductor may retry
+	// against its Retry-After header). Clamp to the registered per-model cap.
+	translated = clampAlysisMaxTokens(translated, baseModel)
 
 	url := e.chatCompletionsURL()
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
@@ -192,6 +198,11 @@ func (e *AlysisExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return nil, err
 	}
+
+	// Clamp max_tokens to the registered per-model cap; the gateway rejects
+	// oversized output limits with a 400 that may be retried against a
+	// Retry-After header, wasting quota.
+	translated = clampAlysisMaxTokens(translated, baseModel)
 
 	url := e.chatCompletionsURL()
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
@@ -423,4 +434,68 @@ func applyAlysisHeaders(r *http.Request, key string, stream bool) {
 	} else {
 		r.Header.Set("Accept", "application/json")
 	}
+}
+
+// clampAlysisMaxTokens rewrites max_tokens in the outbound payload so that
+// (input_tokens + max_tokens) stays within the model's context window. The
+// Alysis gateway rejects requests whose total budget exceeds the context
+// window with a 400 ("Invalid or oversized hosted request ... output limits
+// (8 MiB maximum)") that the conductor may otherwise retry against a
+// Retry-After header, wasting quota. When the model is unknown or has no
+// context length registered, the payload is returned unchanged.
+func clampAlysisMaxTokens(payload []byte, model string) []byte {
+	contextLen := alysisModelContextLength(model)
+	if contextLen <= 0 {
+		return payload
+	}
+	// Estimate input tokens from the translated payload. If tokenization
+	// fails, fall back to a conservative byte-based estimate.
+	inputTokens := estimateInputTokens(payload, model)
+	// Reserve a 5% safety margin on the context window so we don't brush
+	// against the exact boundary (tokenizer approximations can undercount).
+	budget := int(float64(contextLen)*0.95) - inputTokens
+	if budget <= 0 {
+		// Input alone already exceeds the budget; clamp to a minimal
+		// output allowance so the request at least reaches the gateway
+		// and the user sees a meaningful error instead of a 400.
+		budget = 1024
+	}
+	maxTokens := gjson.GetBytes(payload, "max_tokens")
+	if !maxTokens.Exists() || maxTokens.Int() <= int64(budget) {
+		return payload
+	}
+	clamped, err := sjson.SetBytes(payload, "max_tokens", budget)
+	if err != nil {
+		return payload
+	}
+	log.Debugf("alysis: clamped max_tokens %d -> %d for model %q (input ~%d tokens, context %d)", maxTokens.Int(), budget, model, inputTokens, contextLen)
+	return clamped
+}
+
+// estimateInputTokens returns an approximate token count for the outbound
+// payload. Falls back to a byte-based estimate (~4 chars per token) when
+// tokenization fails.
+func estimateInputTokens(payload []byte, model string) int {
+	enc, err := helps.TokenizerForModel(model)
+	if err != nil {
+		return len(payload) / 4
+	}
+	count, err := helps.CountOpenAIChatTokens(enc, payload)
+	if err != nil {
+		return len(payload) / 4
+	}
+	return int(count)
+}
+
+// alysisModelContextLength returns the per-model context window from the
+// alysis static catalog. The global registry may carry entries for the same
+// model id with a different context length from another provider, so we look
+// up the alysis catalog directly.
+func alysisModelContextLength(model string) int {
+	for _, m := range registry.GetAlysisModels() {
+		if m != nil && m.ID == model {
+			return m.ContextLength
+		}
+	}
+	return 0
 }
