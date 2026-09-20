@@ -899,7 +899,10 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	if t := gjson.GetBytes(rawJSON, "thinking"); enableThoughtTranslate && t.Exists() && t.IsObject() {
 		switch t.Get("type").String() {
 		case "enabled":
-			if b := t.Get("budget_tokens"); b.Exists() && b.Type == gjson.Number {
+			// Honor output_config.effort if present (Claude 4.6 adaptive format).
+			if effort := thinking.ClaudeOutputEffort(rawJSON); effort != "" {
+				out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel", effort)
+			} else if b := t.Get("budget_tokens"); b.Exists() && b.Type == gjson.Number {
 				budget := int(b.Int())
 				out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", budget)
 			}
@@ -908,11 +911,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 			// - If output_config.effort is explicitly present, pass through as thinkingLevel.
 			// - Otherwise, treat it as "enabled with target-model maximum" and emit high.
 			// ApplyThinking handles clamping to target model's supported levels.
-			effort := ""
-			if v := gjson.GetBytes(rawJSON, "output_config.effort"); v.Exists() && v.Type == gjson.String {
-				effort = strings.ToLower(strings.TrimSpace(v.String()))
-			}
-			if effort != "" {
+			if effort := thinking.ClaudeOutputEffort(rawJSON); effort != "" {
 				out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel", effort)
 			} else {
 				out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel", "high")

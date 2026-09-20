@@ -10,6 +10,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -311,7 +312,10 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 	if t := gjson.GetBytes(rawJSON, "thinking"); t.Exists() && t.IsObject() {
 		switch t.Get("type").String() {
 		case "enabled":
-			if b := t.Get("budget_tokens"); b.Exists() && b.Type == gjson.Number {
+			// Honor output_config.effort if present (Claude 4.6 adaptive format).
+			if effort := thinking.ClaudeOutputEffort(inputRawJSON); effort != "" {
+				out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.thinkingLevel", effort)
+			} else if b := t.Get("budget_tokens"); b.Exists() && b.Type == gjson.Number {
 				budget := int(b.Int())
 				out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.thinkingBudget", budget)
 			}
@@ -320,11 +324,7 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 			// - If output_config.effort is explicitly present, pass through as thinkingLevel.
 			// - Otherwise, treat it as "enabled with target-model maximum" and emit thinkingBudget=max.
 			// ApplyThinking handles clamping to target model's supported levels.
-			effort := ""
-			if v := gjson.GetBytes(rawJSON, "output_config.effort"); v.Exists() && v.Type == gjson.String {
-				effort = strings.ToLower(strings.TrimSpace(v.String()))
-			}
-			if effort != "" {
+			if effort := thinking.ClaudeOutputEffort(inputRawJSON); effort != "" {
 				out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.thinkingLevel", effort)
 			} else {
 				maxBudget := 0

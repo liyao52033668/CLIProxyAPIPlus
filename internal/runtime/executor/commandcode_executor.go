@@ -543,17 +543,30 @@ func FetchCommandCodeModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 		if displayName == "" {
 			displayName = id
 		}
+		// Parse max output tokens from various possible field names.
+		// The upstream API may return per-model limits under different keys.
+		maxCompletionTokens := 0
+		for _, field := range []string{"max_output_tokens", "max_completion_tokens", "output_token_limit", "max_tokens"} {
+			if v := value.Get(field); v.Exists() && v.Type == gjson.Number {
+				maxCompletionTokens = int(v.Int())
+				break
+			}
+		}
+		if maxCompletionTokens == 0 {
+			log.Debugf("commandcode: model %s has no max output tokens field in upstream response", id)
+		}
 		dynamicModels = append(dynamicModels, &registry.ModelInfo{
-			ID:                 id,
-			Name:               id,
-			DisplayName:        displayName,
-			ContextLength:      int(contextLength),
-			OwnedBy:            "commandcode",
-			Type:               "commandcode",
-			Object:             "model",
-			Created:            now,
-			Thinking:           registry.CommandCodeThinkingSupport(),
-			SupportedEndpoints: []string{"/chat/completions"},
+			ID:                  id,
+			Name:                id,
+			DisplayName:         displayName,
+			ContextLength:       int(contextLength),
+			MaxCompletionTokens: maxCompletionTokens,
+			OwnedBy:             "commandcode",
+			Type:                "commandcode",
+			Object:              "model",
+			Created:             now,
+			Thinking:            registry.CommandCodeThinkingSupport(),
+			SupportedEndpoints:  []string{"/chat/completions"},
 		})
 		return true
 	})

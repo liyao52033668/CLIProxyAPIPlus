@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	kirocommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/common"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -374,6 +375,13 @@ func extractSystemPrompt(claudeBody []byte) string {
 }
 
 // checkThinkingMode checks if thinking mode is enabled in the Claude request
+// and returns the thinking budget tokens.
+// Supports:
+// - Claude API format: thinking.type = "enabled" with optional budget_tokens
+// - Claude 4.6 adaptive: thinking.type = "adaptive" or "enabled" with output_config.effort
+// - OpenAI format: reasoning_effort parameter
+// - AMP/Cursor format: <thinking_mode> tags in system prompt
+// - Anthropic-Beta header: interleaved-thinking-2025-05-14
 func checkThinkingMode(claudeBody []byte) (bool, int64) {
 	thinkingEnabled := false
 	var budgetTokens int64 = 24000
@@ -381,7 +389,7 @@ func checkThinkingMode(claudeBody []byte) (bool, int64) {
 	thinkingField := gjson.GetBytes(claudeBody, "thinking")
 	if thinkingField.Exists() {
 		thinkingType := thinkingField.Get("type").String()
-		if thinkingType == "enabled" {
+		if thinkingType == "enabled" || thinkingType == "adaptive" {
 			thinkingEnabled = true
 			if bt := thinkingField.Get("budget_tokens"); bt.Exists() {
 				budgetTokens = bt.Int()
@@ -389,6 +397,9 @@ func checkThinkingMode(claudeBody []byte) (bool, int64) {
 					thinkingEnabled = false
 					log.Debugf("kiro: thinking mode disabled via budget_tokens <= 0")
 				}
+			} else if effort := thinking.ClaudeOutputEffort(claudeBody); effort != "" {
+				// Convert effort level to budget tokens
+				budgetTokens = effortToBudget(effort)
 			}
 			if thinkingEnabled {
 				log.Debugf("kiro: thinking mode enabled via Claude API parameter, budget_tokens: %d", budgetTokens)
@@ -397,6 +408,28 @@ func checkThinkingMode(claudeBody []byte) (bool, int64) {
 	}
 
 	return thinkingEnabled, budgetTokens
+}
+
+// effortToBudget converts a Claude effort level to budget tokens.
+func effortToBudget(effort string) int64 {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "minimal":
+		return 8000
+	case "low":
+		return 16000
+	case "medium":
+		return 24000
+	case "high":
+		return 32000
+	case "xhigh", "max":
+		return 40000
+	case "none":
+		return 0
+	case "auto":
+		return 24000
+	default:
+		return 24000
+	}
 }
 
 // hasThinkingTagInBody checks if the request body already contains thinking configuration tags.
@@ -449,10 +482,16 @@ func IsThinkingEnabledWithHeaders(body []byte, headers http.Header) bool {
 		return true
 	}
 
-	// Check Claude API format first (thinking.type = "enabled")
+	// Check Claude API format first (thinking.type = "enabled"/"adaptive")
 	enabled, _ := checkThinkingMode(body)
 	if enabled {
 		log.Debugf("kiro: IsThinkingEnabled returning true (Claude API format)")
+		return true
+	}
+
+	// Check Claude adaptive thinking with output_config.effort (Claude 4.6)
+	if effort := thinking.ClaudeOutputEffort(body); effort != "" && effort != "none" {
+		log.Debugf("kiro: IsThinkingEnabled returning true (output_config.effort: %s)", effort)
 		return true
 	}
 

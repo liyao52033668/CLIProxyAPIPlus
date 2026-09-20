@@ -3,6 +3,7 @@ package claude
 import (
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -70,25 +71,41 @@ func copyClaudeJSONField(out []byte, root gjson.Result, from, to string) []byte 
 }
 
 func copyClaudeThinkingToInteractions(out []byte, root gjson.Result) []byte {
-	thinking := root.Get("thinking")
-	if thinking.Exists() {
-		switch strings.ToLower(strings.TrimSpace(thinking.Get("type").String())) {
+	thinkingCfg := root.Get("thinking")
+	if thinkingCfg.Exists() {
+		switch strings.ToLower(strings.TrimSpace(thinkingCfg.Get("type").String())) {
 		case "disabled":
 			out, _ = sjson.SetBytes(out, "generation_config.thinking_level", "none")
 		case "enabled":
-			if budget := thinking.Get("budget_tokens"); budget.Exists() {
+			if budget := thinkingCfg.Get("budget_tokens"); budget.Exists() {
 				out, _ = sjson.SetRawBytes(out, "generation_config.thinking_config.thinking_budget", []byte(budget.Raw))
 			} else {
 				out, _ = sjson.SetBytes(out, "generation_config.thinking_level", "high")
 			}
 		case "adaptive":
+			// Map adaptive to 'auto'; output_config.effort (if present) will override below.
 			out, _ = sjson.SetBytes(out, "generation_config.thinking_level", "auto")
 		}
 	}
-	if effort := root.Get("output_config.effort"); effort.Exists() && effort.Type == gjson.String {
-		out, _ = sjson.SetBytes(out, "generation_config.thinking_level", strings.ToLower(strings.TrimSpace(effort.String())))
+	// Honor output_config.effort if present (Claude 4.6 adaptive format).
+	// Clamp to valid Gemini thinking levels (minimal/low/medium/high).
+	if effort := thinking.ClaudeOutputEffort([]byte(root.Raw)); effort != "" {
+		out, _ = sjson.SetBytes(out, "generation_config.thinking_level", clampToGeminiLevel(effort))
 	}
 	return out
+}
+
+// clampToGeminiLevel clamps a thinking effort level to valid Gemini thinking_level values.
+// Valid values: minimal, low, medium, high.
+func clampToGeminiLevel(effort string) string {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "minimal", "low", "medium", "high":
+		return strings.ToLower(strings.TrimSpace(effort))
+	case "xhigh", "max":
+		return "high"
+	default:
+		return "medium"
+	}
 }
 
 func copyClaudeToolChoiceToInteractions(out []byte, toolChoice gjson.Result) []byte {

@@ -28,6 +28,7 @@ import (
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 const (
@@ -813,6 +814,86 @@ func (e *CodeArtsExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 		var streamFailed bool
 		respModel := req.Model
 
+		// CodeArts instructs the model to output tool calls as XML text blocks
+		// starting with "<tool_call_id>". Emitting content deltas immediately would
+		// leak the raw XML to the client before the block can be parsed. Hold back
+		// content while it might be a tool-call XML block; flush as plain text once
+		// it diverges from the marker prefix.
+		const xmlToolCallPrefix = "<tool_call_id>"
+		const (
+			contentUndecided = iota
+			contentPlainText
+			contentToolCall
+		)
+		contentMode := contentUndecided
+		var heldContent strings.Builder
+
+		// decideContent reports whether streamed content must be withheld because
+		// it may be (or is) a CodeArts XML tool-call block.
+		decideContent := func() bool {
+			if hasToolCalls {
+				return false
+			}
+			if contentMode == contentPlainText {
+				return false
+			}
+			if contentMode == contentToolCall {
+				return true
+			}
+			trimmed := strings.TrimLeft(accumulatedContent.String(), " \t\r\n")
+			switch {
+			case trimmed == "":
+				return true // nothing meaningful yet; keep holding
+			case strings.HasPrefix(xmlToolCallPrefix, trimmed):
+				return true // still a prefix of the marker
+			case strings.HasPrefix(trimmed, xmlToolCallPrefix):
+				contentMode = contentToolCall
+				return true
+			default:
+				contentMode = contentPlainText
+				return false
+			}
+		}
+
+		// stripChunkContent removes the content delta from a chunk. Returns nil
+		// if the chunk has nothing else to emit.
+		stripChunkContent := func(chunk []byte) []byte {
+			if !gjson.GetBytes(chunk, "choices.0.delta.content").Exists() {
+				return chunk
+			}
+			stripped, err := sjson.DeleteBytes(chunk, "choices.0.delta.content")
+			if err != nil {
+				return chunk
+			}
+			// If the chunk has no other meaningful fields, skip it.
+			if !gjson.GetBytes(stripped, "choices.0.delta.reasoning_content").Exists() &&
+				!gjson.GetBytes(stripped, "choices.0.delta.tool_calls").Exists() &&
+				!gjson.GetBytes(stripped, "choices.0.delta.role").Exists() &&
+				gjson.GetBytes(stripped, "choices.0.finish_reason").Type == gjson.Null {
+				return nil
+			}
+			return stripped
+		}
+
+		// buildContentStreamChunk builds a content-only stream chunk.
+		buildContentStreamChunk := func(model, content string) []byte {
+			chunk := map[string]interface{}{
+				"id":      "chatcmpl-codearts",
+				"object":  "chat.completion.chunk",
+				"created": time.Now().Unix(),
+				"model":   model,
+				"choices": []map[string]interface{}{
+					{
+						"index":         0,
+						"delta":         map[string]interface{}{"content": content},
+						"finish_reason": nil,
+					},
+				},
+			}
+			data, _ := json.Marshal(chunk)
+			return data
+		}
+
 		// The registered response translators consume SSE data lines, so frame
 		// every OpenAI chunk as one before handing it over. Claude's translator
 		// drops unframed payloads outright, which would empty the whole stream.
@@ -871,6 +952,9 @@ func (e *CodeArtsExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 
 			if result.HasToolCalls {
 				hasToolCalls = true
+				// Tool calls take precedence; discard any held content that was
+				// buffered while we were still deciding whether it was XML.
+				heldContent.Reset()
 			} else if result.HasContent {
 				if result.ReplaceContent {
 					accumulatedContent.Reset()
@@ -882,6 +966,25 @@ func (e *CodeArtsExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 			if chunk == nil {
 				continue
 			}
+
+			// Hold back content that might be a tool-call XML block.
+			if result.HasContent && decideContent() {
+				// Extract content delta and buffer it.
+				contentDelta := gjson.GetBytes(chunk, "choices.0.delta.content").String()
+				if contentDelta != "" {
+					heldContent.WriteString(contentDelta)
+				}
+				// Strip content from chunk; skip if nothing else.
+				chunk = stripChunkContent(chunk)
+				if chunk == nil {
+					continue
+				}
+			} else if contentMode == contentPlainText && heldContent.Len() > 0 {
+				// Flush held content as a content chunk.
+				emitTranslated(buildContentStreamChunk(respModel, heldContent.String()))
+				heldContent.Reset()
+			}
+
 			emitTranslated(chunk)
 		}
 
@@ -893,6 +996,12 @@ func (e *CodeArtsExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 					emitTranslated(buildToolCallStreamChunk(respModel, i, tc))
 				}
 			}
+		}
+
+		// Flush any remaining held content if it turned out to be plain text.
+		if contentMode == contentPlainText && heldContent.Len() > 0 {
+			emitTranslated(buildContentStreamChunk(respModel, heldContent.String()))
+			heldContent.Reset()
 		}
 
 		if hasToolCalls {

@@ -76,11 +76,13 @@ func ConvertClaudeToCommandCodeRequest(modelName string, inputRawJSON []byte, st
 		if level, ok := thinking.ConvertBudgetToLevel(int(th.Int())); ok {
 			params.ReasoningEffort = level
 		}
-	} else if tt := root.Get("thinking.type").String(); tt == "enabled" {
-		params.ReasoningEffort = "auto"
-	} else if tt := root.Get("thinking.type").String(); tt == "adaptive" {
+	} else if tt := root.Get("thinking.type").String(); tt == "enabled" || tt == "adaptive" {
+		// Honor output_config.effort if present (Claude adaptive thinking format).
 		if effort := root.Get("output_config.effort").String(); effort != "" {
 			params.ReasoningEffort = effort
+		} else {
+			// No effort specified; default to medium (CommandCode does not support "auto").
+			params.ReasoningEffort = "medium"
 		}
 	}
 

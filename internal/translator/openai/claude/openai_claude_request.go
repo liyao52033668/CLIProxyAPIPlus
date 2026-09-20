@@ -66,13 +66,16 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 		if thinkingType := thinkingConfig.Get("type"); thinkingType.Exists() {
 			switch thinkingType.String() {
 			case "enabled":
-				if budgetTokens := thinkingConfig.Get("budget_tokens"); budgetTokens.Exists() {
+				// Honor output_config.effort if present (Claude 4.6 adaptive format).
+				if effort := thinking.ClaudeOutputEffort(inputRawJSON); effort != "" {
+					out, _ = sjson.SetBytes(out, "reasoning_effort", effort)
+				} else if budgetTokens := thinkingConfig.Get("budget_tokens"); budgetTokens.Exists() {
 					budget := int(budgetTokens.Int())
 					if effort, ok := thinking.ConvertBudgetToLevel(budget); ok && effort != "" {
 						out, _ = sjson.SetBytes(out, "reasoning_effort", effort)
 					}
 				} else {
-					// No budget_tokens specified, default to "auto" for enabled thinking
+					// No budget_tokens or effort specified, default to "auto" for enabled thinking
 					if effort, ok := thinking.ConvertBudgetToLevel(-1); ok && effort != "" {
 						out, _ = sjson.SetBytes(out, "reasoning_effort", effort)
 					}
@@ -80,11 +83,7 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 			case "adaptive", "auto":
 				// Adaptive thinking can carry an explicit effort in output_config.effort (Claude 4.6).
 				// Pass through directly; ApplyThinking handles clamping to target model's levels.
-				effort := ""
-				if v := root.Get("output_config.effort"); v.Exists() && v.Type == gjson.String {
-					effort = strings.ToLower(strings.TrimSpace(v.String()))
-				}
-				if effort != "" {
+				if effort := thinking.ClaudeOutputEffort(inputRawJSON); effort != "" {
 					out, _ = sjson.SetBytes(out, "reasoning_effort", effort)
 				} else {
 					out, _ = sjson.SetBytes(out, "reasoning_effort", string(thinking.LevelXHigh))

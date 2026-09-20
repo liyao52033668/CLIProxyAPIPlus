@@ -2,7 +2,7 @@
 //
 // Command Code models use the OpenAI-style reasoning_effort field, located on
 // the wire envelope's params object, with discrete effort levels. The canonical
-// pipeline converts budget and auto modes to levels before the applier runs.
+// pipeline converts budget modes to levels before the applier runs.
 package commandcode
 
 import (
@@ -80,8 +80,6 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 			return body, nil
 		}
 		effort = level
-	case thinking.ModeAuto:
-		effort = string(thinking.LevelAuto)
 	default:
 		return body, nil
 	}
@@ -115,14 +113,15 @@ func applyCompatible(body []byte, config thinking.ThinkingConfig) ([]byte, error
 		if config.Level != "" {
 			effort = string(config.Level)
 		}
-	case thinking.ModeAuto:
-		effort = string(thinking.LevelAuto)
 	case thinking.ModeBudget:
 		level, ok := thinking.ConvertBudgetToLevel(config.Budget)
 		if !ok {
 			return body, nil
 		}
 		effort = level
+	case thinking.ModeAuto:
+		// CommandCode does not support "auto"; resolve to mid-range level.
+		effort = string(thinking.LevelMedium)
 	default:
 		return body, nil
 	}
