@@ -609,11 +609,15 @@ func (e *CodeArtsExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
 	var pendingEvent string
 	streamState := &codeartsStreamState{}
-	for scanner.Scan() {
-		_, data, ok := parseCodeArtsSSELine(scanner.Text(), &pendingEvent)
-		if !ok {
-			continue
-		}
+	var chunkCount int
+		for scanner.Scan() {
+			chunkCount++
+			line := scanner.Text()
+			_, data, ok := parseCodeArtsSSELine(line, &pendingEvent)
+			if !ok {
+				continue
+			}
+
 		if data == "[DONE]" || gjson.Get(data, "text").String() == "[DONE]" {
 			// Upstream failures can arrive as a "[DONE]" frame carrying an
 			// error_code/respCode. Surface them instead of returning an empty
@@ -624,6 +628,7 @@ func (e *CodeArtsExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 			break
 		}
 		result := streamState.convert(data, "", req.Model)
+
 		if result.Err != nil {
 			return cliproxyexecutor.Response{}, result.Err
 		}
@@ -651,6 +656,8 @@ func (e *CodeArtsExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 		}
 	}
 
+	fullContent := contentBuilder.String()
+
 	var toolCallsList []map[string]interface{}
 	if len(toolCallsAccumulated) > 0 {
 		indices := make([]int, 0, len(toolCallsAccumulated))
@@ -663,7 +670,6 @@ func (e *CodeArtsExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 		}
 	}
 
-	fullContent := contentBuilder.String()
 	if len(toolCallsList) == 0 && fullContent != "" && strings.Contains(fullContent, "<tool_call_id>") {
 		xmlToolCalls := parseXMLToolCalls(fullContent)
 		if len(xmlToolCalls) > 0 {
@@ -969,18 +975,15 @@ func (e *CodeArtsExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 
 			// Hold back content that might be a tool-call XML block.
 			if result.HasContent && decideContent() {
-				// Extract content delta and buffer it.
 				contentDelta := gjson.GetBytes(chunk, "choices.0.delta.content").String()
 				if contentDelta != "" {
 					heldContent.WriteString(contentDelta)
 				}
-				// Strip content from chunk; skip if nothing else.
 				chunk = stripChunkContent(chunk)
 				if chunk == nil {
 					continue
 				}
 			} else if contentMode == contentPlainText && heldContent.Len() > 0 {
-				// Flush held content as a content chunk.
 				emitTranslated(buildContentStreamChunk(respModel, heldContent.String()))
 				heldContent.Reset()
 			}
@@ -1434,31 +1437,26 @@ func flattenCodeArtsMessages(openaiPayload []byte) ([]map[string]string, bool) {
 }
 
 // buildCodeArtsV2Payload converts the OpenAI-format payload to the
-// /api/v2/chat/completions OpenAI-compatible body. The whole conversation is
-// folded into a single user message (matching the official AgentKernel flow).
+// /api/v2/chat/completions OpenAI-compatible body. Preserves the original
+// message structure with proper tool_calls and tool_result handling.
 func buildCodeArtsV2Payload(openaiPayload []byte, modelName string, stream bool) ([]byte, error) {
-	codeArtsMessages, ok := flattenCodeArtsMessages(openaiPayload)
-	if !ok {
+	// Preserve original OpenAI messages structure instead of flattening
+	messages := gjson.GetBytes(openaiPayload, "messages")
+	if !messages.Exists() || len(messages.Array()) == 0 {
 		return nil, fmt.Errorf("codearts: no messages found in payload")
-	}
-
-	parts := make([]string, 0, len(codeArtsMessages)+1)
-	if tools := gjson.GetBytes(openaiPayload, "tools"); tools.Exists() {
-		if toolsPrompt := buildToolsSystemPrompt(tools); toolsPrompt != "" {
-			parts = append(parts, "[System]\n"+toolsPrompt)
-		}
-	}
-	for _, m := range codeArtsMessages {
-		if m["content"] != "" {
-			parts = append(parts, m["content"])
-		}
 	}
 
 	body := map[string]any{
 		"model":    canonicalCodeArtsModel(modelName),
 		"stream":   stream,
-		"messages": []map[string]any{{"role": "user", "content": strings.Join(parts, "\n\n")}},
+		"messages": messages.Value(),
 	}
+
+	// Add tools if present
+	if tools := gjson.GetBytes(openaiPayload, "tools"); tools.Exists() && len(tools.Array()) > 0 {
+		body["tools"] = tools.Value()
+	}
+
 	result, err := json.Marshal(body)
 	if err != nil {
 		return nil, fmt.Errorf("codearts: marshal v2 payload: %w", err)
