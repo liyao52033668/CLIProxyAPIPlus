@@ -298,6 +298,7 @@ func main() {
 	var commandCodeLogin bool
 	var devinLogin bool
 	var alysisLogin bool
+	var metaLogin bool
 	var projectID string
 	var vertexImport string
 	var vertexImportPrefix string
@@ -350,6 +351,7 @@ func main() {
 	flag.BoolVar(&commandCodeLogin, "commandcode-login", false, "Login to Command Code using browser OAuth")
 	flag.BoolVar(&devinLogin, "devin-login", false, "Login to Devin using OAuth")
 	flag.BoolVar(&alysisLogin, "alysis-login", false, "Login to Alysis Code Pro using device flow")
+	flag.BoolVar(&metaLogin, "meta-login", false, "Login to Meta using OAuth")
 	flag.StringVar(&projectID, "project_id", "", "Project ID (Gemini only, not required)")
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
@@ -905,6 +907,8 @@ func main() {
 		cmd.DoDevinLogin(cfg, options)
 	} else if alysisLogin {
 		cmd.DoAlysisLogin(cfg, options)
+	} else if metaLogin {
+		cmd.DoMetaLogin(cfg, options)
 	} else {
 		// In cloud deploy mode without config file, just wait for shutdown signals
 		if isCloudDeploy && !configFileExists {

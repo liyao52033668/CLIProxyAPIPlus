@@ -27,6 +27,7 @@ var oauthProviders = []oauthProvider{
 	{"xAI", "xai-auth-url", "⬛"},
 	{"Command Code", "commandcode-auth-url", "🟨"},
 	{"Alysis", "alysis-auth-url", "🟥"},
+	{"Meta", "meta-auth-url", "🔵"},
 }
 
 // oauthTabModel handles OAuth login flows.
@@ -285,6 +286,8 @@ func (m oauthTabModel) submitCallback(callbackURL string) tea.Cmd {
 					providerKey = "kimi"
 				case "xai-auth-url":
 					providerKey = "xai"
+				case "meta-auth-url":
+					providerKey = "meta"
 				}
 				break
 			}

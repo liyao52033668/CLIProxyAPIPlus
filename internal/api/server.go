@@ -1124,6 +1124,7 @@ func (s *Server) registerManagementRoutes() {
 
 		mgmt.GET("/freebuff-auth-url", s.mgmt.RequestFreebuffToken)
 		mgmt.GET("/alysis-auth-url", s.mgmt.RequestAlysisToken)
+		mgmt.GET("/meta-auth-url", s.mgmt.RequestMetaToken)
 
 		mgmt.GET("/oauth-excluded-models", s.mgmt.GetOAuthExcludedModels)
 		mgmt.PUT("/oauth-excluded-models", s.mgmt.PutOAuthExcludedModels)

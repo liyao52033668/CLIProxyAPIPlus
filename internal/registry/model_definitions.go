@@ -34,6 +34,7 @@ type staticModelsJSON struct {
 	XAI         []*ModelInfo `json:"xai"`
 	Devin       []*ModelInfo `json:"devin"`
 	LobsterAI   []*ModelInfo `json:"lobsterai"`
+	Meta        []*ModelInfo `json:"meta"`
 }
 
 // GetClaudeModels returns the standard Claude model definitions.
@@ -1123,6 +1124,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetLobsterAIModels()
 	case "alysis":
 		return GetAlysisModels()
+	case "meta", "muse":
+		return GetMetaModels()
 	default:
 		return nil
 	}
@@ -1230,6 +1233,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		GetGitlabModels(),
 		GetCursorModels(),
 		data.XAI,
+		data.Meta,
 	}
 	for _, models := range allModels {
 		for _, m := range models {

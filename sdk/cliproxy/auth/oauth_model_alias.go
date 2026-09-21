@@ -312,7 +312,7 @@ func OAuthModelAliasChannel(provider, authKind string) string {
 			return ""
 		}
 		return "codex"
-	case "gemini-cli", "aistudio", "antigravity", "iflow", "kiro", "github-copilot", "kimi", "codearts", "qoder", "bt", "codebuddy", "codebuddy-ai", "cursor", "kilo", "gitlab", "joycode", "xai", "commandcode", "lobsterai", "devin", "freebuff", "alysis":
+	case "gemini-cli", "aistudio", "antigravity", "iflow", "kiro", "github-copilot", "kimi", "codearts", "qoder", "bt", "codebuddy", "codebuddy-ai", "cursor", "kilo", "gitlab", "joycode", "xai", "commandcode", "lobsterai", "devin", "freebuff", "alysis", "meta":
 		return provider
 	default:
 		return ""
