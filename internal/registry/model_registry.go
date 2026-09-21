@@ -5,6 +5,7 @@ package registry
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -17,6 +18,13 @@ import (
 
 // OpenAIImageModelType marks models that are callable through OpenAI-compatible image endpoints.
 const OpenAIImageModelType = "openai-image"
+
+// NativeCapabilities contains tri-state native capability metadata from the catalog.
+type NativeCapabilities struct {
+	// WebSearch reports explicit per-model support for native web search.
+	// nil means the catalog has not established support either way.
+	WebSearch *bool `json:"web_search,omitempty"`
+}
 
 // ModelInfo represents information about an available model
 type ModelInfo struct {
@@ -71,6 +79,10 @@ type ModelInfo struct {
 	// fetchAvailableModels.webSearchModelIds and can execute native googleSearch.
 	SupportsWebSearch bool `json:"supports_web_search,omitempty"`
 
+	// NativeCapabilities contains internal, static per-model capability metadata.
+	// It is intentionally separate from Antigravity's dynamically probed capability.
+	NativeCapabilities *NativeCapabilities `json:"-"`
+
 	// Thinking holds provider-specific reasoning/thinking budget capabilities.
 	// This is optional and currently used for Gemini thinking budget normalization.
 	Thinking *ThinkingSupport `json:"thinking,omitempty"`
@@ -89,6 +101,21 @@ type ModelConfig struct {
 	// OverrideHeader forces upstream request headers when non-empty.
 	// Keys are header names (e.g. "user-agent"); values replace any existing header.
 	OverrideHeader map[string]string `json:"override_header,omitempty"`
+}
+
+// UnmarshalJSON loads internal native capability metadata without exposing it
+// through ModelInfo's normal JSON serialization.
+func (m *ModelInfo) UnmarshalJSON(data []byte) error {
+	type modelInfoAlias ModelInfo
+	aux := struct {
+		*modelInfoAlias
+		NativeCapabilities *NativeCapabilities `json:"native_capabilities"`
+	}{modelInfoAlias: (*modelInfoAlias)(m)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	m.NativeCapabilities = aux.NativeCapabilities
+	return nil
 }
 
 type availableModelsCacheEntry struct {
@@ -232,6 +259,92 @@ func LookupModelInfo(modelID string, provider ...string) *ModelInfo {
 		return cloneModelInfo(info)
 	}
 	return cloneModelInfo(LookupStaticModelInfo(modelID))
+}
+
+// NativeCapabilityRoute describes one registered route to a public model.
+type NativeCapabilityRoute struct {
+	Provider           string
+	NativeCapabilities *NativeCapabilities
+}
+
+// ResolveResponsesWebSearchCapability conservatively resolves native web search
+// across every route that can serve a public model. A known unsupported route or
+// explicit model-level false wins; missing/unknown data produces unknown.
+func ResolveResponsesWebSearchCapability(routes []NativeCapabilityRoute) *bool {
+	if len(routes) == 0 {
+		return nil
+	}
+
+	hasUnknown := false
+	for _, route := range routes {
+		if route.NativeCapabilities != nil && route.NativeCapabilities.WebSearch != nil && !*route.NativeCapabilities.WebSearch {
+			return boolPointer(false)
+		}
+		pathSupport := responsesWebSearchProviderPathSupport(route.Provider)
+		if pathSupport == nil {
+			hasUnknown = true
+			continue
+		}
+		if !*pathSupport {
+			return boolPointer(false)
+		}
+		if route.NativeCapabilities == nil || route.NativeCapabilities.WebSearch == nil {
+			hasUnknown = true
+		}
+	}
+	if hasUnknown {
+		return nil
+	}
+	return boolPointer(true)
+}
+
+func responsesWebSearchProviderPathSupport(provider string) *bool {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	switch provider {
+	case "codex", "xai", "claude", "antigravity":
+		return boolPointer(true)
+	case "openai", "openai-compatibility", "gemini", "aistudio", "vertex", "kimi", "interactions", "gemini-interactions":
+		return boolPointer(false)
+	default:
+		if strings.HasPrefix(provider, "openai-compatible-") {
+			return boolPointer(false)
+		}
+		return nil
+	}
+}
+
+func boolPointer(value bool) *bool {
+	return &value
+}
+
+// GetResponsesWebSearchCapability resolves capability metadata across every
+// registered client route for the exact public model ID.
+func (r *ModelRegistry) GetResponsesWebSearchCapability(modelID string) *bool {
+	modelID = strings.TrimSpace(modelID)
+	if r == nil || modelID == "" {
+		return nil
+	}
+
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	routes := make([]NativeCapabilityRoute, 0)
+	for clientID, modelIDs := range r.clientModels {
+		for _, registeredID := range modelIDs {
+			if strings.TrimSpace(registeredID) != modelID {
+				continue
+			}
+			var nativeCapabilities *NativeCapabilities
+			if info := r.clientModelInfos[clientID][registeredID]; info != nil {
+				nativeCapabilities = info.NativeCapabilities
+			}
+			routes = append(routes, NativeCapabilityRoute{
+				Provider:           r.clientProviders[clientID],
+				NativeCapabilities: nativeCapabilities,
+			})
+		}
+	}
+	return ResolveResponsesWebSearchCapability(routes)
 }
 
 // ModelOverrideHeaders returns models.json config.override_header for the model, if any.

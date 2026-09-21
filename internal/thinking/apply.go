@@ -442,12 +442,12 @@ func extractClaudeConfig(body []byte) ThinkingConfig {
 	if thinkingType == "enabled" || thinkingType == "adaptive" || thinkingType == "auto" {
 		if effort := ClaudeOutputEffort(body); effort != "" {
 			switch effort {
-				case "none":
-					return ThinkingConfig{Mode: ModeNone, Budget: 0}
-				case "auto":
-					return ThinkingConfig{Mode: ModeAuto, Budget: -1}
-				default:
-					return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(effort)}
+			case "none":
+				return ThinkingConfig{Mode: ModeNone, Budget: 0}
+			case "auto":
+				return ThinkingConfig{Mode: ModeAuto, Budget: -1}
+			default:
+				return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(effort)}
 			}
 		}
 	}

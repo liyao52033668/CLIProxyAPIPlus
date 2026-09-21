@@ -899,6 +899,42 @@ func isModelSupportResultError(err *Error) bool {
 	return isModelSupportErrorMessage(err.Message)
 }
 
+func isInvalidGrantErrorMessage(message string) bool {
+	return strings.Contains(strings.ToLower(message), "invalid_grant")
+}
+
+func isInvalidGrantResultError(err *Error) bool {
+	if err == nil {
+		return false
+	}
+	status := statusCodeFromResult(err)
+	if status != http.StatusBadRequest && status != http.StatusUnauthorized {
+		return false
+	}
+	return isInvalidGrantErrorMessage(err.Code) || isInvalidGrantErrorMessage(err.Message)
+}
+
+func isCloudflareChallengeErrorMessage(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	return strings.Contains(lower, "challenge-platform") ||
+		strings.Contains(lower, "cf-mitigated") ||
+		strings.Contains(lower, "cloudflare challenge") ||
+		(strings.Contains(lower, "just a moment") && strings.Contains(lower, "cloudflare"))
+}
+
+// isCloudflareChallengeResultError checks whether err is a Cloudflare bot/waf challenge.
+// Responses with HTTP status >= 500 represent upstream gateway/origin failures
+// (such as Cloudflare 520-526) and are excluded from challenge classification.
+func isCloudflareChallengeResultError(err *Error) bool {
+	if err == nil {
+		return false
+	}
+	if status := statusCodeFromResult(err); status >= 500 {
+		return false
+	}
+	return isCloudflareChallengeErrorMessage(err.Message)
+}
+
 // isModelNotFoundIdentifier reports whether the structured error code explicitly
 // identifies a missing or unknown model.
 func isModelNotFoundIdentifier(code string) bool {

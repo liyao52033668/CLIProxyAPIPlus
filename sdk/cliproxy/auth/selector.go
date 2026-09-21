@@ -480,6 +480,34 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	return false, blockReasonNone, time.Time{}
 }
 
+// availabilityBlock is a pure helper that decides whether a cooldown/retry timer
+// blocks selection and which blockReason applies. It is extracted from
+// isAuthBlockedForModel so that snapshot projections can reuse the same logic
+// without mutating auth state. It matches isAuthBlockedForModel: blocking
+// requires a future recovery time (After now); a past or zero retry time does
+// not block.
+func availabilityBlock(unavailable, quotaExceeded bool, nextRetryAfter, nextRecoverAt, now time.Time) (bool, blockReason, time.Time) {
+	if !unavailable && !quotaExceeded {
+		return false, blockReasonNone, time.Time{}
+	}
+
+	var next time.Time
+	for _, candidate := range []time.Time{nextRetryAfter, nextRecoverAt} {
+		if candidate.After(now) && (next.IsZero() || candidate.After(next)) {
+			next = candidate
+		}
+	}
+	if next.IsZero() {
+		// No future recovery time: match isAuthBlockedForModel which also
+		// requires NextRetryAfter.After(now) or NextRecoverAt.After(now).
+		return false, blockReasonNone, time.Time{}
+	}
+	if quotaExceeded {
+		return true, blockReasonCooldown, next
+	}
+	return true, blockReasonOther, next
+}
+
 // sessionPattern matches Claude Code user_id format:
 // user_{hash}_account__session_{uuid}
 var sessionPattern = regexp.MustCompile(`_session_([a-f0-9-]+)$`)

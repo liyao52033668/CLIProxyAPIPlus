@@ -635,6 +635,9 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 
 			for _, payload := range xaiNormalizeReasoningSummaryDataEvents(payload) {
 				payload = restoreXAINamespaceToolCalls(payload, prepared.namespaceTools)
+				if prepared.webSearchAlias != "" {
+					payload = restoreXAIClientWebSearchName(payload, prepared.webSearchAlias)
+				}
 				payload = responseFilter.apply(payload)
 				if len(payload) == 0 {
 					continue

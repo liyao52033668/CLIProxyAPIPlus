@@ -610,13 +610,13 @@ func (e *CodeArtsExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 	var pendingEvent string
 	streamState := &codeartsStreamState{}
 	var chunkCount int
-		for scanner.Scan() {
-			chunkCount++
-			line := scanner.Text()
-			_, data, ok := parseCodeArtsSSELine(line, &pendingEvent)
-			if !ok {
-				continue
-			}
+	for scanner.Scan() {
+		chunkCount++
+		line := scanner.Text()
+		_, data, ok := parseCodeArtsSSELine(line, &pendingEvent)
+		if !ok {
+			continue
+		}
 
 		if data == "[DONE]" || gjson.Get(data, "text").String() == "[DONE]" {
 			// Upstream failures can arrive as a "[DONE]" frame carrying an

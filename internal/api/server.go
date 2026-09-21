@@ -1213,6 +1213,11 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 		return
 	}
 
+	// Disable caching so browsers always fetch the latest SPA bundle.
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.Header("Pragma", "no-cache")
+	c.Header("Expires", "0")
+
 	filePath := managementasset.FilePath(s.configFilePath)
 	if strings.TrimSpace(filePath) != "" {
 		if _, err := os.Stat(filePath); err == nil {
