@@ -44,6 +44,11 @@ const (
 	freebuffCleanupTimeout  = 5 * time.Second
 	freebuffHeartbeatEvery  = 45 * time.Second
 	freebuffErrorSnippetMax = 300
+
+	// freebuffAdRefreshThreshold is the time before session expiry at which we
+	// trigger an ad refresh to extend the session. The reference implementation
+	// uses 120 seconds.
+	freebuffAdRefreshThreshold = 120 * time.Second
 )
 
 type FreebuffExecutor struct {
@@ -57,11 +62,12 @@ var freebuffCredentialStates = struct {
 }{states: make(map[string]*freebuffCredentialState)}
 
 type freebuffCredentialState struct {
-	lease   chan struct{}
-	mu      sync.Mutex
-	session *freebuffSession
-	refs    int
-	retired bool
+	lease      chan struct{}
+	mu         sync.Mutex
+	session    *freebuffSession
+	refs       int
+	retired    bool
+	adRenewals int
 }
 
 type freebuffSession struct {
@@ -144,6 +150,10 @@ func (e *FreebuffExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
 	baseTranslated := sdktranslator.TranslateRequest(from, to, model, bytes.Clone(req.Payload), true)
+	baseTranslated, err = thinking.ApplyThinking(baseTranslated, req.Model, from.String(), "freebuff", e.Identifier())
+	if err != nil {
+		return resp, err
+	}
 	var (
 		session    *freebuffSession
 		run        *freebuffRun
@@ -237,6 +247,10 @@ func (e *FreebuffExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
 	baseTranslated := sdktranslator.TranslateRequest(from, to, model, bytes.Clone(req.Payload), true)
+	baseTranslated, err = thinking.ApplyThinking(baseTranslated, req.Model, from.String(), "freebuff", e.Identifier())
+	if err != nil {
+		return nil, err
+	}
 	var (
 		session    *freebuffSession
 		run        *freebuffRun
@@ -692,7 +706,7 @@ func (e *FreebuffExecutor) runSessionHeartbeat(
 			return
 		case <-ticks:
 			requestCtx, cancelRequest := context.WithTimeout(ctx, freebuffCleanupTimeout)
-			current, status, err := e.sessionRequest(requestCtx, auth, http.MethodGet, model, instanceID)
+			current, status, err := e.sessionHeartbeatRequest(requestCtx, auth, model, instanceID)
 			cancelRequest()
 			if err != nil {
 				if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
@@ -708,6 +722,17 @@ func (e *FreebuffExecutor) runSessionHeartbeat(
 				return
 			}
 			e.applyHeartbeatSession(state, model, instanceID, current)
+
+			// If the session is about to expire, try to extend it via ad refresh.
+			// The reference implementation triggers this when expiry is within the threshold.
+			if !current.expiresAt.IsZero() && time.Until(current.expiresAt) < freebuffAdRefreshThreshold {
+				if e.freebuffRefreshAds(ctx, auth) {
+					state.mu.Lock()
+					state.adRenewals++
+					state.mu.Unlock()
+					log.Debugf("freebuff executor: ad refresh succeeded, session extended")
+				}
+			}
 		}
 	}
 }
@@ -752,6 +777,17 @@ func (e *FreebuffExecutor) applyHeartbeatSession(
 }
 
 func (e *FreebuffExecutor) sessionRequest(ctx context.Context, auth *cliproxyauth.Auth, method, model, instanceID string) (*freebuffSession, string, error) {
+	return e.doSessionRequest(ctx, auth, method, model, instanceID, false)
+}
+
+// sessionHeartbeatRequest pings the session with the heartbeat marker. Upstream
+// accepts a plain status GET for the same endpoint, but only requests carrying
+// x-freebuff-heartbeat count as liveness proof for the session.
+func (e *FreebuffExecutor) sessionHeartbeatRequest(ctx context.Context, auth *cliproxyauth.Auth, model, instanceID string) (*freebuffSession, string, error) {
+	return e.doSessionRequest(ctx, auth, http.MethodGet, model, instanceID, true)
+}
+
+func (e *FreebuffExecutor) doSessionRequest(ctx context.Context, auth *cliproxyauth.Auth, method, model, instanceID string, heartbeat bool) (*freebuffSession, string, error) {
 	url := e.baseURL(auth) + "/api/v1/freebuff/session"
 	req, err := http.NewRequestWithContext(ctx, method, url, nil)
 	if err != nil {
@@ -761,6 +797,15 @@ func (e *FreebuffExecutor) sessionRequest(ctx context.Context, auth *cliproxyaut
 	req.Header.Set("Authorization", "Bearer "+freebuffAPIKey(auth))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-freebuff-model", model)
+	// The official client declares multi-session support on every session call.
+	req.Header.Set("x-freebuff-multi-session", "1")
+	if method == http.MethodGet {
+		// Ask upstream to report per-model rate limits, including untouched ones.
+		req.Header.Set("x-freebuff-include-unused-rate-limits", "1")
+	}
+	if heartbeat {
+		req.Header.Set("x-freebuff-heartbeat", "1")
+	}
 	req.Header.Set("User-Agent", freebuffJSONUserAgent)
 	if instanceID != "" {
 		req.Header.Set("x-freebuff-instance-id", instanceID)

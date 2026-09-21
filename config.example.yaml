@@ -227,6 +227,15 @@ ws-auth: true
 #     - "API"
 #     - "proxy"
 
+# CodeBuddy AI (www.codebuddy.ai) provider behavior.
+# A built-in list of 27 security-related words (e.g. "security testing", "CTF",
+# "DoS attacks", "exploit") is always obfuscated. Use this section to add
+# provider-specific words that also trigger the 11128 security-policy filter.
+# codebuddy-ai:
+#   sensitive-words:             # optional: additional words merged with the built-in defaults
+#     - "自定义敏感词"
+#     - "custom-sensitive-word"
+
 # LobsterAI provider behavior.
 # LobsterAI (NetEase Youdao) is driven entirely by auth files created through the
 # browser login flow (GET /v0/management/lobsterai-auth-url); there is no config

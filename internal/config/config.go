@@ -129,6 +129,9 @@ type Config struct {
 	// Devin configures provider-wide Devin request behavior.
 	Devin DevinConfig `yaml:"devin" json:"devin"`
 
+	// CodeBuddyAI configures provider-wide CodeBuddy AI (www.codebuddy.ai) request behavior.
+	CodeBuddyAI CodeBuddyAIConfig `yaml:"codebuddy-ai" json:"codebuddy-ai"`
+
 	// GeminiKey defines Gemini API key configurations with optional routing overrides.
 	GeminiKey []GeminiKey `yaml:"gemini-api-key" json:"gemini-api-key"`
 
@@ -253,6 +256,13 @@ type AntigravityConfig struct {
 // DevinConfig configures provider-wide Devin request behavior.
 type DevinConfig struct {
 	// SensitiveWords is a list of words to obfuscate with zero-width characters in system prompts and messages.
+	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
+}
+
+// CodeBuddyAIConfig configures provider-wide CodeBuddy AI (www.codebuddy.ai) request behavior.
+type CodeBuddyAIConfig struct {
+	// SensitiveWords is a list of words to obfuscate with zero-width characters in system prompts and messages.
+	// These are merged with the built-in default list (codeBuddyAIDefaultSensitiveWords in the executor).
 	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
 }
 

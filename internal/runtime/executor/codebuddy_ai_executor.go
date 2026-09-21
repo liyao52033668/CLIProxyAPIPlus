@@ -27,8 +27,22 @@ const (
 	codeBuddyAIAuthType = "codebuddy-ai"
 )
 
+// codeBuddyAIDefaultSensitiveWords contains words known to trigger CodeBuddy AI's
+// security policy filter (error 11128). These are obfuscated with zero-width spaces
+// before sending upstream.
+var codeBuddyAIDefaultSensitiveWords = []string{
+	"security testing", "defensive security", "CTF challenges", "CTF competitions",
+	"destructive techniques", "DoS attacks", "DDoS", "mass targeting",
+	"supply chain compromise", "detection evasion", "malicious purposes",
+	"C2 frameworks", "credential testing", "exploit development",
+	"pentesting engagements", "pentesting", "security research",
+	"exploit", "vulnerability", "malware", "phishing", "injection",
+	"backdoor", "rootkit", "payload", "weapon", "bomb",
+}
+
 type CodeBuddyAIExecutor struct {
-	cfg *config.Config
+	cfg           *config.Config
+	cachedMatcher *helps.SensitiveWordMatcher
 }
 
 func NewCodeBuddyAIExecutor(cfg *config.Config) *CodeBuddyAIExecutor {
@@ -36,6 +50,21 @@ func NewCodeBuddyAIExecutor(cfg *config.Config) *CodeBuddyAIExecutor {
 }
 
 func (e *CodeBuddyAIExecutor) Identifier() string { return codeBuddyAIAuthType }
+
+// getSensitiveWordMatcher returns a cached matcher built from the default word list
+// merged with any user-configured words from the config file.
+func (e *CodeBuddyAIExecutor) getSensitiveWordMatcher() *helps.SensitiveWordMatcher {
+	if e.cachedMatcher == nil {
+		// Merge default words with config words
+		words := make([]string, 0, len(codeBuddyAIDefaultSensitiveWords))
+		words = append(words, codeBuddyAIDefaultSensitiveWords...)
+		if e.cfg != nil {
+			words = append(words, e.cfg.CodeBuddyAI.SensitiveWords...)
+		}
+		e.cachedMatcher = helps.BuildSensitiveWordMatcher(words)
+	}
+	return e.cachedMatcher
+}
 
 func codeBuddyAICredentials(auth *cliproxyauth.Auth) (accessToken, userID, domain string) {
 	if auth == nil {
@@ -105,6 +134,7 @@ func (e *CodeBuddyAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	// message is rejected outright. The tencent CodeBuddy upstream behaves the
 	// opposite way and keeps its own handling in codebuddy_executor.go.
 	translated = helps.EnsureOpenAILeadingSystemMessage(translated, codebuddy_ai.DefaultSystemPrompt)
+	translated = helps.ObfuscateSensitiveWords(translated, e.getSensitiveWordMatcher())
 	translated, _ = sjson.SetBytes(translated, "stream", true)
 	translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
 
@@ -179,6 +209,8 @@ func (e *CodeBuddyAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	if err != nil {
 		return nil, err
 	}
+
+	translated = helps.ObfuscateSensitiveWords(translated, e.getSensitiveWordMatcher())
 
 	url := codebuddy_ai.BaseURL + codeBuddyAIChatPath
 	headers := make(http.Header)

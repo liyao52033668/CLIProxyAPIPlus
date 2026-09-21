@@ -1059,3 +1059,257 @@ func TestFreebuffSessionUsesMetadataCredential(t *testing.T) {
 		t.Fatalf("authorization header = %q, want metadata token", authHeader)
 	}
 }
+
+func TestFreebuffSessionRequestsSendMultiSessionHeader(t *testing.T) {
+	var methods []string
+	var multiSessionHeaders []string
+	var includeUnusedHeaders []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		methods = append(methods, r.Method)
+		multiSessionHeaders = append(multiSessionHeaders, r.Header.Get("x-freebuff-multi-session"))
+		includeUnusedHeaders = append(includeUnusedHeaders, r.Header.Get("x-freebuff-include-unused-rate-limits"))
+		switch r.Method {
+		case http.MethodGet:
+			_, _ = io.WriteString(w, `{"status":"none"}`)
+		case http.MethodPost:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status": "active", "model": "model-a", "instanceId": "instance-new",
+			})
+		default:
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer server.Close()
+
+	executor := NewFreebuffExecutor(&config.Config{})
+	auth := freebuffTestAuth(server.URL, nil)
+	state := executor.stateFor(auth)
+	if _, err := executor.ensureSession(t.Context(), auth, state, "model-a"); err != nil {
+		t.Fatalf("ensureSession() error = %v", err)
+	}
+	for i, method := range methods {
+		if multiSessionHeaders[i] != "1" {
+			t.Fatalf("%s request missing x-freebuff-multi-session=1 (got %q)", method, multiSessionHeaders[i])
+		}
+		if method == http.MethodGet && includeUnusedHeaders[i] != "1" {
+			t.Fatalf("GET request missing x-freebuff-include-unused-rate-limits=1 (got %q)", includeUnusedHeaders[i])
+		}
+		if method != http.MethodGet && includeUnusedHeaders[i] != "" {
+			t.Fatalf("%s request should not have x-freebuff-include-unused-rate-limits (got %q)", method, includeUnusedHeaders[i])
+		}
+	}
+}
+
+func TestFreebuffHeartbeatSendsHeartbeatHeader(t *testing.T) {
+	called := make(chan struct{}, 1)
+	var heartbeatHeaders []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		heartbeatHeaders = append(heartbeatHeaders, r.Header.Get("x-freebuff-heartbeat"))
+		called <- struct{}{}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "active", "model": "model-a", "instanceId": "instance-a",
+		})
+	}))
+	defer server.Close()
+
+	executor := NewFreebuffExecutor(&config.Config{})
+	auth := freebuffTestAuth(server.URL, nil)
+	state := executor.stateFor(auth)
+	state.session = &freebuffSession{model: "model-a", instanceID: "instance-a"}
+	ticks := make(chan time.Time, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		executor.runSessionHeartbeat(ctx, auth, state, "model-a", "instance-a", ticks)
+	}()
+	ticks <- time.Now()
+	select {
+	case <-called:
+	case <-time.After(time.Second):
+		t.Fatal("heartbeat request was not observed")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("heartbeat did not stop after cancellation")
+	}
+	if len(heartbeatHeaders) == 0 {
+		t.Fatal("no heartbeat requests observed")
+	}
+	if heartbeatHeaders[0] != "1" {
+		t.Fatalf("heartbeat header = %q, want 1", heartbeatHeaders[0])
+	}
+}
+
+func TestFreebuffExecutorAppliesThinkingReasoningEffort(t *testing.T) {
+	var chatBodies []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/freebuff/session", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "active", "model": "deepseek/deepseek-v4-flash", "instanceId": "instance-1",
+		})
+	})
+	mux.HandleFunc("/api/v1/agent-runs", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body["action"] == "START" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"runId": "run-1"})
+		} else {
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		}
+	})
+	mux.HandleFunc("/api/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		chatBodies = append(chatBodies, string(body))
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(
+			`data: {"id":"chat-1","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}` + "\n\n" +
+				"data: [DONE]\n\n",
+		))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	executor := NewFreebuffExecutor(&config.Config{})
+	auth := freebuffTestAuth(server.URL, nil)
+	req := cliproxyexecutor.Request{
+		Model:   "deepseek/deepseek-v4-flash(high)",
+		Payload: []byte(`{"model":"deepseek/deepseek-v4-flash(high)","messages":[{"role":"user","content":"hi"}]}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FromString("openai"),
+		OriginalRequest: req.Payload,
+	}
+	result, err := executor.ExecuteStream(t.Context(), auth, req, opts)
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+	}
+	if len(chatBodies) == 0 {
+		t.Fatal("no chat requests observed")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(chatBodies[0]), &payload); err != nil {
+		t.Fatalf("unmarshal chat body: %v", err)
+	}
+	effort, _ := payload["reasoning_effort"].(string)
+	if effort != "high" {
+		t.Fatalf("reasoning_effort = %q, want high (suffix should be applied)", effort)
+	}
+}
+
+func TestFreebuffValidateImpressionURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		url     string
+		wantErr bool
+	}{
+		{name: "valid https", url: "https://ads.example.com/impression?id=123", wantErr: false},
+		{name: "valid http", url: "http://ads.example.com/impression", wantErr: false},
+		{name: "reject ftp", url: "ftp://ads.example.com/file", wantErr: true},
+		{name: "reject javascript", url: "javascript:alert(1)", wantErr: true},
+		{name: "reject localhost", url: "http://localhost/impression", wantErr: true},
+		{name: "reject localhost subdomain", url: "http://ads.localhost/impression", wantErr: true},
+		{name: "reject .local", url: "http://host.local/impression", wantErr: true},
+		{name: "reject .internal", url: "http://host.internal/impression", wantErr: true},
+		{name: "reject empty host", url: "http:///impression", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := freebuffValidateImpressionURL(tt.url)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("freebuffValidateImpressionURL(%q) error = %v, wantErr %v", tt.url, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestFreebuffRefreshAdsSuccess(t *testing.T) {
+	var adRequests, impressionRequests int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/ads", func(w http.ResponseWriter, r *http.Request) {
+		adRequests++
+		if r.Method != http.MethodPost {
+			t.Fatalf("ad request method = %s, want POST", r.Method)
+		}
+		if r.Header.Get("Authorization") == "" {
+			t.Fatal("ad request missing Authorization header")
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ads": []map[string]any{
+				{
+					"title":         "Test Ad",
+					"impressionUrl": "https://ads.example.com/impression?id=test",
+				},
+			},
+		})
+	})
+	mux.HandleFunc("/api/v1/ads/impression", func(w http.ResponseWriter, r *http.Request) {
+		impressionRequests++
+		if r.Method != http.MethodPost {
+			t.Fatalf("impression request method = %s, want POST", r.Method)
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	executor := NewFreebuffExecutor(&config.Config{})
+	auth := freebuffTestAuth(server.URL, nil)
+	if !executor.freebuffRefreshAds(t.Context(), auth) {
+		t.Fatal("freebuffRefreshAds() = false, want true")
+	}
+	if adRequests != 1 {
+		t.Fatalf("ad requests = %d, want 1", adRequests)
+	}
+	if impressionRequests != 1 {
+		t.Fatalf("impression requests = %d, want 1", impressionRequests)
+	}
+}
+
+func TestFreebuffRefreshAdsNoAds(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/ads", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"ads": []any{}})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	executor := NewFreebuffExecutor(&config.Config{})
+	auth := freebuffTestAuth(server.URL, nil)
+	if executor.freebuffRefreshAds(t.Context(), auth) {
+		t.Fatal("freebuffRefreshAds() = true, want false (no ads)")
+	}
+}
+
+func TestFreebuffRefreshAdsInvalidImpressionURL(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/ads", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ads": []map[string]any{
+				{
+					"title":         "Malicious Ad",
+					"impressionUrl": "http://localhost/impression",
+				},
+			},
+		})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	executor := NewFreebuffExecutor(&config.Config{})
+	auth := freebuffTestAuth(server.URL, nil)
+	if executor.freebuffRefreshAds(t.Context(), auth) {
+		t.Fatal("freebuffRefreshAds() = true, want false (invalid impression URL)")
+	}
+}
