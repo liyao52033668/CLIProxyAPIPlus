@@ -108,6 +108,16 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 					}
 					normalizedEventName := gjson.GetBytes(eventData, "type").String()
 					switch normalizedEventName {
+					case "error":
+						msg := gjson.GetBytes(eventData, "message").String()
+						if msg == "" {
+							msg = "upstream error"
+						}
+						select {
+						case out <- cliproxyexecutor.StreamChunk{Err: statusErr{code: http.StatusBadGateway, msg: msg}}:
+						case <-ctx.Done():
+						}
+						return
 					case "response.content_part.added":
 						xaiMarkTextContentPartSeen(eventData, textContentPartsSeen)
 					case "response.output_text.delta":
