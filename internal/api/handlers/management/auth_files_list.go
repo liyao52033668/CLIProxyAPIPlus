@@ -2,6 +2,7 @@ package management
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -194,6 +195,13 @@ func (h *Handler) listAuthFilesFromDisk(ctx context.Context, c *gin.Context) {
 							fileData["note"] = trimmed
 						}
 					}
+					// xAI tier: decode access_token JWT to extract tier claim.
+					typeLower := strings.ToLower(typeValue)
+					if typeLower == "xai" || typeLower == "x-ai" || typeLower == "grok" {
+						if tier := extractXaiTierFromRawJSON(data); tier != nil {
+							fileData["tier"] = tier
+						}
+					}
 				}
 
 				files = append(files, fileData)
@@ -210,6 +218,64 @@ func (h *Handler) listAuthFilesFromDisk(ctx context.Context, c *gin.Context) {
 	case <-ctx.Done():
 		c.JSON(http.StatusRequestTimeout, gin.H{"error": "list auth files from disk timeout"})
 	}
+}
+
+// extractXaiTier decodes the access_token JWT for xAI providers and extracts
+// the tier claim. Returns nil when the provider is not xAI, the token is
+// absent/invalid, or the tier claim is not present.
+func extractXaiTier(auth *coreauth.Auth) any {
+	if auth == nil || auth.Metadata == nil {
+		return nil
+	}
+	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "xai") &&
+		!strings.EqualFold(strings.TrimSpace(auth.Provider), "x-ai") &&
+		!strings.EqualFold(strings.TrimSpace(auth.Provider), "grok") {
+		return nil
+	}
+
+	tokenRaw, _ := auth.Metadata["access_token"].(string)
+	return extractTierFromJWT(strings.TrimSpace(tokenRaw))
+}
+
+// extractXaiTierFromRawJSON extracts the tier from an access_token JWT found
+// in raw JSON file bytes. Used by the disk-fallback list path, which has no
+// auth object to read metadata from.
+func extractXaiTierFromRawJSON(data []byte) any {
+	token := strings.TrimSpace(gjson.GetBytes(data, "access_token").String())
+	return extractTierFromJWT(token)
+}
+
+// extractTierFromJWT decodes a JWT payload and returns the tier claim value,
+// or nil when the token is absent, malformed, or carries no tier claim.
+func extractTierFromJWT(token string) any {
+	if token == "" {
+		return nil
+	}
+
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return nil
+	}
+
+	// Base64url-decode the payload (second segment).
+	payload := parts[1]
+	switch len(payload) % 4 {
+	case 2:
+		payload += "=="
+	case 3:
+		payload += "="
+	}
+	decoded, err := base64.URLEncoding.DecodeString(payload)
+	if err != nil {
+		return nil
+	}
+
+	// Use gjson to extract the tier field without full JSON unmarshalling.
+	result := gjson.GetBytes(decoded, "tier")
+	if !result.Exists() {
+		return nil
+	}
+	return result.Value()
 }
 
 func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
@@ -390,6 +456,10 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 				}
 			}
 		}
+	}
+	// xAI tier: decoded from access_token JWT. Tier >= 1 indicates a paid account.
+	if tier := extractXaiTier(auth); tier != nil {
+		entry["tier"] = tier
 	}
 	return entry
 }
