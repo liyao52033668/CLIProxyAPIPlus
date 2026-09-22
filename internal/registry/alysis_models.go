@@ -39,7 +39,9 @@ func GetAlysisModels() []*ModelInfo {
 			MaxCompletionTokens: 128000,
 		},
 		{
-			ID:                  "deepseek-v4.1-flash",
+			// Upstream model id. Client-facing names such as deepseek-v4.1-flash
+			// belong in oauth-model-alias, not in this catalog.
+			ID:                  "deepseek-v4.1-flash-expires-on-0910",
 			DisplayName:         "DeepSeek V4.1 Flash",
 			OwnedBy:             "alysis",
 			Type:                "alysis",
@@ -47,6 +49,7 @@ func GetAlysisModels() []*ModelInfo {
 			Created:             1789889200,
 			ContextLength:       128000,
 			MaxCompletionTokens: 128000,
+			Thinking:            &ThinkingSupport{Levels: []string{"low", "high", "max"}},
 		},
 	}
 }

@@ -88,6 +88,12 @@ func TestClampAlysisMaxTokens(t *testing.T) {
 	if got := clampAlysisMaxTokens(unknown, "mystery"); !bytes.Equal(got, unknown) {
 		t.Fatalf("expected payload unchanged for unknown model, got %s", got)
 	}
+
+	dated := []byte(`{"model":"deepseek-v4.1-flash-expires-on-0910","max_tokens":384000,"messages":[{"role":"user","content":"hi"}]}`)
+	clampedDated := clampAlysisMaxTokens(dated, "deepseek-v4.1-flash-expires-on-0910")
+	if got := gjson.GetBytes(clampedDated, "max_tokens").Int(); got <= 0 || got > 128000 {
+		t.Fatalf("expected dated model max_tokens clamped to <=128000, got %d", got)
+	}
 }
 
 func TestFetchAlysisModelsLiveAndFallback(t *testing.T) {
@@ -98,7 +104,7 @@ func TestFetchAlysisModelsLiveAndFallback(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer slk_models" {
 			t.Errorf("unexpected Authorization %q", got)
 		}
-		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"deepseek-v4-flash","object":"model","owned_by":"alysis"},{"id":"future-model","object":"model","owned_by":"alysis"}]}`))
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"deepseek-v4-flash","object":"model","owned_by":"alysis"},{"id":"deepseek-v4.1-flash-expires-on-0910","object":"model","owned_by":"alysis"},{"id":"future-model","object":"model","owned_by":"alysis"}]}`))
 	}))
 	defer server.Close()
 
@@ -112,8 +118,20 @@ func TestFetchAlysisModelsLiveAndFallback(t *testing.T) {
 	for _, m := range models {
 		ids[m.ID] = true
 	}
-	if !ids["deepseek-v4-flash"] || !ids["future-model"] {
+	if !ids["deepseek-v4-flash"] || !ids["future-model"] || !ids["deepseek-v4.1-flash-expires-on-0910"] {
 		t.Fatalf("expected live models merged with fallback, got %v", ids)
+	}
+	for _, m := range models {
+		switch m.ID {
+		case "deepseek-v4.1-flash-expires-on-0910":
+			if m.Thinking == nil || m.ContextLength != 128000 || m.MaxCompletionTokens != 128000 {
+				t.Fatalf("upstream model missing static capabilities: %+v thinking=%v", m, m.Thinking)
+			}
+		case "future-model":
+			if m.Thinking != nil || m.ContextLength != 0 {
+				t.Fatalf("unknown live model should not inherit capabilities: %+v", m)
+			}
+		}
 	}
 
 	// Failure path: unreachable server falls back to the static catalog.

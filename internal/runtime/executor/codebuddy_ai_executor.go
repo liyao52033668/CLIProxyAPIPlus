@@ -31,6 +31,9 @@ const (
 // security policy filter (error 11128). These are obfuscated with zero-width spaces
 // before sending upstream.
 var codeBuddyAIDefaultSensitiveWords = []string{
+	// Whole-sentence harness fingerprint. Dropping any word or the parentheses
+	// no longer trips the filter, so the phrase must be matched intact.
+	"Main branch (you will usually use this for PRs)",
 	"security testing", "defensive security", "CTF challenges", "CTF competitions",
 	"destructive techniques", "DoS attacks", "DDoS", "mass targeting",
 	"supply chain compromise", "detection evasion", "malicious purposes",

@@ -54,6 +54,26 @@ func TestCodeBuddyAISensitiveWordObfuscation(t *testing.T) {
 	}
 }
 
+// TestCodeBuddyAIObfuscatesGitStatusFingerprint verifies the ZCode git-status
+// sentence that trips CodeBuddy AI error 11128 is broken with a zero-width space.
+func TestCodeBuddyAIObfuscatesGitStatusFingerprint(t *testing.T) {
+	executor := &CodeBuddyAIExecutor{}
+	matcher := executor.getSensitiveWordMatcher()
+
+	payload := []byte(`{
+		"messages": [
+			{"role": "system", "content": "Main branch (you will usually use this for PRs): main"}
+		]
+	}`)
+
+	obfuscated := helps.ObfuscateSensitiveWords(payload, matcher)
+	content := gjson.GetBytes(obfuscated, "messages.0.content").String()
+	want := "M\u200bain branch (you will usually use this for PRs): main"
+	if content != want {
+		t.Errorf("fingerprint not obfuscated:\n got %q\nwant %q", content, want)
+	}
+}
+
 // TestCodeBuddyAISensitiveWordObfuscationPreservesNonSensitive verifies that
 // non-sensitive content is left unchanged.
 func TestCodeBuddyAISensitiveWordObfuscationPreservesNonSensitive(t *testing.T) {
