@@ -21,11 +21,8 @@ func ConvertOpenAIToCommandCodeRequest(modelName string, inputRawJSON []byte, st
 		Messages:  convertMessages(root),
 		Tools:     convertTools(root),
 		System:    ExtractOpenAISystem(inputRawJSON),
-		MaxTokens: root.Get("max_tokens").Int(),
+		MaxTokens: cc.NormalizeMaxTokens(root.Get("max_tokens").Int()),
 		Stream:    stream,
-	}
-	if params.MaxTokens <= 0 {
-		params.MaxTokens = 64000
 	}
 	if t := root.Get("temperature"); t.Exists() {
 		v := t.Float()

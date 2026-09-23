@@ -55,6 +55,27 @@ type WireRequest struct {
 	Params         WireParams `json:"params"`
 }
 
+const (
+	// DefaultMaxTokens is used when the client omits a positive output limit.
+	DefaultMaxTokens int64 = 64000
+	// MinMaxTokens is the smallest output limit Command Code accepts.
+	// Upstream maps max_tokens to max_output_tokens and rejects values below 16.
+	MinMaxTokens int64 = 16
+)
+
+// NormalizeMaxTokens applies Command Code's output-token floor.
+// A missing or non-positive limit keeps the historical default; a positive
+// limit below the upstream minimum is raised so probes are not rejected.
+func NormalizeMaxTokens(n int64) int64 {
+	if n <= 0 {
+		return DefaultMaxTokens
+	}
+	if n < MinMaxTokens {
+		return MinMaxTokens
+	}
+	return n
+}
+
 // WireParams holds the model-facing parameters.
 type WireParams struct {
 	Model           string        `json:"model"`
