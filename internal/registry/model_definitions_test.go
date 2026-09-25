@@ -32,6 +32,15 @@ func TestGeminiVertexModelsUseProductionReleaseIDs(t *testing.T) {
 	}
 }
 
+func TestGetStaticModelDefinitionsByChannelSupportsKimiAndKimiAI(t *testing.T) {
+	for _, channel := range []string{"kimi", "kimi-ai", "kimi.ai", "kimi.com"} {
+		models := GetStaticModelDefinitionsByChannel(channel)
+		if len(models) == 0 {
+			t.Fatalf("GetStaticModelDefinitionsByChannel(%s) returned no models", channel)
+		}
+	}
+}
+
 func TestGetKimiModelsIncludesK3FinalEntry(t *testing.T) {
 	models := GetKimiModels()
 	model := findModelInfo(models, "kimi-k3")
@@ -200,7 +209,7 @@ func TestCodexStaticModelsIncludeGPT55(t *testing.T) {
 }
 
 func TestModelOverrideHeadersFromEmbeddedModels(t *testing.T) {
-	const wantUA = "codex-tui/0.144.0 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.144.0)"
+	const wantUA = "codex-tui/0.154.0 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.154.0)"
 	got := ModelOverrideHeaders("gpt-5.6-luna")
 	if got == nil {
 		t.Fatal("ModelOverrideHeaders(gpt-5.6-luna) = nil, want headers")

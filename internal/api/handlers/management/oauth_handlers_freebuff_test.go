@@ -61,6 +61,9 @@ func TestBuildFreebuffAuthRecordMetadata(t *testing.T) {
 func TestRequestFreebuffTokenStartsDeviceFlow(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
+	// Swap the device-flow hooks under the hook mutex: the background poll
+	// goroutine may still be running when cleanup restores the originals.
+	freebuffOAuthHooksMu.Lock()
 	originalRequestCode := freebuffRequestLoginCodeFn
 	originalPoll := freebuffPollLoginStatusFn
 	freebuffRequestLoginCodeFn = func(_ context.Context, _ *http.Client, _ string, fingerprintID string) (*freebuffauth.LoginCode, error) {
@@ -75,7 +78,10 @@ func TestRequestFreebuffTokenStartsDeviceFlow(t *testing.T) {
 	freebuffPollLoginStatusFn = func(_ context.Context, _ *http.Client, _ string, _ *freebuffauth.LoginCode) (*freebuffauth.LoginUser, bool, error) {
 		return nil, true, nil
 	}
+	freebuffOAuthHooksMu.Unlock()
 	t.Cleanup(func() {
+		freebuffOAuthHooksMu.Lock()
+		defer freebuffOAuthHooksMu.Unlock()
 		freebuffRequestLoginCodeFn = originalRequestCode
 		freebuffPollLoginStatusFn = originalPoll
 	})

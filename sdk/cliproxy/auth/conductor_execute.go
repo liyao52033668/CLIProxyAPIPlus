@@ -74,6 +74,7 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	if m.scheduler != nil {
 		m.scheduler.upsertAuth(authClone)
 	}
+	m.structuralEpoch.Add(1)
 	if authClone.Disabled || authClone.Status == StatusDisabled {
 		m.removeRefreshSchedule(auth.ID)
 	} else {
@@ -172,6 +173,7 @@ func (m *Manager) updateMerged(ctx context.Context, base *Auth, auth *Auth, requ
 	if m.scheduler != nil {
 		m.scheduler.upsertAuth(authClone)
 	}
+	m.structuralEpoch.Add(1)
 	if authClone.Disabled || authClone.Status == StatusDisabled {
 		m.removeRefreshSchedule(auth.ID)
 	} else {
@@ -237,6 +239,7 @@ func (m *Manager) Remove(ctx context.Context, id string) {
 	if m.scheduler != nil {
 		m.scheduler.removeAuth(id)
 	}
+	m.structuralEpoch.Add(1)
 	m.removeRefreshSchedule(id)
 	m.persistLocks.Delete(id)
 	if m.store != nil {
@@ -270,6 +273,7 @@ func (m *Manager) Load(ctx context.Context) error {
 	}
 	m.rebuildAPIKeyModelAliasLocked(cfg)
 	m.mu.Unlock()
+	m.structuralEpoch.Add(1)
 	m.syncScheduler()
 	return nil
 }
@@ -284,6 +288,7 @@ func (m *Manager) handleExecutionError(lastErr error) error {
 // Execute performs a non-streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
@@ -336,6 +341,7 @@ func (m *Manager) executeAutoWithModelFailover(ctx context.Context, providers []
 // ExecuteCount performs a non-streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
@@ -380,6 +386,7 @@ func (m *Manager) executeCountAutoWithModelFailover(ctx context.Context, provide
 // ExecuteStream performs a streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}

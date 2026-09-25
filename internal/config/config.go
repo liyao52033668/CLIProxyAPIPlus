@@ -36,6 +36,10 @@ type Config struct {
 	// Port is the network port on which the API server will listen.
 	Port int `yaml:"port" json:"-"`
 
+	// TrustedProxies lists the IPs or CIDRs allowed to provide forwarded client IP headers.
+	// The server applies this list at startup; changing it requires a restart.
+	TrustedProxies []string `yaml:"trusted-proxies" json:"trusted-proxies"`
+
 	// TLS config controls HTTPS server settings.
 	TLS TLSConfig `yaml:"tls" json:"tls"`
 
@@ -718,12 +722,21 @@ type CodexModel struct {
 
 	// MaxContextLength overrides the context window advertised to Codex clients.
 	MaxContextLength int `yaml:"max-context-length,omitempty" json:"max-context-length,omitempty"`
+
+	// IsCompat marks the model as targeting a third-party Responses-compatible
+	// endpoint (for example DeepSeek behind a Codex-style base-url). Such
+	// endpoints replay cleartext thinking, so request sanitization must keep
+	// reasoning content and reasoning ids intact instead of treating them as
+	// native Codex encrypted reasoning items. Default false keeps native
+	// Codex behavior unchanged.
+	IsCompat bool `yaml:"is-compat,omitempty" json:"is-compat,omitempty"`
 }
 
 func (m CodexModel) GetName() string          { return m.Name }
 func (m CodexModel) GetAlias() string         { return m.Alias }
 func (m CodexModel) GetDisplayName() string   { return m.DisplayName }
 func (m CodexModel) GetMaxContextLength() int { return m.MaxContextLength }
+func (m CodexModel) GetIsCompat() bool        { return m.IsCompat }
 
 // GeminiKey represents the configuration for a Gemini API key,
 // including optional overrides for upstream base URL, proxy routing, and headers.
@@ -938,6 +951,10 @@ type OpenAICompatibilityModel struct {
 	// InputModalities specifies the input modalities supported by this model (e.g., "text", "image").
 	InputModalities []string `yaml:"input-modalities,omitempty" json:"input-modalities,omitempty"`
 
+	// UseMaxCompletionTokens emits max_completion_tokens instead of legacy max_tokens for this model.
+	// Default false preserves max_tokens for older compatible upstreams.
+	UseMaxCompletionTokens bool `yaml:"use-max-completion-tokens,omitempty" json:"use-max-completion-tokens,omitempty"`
+
 	// Thinking configures the thinking/reasoning capability for this model.
 	// If nil, the model defaults to level-based reasoning with levels ["low", "medium", "high"].
 	Thinking *registry.ThinkingSupport `yaml:"thinking,omitempty" json:"thinking,omitempty"`
@@ -947,6 +964,9 @@ func (m OpenAICompatibilityModel) GetName() string          { return m.Name }
 func (m OpenAICompatibilityModel) GetAlias() string         { return m.Alias }
 func (m OpenAICompatibilityModel) GetDisplayName() string   { return m.DisplayName }
 func (m OpenAICompatibilityModel) GetMaxContextLength() int { return m.MaxContextLength }
+func (m OpenAICompatibilityModel) GetUseMaxCompletionTokens() bool {
+	return m.UseMaxCompletionTokens
+}
 
 // LoadConfig reads a YAML configuration file from the given path,
 // unmarshals it into a Config struct, applies environment variable overrides,
@@ -1026,6 +1046,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 			return &Config{WebsocketAuth: true}, nil
 		}
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
+	if errValidate := validateTrustedProxies(cfg.TrustedProxies); errValidate != nil {
+		return nil, errValidate
 	}
 
 	// NOTE: Startup legacy key migration is intentionally disabled.
@@ -1344,6 +1367,30 @@ func (cfg *Config) SanitizeCodexKeys() {
 	cfg.CodexKey = out
 }
 
+// NormalizeCloakConfig trims strings and removes blank sensitive words.
+func NormalizeCloakConfig(cloak *CloakConfig) *CloakConfig {
+	if cloak == nil {
+		return nil
+	}
+	cloak.Mode = strings.TrimSpace(cloak.Mode)
+	if len(cloak.SensitiveWords) > 0 {
+		normalizedWords := make([]string, 0, len(cloak.SensitiveWords))
+		for _, w := range cloak.SensitiveWords {
+			if trimmed := strings.TrimSpace(w); trimmed != "" {
+				normalizedWords = append(normalizedWords, trimmed)
+			}
+		}
+		if len(normalizedWords) > 0 {
+			cloak.SensitiveWords = normalizedWords
+		} else {
+			cloak.SensitiveWords = nil
+		}
+	} else {
+		cloak.SensitiveWords = nil
+	}
+	return cloak
+}
+
 // SanitizeClaudeKeys normalizes headers for Claude credentials.
 func (cfg *Config) SanitizeClaudeKeys() {
 	if cfg == nil || len(cfg.ClaudeKey) == 0 {
@@ -1354,6 +1401,7 @@ func (cfg *Config) SanitizeClaudeKeys() {
 		entry.Prefix = normalizeModelPrefix(entry.Prefix)
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
+		entry.Cloak = NormalizeCloakConfig(entry.Cloak)
 	}
 }
 
@@ -1744,6 +1792,9 @@ func mergeNodePreserve(dst, src *yaml.Node, path ...[]string) {
 			copyNodeShallow(dst, src)
 		}
 		mergeMappingPreserve(dst, src, currentPath)
+		if shouldPruneNestedMappingKeys(currentPath) {
+			pruneMissingMapKeys(dst, src)
+		}
 	case yaml.SequenceNode:
 		// Preserve explicit null style if dst was null and src is empty sequence
 		if dst.Kind == yaml.ScalarNode && dst.Tag == "!!null" && len(src.Content) == 0 {
@@ -1820,6 +1871,12 @@ func appendPath(path []string, key string) []string {
 // represents a known default value that should not be written to the config file.
 // This prevents non-zero defaults from polluting the config.
 func isKnownDefaultValue(path []string, node *yaml.Node) bool {
+	// Pointer-backed booleans (such as cache-user-id and disable-cooling): explicit
+	// false is meaningful and must be preserved.
+	if len(path) > 0 && (path[len(path)-1] == "cache-user-id" || path[len(path)-1] == "disable-cooling") && node != nil && node.Kind == yaml.ScalarNode && node.Tag == "!!bool" {
+		return false
+	}
+
 	// First check if it's a zero value
 	if isZeroValueNode(node) {
 		return true
@@ -2203,6 +2260,26 @@ func pruneMissingMapKeys(dstMap, srcMap *yaml.Node) {
 			continue
 		}
 		i += 2
+	}
+}
+
+// shouldPruneNestedMappingKeys reports whether keys missing from src should be pruned from dst.
+// This is strictly scoped to credential-nested mappings such as "cloak" and "headers" under
+// known credential sequence paths to prevent stale deleted keys from persisting while leaving
+// all other mappings and root sections unaffected.
+func shouldPruneNestedMappingKeys(path []string) bool {
+	if len(path) < 2 {
+		return false
+	}
+	parent := path[len(path)-2]
+	last := path[len(path)-1]
+	switch parent {
+	case "claude-api-key":
+		return last == "cloak" || last == "headers"
+	case "codex-api-key", "gemini-api-key", "interactions-api-key", "xai-api-key", "meta-api-key", "vertex-api-key", "openai-compatibility":
+		return last == "headers"
+	default:
+		return false
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -352,6 +353,8 @@ func (m *Manager) RefreshAuth(ctx context.Context, authID string) (*Auth, error)
 }
 
 func (m *Manager) refreshAuth(ctx context.Context, id string) (*Auth, error) {
+	// Credential refreshes must not inherit an execution-scoped request proxy.
+	ctx = cliproxyexecutor.WithoutRequestProxyURL(ctx)
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -360,7 +363,9 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) (*Auth, error) {
 	var exec ProviderExecutor
 	var cloned *Auth
 	if auth != nil && !auth.Disabled && auth.Status != StatusDisabled {
-		exec = m.executors[auth.Provider]
+		// Use the same effective provider key as request execution so Kimi
+		// dual-domain aliases still resolve to the shared kimi executor.
+		exec, _ = m.executorLocked(executorKeyFromAuth(auth))
 		cloned = auth.Clone()
 	}
 	m.mu.RUnlock()
@@ -460,7 +465,8 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) (*Auth, error) {
 func (m *Manager) executorFor(provider string) ProviderExecutor {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.executors[provider]
+	exec, _ := m.executorLocked(provider)
+	return exec
 }
 
 // roundTripperContextKey is an unexported context key type to avoid collisions.
@@ -508,7 +514,15 @@ func executorKeyFromAuth(auth *Auth) string {
 			return strings.ToLower(providerKey)
 		}
 	}
-	return strings.ToLower(strings.TrimSpace(auth.Provider))
+	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+	switch provider {
+	case "kimi.com":
+		return "kimi"
+	case "kimi.ai":
+		return "kimi-ai"
+	default:
+		return provider
+	}
 }
 
 // logEntryWithRequestID returns a logrus entry with request_id field if available in context.
@@ -586,7 +600,7 @@ func (m *Manager) InjectCredentials(req *http.Request, authID string) error {
 	a := m.auths[authID]
 	var exec ProviderExecutor
 	if a != nil {
-		exec = m.executors[executorKeyFromAuth(a)]
+		exec, _ = m.executorLocked(executorKeyFromAuth(a))
 	}
 	m.mu.RUnlock()
 	if a == nil || exec == nil {

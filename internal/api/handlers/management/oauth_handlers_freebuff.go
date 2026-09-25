@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -29,10 +30,27 @@ const (
 )
 
 // Upstream client seams so tests can stub the device-flow exchange offline.
+// Access is guarded by freebuffOAuthHooksMu because the background poll
+// goroutine keeps reading the hooks after the handler returns, and tests swap
+// them back in cleanup.
 var (
+	freebuffOAuthHooksMu sync.Mutex
+
 	freebuffRequestLoginCodeFn = freebuffauth.RequestLoginCode
 	freebuffPollLoginStatusFn  = freebuffauth.PollLoginStatus
 )
+
+func freebuffRequestLoginCodeHook() func(context.Context, *http.Client, string, string) (*freebuffauth.LoginCode, error) {
+	freebuffOAuthHooksMu.Lock()
+	defer freebuffOAuthHooksMu.Unlock()
+	return freebuffRequestLoginCodeFn
+}
+
+func freebuffPollLoginStatusHook() func(context.Context, *http.Client, string, *freebuffauth.LoginCode) (*freebuffauth.LoginUser, bool, error) {
+	freebuffOAuthHooksMu.Lock()
+	defer freebuffOAuthHooksMu.Unlock()
+	return freebuffPollLoginStatusFn
+}
 
 // RequestFreebuffToken starts the Freebuff CLI device-flow login. It follows
 // the standard OAuth session machinery: the browser login URL is returned
@@ -52,7 +70,7 @@ func (h *Handler) RequestFreebuffToken(c *gin.Context) {
 		return
 	}
 	client := helps.NewProxyAwareHTTPClient(ctx, h.cfg, nil, 0)
-	code, errCode := freebuffRequestLoginCodeFn(ctx, client, freebuffauth.DefaultLoginBaseURL, fingerprintID)
+	code, errCode := freebuffRequestLoginCodeHook()(ctx, client, freebuffauth.DefaultLoginBaseURL, fingerprintID)
 	if errCode != nil {
 		log.Errorf("freebuff login: failed to request login code: %v", errCode)
 		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to start freebuff login"})
@@ -102,7 +120,7 @@ func (h *Handler) pollFreebuffLogin(ctx context.Context, state string, client *h
 	}()
 
 	for {
-		user, pending, errPoll := freebuffPollLoginStatusFn(pollCtx, client, freebuffauth.DefaultLoginBaseURL, code)
+		user, pending, errPoll := freebuffPollLoginStatusHook()(pollCtx, client, freebuffauth.DefaultLoginBaseURL, code)
 		if errPoll != nil {
 			if errors.Is(errPoll, context.Canceled) || errors.Is(errPoll, context.DeadlineExceeded) {
 				return

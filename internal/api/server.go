@@ -161,6 +161,9 @@ type Server struct {
 	// server is the underlying HTTP server.
 	server *http.Server
 
+	// listenerMu guards the mux listener fields against concurrent stop/serve access.
+	listenerMu sync.Mutex
+
 	// muxBaseListener is the shared TCP listener used to serve both HTTP and Redis protocol traffic.
 	muxBaseListener net.Listener
 
@@ -169,6 +172,9 @@ type Server struct {
 
 	// handlers contains the API handlers for processing requests.
 	handlers *handlers.BaseAPIHandler
+
+	// cfgMu guards concurrent access to cfg while reloads swap the configuration.
+	cfgMu sync.RWMutex
 
 	// cfg holds the current server configuration.
 	cfg *config.Config
@@ -251,6 +257,12 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 
 	// Create gin engine
 	engine := gin.New()
+	if errSetTrustedProxies := engine.SetTrustedProxies(cfg.TrustedProxies); errSetTrustedProxies != nil {
+		log.WithError(errSetTrustedProxies).Error("invalid trusted-proxies configuration; forwarded client IP headers will be ignored")
+		if errDisableTrustedProxies := engine.SetTrustedProxies(nil); errDisableTrustedProxies != nil {
+			log.WithError(errDisableTrustedProxies).Error("failed to disable trusted proxy handling")
+		}
+	}
 	if optionState.engineConfigurator != nil {
 		optionState.engineConfigurator(engine)
 	}
@@ -444,6 +456,17 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	return s
 }
 
+// getConfig returns the current server configuration under the read lock so
+// request-time readers never race with configuration reloads.
+func (s *Server) getConfig() *config.Config {
+	if s == nil {
+		return nil
+	}
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	return s.cfg
+}
+
 // Handler returns the HTTP handler used by the server.
 func (s *Server) Handler() http.Handler {
 	if s == nil || s.server == nil {
@@ -454,7 +477,8 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) homeHeartbeatMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if s == nil || s.cfg == nil || !s.cfg.Home.Enabled {
+		cfg := s.getConfig()
+		if s == nil || cfg == nil || !cfg.Home.Enabled {
 			c.Next()
 			return
 		}
@@ -577,7 +601,7 @@ func (s *Server) setupRoutes() {
 			errStr = c.Query("error_description")
 		}
 		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "anthropic", state, code, errStr)
+			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.getConfig().AuthDir, "anthropic", state, code, errStr)
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
@@ -591,7 +615,7 @@ func (s *Server) setupRoutes() {
 			errStr = c.Query("error_description")
 		}
 		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "codex", state, code, errStr)
+			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.getConfig().AuthDir, "codex", state, code, errStr)
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
@@ -605,7 +629,7 @@ func (s *Server) setupRoutes() {
 			errStr = c.Query("error_description")
 		}
 		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "gitlab", state, code, errStr)
+			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.getConfig().AuthDir, "gitlab", state, code, errStr)
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
@@ -619,7 +643,7 @@ func (s *Server) setupRoutes() {
 			errStr = c.Query("error_description")
 		}
 		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "gemini", state, code, errStr)
+			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.getConfig().AuthDir, "gemini", state, code, errStr)
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
@@ -633,7 +657,7 @@ func (s *Server) setupRoutes() {
 			errStr = c.Query("error_description")
 		}
 		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "antigravity", state, code, errStr)
+			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.getConfig().AuthDir, "antigravity", state, code, errStr)
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
@@ -648,7 +672,7 @@ func (s *Server) setupRoutes() {
 		}
 		authField := c.Query("auth")
 		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSessionWithAuth(s.cfg.AuthDir, "kiro", state, code, errStr, authField)
+			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSessionWithAuth(s.getConfig().AuthDir, "kiro", state, code, errStr, authField)
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
@@ -662,7 +686,7 @@ func (s *Server) setupRoutes() {
 			errStr = c.Query("error_description")
 		}
 		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "xai", state, code, errStr)
+			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.getConfig().AuthDir, "xai", state, code, errStr)
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
@@ -682,7 +706,7 @@ func (s *Server) setupRoutes() {
 			errStr = c.Query("error_description")
 		}
 		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSessionWithAuth(s.cfg.AuthDir, "commandcode", state, apiKey, errStr, apiKey)
+			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSessionWithAuth(s.getConfig().AuthDir, "commandcode", state, apiKey, errStr, apiKey)
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
@@ -705,7 +729,7 @@ func (s *Server) setupRoutes() {
 				apiKey = payload.Token
 			}
 			if payload.State != "" {
-				_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSessionWithAuth(s.cfg.AuthDir, "commandcode", payload.State, apiKey, payload.Error, apiKey)
+				_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSessionWithAuth(s.getConfig().AuthDir, "commandcode", payload.State, apiKey, payload.Error, apiKey)
 			}
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
@@ -728,7 +752,7 @@ func (s *Server) setupRoutes() {
 				authField := parsed.Get("auth")
 				errStr := parsed.Get("error")
 				if state != "" && (token != "" || errStr != "") {
-					_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSessionWithAuth(s.cfg.AuthDir, "qoder", state, token, errStr, authField)
+					_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSessionWithAuth(s.getConfig().AuthDir, "qoder", state, token, errStr, authField)
 				}
 			}
 		}
@@ -745,7 +769,7 @@ func (s *Server) setupRoutes() {
 		authField := c.Query("auth")
 		errStr := c.Query("error")
 		if state != "" && (token != "" || errStr != "") {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSessionWithAuth(s.cfg.AuthDir, "qoder", state, token, errStr, authField)
+			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSessionWithAuth(s.getConfig().AuthDir, "qoder", state, token, errStr, authField)
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
@@ -763,7 +787,7 @@ func (s *Server) setupRoutes() {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "code or error is required"})
 			return
 		}
-		if _, errWrite := managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "devin", state, code, errStr); errWrite != nil {
+		if _, errWrite := managementHandlers.WriteOAuthCallbackFileForPendingSession(s.getConfig().AuthDir, "devin", state, code, errStr); errWrite != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid or expired OAuth callback"})
 			return
 		}
@@ -866,7 +890,7 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 		authLabel = selected.Label
 		authType, authValue = selected.AccountInfo()
 	}
-	helps.RecordAPIRequest(ctx, s.cfg, helps.UpstreamRequestLog{
+	helps.RecordAPIRequest(ctx, s.getConfig(), helps.UpstreamRequestLog{
 		URL:       upstreamURL,
 		Method:    http.MethodPost,
 		Headers:   req.Header.Clone(),
@@ -880,7 +904,7 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 
 	resp, errHTTP := s.handlers.AuthManager.HttpRequest(ctx, selected, req)
 	if errHTTP != nil {
-		helps.RecordAPIResponseError(ctx, s.cfg, errHTTP)
+		helps.RecordAPIResponseError(ctx, s.getConfig(), errHTTP)
 		c.JSON(http.StatusBadGateway, gin.H{"error": errHTTP.Error()})
 		return
 	}
@@ -890,14 +914,14 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 		}
 	}()
 
-	helps.RecordAPIResponseMetadata(ctx, s.cfg, resp.StatusCode, resp.Header.Clone())
+	helps.RecordAPIResponseMetadata(ctx, s.getConfig(), resp.StatusCode, resp.Header.Clone())
 	upstreamBody, errReadResponse := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 	if errReadResponse != nil {
-		helps.RecordAPIResponseError(ctx, s.cfg, errReadResponse)
+		helps.RecordAPIResponseError(ctx, s.getConfig(), errReadResponse)
 		c.JSON(http.StatusBadGateway, gin.H{"error": "Failed to read Codex search response"})
 		return
 	}
-	helps.AppendAPIResponseChunk(ctx, s.cfg, upstreamBody)
+	helps.AppendAPIResponseChunk(ctx, s.getConfig(), upstreamBody)
 	if contentType := resp.Header.Get("Content-Type"); contentType != "" {
 		c.Header("Content-Type", contentType)
 	}
@@ -1164,6 +1188,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/antigravity-auth-url", s.mgmt.RequestAntigravityToken)
 		mgmt.GET("/kilo-auth-url", s.mgmt.RequestKiloToken)
 		mgmt.GET("/kimi-auth-url", s.mgmt.RequestKimiToken)
+		mgmt.GET("/kimi-ai-auth-url", s.mgmt.RequestKimiAIToken)
 		mgmt.GET("/iflow-auth-url", s.mgmt.RequestIFlowToken)
 		mgmt.POST("/iflow-auth-url", s.mgmt.RequestIFlowCookieToken)
 		mgmt.GET("/kiro-auth-url", s.mgmt.RequestKiroToken)
@@ -1191,11 +1216,12 @@ func (s *Server) registerManagementRoutes() {
 
 func (s *Server) managementAvailabilityMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if s == nil || s.cfg == nil {
+		cfg := s.getConfig()
+		if s == nil || cfg == nil {
 			c.AbortWithStatus(http.StatusNotFound)
 			return
 		}
-		if s.cfg.Home.Enabled {
+		if cfg.Home.Enabled {
 			c.AbortWithStatus(http.StatusNotFound)
 			return
 		}
@@ -1208,7 +1234,7 @@ func (s *Server) managementAvailabilityMiddleware() gin.HandlerFunc {
 }
 
 func (s *Server) serveManagementControlPanel(c *gin.Context) {
-	cfg := s.cfg
+	cfg := s.getConfig()
 	if cfg == nil || cfg.Home.Enabled || cfg.RemoteManagement.DisableControlPanel {
 		c.AbortWithStatus(http.StatusNotFound)
 		return
@@ -1358,7 +1384,8 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 
 		if _, ok := c.Request.URL.Query()["client_version"]; ok {
 			clientVersion := c.Query("client_version")
-			if s != nil && s.cfg != nil && s.cfg.Home.Enabled {
+			cfg := s.getConfig()
+			if s != nil && cfg != nil && cfg.Home.Enabled {
 				s.handleHomeCodexClientModels(c, clientVersion)
 				return
 			}
@@ -1370,7 +1397,8 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 			return
 		}
 
-		if s != nil && s.cfg != nil && s.cfg.Home.Enabled {
+		cfg := s.getConfig()
+		if s != nil && cfg != nil && cfg.Home.Enabled {
 			s.handleHomeModels(c)
 			return
 		}
@@ -1397,7 +1425,11 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 // getAllowedModelsForKey returns the models whitelist for the authenticated API key,
 // or nil if no whitelist is configured (all models allowed).
 func (s *Server) getAllowedModelsForKey(c *gin.Context) []string {
-	if s == nil || s.cfg == nil {
+	if s == nil {
+		return nil
+	}
+	cfg := s.getConfig()
+	if cfg == nil {
 		return nil
 	}
 	// Get the authenticated API key from context (set by AuthMiddleware)
@@ -1410,7 +1442,7 @@ func (s *Server) getAllowedModelsForKey(c *gin.Context) []string {
 		return nil
 	}
 	// Look up the key in config
-	entry := s.cfg.APIKeys.GetEntry(keyStr)
+	entry := cfg.APIKeys.GetEntry(keyStr)
 	if entry == nil || len(entry.Models) == 0 {
 		return nil
 	}
@@ -1537,12 +1569,19 @@ func (s *Server) handleHomeCodexClientModels(c *gin.Context, clientVersion strin
 		models = append(models, model)
 	}
 
-	c.JSON(http.StatusOK, openai.CodexClientModelsResponseForClient(models, clientVersion))
+	payload := openai.CodexClientModelsResponseForClient(models, clientVersion)
+	body, errMarshal := openai.MarshalCompact(payload)
+	if errMarshal != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMarshal.Error()})
+		return
+	}
+	c.Data(http.StatusOK, "application/json; charset=utf-8", body)
 }
 
 func (s *Server) geminiModelsHandler(geminiHandler *gemini.GeminiAPIHandler) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if s != nil && s.cfg != nil && s.cfg.Home.Enabled {
+		cfg := s.getConfig()
+		if s != nil && cfg != nil && cfg.Home.Enabled {
 			s.handleHomeGeminiModels(c)
 			return
 		}
@@ -1553,7 +1592,8 @@ func (s *Server) geminiModelsHandler(geminiHandler *gemini.GeminiAPIHandler) gin
 
 func (s *Server) geminiGetHandler(geminiHandler *gemini.GeminiAPIHandler) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if s != nil && s.cfg != nil && s.cfg.Home.Enabled {
+		cfg := s.getConfig()
+		if s != nil && cfg != nil && cfg.Home.Enabled {
 			s.handleHomeGeminiModel(c)
 			return
 		}
@@ -1834,10 +1874,11 @@ func (s *Server) StartWithReady(ready chan<- struct{}) error {
 		return fmt.Errorf("failed to start HTTP server: %v", errListen)
 	}
 
-	useTLS := s.cfg != nil && s.cfg.TLS.Enable
+	cfg := s.getConfig()
+	useTLS := cfg != nil && cfg.TLS.Enable
 	if useTLS {
-		certPath := strings.TrimSpace(s.cfg.TLS.Cert)
-		keyPath := strings.TrimSpace(s.cfg.TLS.Key)
+		certPath := strings.TrimSpace(cfg.TLS.Cert)
+		keyPath := strings.TrimSpace(cfg.TLS.Key)
 		if certPath == "" || keyPath == "" {
 			if errClose := listener.Close(); errClose != nil {
 				log.Errorf("failed to close listener after TLS validation failure: %v", errClose)
@@ -1867,8 +1908,10 @@ func (s *Server) StartWithReady(ready chan<- struct{}) error {
 	}
 
 	httpListener := newMuxListener(listener.Addr(), 1024)
+	s.listenerMu.Lock()
 	s.muxBaseListener = listener
 	s.muxHTTPListener = httpListener
+	s.listenerMu.Unlock()
 
 	httpErrCh := make(chan error, 1)
 	acceptErrCh := make(chan error, 1)
@@ -1885,13 +1928,19 @@ func (s *Server) StartWithReady(ready chan<- struct{}) error {
 
 	select {
 	case errServe := <-httpErrCh:
-		if s.muxBaseListener != nil {
-			if errClose := s.muxBaseListener.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
+		s.listenerMu.Lock()
+		muxBase := s.muxBaseListener
+		muxHTTP := s.muxHTTPListener
+		s.muxBaseListener = nil
+		s.muxHTTPListener = nil
+		s.listenerMu.Unlock()
+		if muxBase != nil {
+			if errClose := muxBase.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
 				log.Debugf("failed to close shared listener after HTTP serve exit: %v", errClose)
 			}
 		}
-		if s.muxHTTPListener != nil {
-			_ = s.muxHTTPListener.Close()
+		if muxHTTP != nil {
+			_ = muxHTTP.Close()
 		}
 		errAccept := <-acceptErrCh
 		errServe = normalizeHTTPServeError(errServe)
@@ -1904,11 +1953,17 @@ func (s *Server) StartWithReady(ready chan<- struct{}) error {
 		}
 		return nil
 	case errAccept := <-acceptErrCh:
-		if s.muxHTTPListener != nil {
-			_ = s.muxHTTPListener.Close()
+		s.listenerMu.Lock()
+		muxHTTP := s.muxHTTPListener
+		muxBase := s.muxBaseListener
+		s.muxHTTPListener = nil
+		s.muxBaseListener = nil
+		s.listenerMu.Unlock()
+		if muxHTTP != nil {
+			_ = muxHTTP.Close()
 		}
-		if s.muxBaseListener != nil {
-			if errClose := s.muxBaseListener.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
+		if muxBase != nil {
+			if errClose := muxBase.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
 				log.Debugf("failed to close shared listener after accept loop exit: %v", errClose)
 			}
 		}
@@ -1930,25 +1985,29 @@ func (s *Server) StopAccepting() error {
 	if s == nil {
 		return nil
 	}
+	s.listenerMu.Lock()
+	muxHTTP := s.muxHTTPListener
+	muxBase := s.muxBaseListener
+	s.listenerMu.Unlock()
 	var stopErr error
-	if s.muxHTTPListener != nil {
-		if errClose := s.muxHTTPListener.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
+	if muxHTTP != nil {
+		if errClose := muxHTTP.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
 			stopErr = errClose
 		}
 	}
-	if s.muxBaseListener != nil {
-		if errClose := s.muxBaseListener.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) && stopErr == nil {
+	if muxBase != nil {
+		if errClose := muxBase.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) && stopErr == nil {
 			stopErr = errClose
 		}
 	}
 	return stopErr
 }
 
-// Stop gracefully shuts down the API server without interrupting any
-// active connections.
+// Stop closes listeners and immediately shuts down the API server without
+// waiting for active connections to drain.
 //
 // Parameters:
-//   - ctx: The context for graceful shutdown
+//   - ctx: Context passed for compatibility.
 //
 // Returns:
 //   - error: An error if the server fails to stop
@@ -1965,13 +2024,32 @@ func (s *Server) Stop(ctx context.Context) error {
 		s.codexWorkerCancel()
 	}
 
-	if errStopAccepting := s.StopAccepting(); errStopAccepting != nil {
-		log.Debugf("failed to stop accepting API connections: %v", errStopAccepting)
+	s.listenerMu.Lock()
+	muxHTTP := s.muxHTTPListener
+	s.muxHTTPListener = nil
+	muxBase := s.muxBaseListener
+	s.muxBaseListener = nil
+	s.listenerMu.Unlock()
+
+	if muxHTTP != nil {
+		_ = muxHTTP.Close()
+	}
+	if muxBase != nil {
+		if errCloseBase := muxBase.Close(); errCloseBase != nil && !errors.Is(errCloseBase, net.ErrClosed) {
+			log.Debugf("failed to close shared listener: %v", errCloseBase)
+		}
 	}
 
-	// Shutdown the HTTP server.
-	if err := s.server.Shutdown(ctx); err != nil {
-		return fmt.Errorf("failed to shutdown HTTP server: %v", err)
+	// Close the HTTP server immediately without graceful draining.
+	var errCloseServer error
+	if s.server != nil {
+		errCloseServer = s.server.Close()
+		if errors.Is(errCloseServer, http.ErrServerClosed) || errors.Is(errCloseServer, net.ErrClosed) {
+			errCloseServer = nil
+		}
+	}
+	if errCloseServer != nil {
+		return fmt.Errorf("failed to shutdown HTTP server: %v", errCloseServer)
 	}
 
 	log.Debug("API server stopped")
@@ -2043,10 +2121,14 @@ func (s *Server) applyManagementCORS(c *gin.Context) {
 }
 
 func (s *Server) isManagementCORSOriginAllowed(origin string) bool {
-	if s == nil || s.cfg == nil {
+	if s == nil {
 		return false
 	}
-	return originAllowedByList(origin, s.cfg.RemoteManagement.CorsAllowedOrigins)
+	cfg := s.getConfig()
+	if cfg == nil {
+		return false
+	}
+	return originAllowedByList(origin, cfg.RemoteManagement.CorsAllowedOrigins)
 }
 
 // normalizeCORSOrigin converts a configured or request origin into scheme://host[:port].
@@ -2203,7 +2285,9 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	redisqueue.SetEnabled(s.managementRoutesEnabled.Load() || (cfg != nil && cfg.Home.Enabled))
 
 	s.applyAccessConfig(oldCfg, cfg)
+	s.cfgMu.Lock()
 	s.cfg = cfg
+	s.cfgMu.Unlock()
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	if oldCfg != nil && s.wsAuthChanged != nil && oldCfg.WebsocketAuth != cfg.WebsocketAuth {
 		s.wsAuthChanged(oldCfg.WebsocketAuth, cfg.WebsocketAuth)

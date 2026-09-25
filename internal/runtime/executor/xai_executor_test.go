@@ -20,6 +20,7 @@ import (
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -1777,6 +1778,10 @@ func TestXAIExecutorExecuteStreamCompactionTriggerUsesCompactEndpoint(t *testing
 }
 
 func TestXAIExecutorOmitsUnsupportedReasoningEffort(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient("xai-non-thinking-test", "xai", []*registry.ModelInfo{{ID: "grok-4", Type: "xai"}})
+	t.Cleanup(func() { modelRegistry.UnregisterClient("xai-non-thinking-test") })
+
 	var gotBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var errRead error
@@ -1812,34 +1817,6 @@ func TestXAIExecutorOmitsUnsupportedReasoningEffort(t *testing.T) {
 
 	if gjson.GetBytes(gotBody, "reasoning").Exists() {
 		t.Fatalf("unsupported xAI model must omit reasoning key: %s", string(gotBody))
-	}
-}
-
-func TestXAISupportsReasoningEffortUsesModelRegistry(t *testing.T) {
-	tests := []struct {
-		name  string
-		model string
-		want  bool
-	}{
-		{name: "grok-4.5", model: "grok-4.5", want: true},
-		{name: "grok-4.5 with suffix", model: "grok-4.5(high)", want: true},
-		{name: "grok-4.3", model: "grok-4.3", want: true},
-		{name: "grok-3-mini", model: "grok-3-mini", want: true},
-		{name: "grok-3-mini-fast", model: "grok-3-mini-fast", want: true},
-		{name: "grok-4.20-multi-agent", model: "grok-4.20-multi-agent-0309", want: true},
-		{name: "provider-prefixed grok-4.5", model: "xai/grok-4.5", want: true},
-		{name: "legacy grok-4", model: "grok-4", want: false},
-		{name: "composer without thinking metadata", model: "grok-composer-2.5-fast", want: false},
-		{name: "non-reasoning 4.20", model: "grok-4.20-0309-non-reasoning", want: false},
-		{name: "unknown model", model: "unknown-xai-model", want: false},
-		{name: "empty model", model: "", want: false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := xaiSupportsReasoningEffort(tt.model); got != tt.want {
-				t.Fatalf("xaiSupportsReasoningEffort(%q) = %v, want %v", tt.model, got, tt.want)
-			}
-		})
 	}
 }
 

@@ -42,12 +42,14 @@ type Record struct {
 	RequestServiceTier string
 	// ResponseServiceTier stores the final tier reported by the upstream response.
 	ResponseServiceTier string
-	RequestedAt         time.Time
-	Latency             time.Duration
-	TTFT                time.Duration
-	Failed              bool
-	Fail                Failure
-	Detail              Detail
+	// ResponseModel stores the model name reported by the upstream response, empty when unknown.
+	ResponseModel string
+	RequestedAt   time.Time
+	Latency       time.Duration
+	TTFT          time.Duration
+	Failed        bool
+	Fail          Failure
+	Detail        Detail
 	// ResponseHeaders stores a snapshot of upstream response headers for usage sinks.
 	ResponseHeaders http.Header
 }

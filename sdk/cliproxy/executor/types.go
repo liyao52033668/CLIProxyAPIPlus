@@ -74,6 +74,9 @@ type Options struct {
 	Metadata map[string]any
 	// IsAuto indicates this request used auto model resolution.
 	IsAuto bool
+	// ProxyURL overrides the credential and global proxy for this execution only.
+	// Credential refresh and token exchange must ignore it.
+	ProxyURL string
 }
 
 // Response wraps either a full provider response or metadata for streaming flows.

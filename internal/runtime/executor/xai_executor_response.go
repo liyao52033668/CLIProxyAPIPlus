@@ -8,9 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -685,39 +683,6 @@ func appendXAIReasoningSummary(previous json.RawMessage, currentSummary []gjson.
 		updated = updatedItem
 	}
 	return updated, true
-}
-
-// xaiSupportsReasoningEffort reports whether the model accepts Responses API
-// reasoning.effort. Capability comes from model registry thinking metadata
-// (static models.json and dynamic registrations), not a hard-coded name allowlist.
-func xaiSupportsReasoningEffort(model string) bool {
-	name := strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(model).ModelName))
-	if idx := strings.LastIndex(name, "/"); idx >= 0 {
-		name = name[idx+1:]
-	}
-	if name == "" {
-		return false
-	}
-	info := registry.LookupModelInfo(name, "xai")
-	if info != nil && info.Thinking != nil && len(info.Thinking.Levels) > 0 {
-		return true
-	}
-	// Fallback for static/local model tables that lag upstream definitions.
-	if strings.Contains(name, "non-reasoning") {
-		return false
-	}
-	switch {
-	case strings.HasPrefix(name, "grok-3-mini"):
-		return true
-	case strings.HasPrefix(name, "grok-4.20-multi-agent"):
-		return true
-	case strings.HasPrefix(name, "grok-4.3"):
-		return true
-	case strings.HasPrefix(name, "grok-4.5"):
-		return true
-	default:
-		return false
-	}
 }
 
 func xaiNormalizeReasoningSummaryEventLine(line []byte, eventName string) []byte {

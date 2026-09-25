@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	misc "github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
@@ -201,6 +202,17 @@ type ModelRegistry struct {
 	highestPriorityFunc func(handlerType, modelID string) (int, bool)
 	// nextRegistrationOrder assigns deterministic ordering to newly seen models.
 	nextRegistrationOrder uint64
+	// registrationEpoch tracks monotonic client registration and deregistration structural changes.
+	registrationEpoch atomic.Uint64
+}
+
+// RegistrationEpoch returns a monotonically increasing epoch that increments whenever
+// client model registrations or deregistrations occur.
+func (r *ModelRegistry) RegistrationEpoch() uint64 {
+	if r == nil {
+		return 0
+	}
+	return r.registrationEpoch.Load()
 }
 
 // stickySessionState tracks the sticky model for a handler type
@@ -303,7 +315,7 @@ func responsesWebSearchProviderPathSupport(provider string) *bool {
 	switch provider {
 	case "codex", "xai", "claude", "antigravity":
 		return boolPointer(true)
-	case "openai", "openai-compatibility", "gemini", "aistudio", "vertex", "kimi", "interactions", "gemini-interactions":
+	case "openai", "openai-compatibility", "gemini", "aistudio", "vertex", "kimi", "kimi-ai", "kimi.ai", "kimi.com", "interactions", "gemini-interactions":
 		return boolPointer(false)
 	default:
 		if strings.HasPrefix(provider, "openai-compatible-") {
@@ -462,6 +474,9 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 		misc.LogCredentialSeparator()
 		return
 	}
+
+	// Structural change: bump the registration epoch before applying the update.
+	r.registrationEpoch.Add(1)
 
 	now := time.Now()
 
@@ -787,6 +802,9 @@ func (r *ModelRegistry) UnregisterClient(clientID string) {
 
 // unregisterClientInternal performs the actual client unregistration (internal, no locking)
 func (r *ModelRegistry) unregisterClientInternal(clientID string) {
+	// Structural change: bump the registration epoch before removing state.
+	r.registrationEpoch.Add(1)
+
 	models, exists := r.clientModels[clientID]
 	provider, hasProvider := r.clientProviders[clientID]
 	if !exists {
@@ -1021,17 +1039,23 @@ func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.
 
 		cooldownSuspended := 0
 		otherSuspended := 0
+		quotaAndOtherSuspended := 0
 		if registration.SuspendedClients != nil {
-			for _, reason := range registration.SuspendedClients {
+			for clientID, reason := range registration.SuspendedClients {
 				if strings.EqualFold(reason, "quota") {
 					cooldownSuspended++
 					continue
 				}
 				otherSuspended++
+				if quotaTime := registration.QuotaExceededClients[clientID]; quotaTime != nil && now.Before(quotaTime.Add(modelQuotaExceededWindow)) {
+					quotaAndOtherSuspended++
+				}
 			}
 		}
 
-		effectiveClients := max(availableClients-expiredClients-otherSuspended, 0)
+		// A credential-wide quota can mark the same client both quota-exceeded and
+		// suspended. Count that unavailable client only once.
+		effectiveClients := max(availableClients-expiredClients-otherSuspended+quotaAndOtherSuspended, 0)
 
 		if effectiveClients > 0 || (availableClients > 0 && (expiredClients > 0 || cooldownSuspended > 0) && otherSuspended == 0) {
 			model := r.convertModelToMap(registration.Info, handlerType)
@@ -1238,6 +1262,7 @@ func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelIn
 		expiredClients := 0
 		cooldownSuspended := 0
 		otherSuspended := 0
+		quotaAndOtherSuspended := 0
 		if ok && registration != nil {
 			if registration.QuotaExceededClients != nil {
 				for clientID, quotaTime := range registration.QuotaExceededClients {
@@ -1265,12 +1290,17 @@ func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelIn
 						continue
 					}
 					otherSuspended++
+					if quotaTime := registration.QuotaExceededClients[clientID]; quotaTime != nil && now.Before(quotaTime.Add(modelQuotaExceededWindow)) {
+						quotaAndOtherSuspended++
+					}
 				}
 			}
 		}
 
 		availableClients := entry.count
-		effectiveClients := max(availableClients-expiredClients-otherSuspended, 0)
+		// A credential-wide quota can mark the same client both quota-exceeded and
+		// suspended. Count that unavailable client only once.
+		effectiveClients := max(availableClients-expiredClients-otherSuspended+quotaAndOtherSuspended, 0)
 
 		if effectiveClients > 0 || (availableClients > 0 && (expiredClients > 0 || cooldownSuspended > 0) && otherSuspended == 0) {
 			if entry.info != nil {
@@ -1309,9 +1339,14 @@ func (r *ModelRegistry) getModelCountLocked(modelID string) int {
 				expiredClients++
 			}
 		}
+		// A credential-wide quota can mark the same client both quota-exceeded and
+		// suspended. Count that unavailable client only once.
 		suspendedClients := 0
-		if registration.SuspendedClients != nil {
-			suspendedClients = len(registration.SuspendedClients)
+		for clientID := range registration.SuspendedClients {
+			if quotaTime := registration.QuotaExceededClients[clientID]; quotaTime != nil && now.Before(quotaTime.Add(modelQuotaExceededWindow)) {
+				continue
+			}
+			suspendedClients++
 		}
 		result := registration.Count - expiredClients - suspendedClients
 		if result < 0 {

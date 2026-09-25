@@ -986,8 +986,15 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	if got, _ := custom["context_window"].(float64); got != 123456 {
 		t.Fatalf("custom context_window = %v, want 123456", custom["context_window"])
 	}
-	if custom["base_instructions"] != gpt55["base_instructions"] {
-		t.Fatal("expected custom model to use gpt-5.5 base_instructions fallback")
+	if custom["base_instructions"] == gpt55["base_instructions"] {
+		t.Fatal("expected custom model to use compact instructions instead of the full gpt-5.5 template")
+	}
+	if got, _ := custom["base_instructions"].(string); got == "" {
+		t.Fatal("expected custom model to include base_instructions")
+	}
+	customMessages, _ := custom["model_messages"].(map[string]any)
+	if customMessages["instructions_template"] != custom["base_instructions"] {
+		t.Fatalf("expected custom instructions_template to match base_instructions, got %#v", customMessages["instructions_template"])
 	}
 	if _, ok := custom["available_in_plans"].([]any); !ok {
 		t.Fatalf("expected custom model to use gpt-5.5 available_in_plans fallback, got %#v", custom["available_in_plans"])
@@ -995,15 +1002,9 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	if got, _ := custom["prefer_websockets"].(bool); got {
 		t.Fatalf("custom prefer_websockets = %v, want false", custom["prefer_websockets"])
 	}
-	if _, ok := custom["apply_patch_tool_type"]; ok {
-		t.Fatal("expected custom model to omit apply_patch_tool_type")
-	}
-	if _, ok := custom["upgrade"]; ok {
-		t.Fatal("expected custom model to omit upgrade")
-	}
-	if _, ok := custom["availability_nux"]; ok {
-		t.Fatal("expected custom model to omit availability_nux")
-	}
+	assertCodexNullableCatalogField(t, custom, "apply_patch_tool_type")
+	assertCodexNullableCatalogField(t, custom, "upgrade")
+	assertCodexNullableCatalogField(t, custom, "availability_nux")
 
 	hiddenModels := map[string]bool{
 		"grok-imagine-image-quality": false,
@@ -1025,6 +1026,17 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 		if !found {
 			t.Fatalf("expected hidden model %s in codex catalog", slug)
 		}
+	}
+}
+
+func assertCodexNullableCatalogField(t *testing.T, model map[string]any, key string) {
+	t.Helper()
+	value, exists := model[key]
+	if !exists {
+		t.Fatalf("%s must be present and null so Codex can decode the catalog", key)
+	}
+	if value != nil {
+		t.Fatalf("%s = %#v, want null", key, value)
 	}
 }
 

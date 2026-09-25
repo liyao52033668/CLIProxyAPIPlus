@@ -197,6 +197,96 @@ func (s *authScheduler) setSelector(selector Selector) {
 	clear(s.mixedCursors)
 }
 
+// isSchedulableAuth determines whether an auth can be scheduled by a provider scheduler,
+// returning its normalized ID and providerKey. Disabled or invalid credentials are filtered out.
+func isSchedulableAuth(auth *Auth) (string, string, bool) {
+	if auth == nil || auth.Disabled || auth.Status == StatusDisabled {
+		return "", "", false
+	}
+	authID := strings.TrimSpace(auth.ID)
+	if authID == "" {
+		return "", "", false
+	}
+	providerKey := executorKeyFromAuth(auth)
+	if providerKey == "" {
+		return "", "", false
+	}
+	return authID, providerKey, true
+}
+
+// needsSyncFromMap reports whether the scheduler state is missing schedulable auths or
+// carries stale provider/model metadata, reading directly from the in-memory auth map
+// without cloning auth instances.
+func (s *authScheduler) needsSyncFromMap(auths map[string]*Auth) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.needsSyncFromMapLocked(auths)
+}
+
+func (s *authScheduler) needsSyncFromMapLocked(auths map[string]*Auth) bool {
+	activeCount := 0
+	for _, auth := range auths {
+		if _, _, ok := isSchedulableAuth(auth); ok {
+			activeCount++
+		}
+	}
+	if activeCount != len(s.authProviders) {
+		return true
+	}
+
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		authID, providerKey, schedulable := isSchedulableAuth(auth)
+		if !schedulable {
+			rawID := strings.TrimSpace(auth.ID)
+			if rawID != "" {
+				if _, exists := s.authProviders[rawID]; exists {
+					return true
+				}
+			}
+			continue
+		}
+
+		if s.authProviders[authID] != providerKey {
+			return true
+		}
+
+		pState := s.providers[providerKey]
+		if pState == nil {
+			return true
+		}
+		meta := pState.auths[authID]
+		if meta == nil {
+			return true
+		}
+
+		// Detect model registration drift: the scheduler snapshots supported models
+		// from the global registry, so a registration change must trigger a rebuild.
+		if !supportedModelSetsEqual(meta.supportedModelSet, supportedModelSetForAuth(authID)) {
+			return true
+		}
+	}
+	return false
+}
+
+// supportedModelSetsEqual reports whether two supported-model sets contain the same keys.
+func supportedModelSetsEqual(a, b map[string]struct{}) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for key := range a {
+		if _, ok := b[key]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // rebuild recreates the complete scheduler state from an auth snapshot.
 func (s *authScheduler) rebuild(auths []*Auth) {
 	if s == nil {
@@ -204,13 +294,51 @@ func (s *authScheduler) rebuild(auths []*Auth) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Capture existing auth metadata so that in-flight MarkResult updates (which
+	// advanced cooldown/quota/error state) are preserved during rebuild instead of
+	// being downgraded by a slightly older snapshot.
+	existingMetas := make(map[string]*scheduledAuthMeta)
+	for _, pState := range s.providers {
+		if pState == nil {
+			continue
+		}
+		for id, meta := range pState.auths {
+			if meta != nil && meta.auth != nil {
+				existingMetas[id] = meta
+			}
+		}
+	}
+
 	s.providers = make(map[string]*providerScheduler)
 	s.authProviders = make(map[string]string)
 	s.mixedCursors = make(map[string]int)
 	now := time.Now()
 	for _, auth := range auths {
-		s.upsertAuthLocked(auth, now)
+		s.upsertAuthRebuildLocked(auth, existingMetas, now)
 	}
+}
+
+// upsertAuthRebuildLocked inserts an auth during a scheduler rebuild. When the
+// scheduler already holds a snapshot of the same auth that is at least as recent
+// (advanced by an in-flight MarkResult after the rebuild snapshot was taken), the
+// existing state is kept so cooldown/quota/error information is not lost.
+// Timestamps tie-break in favor of the existing state because monotonic generation
+// counters are not available in this fork.
+func (s *authScheduler) upsertAuthRebuildLocked(auth *Auth, existingMetas map[string]*scheduledAuthMeta, now time.Time) {
+	if auth == nil {
+		return
+	}
+	authID := strings.TrimSpace(auth.ID)
+	if authID == "" {
+		return
+	}
+	if existing, ok := existingMetas[authID]; ok && existing != nil && existing.auth != nil && !auth.UpdatedAt.After(existing.auth.UpdatedAt) {
+		// The existing scheduler state is at least as new as the rebuild snapshot; keep it.
+		// A disabled newer state still removes the auth from the scheduler below.
+		auth = existing.auth
+	}
+	s.upsertAuthLocked(auth, now)
 }
 
 // upsertAuth incrementally synchronizes one auth into the scheduler.
@@ -239,7 +367,7 @@ func (s *authScheduler) upsertAuthResult(auth *Auth, targetModels []string, cred
 		return
 	}
 	authID := strings.TrimSpace(auth.ID)
-	providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
+	providerKey := executorKeyFromAuth(auth)
 	if authID == "" || providerKey == "" || auth.Disabled {
 		s.removeAuthLocked(authID)
 		return
@@ -259,7 +387,7 @@ func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, 
 	if s == nil {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	providerKey := strings.ToLower(strings.TrimSpace(provider))
+	providerKey := canonicalSchedulingProvider(provider)
 	modelKey := canonicalModelKey(model)
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	preferWebsocket := cliproxyexecutor.DownstreamWebsocket(ctx) && (providerKey == "codex" || providerKey == "xai") && pinnedAuthID == ""
@@ -518,12 +646,12 @@ func triedPredicate(tried map[string]struct{}) func(*scheduledAuth) bool {
 	}
 }
 
-// normalizeProviderKeys lowercases, trims, and de-duplicates provider keys while preserving order.
+// normalizeProviderKeys canonicalizes, trims, and de-duplicates provider keys while preserving order.
 func normalizeProviderKeys(providers []string) []string {
 	seen := make(map[string]struct{}, len(providers))
 	out := make([]string, 0, len(providers))
 	for _, provider := range providers {
-		providerKey := strings.ToLower(strings.TrimSpace(provider))
+		providerKey := canonicalSchedulingProvider(provider)
 		if providerKey == "" {
 			continue
 		}
@@ -547,7 +675,7 @@ func (s *authScheduler) upsertAuthLocked(auth *Auth, now time.Time) {
 		return
 	}
 	authID := strings.TrimSpace(auth.ID)
-	providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
+	providerKey := executorKeyFromAuth(auth)
 	if authID == "" || providerKey == "" || auth.Disabled {
 		s.removeAuthLocked(authID)
 		return
@@ -594,7 +722,7 @@ func (s *authScheduler) ensureProviderLocked(providerKey string) *providerSchedu
 
 // buildScheduledAuthMeta extracts the scheduling metadata needed for shard bookkeeping.
 func buildScheduledAuthMeta(auth *Auth) *scheduledAuthMeta {
-	providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
+	providerKey := executorKeyFromAuth(auth)
 	virtualParent := ""
 	if auth.Attributes != nil {
 		virtualParent = strings.TrimSpace(auth.Attributes["gemini_virtual_parent"])

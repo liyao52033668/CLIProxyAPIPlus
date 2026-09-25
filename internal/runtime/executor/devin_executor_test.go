@@ -21,6 +21,8 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	log "github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/tidwall/gjson"
 	"google.golang.org/protobuf/encoding/protowire"
 )
@@ -3642,4 +3644,189 @@ func TestDevinExecutor_FunctionResult_Regression_Issue5911(t *testing.T) {
 			t.Errorf("user message should have 1 image, got %d", len(prompts6[1].Images))
 		}
 	})
+}
+
+func TestDevinExecutor_NoModelSubstitutionWarningForIntentionalMapping_NonStream(t *testing.T) {
+	// Build a Devin Connect-RPC response containing Usage with ModelName = "swe-2-high"
+	var f7 []byte
+	f7 = protowire.AppendTag(f7, 2, protowire.VarintType)
+	f7 = protowire.AppendVarint(f7, 10)
+	f7 = protowire.AppendTag(f7, 3, protowire.VarintType)
+	f7 = protowire.AppendVarint(f7, 20)
+	f7 = protowire.AppendTag(f7, 9, protowire.BytesType)
+	f7 = protowire.AppendString(f7, "swe-2-high")
+
+	var f1 []byte
+	f1 = protowire.AppendTag(f1, 7, protowire.BytesType)
+	f1 = protowire.AppendBytes(f1, f7)
+
+	var buf bytes.Buffer
+	buf.Write(helps.WrapConnectEnvelope(f1))
+	buf.Write(helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte(`{}`)))
+
+	mockRT := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/connect+proto"}},
+			Body:       io.NopCloser(bytes.NewReader(buf.Bytes())),
+		}, nil
+	})
+
+	hook := new(logtest.Hook)
+	log.StandardLogger().AddHook(hook)
+	t.Cleanup(func() {
+		log.StandardLogger().ReplaceHooks(make(log.LevelHooks))
+	})
+
+	exec := NewDevinExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:         "devin-auth-map-nonstream",
+		Provider:   "devin",
+		Attributes: map[string]string{"api_key": "test-key"},
+	}
+
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", mockRT)
+	req := cliproxyexecutor.Request{
+		Model:   "devin/swe-2",
+		Payload: []byte(`{"messages":[{"role":"user","content":"hello"}]}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAI,
+	}
+
+	_, err := exec.Execute(ctx, auth, req, opts)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	for _, entry := range hook.AllEntries() {
+		if entry.Level == log.WarnLevel && strings.Contains(entry.Message, "upstream served model") {
+			t.Fatalf("unexpected model substitution warning for intentional mapping: %s", entry.Message)
+		}
+	}
+}
+
+func TestDevinExecutor_NoModelSubstitutionWarningForIntentionalMapping_Stream(t *testing.T) {
+	var f7 []byte
+	f7 = protowire.AppendTag(f7, 2, protowire.VarintType)
+	f7 = protowire.AppendVarint(f7, 10)
+	f7 = protowire.AppendTag(f7, 3, protowire.VarintType)
+	f7 = protowire.AppendVarint(f7, 20)
+	f7 = protowire.AppendTag(f7, 9, protowire.BytesType)
+	f7 = protowire.AppendString(f7, "swe-2-high")
+
+	var f1 []byte
+	f1 = protowire.AppendTag(f1, 7, protowire.BytesType)
+	f1 = protowire.AppendBytes(f1, f7)
+
+	var buf bytes.Buffer
+	buf.Write(helps.WrapConnectEnvelope(f1))
+	buf.Write(helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte(`{}`)))
+
+	mockRT := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/connect+proto"}},
+			Body:       io.NopCloser(bytes.NewReader(buf.Bytes())),
+		}, nil
+	})
+
+	hook := new(logtest.Hook)
+	log.StandardLogger().AddHook(hook)
+	t.Cleanup(func() {
+		log.StandardLogger().ReplaceHooks(make(log.LevelHooks))
+	})
+
+	exec := NewDevinExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:         "devin-auth-map-stream",
+		Provider:   "devin",
+		Attributes: map[string]string{"api_key": "test-key"},
+	}
+
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", mockRT)
+	req := cliproxyexecutor.Request{
+		Model:   "devin/swe-2",
+		Payload: []byte(`{"messages":[{"role":"user","content":"hello"}]}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAI,
+	}
+
+	result, err := exec.ExecuteStream(ctx, auth, req, opts)
+	if err != nil {
+		t.Fatalf("ExecuteStream failed: %v", err)
+	}
+	for range result.Chunks {
+	}
+
+	for _, entry := range hook.AllEntries() {
+		if entry.Level == log.WarnLevel && strings.Contains(entry.Message, "upstream served model") {
+			t.Fatalf("unexpected model substitution warning for intentional mapping: %s", entry.Message)
+		}
+	}
+}
+
+func TestDevinExecutor_WarnsWhenUpstreamServesUnexpectedModel(t *testing.T) {
+	var f7 []byte
+	f7 = protowire.AppendTag(f7, 2, protowire.VarintType)
+	f7 = protowire.AppendVarint(f7, 10)
+	f7 = protowire.AppendTag(f7, 3, protowire.VarintType)
+	f7 = protowire.AppendVarint(f7, 20)
+	f7 = protowire.AppendTag(f7, 9, protowire.BytesType)
+	f7 = protowire.AppendString(f7, "unexpected-model-xyz")
+
+	var f1 []byte
+	f1 = protowire.AppendTag(f1, 7, protowire.BytesType)
+	f1 = protowire.AppendBytes(f1, f7)
+
+	var buf bytes.Buffer
+	buf.Write(helps.WrapConnectEnvelope(f1))
+	buf.Write(helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte(`{}`)))
+
+	mockRT := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/connect+proto"}},
+			Body:       io.NopCloser(bytes.NewReader(buf.Bytes())),
+		}, nil
+	})
+
+	hook := new(logtest.Hook)
+	log.StandardLogger().AddHook(hook)
+	t.Cleanup(func() {
+		log.StandardLogger().ReplaceHooks(make(log.LevelHooks))
+	})
+
+	exec := NewDevinExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:         "devin-auth-unexpected",
+		Provider:   "devin",
+		Attributes: map[string]string{"api_key": "test-key"},
+	}
+
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", mockRT)
+	req := cliproxyexecutor.Request{
+		Model:   "devin/swe-2",
+		Payload: []byte(`{"messages":[{"role":"user","content":"hello"}]}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAI,
+	}
+
+	_, err := exec.Execute(ctx, auth, req, opts)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	found := false
+	for _, entry := range hook.AllEntries() {
+		if entry.Level == log.WarnLevel && strings.Contains(entry.Message, "upstream served model \"unexpected-model-xyz\"") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected model substitution warning for unexpected model, got none")
+	}
 }

@@ -3,6 +3,7 @@ package interactions
 import (
 	"bytes"
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -238,5 +239,31 @@ func TestConvertInteractionsRequestToAntigravityToolChoiceNoneOmitsTools(t *test
 				t.Fatalf("expected request.tools to be omitted, got %s", gjson.GetBytes(out, "request.tools").Raw)
 			}
 		})
+	}
+}
+
+func TestConvertInteractionsRequestToAntigravity_FunctionResponseJSONRef(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gemini-3.8-flash-high",
+		"input": [
+			{
+				"type": "function_result",
+				"name": "lookup",
+				"call_id": "call_1",
+				"result": {
+					"schema": {
+						"$ref": "#/components/schemas/ErrorModel"
+					}
+				}
+			}
+		]
+	}`)
+	out := ConvertInteractionsRequestToAntigravity("gemini-3.8-flash-high", inputJSON, false)
+	val := gjson.GetBytes(out, "request.contents.0.parts.0.functionResponse.response.result")
+	if val.Type != gjson.String {
+		t.Fatalf("expected functionResponse.response.result to be string, got %s (raw: %s)", val.Type, val.Raw)
+	}
+	if !strings.Contains(val.String(), "#/components/schemas/ErrorModel") {
+		t.Fatalf("expected string result to contain ref target, got %q", val.String())
 	}
 }

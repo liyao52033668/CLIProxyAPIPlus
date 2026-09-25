@@ -5,6 +5,14 @@ host: ''
 # Server port
 port: 8317
 
+# IP addresses or CIDRs of proxies allowed to supply forwarded client IP headers.
+# An empty list (the default) does not trust forwarded headers. Restart after changing this setting.
+trusted-proxies: []
+# Example:
+# trusted-proxies:
+#   - 127.0.0.1
+#   - 192.0.2.0/24
+
 # TLS settings for HTTPS. When enabled, the server listens with the provided certificate and key.
 tls:
   enable: false
@@ -440,6 +448,7 @@ nonstream-keepalive-interval: 0
 #         alias: "kimi-k2"               # The alias used in the API.
 #         display-name: "Kimi K2"         # optional catalog display name
 #         image: false                   # optional: set true to allow this model on /v1/images/generations and /v1/images/edits
+#         use-max-completion-tokens: false # optional: default false (uses max_tokens); set true to use max_completion_tokens
 #         thinking:                      # optional: omit to default to levels ["low","medium","high"]
 #           levels: ["low", "medium", "high"]
 #       # You may repeat the same alias to build an internal model pool.

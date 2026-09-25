@@ -355,3 +355,154 @@ func TestSupportsExtendedReasoningLevels(t *testing.T) {
 		})
 	}
 }
+
+func TestCodexClientModelsResponse_DevinDisplayName(t *testing.T) {
+	// Registry-registered Devin models must be detected through registry metadata
+	// (type/owned_by) even when the id carries no devin/ prefix.
+	devinClientID := "test-sdk-devin-models"
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient(devinClientID, "devin", []*registry.ModelInfo{
+		{
+			ID:          "devin/swe-2",
+			Object:      "model",
+			OwnedBy:     "cognition",
+			Type:        "devin",
+			DisplayName: "SWE-2",
+		},
+		{
+			ID:          "registry-devin-model",
+			Object:      "model",
+			OwnedBy:     "cognition",
+			Type:        "devin",
+			DisplayName: "Registry Model",
+		},
+	})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(devinClientID)
+	})
+
+	availableModels := []map[string]any{
+		// 1. Template Devin model with explicit display_name
+		{
+			"id":           "devin/gpt-6-astra",
+			"display_name": "GPT-6 Astra",
+		},
+		// 2. Template Devin model without display_name (inherits template "GPT-5.5")
+		{
+			"id": "devin/gpt-5.5",
+		},
+		// 3. Non-template Devin model
+		{
+			"id":           "devin/swe-2",
+			"display_name": "SWE-2",
+		},
+		// 4. Non-Devin model (must NOT have (Devin) suffix)
+		{
+			"id":           "gpt-6-astra",
+			"display_name": "GPT 6.0 Astra",
+		},
+		// 5. Standard non-Devin model
+		{
+			"id": "gpt-5.5",
+		},
+		// 6. Devin model that already has (Devin) suffix
+		{
+			"id":           "devin/swe-1-7",
+			"display_name": "SWE-1.7 (Devin)",
+		},
+		// 7. Model identified via type: "devin"
+		{
+			"id":           "custom-devin-by-type",
+			"display_name": "Custom Model",
+			"type":         "devin",
+		},
+		// 8. Model identified via owned_by: "cognition"
+		{
+			"id":           "custom-devin-by-owned",
+			"display_name": "Cognition Model",
+			"owned_by":     "cognition",
+		},
+		// 9. Model identified via providersForModel
+		{
+			"id":           "provider-devin-model",
+			"display_name": "Provider Model",
+		},
+		// 10. Channel-prefixed Devin model
+		{
+			"id":           "1/devin/swe-2",
+			"display_name": "SWE-2",
+		},
+		// 11. Model with devin in substring but not a devin model
+		{
+			"id":           "my-devin-tool",
+			"display_name": "My Devin Tool",
+			"type":         "openai",
+		},
+		// 12. Channel prefixed model whose explicit provider is openai
+		{
+			"id":           "channel/swe-2",
+			"display_name": "Channel SWE-2",
+		},
+		// 13. Model identified via registry metadata (type "devin", no devin/ prefix)
+		{
+			"id":           "registry-devin-model",
+			"display_name": "Registry Model",
+		},
+	}
+
+	providerLookup := func(id string) []string {
+		if id == "provider-devin-model" {
+			return []string{"devin"}
+		}
+		if id == "channel/swe-2" {
+			return []string{"openai"}
+		}
+		return []string{"openai"}
+	}
+
+	resp := codexClientModelsResponse(availableModels, providerLookup, "0.153.4")
+	models, ok := resp["models"].([]map[string]any)
+	if !ok {
+		t.Fatalf("resp models type = %T, want []map[string]any", resp["models"])
+	}
+
+	bySlug := make(map[string]map[string]any, len(models))
+	for _, m := range models {
+		slug := stringModelValue(m, "slug")
+		bySlug[slug] = m
+	}
+
+	testCases := []struct {
+		slug            string
+		wantDisplayName string
+	}{
+		{"devin/gpt-6-astra", "GPT-6 Astra (Devin)"},
+		// Upstream inherits the "GPT-5.5" template display name via its
+		// metadata-id template matching; the local catalog matches templates
+		// by exact id and falls back to the id, so the id-based name is expected.
+		{"devin/gpt-5.5", "devin/gpt-5.5 (Devin)"},
+		{"devin/swe-2", "SWE-2 (Devin)"},
+		{"gpt-6-astra", "GPT 6.0 Astra"},
+		{"gpt-5.5", "GPT-5.5"},
+		{"devin/swe-1-7", "SWE-1.7 (Devin)"},
+		{"custom-devin-by-type", "Custom Model (Devin)"},
+		{"custom-devin-by-owned", "Cognition Model (Devin)"},
+		{"provider-devin-model", "Provider Model (Devin)"},
+		{"1/devin/swe-2", "SWE-2 (Devin)"},
+		{"my-devin-tool", "My Devin Tool"},
+		{"channel/swe-2", "Channel SWE-2"},
+		{"registry-devin-model", "Registry Model (Devin)"},
+	}
+
+	for _, tc := range testCases {
+		entry, exists := bySlug[tc.slug]
+		if !exists {
+			t.Errorf("model %q not found in response", tc.slug)
+			continue
+		}
+		got := stringModelValue(entry, "display_name")
+		if got != tc.wantDisplayName {
+			t.Errorf("model %q display_name = %q, want %q", tc.slug, got, tc.wantDisplayName)
+		}
+	}
+}

@@ -893,3 +893,22 @@ func TestConvertOpenAIResponsesRequestToClaude_TextFormatStructuredOutput(t *tes
 		}
 	})
 }
+
+func TestConvertOpenAIResponsesRequestToClaude_StringInput(t *testing.T) {
+	out := ConvertOpenAIResponsesRequestToClaude("claude-test", []byte(`{"model":"claude-test","input":"hello there"}`), false)
+	root := gjson.ParseBytes(out)
+
+	msg := root.Get("messages.0")
+	if !msg.Exists() {
+		t.Fatalf("expected one user message, got none. Output: %s", string(out))
+	}
+	if got := msg.Get("role").String(); got != "user" {
+		t.Fatalf("message role = %q, want user. Output: %s", got, string(out))
+	}
+	if got := msg.Get("content.0.type").String(); got != "text" {
+		t.Fatalf("content type = %q, want text. Output: %s", got, string(out))
+	}
+	if got := msg.Get("content.0.text").String(); got != "hello there" {
+		t.Fatalf("content text = %q, want %q. Output: %s", got, "hello there", string(out))
+	}
+}

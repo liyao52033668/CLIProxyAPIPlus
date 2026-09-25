@@ -94,6 +94,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	if responseServiceTier == "" {
 		responseServiceTier = strings.TrimSpace(record.Detail.ResponseServiceTier)
 	}
+	responseModel := strings.TrimSpace(record.ResponseModel)
 
 	payload, err := json.Marshal(queuedUsageDetail{
 		requestDetail:       detail,
@@ -106,6 +107,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		RequestID:           requestID,
 		ServiceTier:         serviceTier,
 		ResponseServiceTier: responseServiceTier,
+		ResponseModel:       responseModel,
 	})
 	if err != nil {
 		return
@@ -124,6 +126,7 @@ type queuedUsageDetail struct {
 	RequestID           string `json:"request_id"`
 	ServiceTier         string `json:"service_tier"`
 	ResponseServiceTier string `json:"response_service_tier,omitempty"`
+	ResponseModel       string `json:"response_model,omitempty"`
 }
 
 type requestDetail struct {

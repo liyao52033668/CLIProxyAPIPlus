@@ -52,6 +52,7 @@ func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth
 		return resp, errDo
 	}
 
+	reporter.ObserveResponseModel(data)
 	reporter.EnsurePublished(ctx)
 	return cliproxyexecutor.Response{Payload: data, Headers: respHeaders}, nil
 }

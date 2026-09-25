@@ -158,6 +158,10 @@ func newDefaultAuthManager() *sdkAuth.Manager {
 		sdkAuth.NewGeminiAuthenticator(),
 		sdkAuth.NewCodexAuthenticator(),
 		sdkAuth.NewClaudeAuthenticator(),
+		sdkAuth.NewAntigravityAuthenticator(),
+		sdkAuth.NewKimiAuthenticator(),
+		sdkAuth.NewKimiAIAuthenticator(),
+		sdkAuth.NewKimiAIDotAuthenticator(),
 		sdkAuth.NewGitLabAuthenticator(),
 		sdkAuth.NewXAIAuthenticator(),
 	)
@@ -543,7 +547,7 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 		s.coreManager.RegisterExecutor(executor.NewAntigravityExecutor(s.cfg))
 	case "claude":
 		s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(s.cfg))
-	case "kimi":
+	case "kimi", "kimi-ai", "kimi.ai", "kimi.com":
 		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
 	case "kiro":
 		s.coreManager.RegisterExecutor(executor.NewKiroExecutor(s.cfg))
@@ -997,11 +1001,13 @@ func (s *Service) Run(ctx context.Context) error {
 		redisqueue.SetUsageStatisticsEnabled(true)
 	}
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer shutdownCancel()
 	defer func() {
-		if err := s.Shutdown(shutdownCtx); err != nil {
-			log.Errorf("service shutdown returned error: %v", err)
+		// Instantiate the shutdown context here so the deadline is fresh at exit
+		// time instead of having been consumed while the service was running.
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer shutdownCancel()
+		if errShutdown := s.Shutdown(shutdownCtx); errShutdown != nil {
+			log.Errorf("service shutdown returned error: %v", errShutdown)
 		}
 	}()
 
@@ -1111,7 +1117,17 @@ func (s *Service) Run(ctx context.Context) error {
 
 		providerSet := make(map[string]bool, len(changedProviders))
 		for _, p := range changedProviders {
-			providerSet[strings.ToLower(strings.TrimSpace(p))] = true
+			norm := strings.ToLower(strings.TrimSpace(p))
+			if norm != "" {
+				providerSet[norm] = true
+				switch norm {
+				case "kimi", "kimi-ai", "kimi.ai", "kimi.com":
+					providerSet["kimi"] = true
+					providerSet["kimi-ai"] = true
+					providerSet["kimi.ai"] = true
+					providerSet["kimi.com"] = true
+				}
+			}
 		}
 
 		auths := s.coreManager.List()
@@ -1212,7 +1228,7 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 }
 
-// Shutdown gracefully stops background workers and the HTTP server.
+// Shutdown stops background workers and immediately closes the HTTP server.
 // It ensures all resources are properly cleaned up and connections are closed.
 // The shutdown is idempotent and can be called multiple times safely.
 //
@@ -1285,12 +1301,12 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		// no legacy clients to persist
 
 		if s.server != nil {
-			shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			defer cancel()
-			if err := s.server.Stop(shutdownCtx); err != nil {
-				log.Errorf("error stopping API server: %v", err)
+			// Server.Stop closes listeners and connections immediately; no extra
+			// draining timeout is needed on top of the caller-provided context.
+			if errStop := s.server.Stop(ctx); errStop != nil {
+				log.Errorf("error stopping API server: %v", errStop)
 				if shutdownErr == nil {
-					shutdownErr = err
+					shutdownErr = errStop
 				}
 			}
 		}
@@ -1430,7 +1446,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 				excluded = entry.ExcludedModels
 			}
 		}
-	case "kimi":
+	case "kimi", "kimi-ai", "kimi.ai", "kimi.com":
 		models = registry.GetKimiModels()
 	case "cursor":
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

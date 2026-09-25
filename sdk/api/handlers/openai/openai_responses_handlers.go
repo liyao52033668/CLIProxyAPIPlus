@@ -52,6 +52,7 @@ type responsesSSEFramer struct {
 	outputItems          map[int][]byte
 	outputOrder          []int
 	unindexedOutputItems [][]byte
+	isCodexClient        bool
 }
 
 func (f *responsesSSEFramer) WriteChunk(w io.Writer, chunk []byte) {
@@ -102,13 +103,60 @@ func (f *responsesSSEFramer) writeFrame(w io.Writer, frame []byte) {
 	writeResponsesSSEChunk(w, f.repairFrame(frame))
 }
 
+// shouldFilterPrivateEvent reports whether an SSE event name or payload type must be
+// dropped before reaching the downstream client. Internal WebSocket timing telemetry
+// (responsesapi.*) is always filtered. Official Codex clients keep codex.response.metadata
+// but lose codex.rate_limits; standard Responses API clients lose every codex.* event.
+func (f *responsesSSEFramer) shouldFilterPrivateEvent(streamEvent, payloadType string) bool {
+	check := func(name string) bool {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return false
+		}
+		if responsesSSEErrorEvent(name) {
+			return false
+		}
+
+		// Always filter internal WebSocket timing telemetry from SSE streams.
+		if strings.HasPrefix(name, "responsesapi.") {
+			return true
+		}
+
+		// If official Codex client, preserve codex.response.metadata but filter rate limits.
+		if f != nil && f.isCodexClient {
+			if name == "codex.rate_limits" {
+				return true
+			}
+			return false
+		}
+
+		// For standard Responses API clients: filter any codex.* private events.
+		if strings.HasPrefix(name, "codex.") {
+			return true
+		}
+
+		return false
+	}
+
+	return check(streamEvent) || check(payloadType)
+}
+
 func (f *responsesSSEFramer) repairFrame(frame []byte) []byte {
 	payload, ok := responsesSSEDataPayload(frame)
+	streamEvent := responsesSSEEventName(frame)
+	if streamEvent != "" && f.shouldFilterPrivateEvent(streamEvent, "") {
+		return nil
+	}
 	if !ok || len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) || !json.Valid(payload) {
 		return frame
 	}
 
-	switch gjson.GetBytes(payload, "type").String() {
+	payloadType := gjson.GetBytes(payload, "type").String()
+	if f.shouldFilterPrivateEvent(streamEvent, payloadType) {
+		return nil
+	}
+
+	switch payloadType {
 	case "response.output_item.done":
 		f.recordOutputItem(payload)
 	case "response.completed":
@@ -118,6 +166,27 @@ func (f *responsesSSEFramer) repairFrame(frame []byte) []byte {
 		}
 	}
 	return frame
+}
+
+// responsesSSEEventName extracts the event name from the SSE "event:" line, if present.
+func responsesSSEEventName(frame []byte) string {
+	for _, line := range bytes.Split(frame, []byte("\n")) {
+		trimmed := bytes.TrimSpace(bytes.TrimRight(line, "\r"))
+		if bytes.HasPrefix(trimmed, []byte("event:")) {
+			return strings.TrimSpace(string(trimmed[len("event:"):]))
+		}
+	}
+	return ""
+}
+
+// responsesSSEErrorEvent reports whether the event type carries terminal error semantics.
+func responsesSSEErrorEvent(eventType string) bool {
+	switch eventType {
+	case "response.failed", "response.error", "error":
+		return true
+	default:
+		return false
+	}
 }
 
 func responsesSSEDataPayload(frame []byte) ([]byte, bool) {
@@ -535,7 +604,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 		c.Header("Connection", "keep-alive")
 		c.Header("Access-Control-Allow-Origin", "*")
 	}
-	framer := &responsesSSEFramer{}
+	framer := &responsesSSEFramer{isCodexClient: isCodexResponsesClientRequest(c)}
 
 	// Peek at the first chunk
 	for {
@@ -786,7 +855,7 @@ func responsesStreamErrorText(errText string, status int) string {
 
 func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, framer *responsesSSEFramer) {
 	if framer == nil {
-		framer = &responsesSSEFramer{}
+		framer = &responsesSSEFramer{isCodexClient: isCodexResponsesClientRequest(c)}
 	}
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 		WriteChunk: func(chunk []byte) {
@@ -817,4 +886,28 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
 			_, _ = c.Writer.Write([]byte("\n"))
 		},
 	})
+}
+
+// isCodexResponsesClientRequest identifies official Codex clients so the SSE framer
+// can preserve their private codex.response.metadata events while still dropping
+// rate-limit and telemetry noise.
+func isCodexResponsesClientRequest(c *gin.Context) bool {
+	if c == nil || c.Request == nil {
+		return false
+	}
+	userAgent := strings.TrimSpace(c.GetHeader("User-Agent"))
+	if strings.HasPrefix(userAgent, "Codex Desktop/") ||
+		strings.HasPrefix(userAgent, "codex-tui/") ||
+		userAgent == "codex_cli_rs" ||
+		strings.HasPrefix(userAgent, "codex_cli_rs/") ||
+		strings.HasPrefix(userAgent, "codex_exec/") {
+		return true
+	}
+
+	switch originator := strings.ToLower(strings.TrimSpace(c.GetHeader("Originator"))); originator {
+	case "codex desktop", "codex-tui", "codex_cli_rs":
+		return true
+	default:
+		return strings.HasPrefix(originator, "codex desktop/") || strings.HasPrefix(originator, "codex-tui/") || strings.HasPrefix(originator, "codex_cli_rs/")
+	}
 }

@@ -173,8 +173,9 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 		prefix := strings.TrimSpace(ck.Prefix)
 		id, token := idGen.Next("codex:apikey", key, ck.BaseURL)
 		attrs := map[string]string{
-			"source":  fmt.Sprintf("config:codex[%s]", token),
-			"api_key": key,
+			"source":       fmt.Sprintf("config:codex[%s]", token),
+			"config_index": strconv.Itoa(i),
+			"api_key":      key,
 		}
 		metadata := map[string]any{}
 		if ck.DisableCooling {

@@ -17,6 +17,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -236,7 +237,7 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 							function := toolCall.Get("function")
 							toolUse := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
 							toolUse, _ = sjson.SetBytes(toolUse, "id", toolCallID)
-							toolUse, _ = sjson.SetBytes(toolUse, "name", function.Get("name").String())
+							toolUse, _ = sjson.SetBytes(toolUse, "name", util.SanitizeClaudeFunctionName(function.Get("name").String()))
 
 							// Parse arguments for the tool call
 							if args := function.Get("arguments"); args.Exists() {
@@ -278,7 +279,10 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 				} else {
 					msg, _ = sjson.SetBytes(msg, "content.0.content", toolResultContent)
 				}
-				msg = common.AttachMessageCacheControl(msg, message)
+				// Anthropic rejects cache_control inside tool_result.content, so
+				// part-level or message-level cache_control is hoisted onto the
+				// tool_result block itself.
+				msg = common.AttachToolMessageCacheControl(msg, message)
 				out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
 				messageIndex++
 			}
@@ -314,13 +318,50 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	}
 
 	// Tools mapping: OpenAI tools -> Claude Code tools
+	allowedToolNames := make(map[string]struct{})
+	isAllowedTools := false
+	allowedMode := "auto"
+	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() && toolChoice.IsObject() && toolChoice.Get("type").String() == "allowed_tools" {
+		isAllowedTools = true
+		toolList := toolChoice.Get("allowed_tools.tools").Array()
+		if len(toolList) == 0 {
+			toolList = toolChoice.Get("tools").Array()
+		}
+		for _, t := range toolList {
+			fnName := strings.TrimSpace(t.Get("function.name").String())
+			if fnName == "" {
+				fnName = strings.TrimSpace(t.Get("name").String())
+			}
+			if fnName != "" {
+				allowedToolNames[fnName] = struct{}{}
+				allowedToolNames[util.SanitizeClaudeFunctionName(fnName)] = struct{}{}
+			}
+		}
+		modeVal := strings.ToLower(strings.TrimSpace(toolChoice.Get("allowed_tools.mode").String()))
+		if modeVal == "" {
+			modeVal = strings.ToLower(strings.TrimSpace(toolChoice.Get("mode").String()))
+		}
+		if modeVal != "" {
+			allowedMode = modeVal
+		}
+	}
+
+	anthropicToolCount := 0
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() && len(tools.Array()) > 0 {
-		hasAnthropicTools := false
 		tools.ForEach(func(_, tool gjson.Result) bool {
 			if tool.Get("type").String() == "function" {
 				function := tool.Get("function")
+				fnName := function.Get("name").String()
+				sanitizedFnName := util.SanitizeClaudeFunctionName(fnName)
+				if isAllowedTools {
+					if _, ok := allowedToolNames[fnName]; !ok {
+						if _, okSanitized := allowedToolNames[sanitizedFnName]; !okSanitized {
+							return true
+						}
+					}
+				}
 				anthropicTool := []byte(`{"name":"","description":""}`)
-				anthropicTool, _ = sjson.SetBytes(anthropicTool, "name", function.Get("name").String())
+				anthropicTool, _ = sjson.SetBytes(anthropicTool, "name", sanitizedFnName)
 				anthropicTool, _ = sjson.SetBytes(anthropicTool, "description", function.Get("description").String())
 
 				// Convert parameters schema for the tool
@@ -328,64 +369,108 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 					anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", []byte(parameters.Raw))
 				} else if parameters := function.Get("parametersJsonSchema"); parameters.Exists() {
 					anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", []byte(parameters.Raw))
+				} else {
+					anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", util.NormalizeClaudeToolInputSchema(nil))
 				}
 
 				anthropicTool = common.AttachCacheControl(anthropicTool, tool)
 				if !gjson.GetBytes(anthropicTool, "cache_control").Exists() {
 					anthropicTool = common.AttachCacheControl(anthropicTool, function)
 				}
+				strict := function.Get("strict")
+				if !strict.Exists() {
+					strict = tool.Get("strict")
+				}
+				if strict.Exists() {
+					if strict.Type == gjson.True {
+						anthropicTool, _ = sjson.SetBytes(anthropicTool, "strict", true)
+					} else if strict.Type == gjson.False {
+						anthropicTool, _ = sjson.SetBytes(anthropicTool, "strict", false)
+					}
+				}
 
 				out, _ = sjson.SetRawBytes(out, "tools.-1", anthropicTool)
-				hasAnthropicTools = true
+				anthropicToolCount++
 			}
 			return true
 		})
 
-		if !hasAnthropicTools {
+		if anthropicToolCount == 0 {
 			out, _ = sjson.DeleteBytes(out, "tools")
 		}
 	}
 
 	// Tool choice mapping from OpenAI format to Claude Code format
-	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
+	if isAllowedTools {
+		if anthropicToolCount == 0 {
+			out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"none"}`))
+		} else if allowedMode == "required" {
+			out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"any"}`))
+		} else {
+			out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"auto"}`))
+		}
+	} else if toolChoice := root.Get("tool_choice"); toolChoice.Exists() && toolChoice.Type != gjson.Null {
 		switch toolChoice.Type {
 		case gjson.String:
 			choice := toolChoice.String()
 			switch choice {
 			case "none":
-				// Don't set tool_choice, Claude Code will not use tools
+				out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"none"}`))
 			case "auto":
 				out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"auto"}`))
 			case "required":
 				out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"any"}`))
 			}
 		case gjson.JSON:
-			// Specific tool choice mapping
-			if toolChoice.Get("type").String() == "function" {
+			choiceType := toolChoice.Get("type").String()
+			switch choiceType {
+			case "none":
+				out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"none"}`))
+			case "auto":
+				out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"auto"}`))
+			case "required", "any":
+				out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"any"}`))
+			case "function":
 				functionName := toolChoice.Get("function.name").String()
-				toolChoiceJSON := []byte(`{"type":"tool","name":""}`)
-				toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "name", functionName)
-				out, _ = sjson.SetRawBytes(out, "tool_choice", toolChoiceJSON)
+				if functionName == "" {
+					functionName = toolChoice.Get("name").String()
+				}
+				if functionName != "" {
+					toolChoiceJSON := []byte(`{"type":"tool","name":""}`)
+					toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "name", util.SanitizeClaudeFunctionName(functionName))
+					out, _ = sjson.SetRawBytes(out, "tool_choice", toolChoiceJSON)
+				} else {
+					out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"none"}`))
+				}
 			}
 		default:
+		}
+	}
+
+	if parallelToolCalls := root.Get("parallel_tool_calls"); parallelToolCalls.Type == gjson.False {
+		if gjson.GetBytes(out, "tool_choice").Exists() {
+			if gjson.GetBytes(out, "tool_choice.type").String() != "none" {
+				out, _ = sjson.SetBytes(out, "tool_choice.disable_parallel_tool_use", true)
+			}
+		} else if gjson.GetBytes(out, "tools").Exists() {
+			out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"auto","disable_parallel_tool_use":true}`))
 		}
 	}
 
 	return out
 }
 
-func convertOpenAIContentPartToClaudePart(part gjson.Result) string {
-	var claudePart []byte
+func convertOpenAIContentPartToClaudePartRaw(part gjson.Result) []byte {
 	switch part.Get("type").String() {
 	case "text":
 		textPart := []byte(`{"type":"text","text":""}`)
 		textPart, _ = sjson.SetBytes(textPart, "text", part.Get("text").String())
-		claudePart = textPart
+		return textPart
 
 	case "image_url":
 		converted := convertOpenAIImageURLToClaudePart(part.Get("image_url.url").String())
 		if converted != "" {
-			claudePart = []byte(converted)
+			return []byte(converted)
 		}
 
 	case "file":
@@ -399,11 +484,15 @@ func convertOpenAIContentPartToClaudePart(part gjson.Result) string {
 				docPart := []byte(`{"type":"document","source":{"type":"base64","media_type":"","data":""}}`)
 				docPart, _ = sjson.SetBytes(docPart, "source.media_type", mediaType)
 				docPart, _ = sjson.SetBytes(docPart, "source.data", data)
-				claudePart = docPart
+				return docPart
 			}
 		}
 	}
+	return nil
+}
 
+func convertOpenAIContentPartToClaudePart(part gjson.Result) string {
+	claudePart := convertOpenAIContentPartToClaudePartRaw(part)
 	if len(claudePart) == 0 {
 		return ""
 	}
@@ -460,9 +549,8 @@ func convertOpenAIToolResultContent(content gjson.Result) (string, bool) {
 				return true
 			}
 
-			claudePart := convertOpenAIContentPartToClaudePart(part)
-			if claudePart != "" {
-				claudeContent, _ = sjson.SetRawBytes(claudeContent, "-1", []byte(claudePart))
+			if claudePart := convertOpenAIContentPartToClaudePartRaw(part); len(claudePart) > 0 {
+				claudeContent, _ = sjson.SetRawBytes(claudeContent, "-1", claudePart)
 				partCount++
 			}
 			return true
@@ -476,10 +564,9 @@ func convertOpenAIToolResultContent(content gjson.Result) (string, bool) {
 	}
 
 	if content.IsObject() {
-		claudePart := convertOpenAIContentPartToClaudePart(content)
-		if claudePart != "" {
+		if claudePart := convertOpenAIContentPartToClaudePartRaw(content); len(claudePart) > 0 {
 			claudeContent := []byte("[]")
-			claudeContent, _ = sjson.SetRawBytes(claudeContent, "-1", []byte(claudePart))
+			claudeContent, _ = sjson.SetRawBytes(claudeContent, "-1", claudePart)
 			return string(claudeContent), true
 		}
 		return content.Raw, false

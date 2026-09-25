@@ -277,6 +277,13 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 		appendSystemText(formatInstruction, gjson.Result{})
 	}
 
+	// String input (simplest OpenAI Responses SDK usage) becomes a single user text message.
+	if input := root.Get("input"); input.Exists() && input.Type == gjson.String {
+		contentPart := []byte(`{"type":"text","text":""}`)
+		contentPart, _ = sjson.SetBytes(contentPart, "text", input.String())
+		appendUserParts("user", [][]byte{contentPart})
+	}
+
 	// input array processing
 	if input := root.Get("input"); input.Exists() && input.IsArray() {
 		input.ForEach(func(_, item gjson.Result) bool {
@@ -450,7 +457,7 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 
 				toolUse := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
 				toolUse, _ = sjson.SetBytes(toolUse, "id", callID)
-				toolUse, _ = sjson.SetBytes(toolUse, "name", name)
+				toolUse, _ = sjson.SetBytes(toolUse, "name", util.SanitizeClaudeFunctionName(name))
 				if isCustomToolCall {
 					toolUse, _ = sjson.SetBytes(toolUse, "input.input", item.Get("input").String())
 				} else {
@@ -603,7 +610,7 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				}
 				if _, ok := includedToolNames[fn]; ok {
 					toolChoiceJSON := []byte(`{"name":"","type":"tool"}`)
-					toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "name", fn)
+					toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "name", util.SanitizeClaudeFunctionName(fn))
 					out, _ = sjson.SetRawBytes(out, "tool_choice", toolChoiceJSON)
 				}
 			}
@@ -862,8 +869,8 @@ func convertResponsesFunctionToolToClaude(tool gjson.Result, overrideName string
 		return nil, false
 	}
 
-	tJSON := []byte(`{"name":"","description":"","input_schema":{}}`)
-	tJSON, _ = sjson.SetBytes(tJSON, "name", name)
+	tJSON := []byte(`{"name":"","description":"","input_schema":{"type":"object","properties":{}}}`)
+	tJSON, _ = sjson.SetBytes(tJSON, "name", util.SanitizeClaudeFunctionName(name))
 	if d := responsesToolDescription(tool); d != "" {
 		tJSON, _ = sjson.SetBytes(tJSON, "description", d)
 	}
@@ -885,7 +892,7 @@ func convertResponsesCustomToolToClaude(tool gjson.Result, overrideName string) 
 	}
 
 	tJSON := []byte(`{"name":"","description":"","input_schema":{"type":"object","properties":{"input":{"type":"string"}},"required":["input"]}}`)
-	tJSON, _ = sjson.SetBytes(tJSON, "name", name)
+	tJSON, _ = sjson.SetBytes(tJSON, "name", util.SanitizeClaudeFunctionName(name))
 	if description := responsesToolDescription(tool); description != "" {
 		tJSON, _ = sjson.SetBytes(tJSON, "description", description)
 	}

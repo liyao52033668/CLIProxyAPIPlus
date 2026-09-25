@@ -13,6 +13,15 @@ import (
 )
 
 func sanitizeOpenAIResponsesReasoningEncryptedContent(ctx context.Context, provider string, body []byte) []byte {
+	return sanitizeOpenAIResponsesReasoningEncryptedContentWithCompat(ctx, provider, body, false)
+}
+
+// sanitizeOpenAIResponsesReasoningEncryptedContentWithCompat sanitizes the
+// Responses input while honoring the model is-compat flag. When isCompat is
+// true, third-party Responses models (such as DeepSeek) replay cleartext
+// thinking, so reasoning ids must be preserved even when encrypted_content is
+// missing or invalid.
+func sanitizeOpenAIResponsesReasoningEncryptedContentWithCompat(ctx context.Context, provider string, body []byte, isCompat bool) []byte {
 	inputResult := util.GetGJSONBytesNoCopy(body, "input")
 	if !inputResult.Exists() || !inputResult.IsArray() {
 		return body
@@ -74,7 +83,7 @@ func sanitizeOpenAIResponsesReasoningEncryptedContent(ctx context.Context, provi
 		}
 
 		if !encryptedContent.Exists() {
-			if stripOrphanReasoningIDs && item.Get("id").Exists() {
+			if !isCompat && stripOrphanReasoningIDs && item.Get("id").Exists() {
 				nextItem, err := sjson.Delete(item.Raw, "id")
 				if err != nil {
 					helps.LogWithRequestID(ctx).Debugf("%s: failed to drop orphan reasoning id at input[%d]: %v", provider, index, err)
@@ -115,7 +124,7 @@ func sanitizeOpenAIResponsesReasoningEncryptedContent(ctx context.Context, provi
 			keep(item.Raw)
 			continue
 		}
-		if stripOrphanReasoningIDs && item.Get("id").Exists() {
+		if !isCompat && stripOrphanReasoningIDs && item.Get("id").Exists() {
 			if nextID, errID := sjson.Delete(nextItem, "id"); errID != nil {
 				helps.LogWithRequestID(ctx).Debugf("%s: failed to drop reasoning id after invalid encrypted_content at input[%d]: %v", provider, index, errID)
 			} else {

@@ -338,6 +338,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					if isModelSupportResultError(result.Error) {
 						if disableCooling {
 							state.NextRetryAfter = time.Time{}
+						} else if result.RetryAfter != nil && *result.RetryAfter > 0 {
+							state.NextRetryAfter = now.Add(*result.RetryAfter)
 						} else {
 							next := now.Add(12 * time.Hour)
 							state.NextRetryAfter = next
@@ -368,8 +370,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							if disableCooling {
 								state.NextRetryAfter = time.Time{}
 							} else {
-								next := now.Add(12 * time.Hour)
-								state.NextRetryAfter = next
+								if result.RetryAfter != nil && *result.RetryAfter > 0 {
+									state.NextRetryAfter = now.Add(*result.RetryAfter)
+								} else {
+									state.NextRetryAfter = now.Add(12 * time.Hour)
+								}
 								suspendReason = "not_found"
 								shouldSuspendModel = true
 							}
@@ -705,6 +710,12 @@ func hasUnauthorizedAuthFailure(auth *Auth) bool {
 		return true
 	}
 	return false
+}
+
+// HasUnauthorizedAuthFailure reports whether the auth has a terminal unauthorized error
+// with no pending refresh scheduled.
+func HasUnauthorizedAuthFailure(auth *Auth) bool {
+	return hasUnauthorizedAuthFailure(auth)
 }
 
 // CredentialsChanged reports whether authentication credentials (tokens or API keys)
@@ -1093,6 +1104,8 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		auth.StatusMessage = "not_found"
 		if disableCooling {
 			auth.NextRetryAfter = time.Time{}
+		} else if retryAfter != nil && *retryAfter > 0 {
+			auth.NextRetryAfter = now.Add(*retryAfter)
 		} else {
 			auth.NextRetryAfter = now.Add(12 * time.Hour)
 		}
@@ -1278,17 +1291,30 @@ func (m *Manager) GetExecutionSessionAuthByID(sessionID string, authID string) (
 	return auth.Clone(), true
 }
 
-// Executor returns the registered provider executor for a provider key.
-func (m *Manager) Executor(provider string) (ProviderExecutor, bool) {
-	if m == nil {
-		return nil, false
+// canonicalSchedulingProvider normalizes a provider key for scheduling comparisons.
+// Kimi dual-domain aliases collapse onto their canonical executor keys:
+// "kimi.com" -> "kimi" and "kimi.ai" -> "kimi-ai".
+func canonicalSchedulingProvider(key string) string {
+	lower := strings.ToLower(strings.TrimSpace(key))
+	switch lower {
+	case "kimi.com":
+		return "kimi"
+	case "kimi.ai":
+		return "kimi-ai"
+	default:
+		return lower
 	}
+}
+
+// executorLocked resolves the registered provider executor while the manager lock
+// is held. Kimi alias providers ("kimi-ai", "kimi.ai", "kimi.com") fall back to
+// the shared "kimi" executor registration.
+func (m *Manager) executorLocked(provider string) (ProviderExecutor, bool) {
 	provider = strings.TrimSpace(provider)
 	if provider == "" {
 		return nil, false
 	}
 
-	m.mu.RLock()
 	executor, okExecutor := m.executors[provider]
 	if !okExecutor {
 		lowerProvider := strings.ToLower(provider)
@@ -1296,12 +1322,26 @@ func (m *Manager) Executor(provider string) (ProviderExecutor, bool) {
 			executor, okExecutor = m.executors[lowerProvider]
 		}
 	}
-	m.mu.RUnlock()
-
+	if !okExecutor {
+		switch strings.ToLower(provider) {
+		case "kimi-ai", "kimi.ai", "kimi.com":
+			executor, okExecutor = m.executors["kimi"]
+		}
+	}
 	if !okExecutor || executor == nil {
 		return nil, false
 	}
 	return executor, true
+}
+
+// Executor returns the registered provider executor for a provider key.
+func (m *Manager) Executor(provider string) (ProviderExecutor, bool) {
+	if m == nil {
+		return nil, false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.executorLocked(provider)
 }
 
 // CloseExecutionSession asks all registered executors to release the supplied execution session.

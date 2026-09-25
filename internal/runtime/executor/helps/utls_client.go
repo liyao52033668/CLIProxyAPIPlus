@@ -211,13 +211,7 @@ func parseUtlsHTTPClientArgs(args []any) (context.Context, *config.Config, *clip
 }
 
 func newUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
-	var proxyURL string
-	if auth != nil {
-		proxyURL = strings.TrimSpace(auth.ProxyURL)
-	}
-	if proxyURL == "" && cfg != nil {
-		proxyURL = strings.TrimSpace(cfg.ProxyURL)
-	}
+	proxyURL := effectiveProxyURL(ctx, cfg, auth)
 
 	var utlsRT *utlsRoundTripper
 	if cfg == nil || !cfg.DisableUTLS {

@@ -117,7 +117,9 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	body = normalizeXAIInputReasoningItems(body)
 	body = sanitizeXAIInputEncryptedContent(body)
 	body = normalizeCodexInstructions(body)
-	body = sanitizeXAIResponsesBody(body, baseModel)
+	// stop is supported by Chat Completions but not by xAI's Responses API.
+	// Thinking was handled before payload overrides and must not be revalidated here.
+	body, _ = sjson.DeleteBytes(body, "stop")
 	body = normalizeXAIImageRefs(body)
 	if errValidate := validateXAIToolOutputsHavePriorCalls(body, hasPreviousResponseID); errValidate != nil {
 		return nil, errValidate
@@ -495,19 +497,6 @@ func xaiVideoEndpointPath(opts cliproxyexecutor.Options) string {
 
 func xaiMetadataString(meta map[string]any, key string) string {
 	return helps.MetadataString(meta, key)
-}
-
-func sanitizeXAIResponsesBody(body []byte, model string) []byte {
-	if !xaiSupportsReasoningEffort(model) {
-		if gjson.GetBytes(body, "reasoning.effort").Exists() {
-			log.Debugf("xai: stripping reasoning.effort for model %s (no thinking levels in model registry)", model)
-		}
-		body, _ = sjson.DeleteBytes(body, "reasoning.effort")
-		if reasoning := gjson.GetBytes(body, "reasoning"); reasoning.Exists() && reasoning.IsObject() && len(reasoning.Map()) == 0 {
-			body, _ = sjson.DeleteBytes(body, "reasoning")
-		}
-	}
-	return body
 }
 
 // ensureXAINativeXSearchTool appends {"type":"x_search"} when the final tools

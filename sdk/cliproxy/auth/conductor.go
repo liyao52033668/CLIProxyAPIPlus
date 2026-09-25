@@ -192,6 +192,15 @@ type Manager struct {
 	mu        sync.RWMutex
 	auths     map[string]*Auth
 	scheduler *authScheduler
+	// syncSchedulerMu serializes scheduler sync checks so concurrent pick retries
+	// do not rebuild the scheduler redundantly.
+	syncSchedulerMu sync.Mutex
+	// structuralEpoch increments on every structural auth change (register, update,
+	// remove, load) so scheduler syncs can detect fresh modifications.
+	structuralEpoch atomic.Uint64
+	// syncedVersion records the version (structural + registry epoch) the scheduler
+	// last observed, allowing syncScheduler to skip redundant rebuilds.
+	syncedVersion atomic.Uint64
 	// homeRuntimeAuths caches auths returned by Home so websocket sessions can
 	// reuse an established upstream credential without dispatching every turn.
 	homeRuntimeAuths map[string]map[string]*Auth
@@ -287,7 +296,11 @@ func (m *Manager) syncScheduler() {
 	if m == nil || m.scheduler == nil {
 		return
 	}
-	m.syncSchedulerFromSnapshot(m.snapshotAuths())
+	currentVer := m.currentVersion()
+	if currentVer == m.syncedVersion.Load() {
+		return
+	}
+	m.checkAndSyncScheduler()
 }
 
 func (m *Manager) snapshotAuths() []*Auth {
@@ -317,6 +330,7 @@ func (m *Manager) RefreshSchedulerEntry(authID string) {
 	}
 	snapshot := auth.Clone()
 	m.mu.RUnlock()
+	m.structuralEpoch.Add(1)
 	m.scheduler.upsertAuth(snapshot)
 }
 
@@ -410,6 +424,7 @@ func (m *Manager) SetSelector(selector Selector) {
 	m.mu.Unlock()
 	if m.scheduler != nil {
 		m.scheduler.setSelector(selector)
+		m.structuralEpoch.Add(1)
 		m.syncScheduler()
 	}
 }
