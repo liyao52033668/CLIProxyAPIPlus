@@ -1049,6 +1049,8 @@ func (s *Service) Run(ctx context.Context) error {
 	s.server = api.NewServer(s.cfg, s.coreManager, s.accessManager, s.configPath, s.serverOptions...)
 	// Set callback to refresh model registrations when OAuthModelAlias is updated
 	s.server.SetOnOAuthModelAliasUpdated(s.RefreshAllModelRegistrations)
+	// OAuthSettings overrides also change registered model information
+	s.server.SetOnOAuthSettingsUpdated(s.RefreshAllModelRegistrations)
 	s.server.SetOnCodexConfigUpdated(s.syncCodexConfig)
 
 	// Set usage service if database is configured

@@ -1140,6 +1140,124 @@ func (h *Handler) DeleteOAuthModelAlias(c *gin.Context) {
 	h.triggerOAuthModelAliasUpdated()
 }
 
+// sanitizedOAuthSettingsSnapshot returns a sanitized deep copy of the given
+// OAuth settings map so stored config is never mutated in place.
+func sanitizedOAuthSettingsSnapshot(entries map[string][]config.OAuthModelSetting) map[string][]config.OAuthModelSetting {
+	if entries == nil {
+		return nil
+	}
+	copied := make(map[string][]config.OAuthModelSetting, len(entries))
+	for channel, settings := range entries {
+		copied[channel] = append([]config.OAuthModelSetting(nil), settings...)
+	}
+	tmp := config.Config{OAuthSettings: copied}
+	tmp.SanitizeOAuthSettings()
+	return tmp.OAuthSettings
+}
+
+// GetOAuthSettings returns the map of OAuth per-channel model settings.
+func (h *Handler) GetOAuthSettings(c *gin.Context) {
+	c.JSON(200, gin.H{"oauth-settings": sanitizedOAuthSettingsSnapshot(h.cfg.OAuthSettings)})
+}
+
+func (h *Handler) PutOAuthSettings(c *gin.Context) {
+	data, err := c.GetRawData()
+	if err != nil {
+		c.JSON(400, gin.H{"error": "failed to read body"})
+		return
+	}
+	var entries map[string][]config.OAuthModelSetting
+	if err = json.Unmarshal(data, &entries); err != nil {
+		var wrapper struct {
+			Items map[string][]config.OAuthModelSetting `json:"items"`
+		}
+		if err2 := json.Unmarshal(data, &wrapper); err2 != nil {
+			c.JSON(400, gin.H{"error": "invalid body"})
+			return
+		}
+		entries = wrapper.Items
+	}
+	h.cfg.OAuthSettings = sanitizedOAuthSettingsSnapshot(entries)
+	h.persist(c)
+	h.triggerOAuthSettingsUpdated()
+}
+
+func (h *Handler) PatchOAuthSettings(c *gin.Context) {
+	var body struct {
+		Provider *string                    `json:"provider"`
+		Channel  *string                    `json:"channel"`
+		Settings []config.OAuthModelSetting `json:"settings"`
+	}
+	if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+	channelRaw := ""
+	if body.Channel != nil {
+		channelRaw = *body.Channel
+	} else if body.Provider != nil {
+		channelRaw = *body.Provider
+	}
+	channel := strings.ToLower(strings.TrimSpace(channelRaw))
+	if channel == "" {
+		c.JSON(400, gin.H{"error": "invalid channel"})
+		return
+	}
+
+	normalizedMap := sanitizedOAuthSettingsSnapshot(map[string][]config.OAuthModelSetting{channel: body.Settings})
+	normalized := normalizedMap[channel]
+	if h.cfg.OAuthSettings == nil {
+		h.cfg.OAuthSettings = make(map[string][]config.OAuthModelSetting)
+	}
+	if len(normalized) == 0 {
+		// An empty settings list removes the channel entirely; unlike
+		// oauth-model-alias there are no defaults to preserve, so no
+		// explicit-empty marker is needed.
+		delete(h.cfg.OAuthSettings, channel)
+		if len(h.cfg.OAuthSettings) == 0 {
+			h.cfg.OAuthSettings = nil
+		}
+	} else {
+		h.cfg.OAuthSettings[channel] = normalized
+	}
+	h.persist(c)
+	h.triggerOAuthSettingsUpdated()
+}
+
+func (h *Handler) triggerOAuthSettingsUpdated() {
+	h.mu.Lock()
+	fn := h.onOAuthSettingsUpdated
+	h.mu.Unlock()
+	if fn != nil {
+		go fn()
+	}
+}
+
+func (h *Handler) DeleteOAuthSettings(c *gin.Context) {
+	channel := strings.ToLower(strings.TrimSpace(c.Query("channel")))
+	if channel == "" {
+		channel = strings.ToLower(strings.TrimSpace(c.Query("provider")))
+	}
+	if channel == "" {
+		c.JSON(400, gin.H{"error": "missing channel"})
+		return
+	}
+	if h.cfg.OAuthSettings == nil {
+		c.JSON(404, gin.H{"error": "channel not found"})
+		return
+	}
+	if _, ok := h.cfg.OAuthSettings[channel]; !ok {
+		c.JSON(404, gin.H{"error": "channel not found"})
+		return
+	}
+	delete(h.cfg.OAuthSettings, channel)
+	if len(h.cfg.OAuthSettings) == 0 {
+		h.cfg.OAuthSettings = nil
+	}
+	h.persist(c)
+	h.triggerOAuthSettingsUpdated()
+}
+
 // GetCodexKeys returns the list of Codex API keys.
 func (h *Handler) GetCodexKeys(c *gin.Context) {
 	c.JSON(200, gin.H{"codex-api-key": h.codexKeysWithAuthIndex()})

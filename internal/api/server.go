@@ -1160,6 +1160,11 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/oauth-model-alias", s.mgmt.PatchOAuthModelAlias)
 		mgmt.DELETE("/oauth-model-alias", s.mgmt.DeleteOAuthModelAlias)
 
+		mgmt.GET("/oauth-settings", s.mgmt.GetOAuthSettings)
+		mgmt.PUT("/oauth-settings", s.mgmt.PutOAuthSettings)
+		mgmt.PATCH("/oauth-settings", s.mgmt.PatchOAuthSettings)
+		mgmt.DELETE("/oauth-settings", s.mgmt.DeleteOAuthSettings)
+
 		mgmt.GET("/auth-files", s.mgmt.ListAuthFiles)
 		mgmt.GET("/auth-files/models", s.mgmt.GetAuthFileModels)
 		mgmt.POST("/auth-files/test", s.mgmt.TestAuthFileModel)
@@ -2363,6 +2368,14 @@ func (s *Server) SetOnOAuthModelAliasUpdated(fn func()) {
 		return
 	}
 	s.mgmt.SetOnOAuthModelAliasUpdated(fn)
+}
+
+// SetOnOAuthSettingsUpdated sets the callback that will be invoked when OAuthSettings is updated
+func (s *Server) SetOnOAuthSettingsUpdated(fn func()) {
+	if s == nil || s.mgmt == nil {
+		return
+	}
+	s.mgmt.SetOnOAuthSettingsUpdated(fn)
 }
 
 // SetOnCodexConfigUpdated sets the callback invoked after Codex API key updates.

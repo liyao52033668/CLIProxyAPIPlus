@@ -71,6 +71,7 @@ type Handler struct {
 	codexInspectionService   CodexInspectionService
 	apiCallResolver          apiCallResolver
 	onOAuthModelAliasUpdated func()
+	onOAuthSettingsUpdated   func()
 	onCodexConfigUpdated     func() error
 }
 
@@ -99,6 +100,13 @@ func (h *Handler) SetOnOAuthModelAliasUpdated(fn func()) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.onOAuthModelAliasUpdated = fn
+}
+
+// SetOnOAuthSettingsUpdated sets the callback triggered after OAuthSettings updates.
+func (h *Handler) SetOnOAuthSettingsUpdated(fn func()) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.onOAuthSettingsUpdated = fn
 }
 
 // SetOnCodexConfigUpdated sets the callback triggered after Codex API key updates.
