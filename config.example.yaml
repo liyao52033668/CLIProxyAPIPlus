@@ -576,6 +576,16 @@ nonstream-keepalive-interval: 0
 #     - name: "grok-4.3"
 #       alias: "grok-latest"
 
+# OAuth provider model settings (per channel)
+# Allows overriding model-level capabilities (such as context window) for OAuth credentials.
+# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, iflow, kiro, github-copilot, kimi, codearts, joycode, gitlab, cursor, qoder, codebuddy, codebuddy-ai, kilo, bt, xai, commandcode, lobsterai, devin, freebuff, alysis, meta.
+# oauth-settings:
+#   codex:
+#     - name: "gpt-6-sol"
+#       max-context-length: 524288 # overrides the context window advertised to clients
+#     - name: "gpt-6-astra"
+#       max-context-length: 1048576
+
 # OAuth provider excluded models
 # Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, iflow, kiro, github-copilot, codearts, joycode, gitlab, cursor, qoder, codebuddy, codebuddy-ai, kilo, bt.
 # oauth-excluded-models:

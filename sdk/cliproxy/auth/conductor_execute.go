@@ -80,7 +80,11 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	} else {
 		m.queueRefreshReschedule(auth.ID)
 	}
-	_ = m.persist(ctx, auth)
+	// Persist failures stay non-fatal, but must not be silent: a restart would
+	// lose the credential that only exists in memory.
+	if errPersist := m.persist(ctx, auth); errPersist != nil {
+		log.WithFields(log.Fields{"auth_id": auth.ID, "credential": auth.ID, "provider": auth.Provider}).Warnf("failed to persist registered auth %s (%s): %v", auth.Provider, auth.ID, errPersist)
+	}
 	m.hook.OnAuthRegistered(ctx, auth.Clone())
 	return auth.Clone(), nil
 }
@@ -179,7 +183,11 @@ func (m *Manager) updateMerged(ctx context.Context, base *Auth, auth *Auth, requ
 	} else {
 		m.queueRefreshReschedule(auth.ID)
 	}
-	_ = m.persist(ctx, auth)
+	// Persist failures stay non-fatal, but must not be silent: after a token
+	// refresh the rotated credentials only exist in memory until persisted.
+	if errPersist := m.persist(ctx, auth); errPersist != nil {
+		log.WithFields(log.Fields{"auth_id": auth.ID, "credential": auth.ID, "provider": auth.Provider}).Warnf("failed to persist updated auth %s (%s): %v", auth.Provider, auth.ID, errPersist)
+	}
 	m.hook.OnAuthUpdated(ctx, auth.Clone())
 	return auth.Clone(), nil
 }
@@ -212,7 +220,11 @@ func (m *Manager) MergeMetadata(ctx context.Context, id string, updates map[stri
 		m.scheduler.upsertAuth(updatedClone)
 	}
 	m.queueRefreshReschedule(id)
-	_ = m.persist(ctx, updated)
+	// Persist failures stay non-fatal, but must not be silent: the merged
+	// metadata only exists in memory until persisted.
+	if errPersist := m.persist(ctx, updated); errPersist != nil {
+		log.WithFields(log.Fields{"auth_id": updated.ID, "credential": updated.ID, "provider": updated.Provider}).Warnf("failed to persist updated auth %s (%s): %v", updated.Provider, updated.ID, errPersist)
+	}
 	m.hook.OnAuthUpdated(ctx, updated.Clone())
 	return updated.Clone(), nil
 }

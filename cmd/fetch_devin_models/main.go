@@ -32,6 +32,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
@@ -404,6 +405,11 @@ func formatRawModels(raw []rawDevinModel) []devinModelJSON {
 	return res
 }
 
+func splitDevinUID(uid string) (string, string) {
+	// Delegate to registry package to avoid duplication
+	return registry.SplitDevinModelID(uid)
+}
+
 func aggregateModels(raw []rawDevinModel) []devinModelJSON {
 	type aggEntry struct {
 		baseID        string
@@ -414,43 +420,51 @@ func aggregateModels(raw []rawDevinModel) []devinModelJSON {
 		levels        map[string]struct{}
 	}
 
-	knownSuffixes := []string{"-minimal", "-low", "-medium", "-high", "-xhigh", "-max", "-none", "-priority"}
 	grouped := make(map[string]*aggEntry)
 	var order []string
 
 	for _, r := range raw {
-		base := r.UID
-		level := ""
-
-		for _, s := range knownSuffixes {
-			if strings.HasSuffix(base, s) {
-				level = strings.TrimPrefix(s, "-")
-				base = strings.TrimSuffix(base, s)
-				break
-			}
+		base, level := splitDevinUID(r.UID)
+		if base == "" {
+			base = r.UID
 		}
+		isBase := (base == r.UID)
 
 		entry, exists := grouped[base]
 		if !exists {
+			initialLevels := make(map[string]struct{})
+			if mInfo := registry.LookupDevinModel(base); mInfo != nil && mInfo.Thinking != nil {
+				for _, l := range mInfo.Thinking.Levels {
+					if l != "" && l != "priority" {
+						initialLevels[l] = struct{}{}
+					}
+				}
+			}
 			entry = &aggEntry{
 				baseID:        base,
 				displayName:   cleanDisplayName(r.Label),
 				vendorID:      r.VendorID,
 				contextLength: r.ContextLength,
 				multimodal:    r.Multimodal,
-				levels:        make(map[string]struct{}),
+				levels:        initialLevels,
 			}
 			grouped[base] = entry
 			order = append(order, base)
 		}
 
+		if isBase {
+			entry.displayName = cleanDisplayName(r.Label)
+			if r.VendorID != 0 {
+				entry.vendorID = r.VendorID
+			}
+		}
 		if r.Multimodal {
 			entry.multimodal = true
 		}
 		if r.ContextLength > entry.contextLength {
 			entry.contextLength = r.ContextLength
 		}
-		if level != "" {
+		if level != "" && level != "priority" {
 			entry.levels[level] = struct{}{}
 		}
 	}
@@ -493,22 +507,21 @@ func aggregateModels(raw []rawDevinModel) []devinModelJSON {
 }
 
 func cleanDisplayName(label string) string {
-	clean := label
-	for _, s := range []string{" Low", " Medium", " High", " XHigh", " Max", " Minimal", " None", " Priority"} {
-		clean = strings.TrimSuffix(clean, s)
-	}
-	return clean
+	// Delegate to registry package to avoid duplication
+	return registry.CleanDevinDisplayName(label)
 }
 
 func sortLevels(levels []string) {
 	rank := map[string]int{
-		"none":    0,
-		"minimal": 1,
-		"low":     2,
-		"medium":  3,
-		"high":    4,
-		"xhigh":   5,
-		"max":     6,
+		"none":     0,
+		"minimal":  1,
+		"low":      2,
+		"medium":   3,
+		"high":     4,
+		"xhigh":    5,
+		"max":      6,
+		"fast":     7,
+		"priority": 8,
 	}
 	sort.Slice(levels, func(i, j int) bool {
 		rI, okI := rank[levels[i]]
@@ -519,6 +532,9 @@ func sortLevels(levels []string) {
 		if !okJ {
 			rJ = 99
 		}
-		return rI < rJ
+		if rI != rJ {
+			return rI < rJ
+		}
+		return levels[i] < levels[j]
 	})
 }

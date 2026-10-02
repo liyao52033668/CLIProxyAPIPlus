@@ -106,6 +106,17 @@ func pickRequestJSON(originalRequestRawJSON, requestRawJSON []byte) []byte {
 	return nil
 }
 
+// applyResponsesFunctionCallNamespaceFields rewrites a Responses function_call
+// or custom_tool_call item so its name (and namespace, when applicable) carry
+// the original client-facing tool identity. Claude only ever sees the
+// Claude-safe name the request translator declared, which may be a sanitized
+// spelling or a disambiguated hash of the original one; without this mapping
+// the client could not match the call back to its own tool declarations.
+func applyResponsesFunctionCallNamespaceFields(item []byte, requestRawJSON []byte, qualifiedName string, itemPath string) []byte {
+	name, namespace := splitResponsesQualifiedFunctionCallFromRequest(requestRawJSON, qualifiedName)
+	return translatorcommon.SetResponsesToolCallIdentity(item, name, namespace, itemPath)
+}
+
 func emitEvent(event string, payload []byte) []byte {
 	return translatorcommon.SSEEventData(event, payload)
 }
@@ -150,8 +161,8 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 	root := gjson.ParseBytes(rawJSON)
 	// Compute the custom-tool set once per stream and reuse it across chunks;
 	// rescans of the tool graph per chunk are wasted work.
+	requestForToolMetadata := pickRequestJSON(originalRequestRawJSON, requestRawJSON)
 	if st.CustomToolNames == nil {
-		requestForToolMetadata := pickRequestJSON(originalRequestRawJSON, requestRawJSON)
 		st.CustomToolNames = responsesCustomToolNames(requestForToolMetadata)
 	}
 	customToolNames := st.CustomToolNames
@@ -252,6 +263,9 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 				item, _ = sjson.SetBytes(item, "item.call_id", st.CurrentFCID)
 				item, _ = sjson.SetBytes(item, "item.name", name)
 			}
+			// Report the original client-facing tool identity instead of the
+			// Claude-safe name Claude echoed back.
+			item = applyResponsesFunctionCallNamespaceFields(item, requestForToolMetadata, name, "item")
 			item, _ = sjson.SetBytes(item, "sequence_number", nextSeq())
 			item, _ = sjson.SetBytes(item, "output_index", idx)
 			out = append(out, emitEvent("response.output_item.added", item))
@@ -408,7 +422,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 				itemDone, _ = sjson.SetBytes(itemDone, "item.id", fmt.Sprintf("ctc_%s", st.CurrentFCID))
 				itemDone, _ = sjson.SetBytes(itemDone, "item.input", input)
 				itemDone, _ = sjson.SetBytes(itemDone, "item.call_id", st.CurrentFCID)
-				itemDone, _ = sjson.SetBytes(itemDone, "item.name", st.FuncNames[idx])
+				itemDone = applyResponsesFunctionCallNamespaceFields(itemDone, requestForToolMetadata, st.FuncNames[idx], "item")
 				out = append(out, emitEvent("response.output_item.done", itemDone))
 			} else {
 				fcDone := []byte(`{"type":"response.function_call_arguments.done","sequence_number":0,"item_id":"","output_index":0,"arguments":""}`)
@@ -423,7 +437,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 				itemDone, _ = sjson.SetBytes(itemDone, "item.id", fmt.Sprintf("fc_%s", st.CurrentFCID))
 				itemDone, _ = translatorcommon.SetStringWithoutHTMLEscape(itemDone, "item.arguments", args)
 				itemDone, _ = sjson.SetBytes(itemDone, "item.call_id", st.CurrentFCID)
-				itemDone, _ = sjson.SetBytes(itemDone, "item.name", st.FuncNames[idx])
+				itemDone = applyResponsesFunctionCallNamespaceFields(itemDone, requestForToolMetadata, st.FuncNames[idx], "item")
 				out = append(out, emitEvent("response.output_item.done", itemDone))
 			}
 			st.InFuncBlock = false
@@ -610,6 +624,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 					item, _ = sjson.SetBytes(item, "input", unwrapCustomToolInput(args))
 					item, _ = sjson.SetBytes(item, "call_id", callID)
 					item, _ = sjson.SetBytes(item, "name", name)
+					item = applyResponsesFunctionCallNamespaceFields(item, reqBytes, name, "")
 					outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
 				} else {
 					item := []byte(`{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`)
@@ -617,6 +632,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 					item, _ = translatorcommon.SetStringWithoutHTMLEscape(item, "arguments", args)
 					item, _ = sjson.SetBytes(item, "call_id", callID)
 					item, _ = sjson.SetBytes(item, "name", name)
+					item = applyResponsesFunctionCallNamespaceFields(item, reqBytes, name, "")
 					outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
 				}
 			}
@@ -926,6 +942,7 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 				item, _ = sjson.SetBytes(item, "input", unwrapCustomToolInput(args))
 				item, _ = sjson.SetBytes(item, "call_id", st.id)
 				item, _ = sjson.SetBytes(item, "name", st.name)
+				item = applyResponsesFunctionCallNamespaceFields(item, reqBytes, st.name, "")
 				outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
 			} else {
 				item := []byte(`{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`)
@@ -933,6 +950,7 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 				item, _ = sjson.SetBytes(item, "arguments", args)
 				item, _ = sjson.SetBytes(item, "call_id", st.id)
 				item, _ = sjson.SetBytes(item, "name", st.name)
+				item = applyResponsesFunctionCallNamespaceFields(item, reqBytes, st.name, "")
 				outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
 			}
 		}

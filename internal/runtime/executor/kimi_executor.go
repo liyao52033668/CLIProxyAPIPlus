@@ -147,6 +147,11 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
+	var errNormalizeInput error
+	body, errNormalizeInput = helps.NormalizeKimiResponsesInput(body)
+	if errNormalizeInput != nil {
+		return resp, fmt.Errorf("kimi executor: failed to normalize responses input: %w", errNormalizeInput)
+	}
 	body, err = normalizeKimiToolMessageLinks(body)
 	if err != nil {
 		return resp, err
@@ -230,6 +235,11 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
+	var errNormalizeInputStream error
+	body, errNormalizeInputStream = helps.NormalizeKimiResponsesInput(body)
+	if errNormalizeInputStream != nil {
+		return nil, fmt.Errorf("kimi executor: failed to normalize responses input: %w", errNormalizeInputStream)
+	}
 	body, err = normalizeKimiToolMessageLinks(body)
 	if err != nil {
 		return nil, err

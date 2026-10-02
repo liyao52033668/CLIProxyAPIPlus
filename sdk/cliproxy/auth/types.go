@@ -88,6 +88,8 @@ type Auth struct {
 	LastRefreshedAt time.Time `json:"last_refreshed_at"`
 	// NextRefreshAfter is the earliest time a refresh should retrigger.
 	NextRefreshAfter time.Time `json:"next_refresh_after"`
+	// RefreshFailures tracks consecutive refresh failures for exponential backoff (in-memory only).
+	RefreshFailures int `json:"-"`
 	// NextRetryAfter is the earliest time a retry should retrigger.
 	NextRetryAfter time.Time `json:"next_retry_after"`
 	// ModelStates tracks per-model runtime availability data.
@@ -249,15 +251,17 @@ func (a *Auth) Clone() *Auth {
 	}
 	copyAuth := *a
 	copyAuth.Quota = a.Quota.Clone()
-	if len(a.Attributes) > 0 {
+	// Preserve empty (non-nil) map allocations so writes through a clone never
+	// mutate the original nor panic on a nil map (upstream 59baf731).
+	if a.Attributes != nil {
 		copyAuth.Attributes = make(map[string]string, len(a.Attributes))
 		maps.Copy(copyAuth.Attributes, a.Attributes)
 	}
-	if len(a.Metadata) > 0 {
+	if a.Metadata != nil {
 		copyAuth.Metadata = make(map[string]any, len(a.Metadata))
 		maps.Copy(copyAuth.Metadata, a.Metadata)
 	}
-	if len(a.ModelStates) > 0 {
+	if a.ModelStates != nil {
 		copyAuth.ModelStates = make(map[string]*ModelState, len(a.ModelStates))
 		for key, state := range a.ModelStates {
 			copyAuth.ModelStates[key] = state.Clone()

@@ -351,7 +351,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
-	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
+	body = helps.ApplyPayloadConfigWithRequestForExecutor(e.cfg, e.Identifier(), baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body, _ = sjson.SetBytes(body, "stream", true)
 	body, _ = sjson.DeleteBytes(body, "previous_response_id")
@@ -488,7 +488,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
-	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
+	body = helps.ApplyPayloadConfigWithRequestForExecutor(e.cfg, e.Identifier(), baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body, _ = sjson.DeleteBytes(body, "stream")
 	body = normalizeCodexInstructions(body)
@@ -563,7 +563,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
-	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
+	body = helps.ApplyPayloadConfigWithRequestForExecutor(e.cfg, e.Identifier(), baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body, _ = sjson.DeleteBytes(body, "previous_response_id")
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
@@ -616,10 +616,19 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		buffering := e.cfg != nil && e.cfg.Streaming.CodexStreamBootstrapBuffering
 		streamStarted := !buffering
 		bufferedChunks := make([]cliproxyexecutor.StreamChunk, 0, codexBootstrapMaxBufferedEvents)
+		// emittedCount tracks non-empty payload chunks actually handed to the downstream
+		// channel (flushed bootstrap frames included). When the upstream stream closes
+		// before the first payload, the attempt is reported as Bad Gateway and the stream
+		// ends without an error chunk so the conductor observes an empty committed stream
+		// and fails over to the next credential instead of blaming the well-formed request.
+		emittedCount := 0
 		flushBuffered := func() bool {
 			for _, pending := range bufferedChunks {
 				select {
 				case out <- pending:
+					if len(pending.Payload) > 0 {
+						emittedCount++
+					}
 				case <-ctx.Done():
 					return false
 				}
@@ -708,6 +717,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			for i := range chunks {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+					if len(chunks[i]) > 0 {
+						emittedCount++
+					}
 				case <-ctx.Done():
 					return
 				}
@@ -723,9 +735,21 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		if errScan := scanner.Err(); errScan != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 		}
+		if emittedCount == 0 && len(bufferedChunks) == 0 {
+			// Upstream closed the stream (headers only) before emitting any payload.
+			// Surface a Bad Gateway failure for this credential and end the stream
+			// without an error chunk so the conductor treats it as an empty committed
+			// stream and fails over to the next credential (upstream 9e71c20d, #6247).
+			emptyErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before first payload"}
+			helps.RecordAPIResponseError(ctx, e.cfg, emptyErr)
+			reporter.PublishFailure(ctx, emptyErr)
+			return
+		}
 		streamErr := newCodexIncompleteStreamError()
 		helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 		reporter.PublishFailure(ctx, streamErr)
+		// Flush buffered bootstrap chunks before sending the error chunk
+		// to maintain a consistent stream sequence for the client.
 		if buffering && !streamStarted {
 			streamStarted = true
 			if !flushBuffered() {
@@ -945,6 +969,33 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	auth.Metadata["type"] = "codex"
 	now := time.Now().Format(time.RFC3339)
 	auth.Metadata["last_refresh"] = now
+
+	// Persist the subscription plan type so failover/cooling decisions that read the
+	// attribute keep working after a token refresh (upstream 59baf731).
+	planType := strings.TrimSpace(td.PlanType)
+	if planType == "" && td.IDToken != "" {
+		if claims, errParse := codexauth.ParseJWTToken(td.IDToken); errParse == nil && claims != nil {
+			planType = claims.GetPlanType()
+		}
+	}
+	if planType == "" {
+		planType = codexauth.DefaultPlanType
+	}
+	auth.Metadata["plan_type"] = planType
+	clonedAttributes := make(map[string]string, len(auth.Attributes)+1)
+	for k, v := range auth.Attributes {
+		clonedAttributes[k] = v
+	}
+	clonedAttributes["plan_type"] = planType
+	auth.Attributes = clonedAttributes
+	if storage, ok := auth.Storage.(*codexauth.CodexTokenStorage); ok && storage != nil {
+		// Refresh against a cloned storage snapshot so the caller's original
+		// storage object is never mutated in place.
+		clonedStorage := *storage
+		svc.UpdateTokenStorage(&clonedStorage, td)
+		clonedStorage.PlanType = planType
+		auth.Storage = &clonedStorage
+	}
 	return auth, nil
 }
 

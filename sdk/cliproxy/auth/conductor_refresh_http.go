@@ -119,7 +119,7 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 	if a == nil || a.Disabled || a.Status == StatusDisabled {
 		return false
 	}
-	if hasUnauthorizedAuthFailure(a) {
+	if hasUnauthorizedAuthFailure(a) || hasDisabledInvalidGrantFailure(a) {
 		return false
 	}
 	if !a.NextRefreshAfter.IsZero() && now.Before(a.NextRefreshAfter) {
@@ -352,6 +352,24 @@ func (m *Manager) RefreshAuth(ctx context.Context, authID string) (*Auth, error)
 	return m.refreshAuth(ctx, authID)
 }
 
+// invalidGrantBackoffDuration returns the exponential retry backoff for the
+// given consecutive invalid_grant refresh failure count, starting at 1 minute
+// and capped at 30 minutes.
+func invalidGrantBackoffDuration(failures int) time.Duration {
+	if failures <= 1 {
+		return invalidGrantBackoffBase
+	}
+	shift := failures - 1
+	if shift > 10 {
+		shift = 10
+	}
+	backoff := invalidGrantBackoffBase * time.Duration(1<<shift)
+	if backoff > invalidGrantBackoffMax {
+		return invalidGrantBackoffMax
+	}
+	return backoff
+}
+
 func (m *Manager) refreshAuth(ctx context.Context, id string) (*Auth, error) {
 	// Credential refreshes must not inherit an execution-scoped request proxy.
 	ctx = cliproxyexecutor.WithoutRequestProxyURL(ctx)
@@ -385,26 +403,60 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) (*Auth, error) {
 	now := time.Now()
 	if err != nil {
 		unauthorized := isUnauthorizedError(err)
+		invalidGrant := isInvalidGrantError(err)
 		shouldReschedule := false
+		isPermanentlyDisabled := false
 		var failedAuth *Auth
 		m.mu.Lock()
-		if current := m.auths[id]; current != nil && !current.Disabled && current.Status != StatusDisabled {
+		if current := m.auths[id]; current != nil {
 			current.LastError = refreshErrorFromError(err)
 			hasValidAccessToken := current.HasValidAccessToken(now)
 			hasExpiredAccessToken := !hasValidAccessToken && current.HasExpiredAccessToken(now)
-			if unauthorized || hasExpiredAccessToken {
+			if current.Disabled || current.Status == StatusDisabled {
+				// The credential was disabled while the refresh was in flight.
+				// A disabled credential whose refresh token was revoked
+				// (invalid_grant) is permanently retired; other disabled
+				// failures keep the ordinary failure backoff.
+				current.Unavailable = true
+				current.Status = StatusDisabled
+				if invalidGrant {
+					current.NextRefreshAfter = time.Time{}
+					current.RefreshFailures = 0
+					current.StatusMessage = "disabled (invalid grant)"
+					isPermanentlyDisabled = true
+				} else {
+					current.NextRefreshAfter = now.Add(refreshFailureBackoff)
+					if current.StatusMessage == "" {
+						current.StatusMessage = "disabled"
+					}
+					shouldReschedule = true
+				}
+			} else if unauthorized || hasExpiredAccessToken {
 				current.Unavailable = true
 				current.Status = StatusError
 				if unauthorized {
 					current.NextRefreshAfter = time.Time{}
+					current.RefreshFailures = 0
 					current.StatusMessage = "unauthorized"
+				} else if invalidGrant {
+					current.RefreshFailures++
+					current.NextRefreshAfter = now.Add(invalidGrantBackoffDuration(current.RefreshFailures))
+					current.StatusMessage = "invalid grant (retrying)"
 				} else {
+					current.RefreshFailures = 0
 					current.NextRefreshAfter = now.Add(refreshFailureBackoff)
 					current.StatusMessage = "token expired"
 				}
+				shouldReschedule = true
 			} else if hasValidAccessToken {
 				// Access token remains valid. Preserve current in-flight/cooldown status without overwrite.
 				nextRetry := now.Add(refreshFailureBackoff)
+				if invalidGrant {
+					current.RefreshFailures++
+					nextRetry = now.Add(invalidGrantBackoffDuration(current.RefreshFailures))
+				} else {
+					current.RefreshFailures = 0
+				}
 				if exp, ok := current.AccessTokenExpirationTime(); ok && !exp.IsZero() && nextRetry.After(exp) {
 					nextRetry = exp
 				}
@@ -413,14 +465,22 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) (*Auth, error) {
 				if !current.Unavailable {
 					log.Warnf("credential refresh failed for %s (%s): %s; retaining active credential as access token is unexpired", current.Provider, current.ID, boundedErrorDiagnostic(err))
 				}
+				shouldReschedule = true
 			} else {
 				// Metadata carries no access token to assess (e.g. tokens kept in
 				// Storage). Keep the credential schedulable and only back off.
-				current.NextRefreshAfter = now.Add(refreshFailureBackoff)
+				if invalidGrant {
+					current.RefreshFailures++
+					current.NextRefreshAfter = now.Add(invalidGrantBackoffDuration(current.RefreshFailures))
+					current.StatusMessage = "invalid grant (retrying)"
+				} else {
+					current.RefreshFailures = 0
+					current.NextRefreshAfter = now.Add(refreshFailureBackoff)
+				}
+				shouldReschedule = true
 			}
 			m.auths[id] = current
 			failedAuth = current
-			shouldReschedule = true
 			if m.scheduler != nil {
 				m.scheduler.upsertAuth(current.Clone())
 			}
@@ -428,6 +488,10 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) (*Auth, error) {
 		m.mu.Unlock()
 		if shouldReschedule {
 			m.queueRefreshReschedule(id)
+		} else if isPermanentlyDisabled {
+			// Permanently unschedule disabled credentials whose refresh token
+			// was revoked so the auto-refresh loop stops retrying them.
+			m.removeRefreshSchedule(id)
 		}
 		// Persist the error state so LastError/Status/Unavailable survive a
 		// restart or config reload instead of re-parsing with stale state.
@@ -454,6 +518,9 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) (*Auth, error) {
 	}
 	updated.LastError = nil
 	updated.UpdatedAt = now
+	// The refresh recovered the credential, so any prior failure streak no
+	// longer applies to the next invalid_grant backoff computation.
+	updated.RefreshFailures = 0
 	if m.shouldRefresh(updated, now) {
 		updated.NextRefreshAfter = now.Add(refreshIneffectiveBackoff)
 	}

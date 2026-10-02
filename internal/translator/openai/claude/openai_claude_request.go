@@ -429,6 +429,15 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 // upstream schema validation.
 func normalizeObjectSchemaProperties(schema any) any {
 	switch value := schema.(type) {
+	case bool:
+		// JSON Schema boolean subschemas (true/false) are valid, but strict OpenAPI 3.0
+		// upstream validators reject boolean subschemas.
+		// Normalize `true` (accept anything) to an empty object schema `{}`.
+		// Preserve `false` (reject all) to avoid turning rejection constraints into open schemas.
+		if value {
+			return map[string]any{}
+		}
+		return value
 	case map[string]any:
 		if schemaType, ok := value["type"].(string); ok && schemaType == "object" {
 			if _, ok := value["properties"]; !ok {
@@ -464,6 +473,12 @@ func normalizeObjectSchemaProperties(schema any) any {
 		for _, valKey := range util.SchemaValueKeywords {
 			if val, exists := value[valKey]; exists {
 				switch sub := val.(type) {
+				case bool:
+					// Normalize boolean subschemas (e.g. items: true), but preserve boolean
+					// additionalProperties (false/true) required by OpenAI structured outputs.
+					if valKey != "additionalProperties" && sub {
+						value[valKey] = map[string]any{}
+					}
 				case map[string]any:
 					value[valKey] = normalizeObjectSchemaProperties(sub)
 				case []any:

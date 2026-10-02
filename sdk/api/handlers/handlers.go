@@ -174,6 +174,11 @@ func BuildErrorResponseBodyWithError(status int, errText string, err error) []by
 	case http.StatusNotFound:
 		errType = "invalid_request_error"
 		code = "model_not_found"
+	case http.StatusRequestTimeout:
+		// A 408 from a streaming upstream means the connection died mid-flight, not
+		// that the client request was malformed; classify it as a server-side error.
+		errType = "server_error"
+		code = "request_timeout"
 	default:
 		if status >= http.StatusInternalServerError {
 			errType = "server_error"

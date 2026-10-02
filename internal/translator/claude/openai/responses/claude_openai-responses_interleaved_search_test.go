@@ -73,10 +73,12 @@ func TestInterleavedThinkingAndSearchSurvivesRoundTrip(t *testing.T) {
 	out := ConvertOpenAIResponsesRequestToClaude("claude-test", req, false)
 
 	got := claudeAssistantBlockTypes(t, out)
+	// The thinking block is replayed before tool_use because Anthropic rejects
+	// a tool_use glued directly onto a web_search_tool_result.
 	want := []string{
 		"thinking", "text", "server_tool_use", "web_search_tool_result",
 		"server_tool_use", "web_search_tool_result",
-		"tool_use",
+		"thinking", "tool_use",
 	}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("interleaved blocks = %v\nwant %v", got, want)

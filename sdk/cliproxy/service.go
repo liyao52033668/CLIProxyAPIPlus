@@ -1603,6 +1603,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	models = applyExcludedModels(models, excluded)
 	models = applyOAuthModelAlias(s.cfg, provider, authKind, models)
 	models = applyExcludedModels(models, excluded)
+	models = applyOAuthSettingsForAuth(s.cfg, provider, authKind, models)
 	log.Debugf("registerModelsForAuth: provider=%s, authKind=%s, authID=%s, authProvider=%s, models=%d, compatDetected=%v", provider, authKind, a.ID, a.Provider, len(models), compatDetected)
 	if len(models) > 0 {
 		key := provider
@@ -2325,6 +2326,54 @@ func applyOAuthModelAlias(cfg *config.Config, provider, authKind string, models 
 				continue
 			}
 			seen[key] = struct{}{}
+			out = append(out, model)
+		}
+	}
+	return out
+}
+
+func applyOAuthSettings(cfg *config.Config, provider, authKind string, models []*ModelInfo) []*ModelInfo {
+	return applyOAuthSettingsForAuth(cfg, provider, authKind, models)
+}
+
+func applyOAuthSettingsForAuth(cfg *config.Config, provider, authKind string, models []*ModelInfo) []*ModelInfo {
+	if len(models) == 0 {
+		return models
+	}
+	channel := coreauth.OAuthModelAliasChannel(provider, authKind)
+	if channel == "" {
+		return models
+	}
+	settings := oauthSettingsForAuth(cfg, channel)
+	if len(settings) == 0 {
+		return models
+	}
+	return applyOAuthSettingEntries(settings, models)
+}
+
+func oauthSettingsForAuth(cfg *config.Config, channel string) []config.OAuthModelSetting {
+	if cfg == nil || len(cfg.OAuthSettings) == 0 {
+		return nil
+	}
+	return cfg.OAuthSettings[channel]
+}
+
+func applyOAuthSettingEntries(settings []config.OAuthModelSetting, models []*ModelInfo) []*ModelInfo {
+	if len(settings) == 0 || len(models) == 0 {
+		return models
+	}
+	out := make([]*ModelInfo, 0, len(models))
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		setting := config.ResolveOAuthModelSetting(settings, model.ID, model.MetadataModelID, model.Name)
+		if setting != nil && setting.MaxContextLength > 0 {
+			clone := *model
+			clone.ContextLength = setting.MaxContextLength
+			clone.MaxContextLength = setting.MaxContextLength
+			out = append(out, &clone)
+		} else {
 			out = append(out, model)
 		}
 	}

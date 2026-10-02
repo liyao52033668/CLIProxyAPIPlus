@@ -225,7 +225,7 @@ func qualifyResponsesNamespaceToolName(namespaceName, childName string) string {
 	if childName == "" || namespaceName == "" || strings.HasPrefix(childName, "mcp__") {
 		return childName
 	}
-	if strings.HasPrefix(childName, namespaceName) {
+	if childName == namespaceName || strings.HasPrefix(childName, namespaceName+"__") {
 		return childName
 	}
 	if strings.HasSuffix(namespaceName, "__") {

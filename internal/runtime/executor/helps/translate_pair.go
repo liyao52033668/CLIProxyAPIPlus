@@ -29,6 +29,16 @@ func TranslateRequestPairWithCodexMultiAgentV2(ctx context.Context, headers http
 // input before translating it to a non-Codex target protocol.
 // Local stub: multi-agent v2 optimization is not enabled in this fork.
 func TranslateRequestWithCodexMultiAgentV2(ctx context.Context, headers http.Header, cfg *config.Config, from, to sdktranslator.Format, model string, payload []byte, stream bool) []byte {
+	return TranslateRequestWithCodexMultiAgentV2ForExecutor(ctx, headers, cfg, "", from, to, model, payload, stream)
+}
+
+// TranslateRequestWithCodexMultiAgentV2ForExecutor applies Codex client
+// compatibility while respecting the actual target executor identity.
+// Local stub: multi-agent v2 optimization is not enabled in this fork.
+func TranslateRequestWithCodexMultiAgentV2ForExecutor(ctx context.Context, headers http.Header, cfg *config.Config, targetExecutor string, from, to sdktranslator.Format, model string, payload []byte, stream bool) []byte {
+	if IsCodexUserAgent(headers) && !isCodexTargetExecutor(targetExecutor) {
+		payload = NormalizeCodexToolIntegerTypes(payload, headers)
+	}
 	return sdktranslator.TranslateRequest(from, to, model, payload, stream)
 }
 

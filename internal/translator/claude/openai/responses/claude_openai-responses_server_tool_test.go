@@ -231,7 +231,11 @@ func TestRoundTripPreservesReachableClaudeBlocks(t *testing.T) {
 	out := ConvertOpenAIResponsesRequestToClaude("claude-test", req, false)
 
 	got := claudeAssistantBlockTypes(t, out)
-	want := []string{"thinking", "text", "server_tool_use", "web_search_tool_result", "tool_use"}
+	// The aggregated reasoning item replays once as the leading thinking block
+	// and once as the separator before tool_use: Anthropic rejects a tool_use
+	// glued directly onto a web_search_tool_result, and native Claude output
+	// always carries a fresh thinking block there.
+	want := []string{"thinking", "text", "server_tool_use", "web_search_tool_result", "thinking", "tool_use"}
 	if len(got) != len(want) {
 		t.Fatalf("round trip blocks = %v, want %v", got, want)
 	}

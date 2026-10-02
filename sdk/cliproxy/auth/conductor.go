@@ -61,6 +61,11 @@ const (
 	refreshMaxConcurrency = 16
 	refreshPendingBackoff = time.Minute
 	refreshFailureBackoff = 1 * time.Minute
+	// invalidGrantBackoffBase/invalidGrantBackoffMax bound the exponential retry
+	// backoff applied when an enabled credential fails to refresh with invalid_grant,
+	// leaving room for CAPTCHA/checkpoint recovery before giving up.
+	invalidGrantBackoffBase = time.Minute
+	invalidGrantBackoffMax  = 30 * time.Minute
 	// refreshIneffectiveBackoff throttles refresh attempts when an executor returns
 	// success but the auth still evaluates as needing refresh (e.g. token expiry
 	// wasn't updated). Without this guard, the auto-refresh loop can tight-loop and

@@ -47,8 +47,10 @@ const (
 	xaiAutomationUpdateToolName   = "automation_update"
 	xaiSafeFunctionParameters     = `{"type":"object","properties":{},"additionalProperties":true}`
 	xaiFreeUsageExhaustedCooldown = 24 * time.Hour
-	// Keep in sync with the current Grok CLI client version that chat-proxy expects.
-	xaiClientVersionValue     = "0.2.120"
+	// Keep in sync with the current Grok CLI client version that chat-proxy
+	// expects. The server rejects older versions with HTTP 426; it required
+	// 1.0.13+ as of 2026-10-01 (#6249).
+	xaiClientVersionValue     = "1.0.44"
 	xaiUserAgentHeader        = "User-Agent"
 	xaiUserAgentValue         = "grok-shell/" + xaiClientVersionValue + " (linux; x86_64)"
 	xaiAuthResponseHeader     = "x-authenticateresponse"

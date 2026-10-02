@@ -493,11 +493,35 @@ func (e *DevinExecutor) streamDevinFrames(
 
 	firstStreamEvent := true
 	streamFrameCount := 0
-	emitInteractionsEvent := func(rawJSON []byte) bool {
+	createdSent := false
+	var emitInteractionsEvent func(rawJSON []byte) bool
+	emitInteractionsEvent = func(rawJSON []byte) bool {
 		if len(rawJSON) == 0 {
 			return true
 		}
 		trimmed := bytes.TrimSpace(rawJSON)
+
+		eventType := gjson.GetBytes(trimmed, "event_type").String()
+		isFailedEvent := eventType == "response.failed" || eventType == "interaction.failed"
+
+		// If a failure occurs before any stream content has started, suppress the payload event
+		// so the stream can cleanly fail at the bootstrap layer with an HTTP error status code.
+		if isFailedEvent && !createdSent {
+			return true
+		}
+
+		if !createdSent && eventType != "interaction.created" {
+			createdSent = true
+			createdEvent, _ := sjson.SetBytes([]byte(`{"event_type":"interaction.created","interaction":{"id":"","model":""}}`), "interaction.id", interactionID)
+			createdEvent, _ = sjson.SetBytes(createdEvent, "interaction.model", req.Model)
+			if !emitInteractionsEvent(createdEvent) {
+				return false
+			}
+		}
+		if eventType == "interaction.created" {
+			createdSent = true
+		}
+
 		if firstStreamEvent {
 			firstStreamEvent = false
 			helps.AppendAPIResponseChunk(ctx, e.cfg, []byte("=== INTERMEDIATE INTERACTIONS STREAM ===\n"))
@@ -546,11 +570,8 @@ func (e *DevinExecutor) streamDevinFrames(
 	}
 
 	// 1. Send initial interaction.created event
-	createdEvent, _ := sjson.SetBytes([]byte(`{"event_type":"interaction.created","interaction":{"id":"","model":""}}`), "interaction.id", interactionID)
-	createdEvent, _ = sjson.SetBytes(createdEvent, "interaction.model", req.Model)
-	if !emitInteractionsEvent(createdEvent) {
-		return
-	}
+	// Lazily emitted by emitInteractionsEvent on the first non-failure payload so that an
+	// immediate upstream failure propagates as a clean HTTP error instead of a partial stream.
 
 	thoughtStepIndex := -1
 	var streamErr error

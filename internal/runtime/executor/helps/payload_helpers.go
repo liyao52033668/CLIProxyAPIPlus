@@ -26,7 +26,22 @@ func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 
 // ApplyPayloadConfigWithRequest applies payload config using source protocol and request header gates.
 func ApplyPayloadConfigWithRequest(cfg *config.Config, model, protocol, fromProtocol, root string, payload, original []byte, requestedModel string, requestPath string, headers http.Header) []byte {
-	if cfg == nil || len(payload) == 0 {
+	return ApplyPayloadConfigWithRequestForExecutor(cfg, "", model, protocol, fromProtocol, root, payload, original, requestedModel, requestPath, headers)
+}
+
+// ApplyPayloadConfigWithRequestForExecutor applies payload config with explicit target executor context.
+func ApplyPayloadConfigWithRequestForExecutor(cfg *config.Config, targetExecutor, model, protocol, fromProtocol, root string, payload, original []byte, requestedModel string, requestPath string, headers http.Header) []byte {
+	if len(payload) == 0 {
+		return payload
+	}
+	// Codex CLI clients declare builtin tool parameters as number while their
+	// deserializer expects integer values, so normalize for non-Codex upstream
+	// targets (#6237). Codex and Codex WebSocket targets keep the original
+	// schemas because the upstream strictly validates reserved tools (#6244).
+	if IsCodexUserAgent(headers) && !isCodexTargetExecutor(targetExecutor) {
+		payload = NormalizeCodexToolIntegerTypes(payload, headers)
+	}
+	if cfg == nil {
 		return payload
 	}
 	out := payload
@@ -179,6 +194,14 @@ func ApplyPayloadConfigWithRequest(cfg *config.Config, model, protocol, fromProt
 		}
 	}
 	return out
+}
+
+// isCodexTargetExecutor reports whether the target executor identity is a Codex
+// upstream. Only executor identity decides; protocol strings are unreliable
+// because a Codex client request may be translated to any target protocol.
+func isCodexTargetExecutor(targetExecutor string) bool {
+	te := strings.ToLower(strings.TrimSpace(targetExecutor))
+	return te == "codex" || te == "codex-websockets" || te == "codex_websockets"
 }
 
 func isImagesEndpointRequestPath(path string) bool {
