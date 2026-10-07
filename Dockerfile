@@ -58,6 +58,11 @@ COPY --from=builder /app/CLIProxyAPIPlus /CLIProxyAPI/CLIProxyAPIPlus
 
 COPY config.example.yaml /CLIProxyAPI/config.example.yaml
 
+# The hosts pin must happen at container start: Docker replaces the image's
+# /etc/hosts with its own managed file at runtime, so a Dockerfile RUN write
+# would never survive. An entrypoint write does.
+COPY entrypoint.sh /CLIProxyAPI/entrypoint.sh
+
 WORKDIR /CLIProxyAPI
 
 EXPOSE 8317
@@ -65,5 +70,7 @@ EXPOSE 8317
 ENV TZ=Asia/Shanghai
 
 RUN cp /usr/share/zoneinfo/${TZ} /etc/localtime && echo "${TZ}" > /etc/timezone
+
+ENTRYPOINT ["sh", "/CLIProxyAPI/entrypoint.sh"]
 
 CMD ["./CLIProxyAPIPlus"]
