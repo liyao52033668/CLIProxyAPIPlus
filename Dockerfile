@@ -3,9 +3,11 @@
 # modules. Using it as the builder base means those two expensive steps are
 # never repeated: this Dockerfile only compiles the binary.
 #
-# CACHE_IMAGE defaults to the plain base image so a standalone
-# `docker build .` still works without the pipeline around it.
-ARG CACHE_IMAGE=golang:1.26-alpine
+# CACHE_IMAGE defaults to the same base image the cache is built from, so a
+# standalone `docker build .` still works without the pipeline around it.
+# The alpine minor version is pinned so the default matches the runtime stage
+# below (see also the FROM line in Dockerfile.cache).
+ARG CACHE_IMAGE=golang:1.26-alpine3.23
 FROM ${CACHE_IMAGE} AS builder
 
 WORKDIR /app
@@ -21,8 +23,12 @@ ARG CPA_TOKEN=""
 # between local and CI checkouts.
 RUN CGO_ENABLED=1 GOOS=linux go build -buildvcs=false -ldflags="-s -w -X 'main.Version=${VERSION}-plus' -X 'main.Commit=${COMMIT}' -X 'main.BuildDate=${BUILD_DATE}' -X 'main.CPAToken=${CPA_TOKEN}'" -o ./CLIProxyAPIPlus ./cmd/server/
 
+# Keep this branch in sync with the base image of the cache/builder stages
+# (Dockerfile.cache, CACHE_IMAGE above): the CGO binary is linked against the
+# builder's musl-dev, so the runtime must carry the same musl.
 FROM alpine:3.23
 
+# Keep in sync with ALPINE_BRANCH in Dockerfile.cache.
 ARG ALPINE_BRANCH=v3.23
 ARG APK_MIRROR=https://mirrors.aliyun.com/alpine
 

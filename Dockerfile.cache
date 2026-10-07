@@ -5,8 +5,16 @@
 # so `prepare build args` no longer re-downloads the toolchain or the module
 # graph. It is rebuilt only when Dockerfile.cache or go.mod/go.sum changes
 # (see the `versionBy` list in .cnb.yml).
-FROM golang:1.26-alpine
+#
+# The base image tag pins the Alpine minor version, not just the Go version:
+# musl-dev decides which libc the CGO binary links against, so the builder
+# toolchain and the runtime image (Dockerfile, `FROM alpine:3.23`) must resolve
+# to the same Alpine branch. The plain `golang:1.26-alpine` tag does not promise
+# that, and it is what put musl-dev 1.2.6 (alpine 3.24) into a binary later run
+# on musl 1.2.5 (alpine 3.23).
+FROM golang:1.26-alpine3.23
 
+# Keep in sync with ALPINE_BRANCH in Dockerfile.
 ARG ALPINE_BRANCH=v3.23
 ARG APK_MIRROR=https://mirrors.aliyun.com/alpine
 

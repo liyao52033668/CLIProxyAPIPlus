@@ -105,9 +105,17 @@ main:
             by:
               - go.mod
               - go.sum
-            # Rebuild the cache image only when the Dockerfile or the module
-            # graph changes; not on every source change.
+            # Rebuild the cache image only when its own Dockerfile or the
+            # module graph changes; not on every source change.
+            #
+            # Dockerfile.cache MUST be listed here. The CNB cache version is
+            # sha1(Dockerfile + versionBy + buildArgs + target + arch) where
+            # `Dockerfile` means the file named by `dockerfile:`; `by` only
+            # controls the build context. Without this entry, a commit that
+            # only edits Dockerfile.cache would keep the same cache key and
+            # silently reuse the stale toolchain image.
             versionBy:
+              - Dockerfile.cache
               - go.mod
               - go.sum
           exports:
@@ -136,7 +144,7 @@ main:
               fi
 
               docker build \
-                --build-arg CACHE_IMAGE="${BUILD_CACHE_IMAGE:-golang:1.26-alpine}" \
+                --build-arg CACHE_IMAGE="${BUILD_CACHE_IMAGE:-golang:1.26-alpine3.23}" \
                 --build-arg VERSION="${VERSION}" \
                 --build-arg COMMIT="${COMMIT}" \
                 --build-arg BUILD_DATE="${BUILD_DATE}" \
