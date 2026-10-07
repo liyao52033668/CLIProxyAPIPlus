@@ -1,0 +1,51 @@
+# Cache image for the expensive, rarely-changing build prerequisites:
+# the gcc/musl-dev toolchain (~200 MB) and the Go module downloads.
+#
+# CNB builds this image once and reuses it for every subsequent pipeline run,
+# so `prepare build args` no longer re-downloads the toolchain or the module
+# graph. It is rebuilt only when Dockerfile.cache or go.mod/go.sum changes
+# (see the `versionBy` list in .cnb.yml).
+#
+# The base image tag pins the Alpine minor version, not just the Go version:
+# musl-dev decides which libc the CGO binary links against, so the builder
+# toolchain and the runtime image (Dockerfile, `FROM alpine:3.23`) must resolve
+# to the same Alpine branch. The plain `golang:1.26-alpine` tag does not promise
+# that, and it is what put musl-dev 1.2.6 (alpine 3.24) into a binary later run
+# on musl 1.2.5 (alpine 3.23).
+FROM golang:1.26-alpine3.23
+
+# Keep in sync with ALPINE_BRANCH in Dockerfile.
+ARG ALPINE_BRANCH=v3.23
+ARG APK_MIRROR=https://mirrors.aliyun.com/alpine
+
+WORKDIR /app
+
+# Pin the Alpine branch and mirror explicitly instead of rewriting whatever
+# repositories the base image happens to ship. Otherwise the same apk command
+# can resolve to a different (and much slower) package set between builds.
+RUN set -eux; \
+    printf '%s/%s/main\n%s/%s/community\n' \
+        "${APK_MIRROR}" "${ALPINE_BRANCH}" \
+        "${APK_MIRROR}" "${ALPINE_BRANCH}" \
+        > /etc/apk/repositories; \
+    rm -rf /var/cache/apk/*; \
+    for i in 1 2 3; do \
+        if apk add --no-cache gcc musl-dev; then break; fi; \
+        if [ "$i" = "3" ]; then exit 1; fi; \
+        sleep 5; \
+    done; \
+    rm -rf /var/cache/apk/*
+
+COPY go.mod go.sum ./
+
+ENV GOPROXY=https://goproxy.cn,direct
+ENV GOSUMDB=sum.golang.google.cn
+ENV GOFLAGS=-mod=mod
+
+RUN set -eux; \
+    for i in 1 2 3; do \
+        if go mod download; then break; fi; \
+        if [ "$i" = "3" ]; then exit 1; fi; \
+        sleep 5; \
+    done; \
+    go mod verify
