@@ -34,7 +34,6 @@ The file-based backend is the default. The Git backend, enabled with `GITSTORE_*
 
 ## License
 
-This project is licensed under the AGPL-3.0 License - see the [LICENSE](LICENSE) file for details. `LICENSE-MIT` is retained only as the historical license file and does not change the current project license.
-
+This project is licensed under the AGPL-3.0 License - see the [LICENSE](LICENSE) file for details.
 
 
