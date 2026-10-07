@@ -24,6 +24,7 @@ audit-workspace/
 pgstore/*
 gitstore/*
 objectstore/*
+docker-build-cache/
 
 # Static assets
 static/*
