@@ -118,6 +118,18 @@ main:
               - Dockerfile.cache
               - go.mod
               - go.sum
+            # MUST stay true. `sync` defaults to false, which only means the
+            # cache image was built and pushed - the push itself keeps running
+            # in the background while the next stage starts. `prepare build
+            # args` then pulls the tag before it is readable and fails with:
+            #
+            #   failed to resolve reference "...dockerfile-caches:<sha>": not found
+            #
+            # The second-order damage is worse than the error: the tag does not
+            # exist yet, so docker:cache always treats the next run as a local
+            # and remote cache miss and rebuilds the whole toolchain image
+            # (~110s) instead of skipping the stage.
+            sync: true
           exports:
             name: BUILD_CACHE_IMAGE
 
@@ -138,13 +150,22 @@ main:
 
               # Seed the builder image from the prebuilt dependency cache so the
               # gcc/musl-dev toolchain and the Go module graph are never
-              # downloaded again. Empty value => plain build, still correct.
+              # downloaded again. An empty or unreadable value must degrade to
+              # the plain builder image, not abort the release: `sync: true` on
+              # the cache stage is what guarantees the tag is readable here, and
+              # this is only the second line of defence.
+              CACHE_IMAGE="${BUILD_CACHE_IMAGE:-golang:1.26-alpine3.23}"
               if [ -n "${BUILD_CACHE_IMAGE}" ]; then
-                docker pull "${BUILD_CACHE_IMAGE}"
+                if docker pull "${BUILD_CACHE_IMAGE}"; then
+                  echo "Using cached builder image: ${BUILD_CACHE_IMAGE}"
+                else
+                  echo "WARNING: cache image ${BUILD_CACHE_IMAGE} is not available; falling back to ${CACHE_IMAGE}"
+                  CACHE_IMAGE="golang:1.26-alpine3.23"
+                fi
               fi
 
               docker build \
-                --build-arg CACHE_IMAGE="${BUILD_CACHE_IMAGE:-golang:1.26-alpine3.23}" \
+                --build-arg CACHE_IMAGE="${CACHE_IMAGE}" \
                 --build-arg VERSION="${VERSION}" \
                 --build-arg COMMIT="${COMMIT}" \
                 --build-arg BUILD_DATE="${BUILD_DATE}" \
