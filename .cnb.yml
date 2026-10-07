@@ -104,11 +104,26 @@ main:
               echo "BUILD_DATE: ${BUILD_DATE}"
               if [ -n "${CPA_TOKEN}" ]; then echo "CPA_TOKEN: get"; else echo "CPA_TOKEN: not found"; fi
 
+              # Reuse the gcc/musl-dev + go mod download layers across runs.
+              # Without this every build redoes ~2 minutes of work that only
+              # depends on go.mod, and any slow CDN turns that into 5 minutes.
+              BUILD_CACHE_DIR="${CNB_RUNNER_PIPELINE_CACHE:-${HOME:-/tmp}}/docker-build-cache"
+              mkdir -p "${BUILD_CACHE_DIR}"
+
+              CACHE_ARGS=""
+              if docker build --help 2>&1 | grep -q -- "--cache-to"; then
+                CACHE_ARGS="--cache-from type=local,src=${BUILD_CACHE_DIR} --cache-to type=local,dest=${BUILD_CACHE_DIR},mode=max"
+                echo "BuildKit cache enabled: ${BUILD_CACHE_DIR}"
+              else
+                echo "BuildKit cache flags unsupported by this docker version, skipping"
+              fi
+
               docker build \
                 --build-arg VERSION="${VERSION}" \
                 --build-arg COMMIT="${COMMIT}" \
                 --build-arg BUILD_DATE="${BUILD_DATE}" \
                 --build-arg CPA_TOKEN="${CPA_TOKEN}" \
+                ${CACHE_ARGS} \
                 -t ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:latest \
                 .
         - name: docker push
