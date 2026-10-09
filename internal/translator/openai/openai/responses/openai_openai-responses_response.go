@@ -48,6 +48,9 @@ type oaiToResponsesState struct {
 	FuncArgsDone      map[string]bool
 	FuncItemDone      map[string]bool
 	CustomToolNames   map[string]struct{}
+	ToolIndex         *responsesToolIndex
+	toolInputErr      error
+	FinishReason      string
 	PromptTokens      int64
 	CachedTokens      int64
 	CompletionTokens  int64
@@ -197,6 +200,13 @@ func buildResponsesCompletedEvent(st *oaiToResponsesState, requestRawJSON []byte
 			}
 			callID := st.FuncCallIDs[key]
 			name := st.FuncNames[key]
+			if st.ToolIndex.isShell(name) {
+				item, errShellCallItem := shellCallItem(callID, args, "completed")
+				if errShellCallItem == nil {
+					outputItems = append(outputItems, completedOutputItem{index: st.FuncOutputIx[key], raw: item})
+				}
+				continue
+			}
 			if st.FuncItemCustom[key] {
 				item := []byte(`{"id":"","type":"custom_tool_call","status":"completed","input":"","call_id":"","name":""}`)
 				item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("ctc_%s", callID))
@@ -325,6 +335,12 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 	}
 	toolStateKey := func(outputIndex, toolIndex int) string { return fmt.Sprintf("%d:%d", outputIndex, toolIndex) }
 	var out [][]byte
+	failToolInput := func(err error) {
+		if st.ToolInputError() == nil {
+			st.SetToolInputError(err)
+			out = append(out, emitRespEvent("response.failed", responsesToolInputFailure(st.ResponseID, nextSeq(), err)))
+		}
+	}
 	emitToolItem := func(key string, force bool) {
 		if st.FuncItemAdded[key] {
 			return
@@ -349,7 +365,13 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		outputIndex := st.FuncOutputIx[key]
 		_, isCustomTool := st.CustomToolNames[name]
 		st.FuncItemCustom[key] = isCustomTool
-		if isCustomTool {
+		if st.ToolIndex.isShell(name) {
+			o := []byte(`{"type":"response.output_item.added"}`)
+			o, _ = sjson.SetBytes(o, "sequence_number", nextSeq())
+			o, _ = sjson.SetBytes(o, "output_index", outputIndex)
+			o, _ = sjson.SetRawBytes(o, "item", shellCallPlaceholder(callID))
+			out = append(out, emitRespEvent("response.output_item.added", o))
+		} else if isCustomTool {
 			item := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"custom_tool_call","status":"in_progress","input":"","call_id":"","name":""}}`)
 			item, _ = sjson.SetBytes(item, "sequence_number", nextSeq())
 			item, _ = sjson.SetBytes(item, "output_index", outputIndex)
@@ -369,7 +391,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		st.FuncItemAdded[key] = true
 	}
 	emitPendingFunctionArgs := func(key string) {
-		if !st.FuncItemAdded[key] || st.FuncItemCustom[key] {
+		if !st.FuncItemAdded[key] || st.ToolInputError() != nil || st.FuncItemCustom[key] || st.ToolIndex.isShell(st.FuncNames[key]) {
 			return
 		}
 		argsBuf := st.FuncArgsBuf[key]
@@ -413,6 +435,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		st.FuncArgsDone = make(map[string]bool)
 		st.FuncItemDone = make(map[string]bool)
 		st.CustomToolNames = responsesCustomToolNames(requestForNamespace)
+		st.ToolIndex = newResponsesToolIndex(gjson.ParseBytes(requestForNamespace))
 		st.PromptTokens = 0
 		st.CachedTokens = 0
 		st.CompletionTokens = 0
@@ -421,6 +444,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		st.UsageSeen = false
 		st.CompletionPending = false
 		st.CompletedEmitted = false
+		st.FinishReason = ""
 		// response.created
 		created := []byte(`{"type":"response.created","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"in_progress","background":false,"error":null,"output":[]}}`)
 		created, _ = sjson.SetBytes(created, "sequence_number", nextSeq())
@@ -614,10 +638,11 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 				}
 			}
 
-			// finish_reason triggers item-level finalization. response.completed is
-			// deferred until the terminal [DONE] marker so late usage-only chunks can
-			// still populate response.usage.
+			// finish_reason triggers item-level finalization. The terminal event is
+			// deferred until [DONE] or transport finalization so late usage-only chunks
+			// can still populate response.usage.
 			if fr := choice.Get("finish_reason"); fr.Exists() && fr.String() != "" {
+				st.FinishReason = fr.String()
 				// Emit message done events for all indices that started a message
 				if len(st.MsgItemAdded) > 0 {
 					// sort indices for deterministic order
@@ -688,6 +713,25 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 						if builder := st.FuncArgsBuf[key]; builder != nil && builder.Len() > 0 {
 							args = builder.String()
 						}
+						if st.ToolIndex.isShell(st.FuncNames[key]) {
+							toolStatus := "completed"
+							if _, isInc := incompleteByFinishReason(st.FinishReason); isInc {
+								toolStatus = "incomplete"
+							}
+							item, errShellCallItem := shellCallItem(callID, args, toolStatus)
+							if errShellCallItem != nil {
+								failToolInput(errShellCallItem)
+								return false
+							}
+							event := []byte(`{"type":"response.output_item.done"}`)
+							event, _ = sjson.SetBytes(event, "sequence_number", nextSeq())
+							event, _ = sjson.SetBytes(event, "output_index", outputIndex)
+							event, _ = sjson.SetRawBytes(event, "item", item)
+							out = append(out, emitRespEvent("response.output_item.done", event))
+							st.FuncItemDone[key] = true
+							st.FuncArgsDone[key] = true
+							continue
+						}
 						if st.FuncItemCustom[key] {
 							input := unwrapCustomToolInput(args)
 							inputDone := []byte(`{"type":"response.custom_tool_call_input.done","sequence_number":0,"item_id":"","output_index":0,"input":""}`)
@@ -729,7 +773,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 						st.FuncArgsDone[key] = true
 					}
 				}
-				st.CompletionPending = true
+				st.CompletionPending = st.canFinalizeResponse()
 			}
 
 			return true
@@ -739,12 +783,47 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 	return out
 }
 
+func (st *oaiToResponsesState) canFinalizeResponse() bool {
+	if len(st.MsgItemAdded) == 0 && len(st.FuncItemAdded) == 0 {
+		return false
+	}
+	for idx := range st.MsgItemAdded {
+		if !st.MsgItemDone[idx] {
+			return false
+		}
+	}
+	for key := range st.FuncItemAdded {
+		if !st.FuncItemDone[key] {
+			return false
+		}
+	}
+	return st.ReasoningID == ""
+}
+
+// CanFinalizeResponseStream reports whether EOF can safely synthesize the source terminator.
+func (st *oaiToResponsesState) CanFinalizeResponseStream() bool {
+	return !st.CompletedEmitted && st.CompletionPending
+}
+
+// SetToolInputError stores the original conversion error for executor handling.
+func (st *oaiToResponsesState) SetToolInputError(err error) {
+	if st.toolInputErr == nil {
+		st.toolInputErr = err
+	}
+}
+
+// ToolInputError returns the original conversion error, if any.
+func (st *oaiToResponsesState) ToolInputError() error {
+	return st.toolInputErr
+}
+
 // ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream builds a single Responses JSON
 // from a non-streaming OpenAI Chat Completions response.
 func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
 	root := gjson.ParseBytes(rawJSON)
 	requestForNamespace := pickRequestJSON(originalRequestRawJSON, requestRawJSON)
 
+	var shellInputErr error
 	finishReason := root.Get("choices.0.finish_reason").String()
 	incompleteDetails, isIncomplete := incompleteByFinishReason(finishReason)
 	status := "completed"
@@ -895,6 +974,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 				// Function/tool calls
 				if tcs := msg.Get("tool_calls"); tcs.Exists() && tcs.IsArray() {
 					customToolNames := responsesCustomToolNames(requestForNamespace)
+					toolIndex := newResponsesToolIndex(gjson.ParseBytes(requestForNamespace))
 					tcs.ForEach(func(tcIndex, tc gjson.Result) bool {
 						callID := tc.Get("id").String()
 						if callID == "" {
@@ -904,6 +984,19 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 						}
 						name := canonicalResponsesToolName(requestForNamespace, tc.Get("function.name").String())
 						args := tc.Get("function.arguments").String()
+						if toolIndex.isShell(name) {
+							toolStatus := "completed"
+							if isIncomplete {
+								toolStatus = "incomplete"
+							}
+							item, errShellCallItem := shellCallItem(callID, args, toolStatus)
+							if errShellCallItem != nil {
+								shellInputErr = errShellCallItem
+								return false
+							}
+							outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
+							return true
+						}
 						if _, isCustomTool := customToolNames[name]; isCustomTool {
 							toolStatus := "completed"
 							if isIncomplete {
@@ -935,6 +1028,9 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 			}
 			return true
 		})
+	}
+	if shellInputErr != nil {
+		return []byte(gjson.GetBytes(responsesToolInputFailure(id, 0, shellInputErr), "response").Raw)
 	}
 	if gjson.GetBytes(outputsWrapper, "arr.#").Int() > 0 {
 		resp, _ = sjson.SetRawBytes(resp, "output", []byte(gjson.GetBytes(outputsWrapper, "arr").Raw))

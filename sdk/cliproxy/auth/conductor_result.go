@@ -300,9 +300,19 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		} else {
 			auth.Failed++
 		}
+		wasTerminalUnauthorized := hasUnauthorizedAuthFailure(auth)
 
 		if result.Success {
-			if result.Model != "" {
+			if wasTerminalUnauthorized {
+				// A terminal unauthorized credential stays blocked; only the
+				// affected model state resets so a rotated token can resume it.
+				if result.Model != "" {
+					state := ensureModelState(auth, result.Model)
+					modelState = state
+					resetModelState(state, now)
+					auth.UpdatedAt = now
+				}
+			} else if result.Model != "" {
 				state := ensureModelState(auth, result.Model)
 				modelState = state
 				resetModelState(state, now)
@@ -319,6 +329,16 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				clearAuthStateOnSuccess(auth, now)
 			}
 		} else {
+			// Track the access token rejected by upstream so concurrent requests
+			// bypass this credential until a refresh succeeds.
+			if !wasTerminalUnauthorized && result.Error != nil && statusCodeFromResult(result.Error) == http.StatusUnauthorized && authRefreshToken(auth) != "" {
+				if token := authAccessToken(auth); token != "" {
+					if _, hasExp := auth.AccessTokenExpirationTime(); !hasExp {
+						auth.RejectedAccessToken = token
+						auth.UpdatedAt = now
+					}
+				}
+			}
 			if result.Model != "" {
 				if !isRequestScopedResultError(result.Error) {
 					disableCooling := quotaCooldownDisabledForAuth(auth)
@@ -331,8 +351,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					if result.Error != nil {
 						state.LastError = cloneError(result.Error)
 						state.StatusMessage = result.Error.Message
-						auth.LastError = cloneError(result.Error)
-						auth.StatusMessage = result.Error.Message
+						if !wasTerminalUnauthorized {
+							auth.LastError = cloneError(result.Error)
+							auth.StatusMessage = result.Error.Message
+						}
 					}
 
 					statusCode := statusCodeFromResult(result.Error)
@@ -429,8 +451,18 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					updateAggregatedAvailability(auth, now)
 				}
 			} else {
-				applyAuthFailureState(auth, result.Error, result.RetryAfter, now)
+				if !wasTerminalUnauthorized {
+					applyAuthFailureState(auth, result.Error, result.RetryAfter, now)
+				}
 			}
+		}
+
+		if wasTerminalUnauthorized {
+			auth.Unavailable = true
+			auth.Status = StatusError
+			auth.NextRefreshAfter = time.Time{}
+			auth.NextRetryAfter = time.Time{}
+			auth.UpdatedAt = now
 		}
 
 		if !result.SkipQuotaObservation {
@@ -542,6 +574,12 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 	if auth == nil {
 		return
 	}
+	// A terminal unauthorized credential stays blocked until its tokens change.
+	// Model-level results must not make it selectable again.
+	if hasUnauthorizedAuthFailure(auth) {
+		auth.Unavailable = true
+		return
+	}
 	if len(auth.ModelStates) == 0 {
 		clearAggregatedAvailability(auth)
 		return
@@ -642,6 +680,10 @@ func clearAuthStateOnSuccess(auth *Auth, now time.Time) {
 	if auth == nil {
 		return
 	}
+	if hasUnauthorizedAuthFailure(auth) {
+		auth.Unavailable = true
+		return
+	}
 	auth.Unavailable = false
 	auth.Status = StatusActive
 	auth.StatusMessage = ""
@@ -710,7 +752,7 @@ func hasUnauthorizedAuthFailure(auth *Auth) bool {
 	if auth == nil || auth.LastError == nil {
 		return false
 	}
-	if auth.Unavailable && auth.Status == StatusError && auth.NextRefreshAfter.IsZero() &&
+	if auth.Unavailable && auth.Status == StatusError && auth.NextRefreshAfter.IsZero() && auth.NextRetryAfter.IsZero() &&
 		(auth.LastError.StatusCode() == http.StatusUnauthorized || strings.EqualFold(auth.LastError.Code, "unauthorized")) {
 		return true
 	}
@@ -795,6 +837,7 @@ func clearUnauthorizedModelStates(auth *Auth, now time.Time) []string {
 		return nil
 	}
 	var resumed []string
+	anyChanged := false
 	for model, state := range auth.ModelStates {
 		if state == nil {
 			continue
@@ -811,8 +854,22 @@ func clearUnauthorizedModelStates(auth *Auth, now time.Time) []string {
 		if !isUnauth {
 			continue
 		}
+		anyChanged = true
+		if state.Quota.Exceeded && (state.Quota.NextRecoverAt.IsZero() || state.Quota.NextRecoverAt.After(now)) {
+			// A still-active quota cooldown describes the model, not the rejected
+			// token; keep it instead of resuming the model immediately.
+			state.LastError = nil
+			if strings.Contains(strings.ToLower(state.StatusMessage), "unauthorized") {
+				state.StatusMessage = state.Quota.Reason
+			}
+			state.UpdatedAt = now
+			continue
+		}
 		resetModelState(state, now)
 		resumed = append(resumed, model)
+	}
+	if anyChanged {
+		updateAggregatedAvailability(auth, now)
 	}
 	return resumed
 }

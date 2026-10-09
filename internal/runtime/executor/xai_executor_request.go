@@ -197,9 +197,10 @@ func xaiUsingAPI(auth *cliproxyauth.Auth) bool {
 // is false (including its OAuth default), empty or official default base_url is
 // rewritten to the CLI chat-proxy endpoint; an explicit non-default base_url is
 // still honored.
-// Websocket and compact transports intentionally do not use this helper:
+// Websocket, compact, and speech intentionally do not use this helper:
 // cli-chat-proxy only accepts HTTP POST chat and does not implement
-// /responses/compact (404) or websocket upgrades (405).
+// /responses/compact (404), websocket upgrades (405), or /tts.
+// Speech uses xaiSpeechRequestURL.
 func xaiChatBaseURL(auth *cliproxyauth.Auth) string {
 	_, baseURL := xaiCreds(auth)
 	if xaiUsingAPI(auth) {
@@ -298,11 +299,11 @@ func applyXAIChatProxyIdentityHeaders(r *http.Request) {
 	if r == nil {
 		return
 	}
-	r.Header.Set(xaiUserAgentHeader, xaiUserAgentValue)
+	r.Header.Set(xaiUserAgentHeader, xaiUserAgentValue())
 	r.Header.Set(xaiAuthResponseHeader, xaiAuthResponseValue)
 	r.Header.Set(xaiClientIdentifierHeader, xaiClientIdentifierValue)
 	r.Header.Set(xaiTokenAuthHeader, xaiTokenAuthValue)
-	r.Header.Set(xaiClientVersionHeader, xaiClientVersionValue)
+	r.Header.Set(xaiClientVersionHeader, xaiClientVersion())
 }
 
 // applyXAIChatHeaders applies standard xAI headers for non-image/video chat
@@ -476,6 +477,16 @@ func normalizeXAIImageRef(value any) bool {
 
 func xaiIsVideoRequest(opts cliproxyexecutor.Options) bool {
 	return opts.SourceFormat.String() == xaiVideoHandlerType
+}
+
+func xaiIsSpeechRequest(opts cliproxyexecutor.Options) bool {
+	return opts.SourceFormat.String() == xaiSpeechHandlerType
+}
+
+// xaiSpeechRequestURL stays on the official API. cli-chat-proxy does not implement /tts,
+// and a 404 there would cool the OAuth auth down as not_found.
+func xaiSpeechRequestURL(auth *cliproxyauth.Auth) string {
+	return strings.TrimSuffix(xaiCompactBaseURL(auth), "/") + xaiTTSPath
 }
 
 func xaiVideoEndpointPath(opts cliproxyexecutor.Options) string {

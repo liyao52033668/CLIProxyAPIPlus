@@ -156,6 +156,12 @@ func BuildErrorResponseBodyWithError(status int, errText string, err error) []by
 	}
 
 	if trimmed != "" && json.Valid([]byte(trimmed)) {
+		// Compact the upstream body so a multi-line JSON error cannot break
+		// SSE framing when forwarded inside an error event.
+		var compact bytes.Buffer
+		if errCompact := json.Compact(&compact, []byte(trimmed)); errCompact == nil {
+			return compact.Bytes()
+		}
 		return []byte(trimmed)
 	}
 

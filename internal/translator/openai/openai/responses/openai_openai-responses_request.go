@@ -81,7 +81,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		input = root.Get("messages")
 	}
 	if input.IsArray() {
-		inputItems := input.Array()
+		inputItems := shellHistory(rawJSON, input.Array())
 		outputCallIDs := make(map[string]struct{})
 		for _, item := range inputItems {
 			itemType := item.Get("type").String()
@@ -432,6 +432,14 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			return true
 		})
 	}
+	// Emit the synthetic local shell tool declaration. Shell tools are skipped
+	// by convertResponsesToolToOpenAIChatTools because their Chat Completions
+	// name is assigned here with collision avoidance against user tools.
+	if shellName := responsesShellToolName(rawJSON); shellName != "" {
+		if shellTool, ok := convertResponsesShellToolToOpenAIChat(gjson.Result{}, shellName); ok {
+			chatCompletionsTools = append(chatCompletionsTools, gjson.ParseBytes(shellTool).Value())
+		}
+	}
 	if len(chatCompletionsTools) > 0 {
 		out, _ = sjson.SetBytes(out, "tools", chatCompletionsTools)
 	}
@@ -445,7 +453,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 	// Convert tool_choice if present
 	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
-		out, _ = sjson.SetRawBytes(out, "tool_choice", convertResponsesToolChoiceToChatCompletions(toolChoice, inputRawJSON))
+		out, _ = sjson.SetRawBytes(out, "tool_choice", convertResponsesToolChoiceToChatCompletions(toolChoice, rawJSON))
 	}
 
 	return out
@@ -457,6 +465,12 @@ func convertResponsesToolChoiceToChatCompletions(toolChoice gjson.Result, inputR
 	}
 
 	choiceType := toolChoice.Get("type").String()
+	if choiceType == "shell" {
+		if name := responsesShellToolName(inputRawJSON); name != "" {
+			converted, _ := sjson.SetBytes([]byte(`{"type":"function","function":{}}`), "function.name", name)
+			return converted
+		}
+	}
 	if choiceType != "function" && choiceType != "custom" {
 		return []byte(toolChoice.Raw)
 	}

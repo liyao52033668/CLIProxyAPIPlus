@@ -20,6 +20,11 @@ func convertResponsesToolToOpenAIChatTools(tool gjson.Result) [][]byte {
 		if tJSON, ok := convertResponsesCustomToolToOpenAIChat(tool, ""); ok {
 			return [][]byte{tJSON}
 		}
+	case "shell":
+		// Local shell tools are translated at the request level where the
+		// synthetic (collision-free) function name is known; a raw pass-through
+		// here would leak the shell declaration to Chat Completions upstreams.
+		return nil
 	default:
 		return nil
 	}

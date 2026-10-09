@@ -69,10 +69,15 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	authClone := auth.Clone()
 	m.mu.Lock()
 	m.auths[auth.ID] = authClone
+	// Snapshot before unlocking: MarkResult mutates the published auth in place.
+	var schedulerSnapshot *Auth
+	if m.scheduler != nil {
+		schedulerSnapshot = authClone.Clone()
+	}
 	m.mu.Unlock()
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 	if m.scheduler != nil {
-		m.scheduler.upsertAuth(authClone)
+		m.scheduler.upsertAuth(schedulerSnapshot)
 	}
 	m.structuralEpoch.Add(1)
 	if authClone.Disabled || authClone.Status == StatusDisabled {
@@ -128,6 +133,12 @@ func (m *Manager) updateMerged(ctx context.Context, base *Auth, auth *Auth, requ
 		return nil, nil
 	}
 	if mode == updateModeRefresh {
+		// Do not let an in-flight refresh overwrite credentials committed after its snapshot.
+		if base != nil && CredentialsChanged(base, existing) {
+			current := existing.Clone()
+			m.mu.Unlock()
+			return current, nil
+		}
 		if merged := MergeRefreshedAuth(base, existing, auth); merged != nil {
 			auth = merged
 		}
@@ -149,7 +160,8 @@ func (m *Manager) updateMerged(ctx context.Context, base *Auth, auth *Auth, requ
 		}
 		// When credentials change, stale unauthorized failures and model cooldowns
 		// no longer describe the new credential, so clear them immediately.
-		if CredentialsChanged(existing, auth) {
+		if CredentialsChanged(existing, auth) || mode == updateModeRefresh {
+			auth.RejectedAccessToken = ""
 			if hasUnauthorizedAuthFailure(existing) || (auth.LastError != nil && isUnauthorizedError(auth.LastError)) {
 				auth.Unavailable = false
 				auth.LastError = nil
@@ -167,6 +179,8 @@ func (m *Manager) updateMerged(ctx context.Context, base *Auth, auth *Auth, requ
 					auth.NextRetryAfter = time.Time{}
 				}
 			}
+		} else {
+			auth.RejectedAccessToken = existing.RejectedAccessToken
 		}
 	}
 	auth.EnsureIndex()
@@ -214,10 +228,15 @@ func (m *Manager) MergeMetadata(ctx context.Context, id string, updates map[stri
 	updated.EnsureIndex()
 	updatedClone := updated.Clone()
 	m.auths[id] = updatedClone
+	// Snapshot before unlocking: MarkResult mutates the published auth in place.
+	var mergeSchedulerSnapshot *Auth
+	if m.scheduler != nil {
+		mergeSchedulerSnapshot = updatedClone.Clone()
+	}
 	m.mu.Unlock()
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 	if m.scheduler != nil {
-		m.scheduler.upsertAuth(updatedClone)
+		m.scheduler.upsertAuth(mergeSchedulerSnapshot)
 	}
 	m.queueRefreshReschedule(id)
 	// Persist failures stay non-fatal, but must not be silent: the merged

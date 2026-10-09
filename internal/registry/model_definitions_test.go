@@ -241,6 +241,28 @@ func TestWithXAIBuiltinsAddsVideoModel(t *testing.T) {
 	}
 }
 
+func TestWithXAIBuiltinsIncludesSpeechModels(t *testing.T) {
+	models := WithXAIBuiltins(nil)
+	found := map[string]*ModelInfo{}
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		if model.ID == xaiBuiltinSpeechModelID || model.ID == xaiBuiltinSpeechVoiceModelID {
+			found[model.ID] = model
+		}
+	}
+	for _, id := range []string{xaiBuiltinSpeechModelID, xaiBuiltinSpeechVoiceModelID} {
+		model := found[id]
+		if model == nil {
+			t.Fatalf("expected xAI builtin model %s", id)
+		}
+		if model.OwnedBy != "xai" || model.Type != "xai" {
+			t.Fatalf("%s owned_by/type = %s/%s, want xai/xai", id, model.OwnedBy, model.Type)
+		}
+	}
+}
+
 func TestGitHubCopilotStaticModelsContainExpectedIDs(t *testing.T) {
 	t.Parallel()
 

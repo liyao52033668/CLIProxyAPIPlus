@@ -4469,11 +4469,11 @@ func assertNoXAIChatProxyIdentityHeaders(t *testing.T, req *http.Request, reason
 
 func assertXAIChatProxyIdentityHeaders(t *testing.T, req *http.Request) {
 	t.Helper()
-	if got := req.Header.Get(xaiUserAgentHeader); got != xaiUserAgentValue {
-		t.Fatalf("%s = %q, want %q", xaiUserAgentHeader, got, xaiUserAgentValue)
+	if got := req.Header.Get(xaiUserAgentHeader); got != xaiUserAgentValue() {
+		t.Fatalf("%s = %q, want %q", xaiUserAgentHeader, got, xaiUserAgentValue())
 	}
-	if !strings.Contains(xaiUserAgentValue, xaiClientVersionValue) {
-		t.Fatalf("xaiUserAgentValue %q must embed xaiClientVersionValue %q", xaiUserAgentValue, xaiClientVersionValue)
+	if !strings.Contains(xaiUserAgentValue(), xaiClientVersion()) {
+		t.Fatalf("xaiUserAgentValue %q must embed xaiClientVersion %q", xaiUserAgentValue(), xaiClientVersion())
 	}
 	if got := req.Header.Get(xaiAuthResponseHeader); got != xaiAuthResponseValue {
 		t.Fatalf("%s = %q, want %q", xaiAuthResponseHeader, got, xaiAuthResponseValue)

@@ -143,6 +143,21 @@ func TestCodexClientModelsResponse_AppliesDisplayNameToTemplateModel(t *testing.
 	}
 }
 
+func TestCodexClientHidesSpeechModels(t *testing.T) {
+	for _, id := range []string{"grok-tts", "grok-voice-tts-1.0"} {
+		entry := map[string]any{}
+		applyCodexClientVisibilityOverride(entry, id)
+		if got, _ := entry["visibility"].(string); got != "hide" {
+			t.Fatalf("%s visibility = %q, want hide", id, got)
+		}
+	}
+	entry := map[string]any{}
+	applyCodexClientVisibilityOverride(entry, "grok-4")
+	if _, hidden := entry["visibility"]; hidden {
+		t.Fatal("grok-4 should stay visible")
+	}
+}
+
 func TestCodexClientModelsResponse_DisablesSearchToolForSynthesizedModels(t *testing.T) {
 	resp := CodexClientModelsResponse([]map[string]any{
 		{"id": "custom-openai-compatible-model"},

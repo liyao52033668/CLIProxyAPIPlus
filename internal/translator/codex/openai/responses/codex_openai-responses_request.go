@@ -24,7 +24,7 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	rawJSON, _ = sjson.SetBytes(rawJSON, "stream", true)
 	rawJSON, _ = sjson.SetBytes(rawJSON, "store", false)
 	rawJSON, _ = sjson.SetBytes(rawJSON, "parallel_tool_calls", true)
-	rawJSON, _ = sjson.SetBytes(rawJSON, "include", []string{"reasoning.encrypted_content"})
+	rawJSON = setCodexRequiredInclude(rawJSON)
 	// Codex Responses rejects token limit fields, so strip them out before forwarding.
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "max_output_tokens")
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "max_completion_tokens")
@@ -62,6 +62,41 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	rawJSON = stripCodexResponsesCacheBreakpoints(rawJSON)
 
 	return rawJSON
+}
+
+// setCodexRequiredInclude normalizes the Codex "include" field while preserving
+// client-requested web search sources. It avoids payload re-encoding when the
+// include array is already in its normalized form.
+func setCodexRequiredInclude(rawJSON []byte) []byte {
+	current := gjson.GetBytes(rawJSON, "include")
+	includeSources := false
+	if current.IsArray() {
+		values := current.Array()
+		for _, value := range values {
+			if value.Type == gjson.String && value.String() == "web_search_call.action.sources" {
+				includeSources = true
+				break
+			}
+		}
+		if !includeSources && len(values) == 1 && values[0].Type == gjson.String && values[0].String() == "reasoning.encrypted_content" {
+			return rawJSON
+		}
+		if includeSources && len(values) == 2 &&
+			values[0].Type == gjson.String && values[0].String() == "reasoning.encrypted_content" &&
+			values[1].Type == gjson.String && values[1].String() == "web_search_call.action.sources" {
+			return rawJSON
+		}
+	}
+
+	encoded := []byte(`["reasoning.encrypted_content"]`)
+	if includeSources {
+		encoded = []byte(`["reasoning.encrypted_content","web_search_call.action.sources"]`)
+	}
+	updated, errSet := sjson.SetRawBytes(rawJSON, "include", encoded)
+	if errSet != nil {
+		return rawJSON
+	}
+	return updated
 }
 
 // normalizeEmptyFunctionCallArguments rewrites blank string arguments on

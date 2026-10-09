@@ -546,11 +546,36 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 						return
 					}
 				}
-				// In case the upstream close the stream without a terminal [DONE] marker.
-				// Feed a synthetic done marker through the translator so pending
-				// response.completed events are still emitted exactly once.
-				if !emitTranslated([]byte("data: [DONE]")) {
-					return
+				// Only finalize a clean Responses EOF when the translator confirms a
+				// terminal state (finish reason seen and every output item closed).
+				if from == sdktranslator.FormatOpenAIResponse && ctx.Err() == nil && helps.CanFinalizeResponseStream(param) {
+					// In case the upstream close the stream without a terminal [DONE] marker.
+					// Feed a synthetic done marker through the translator so pending
+					// response.completed events are still emitted exactly once.
+					if !emitTranslated([]byte("data: [DONE]")) {
+						return
+					}
+					seenDone = true
+				}
+				if !seenDone {
+					// Without a translator-confirmed terminal state, a clean Responses EOF
+					// without [DONE] remains a failed stream instead of completing it.
+					if from == sdktranslator.FormatOpenAIResponse {
+						streamErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before [DONE]"}
+						helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
+						reporter.PublishFailure(ctx, streamErr)
+						select {
+						case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
+						case <-ctx.Done():
+						}
+						return
+					}
+					// Other protocols retain compatibility with providers that omit [DONE].
+					// Feed a synthetic done marker through the translator so pending
+					// terminal events are still emitted exactly once.
+					if !emitTranslated([]byte("data: [DONE]")) {
+						return
+					}
 				}
 			}
 			cacheOpenAICompatReasoningTurns(ctx, reasoningCapture.Finish())

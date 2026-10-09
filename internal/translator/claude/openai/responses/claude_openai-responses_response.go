@@ -490,11 +490,19 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 		completed, _ = sjson.SetBytes(completed, "sequence_number", nextSeq())
 		completed, _ = sjson.SetBytes(completed, "response.id", st.ResponseID)
 		completed, _ = sjson.SetBytes(completed, "response.created_at", st.CreatedAt)
-		// A max_tokens stop reason means the turn was truncated: report an
-		// incomplete response so clients can distinguish it from a full answer.
-		if st.StopReason == "max_tokens" {
+		// A max_tokens stop reason means the turn was truncated, and pause_turn
+		// means a server-tool iteration is unfinished: report an incomplete
+		// response so clients can distinguish it from a full answer.
+		switch strings.ToLower(strings.TrimSpace(st.StopReason)) {
+		case "max_tokens":
 			completed, _ = sjson.SetBytes(completed, "response.status", "incomplete")
 			completed, _ = sjson.SetBytes(completed, "response.incomplete_details.reason", "max_output_tokens")
+		case "pause_turn":
+			// Anthropic's server-tool iteration pause is unfinished, not a token limit:
+			// https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons#pause_turn
+			// Responses has no matching incomplete reason, so keep its nullable details null.
+			completed, _ = sjson.SetBytes(completed, "response.status", "incomplete")
+			completed, _ = sjson.SetBytes(completed, "response.incomplete_details", nil)
 		}
 		// Inject original request fields into response as per docs/response.completed.json
 
@@ -664,6 +672,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 
 // ConvertClaudeResponseToOpenAIResponsesNonStream aggregates Claude SSE into a single OpenAI Responses JSON.
 func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
+	rawJSON, nativeModel := translatorcommon.ClaudeMessagesJSONToSSE(rawJSON)
 	// Aggregate Claude SSE lines into a single OpenAI Responses JSON (non-stream)
 	// We follow the same aggregation logic as the streaming variant but produce
 	// one final object matching docs/out.json structure.
@@ -822,11 +831,19 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 	// Populate base fields
 	out, _ = sjson.SetBytes(out, "id", responseID)
 	out, _ = sjson.SetBytes(out, "created_at", createdAt)
-	// A max_tokens stop reason means the turn was truncated: report an
-	// incomplete response so clients can distinguish it from a full answer.
-	if stopReason == "max_tokens" {
+	// A max_tokens stop reason means the turn was truncated, and pause_turn
+	// means a server-tool iteration is unfinished: report an incomplete
+	// response so clients can distinguish it from a full answer.
+	switch strings.ToLower(strings.TrimSpace(stopReason)) {
+	case "max_tokens":
 		out, _ = sjson.SetBytes(out, "status", "incomplete")
 		out, _ = sjson.SetBytes(out, "incomplete_details.reason", "max_output_tokens")
+	case "pause_turn":
+		// Anthropic's server-tool iteration pause is unfinished, not a token limit:
+		// https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons#pause_turn
+		// Responses has no matching incomplete reason, so keep its nullable details null.
+		out, _ = sjson.SetBytes(out, "status", "incomplete")
+		out, _ = sjson.SetBytes(out, "incomplete_details", nil)
 	}
 
 	// Inject request echo fields as top-level (similar to streaming variant)
@@ -894,6 +911,12 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 		if v := req.Get("metadata"); v.Exists() {
 			out, _ = sjson.SetBytes(out, "metadata", v.Value())
 		}
+	}
+
+	// A native response's model is authoritative; otherwise retain request echo
+	// behavior, including the existing SSE path.
+	if nativeModel != "" {
+		out, _ = sjson.SetBytes(out, "model", nativeModel)
 	}
 
 	// Build output array

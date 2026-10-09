@@ -787,9 +787,14 @@ func (s *Service) applyConfigUpdate(newCfg *config.Config) {
 	if s.server != nil {
 		s.server.UpdateClients(newCfg)
 	}
+	if errValidate := newCfg.Models.Validate(); errValidate != nil {
+		log.WithError(errValidate).Warn("rejected invalid model catalog sources")
+		return
+	}
 	s.cfgMu.Lock()
 	s.cfg = newCfg
 	s.cfgMu.Unlock()
+	registry.UpdateModelCatalogSources(newCfg.Models, newCfg.Home.Enabled)
 	if s.coreManager != nil {
 		s.coreManager.SetConfig(newCfg)
 		s.coreManager.SetOAuthModelAlias(newCfg.OAuthModelAlias)
@@ -995,6 +1000,17 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	usage.StartDefault(ctx)
+
+	s.startModelCatalogUpdaters(ctx)
+
+	// Start the periodic Grok CLI version updater with the configured outbound
+	// proxy so npm registry lookups follow the same egress path as upstream calls.
+	proxyURL := ""
+	if s.cfg != nil {
+		proxyURL = s.cfg.ProxyURL
+	}
+	executor.StartXAIVersionUpdater(ctx, proxyURL)
+
 	homeEnabled := s.cfg != nil && s.cfg.Home.Enabled
 	if homeEnabled {
 		forceHomeRuntimeConfig(s.cfg)
@@ -1334,6 +1350,16 @@ func (s *Service) ensureAuthDir() error {
 		return fmt.Errorf("cliproxy: auth path exists but is not a directory: %s", s.cfg.AuthDir)
 	}
 	return nil
+}
+
+// startModelCatalogUpdaters applies the same catalog policy for SDK and CLI users.
+func (s *Service) startModelCatalogUpdaters(ctx context.Context) {
+	s.cfgMu.RLock()
+	cfg := s.cfg
+	s.cfgMu.RUnlock()
+	if cfg != nil {
+		registry.StartModelCatalogUpdaters(ctx, cfg.Models, cfg.Home.Enabled)
+	}
 }
 
 // registerModelsForAuth (re)binds provider models in the global registry using the core auth ID as client identifier.

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
@@ -203,6 +204,8 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		scanner.Buffer(nil, streamScannerBuffer)
 		claudeInputTokens := helps.NewClaudeInputTokenState(from, to, responseFormat, originalPayload)
 		var param any
+		var pendingJSON []byte
+		var terminalDelivered bool
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
@@ -215,8 +218,49 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			line = helps.FilterSSEUsageMetadata(line)
 
 			payload := helps.JSONPayload(line)
+			if len(pendingJSON) > 0 {
+				// Assemble payloads that were split across SSE lines until a
+				// complete JSON document is available.
+				trimmedLine := bytes.TrimSpace(line)
+				// Skip non-data SSE lines (event:, id:, retry:) to prevent them
+				// from corrupting the JSON payload assembly.
+				if bytes.HasPrefix(trimmedLine, []byte("event:")) ||
+					bytes.HasPrefix(trimmedLine, []byte("id:")) ||
+					bytes.HasPrefix(trimmedLine, []byte("retry:")) {
+					continue
+				}
+				if bytes.HasPrefix(trimmedLine, []byte("data:")) {
+					trimmedLine = bytes.TrimSpace(trimmedLine[len("data:"):])
+				}
+				if len(trimmedLine) > 0 {
+					pendingJSON = append(pendingJSON, '\n')
+					pendingJSON = append(pendingJSON, trimmedLine...)
+				}
+				if !gjson.ValidBytes(pendingJSON) {
+					continue
+				}
+				payload = pendingJSON
+				pendingJSON = nil
+			} else if payload != nil && !gjson.ValidBytes(payload) {
+				pendingJSON = append([]byte(nil), payload...)
+				continue
+			}
 			if payload == nil {
 				continue
+			}
+			if errorResult := gjson.GetBytes(payload, "error"); errorResult.Exists() {
+				// Surface upstream backend error objects as terminal errors
+				// instead of translating them into an empty response body.
+				statusCode := int(errorResult.Get("code").Int())
+				if statusCode < http.StatusBadRequest || statusCode > 599 {
+					statusCode = http.StatusBadGateway
+				}
+				helps.RecordAPIResponseError(ctx, e.cfg, newAntigravityStatusErr(statusCode, payload))
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Err: newAntigravityStatusErr(statusCode, payload)}:
+				case <-ctx.Done():
+				}
+				return
 			}
 			reporter.ObserveResponseModel(payload)
 
@@ -226,6 +270,44 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 
 			payload = e.resolveWebSearchGroundingURLs(ctx, auth, from, originalPayload, translated, payload)
 			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, bytes.Clone(payload), &param, claudeInputTokens)
+			var isTerminalChunk bool
+			if finishReason := gjson.GetBytes(payload, "candidates.0.finishReason"); finishReason.Exists() && strings.TrimSpace(finishReason.String()) != "" {
+				isTerminalChunk = true
+			} else if finishReason := gjson.GetBytes(payload, "response.candidates.0.finishReason"); finishReason.Exists() && strings.TrimSpace(finishReason.String()) != "" {
+				isTerminalChunk = true
+			} else if replayAccumulator != nil && replayAccumulator.terminal {
+				isTerminalChunk = true
+			}
+			if !isTerminalChunk {
+				for _, chunk := range chunks {
+					for _, cLine := range bytes.Split(chunk, []byte("\n")) {
+						trimmed := bytes.TrimSpace(cLine)
+						if bytes.Equal(trimmed, []byte("data: [DONE]")) || bytes.Equal(trimmed, []byte("[DONE]")) {
+							isTerminalChunk = true
+							break
+						}
+						cPayload := helps.JSONPayload(cLine)
+						if len(cPayload) == 0 {
+							continue
+						}
+						cType := gjson.GetBytes(cPayload, "type").String()
+						if cType == "response.completed" || cType == "message_stop" {
+							isTerminalChunk = true
+							break
+						}
+						if finishReason := gjson.GetBytes(cPayload, "choices.0.finish_reason"); finishReason.Exists() && strings.TrimSpace(finishReason.String()) != "" {
+							isTerminalChunk = true
+							break
+						}
+					}
+					if isTerminalChunk {
+						break
+					}
+				}
+			}
+			if isTerminalChunk {
+				terminalDelivered = true
+			}
 			for i := range chunks {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
@@ -235,6 +317,12 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			}
 		}
 		if errScan := scanner.Err(); errScan != nil {
+			// A client disconnect after the terminal chunk already delivered a
+			// complete response: settle usage instead of reporting a failure.
+			if errors.Is(errScan, context.Canceled) && ctx.Err() != nil && terminalDelivered {
+				reporter.EnsurePublished(ctx)
+				return
+			}
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.PublishFailure(ctx, errScan)
 			select {

@@ -349,7 +349,26 @@ func (m *Manager) RefreshAuth(ctx context.Context, authID string) (*Auth, error)
 	if m == nil {
 		return nil, &Error{Code: "provider_not_found", Message: "auth manager unavailable"}
 	}
-	return m.refreshAuth(ctx, authID)
+	// Manual refresh may bypass the terminal unauthorized guard: the operator
+	// explicitly asks for a new attempt after re-login or token rotation.
+	return m.refreshAuth(withForceRefresh(ctx), authID)
+}
+
+type forceRefreshContextKey struct{}
+
+func withForceRefresh(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, forceRefreshContextKey{}, true)
+}
+
+func isForceRefreshContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	v, ok := ctx.Value(forceRefreshContextKey{}).(bool)
+	return ok && v
 }
 
 // invalidGrantBackoffDuration returns the exponential retry backoff for the
@@ -371,20 +390,30 @@ func invalidGrantBackoffDuration(failures int) time.Duration {
 }
 
 func (m *Manager) refreshAuth(ctx context.Context, id string) (*Auth, error) {
+	forceRefresh := isForceRefreshContext(ctx)
 	// Credential refreshes must not inherit an execution-scoped request proxy.
 	ctx = cliproxyexecutor.WithoutRequestProxyURL(ctx)
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if forceRefresh {
+		ctx = withForceRefresh(ctx)
 	}
 	m.mu.RLock()
 	auth := m.auths[id]
 	var exec ProviderExecutor
 	var cloned *Auth
 	if auth != nil && !auth.Disabled && auth.Status != StatusDisabled {
-		// Use the same effective provider key as request execution so Kimi
-		// dual-domain aliases still resolve to the shared kimi executor.
-		exec, _ = m.executorLocked(executorKeyFromAuth(auth))
-		cloned = auth.Clone()
+		// A terminal credential needs fresh tokens (manual force refresh), not
+		// another automatic attempt with the same rejected tokens.
+		if !forceRefresh && (hasDisabledInvalidGrantFailure(auth) || hasUnauthorizedAuthFailure(auth)) {
+			cloned = nil
+		} else {
+			// Use the same effective provider key as request execution so Kimi
+			// dual-domain aliases still resolve to the shared kimi executor.
+			exec, _ = m.executorLocked(executorKeyFromAuth(auth))
+			cloned = auth.Clone()
+		}
 	}
 	m.mu.RUnlock()
 	if cloned == nil || exec == nil {
@@ -395,23 +424,68 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) (*Auth, error) {
 	// auth in place and return it).
 	refreshBase := cloned.Clone()
 	updated, err := exec.Refresh(ctx, cloned)
+	now := time.Now()
 	if err != nil && errors.Is(err, context.Canceled) {
 		log.Debugf("refresh canceled for %s, %s", auth.Provider, auth.ID)
+		// Reschedule soon so a canceled refresh does not stall the credential
+		// until the next periodic tick.
+		m.mu.Lock()
+		if current := m.auths[id]; current != nil {
+			if current.NextRefreshAfter.IsZero() || current.NextRefreshAfter.Before(now) {
+				current.NextRefreshAfter = now.Add(time.Second)
+			}
+			m.auths[id] = current
+			if m.scheduler != nil {
+				m.scheduler.upsertAuth(current.Clone())
+			}
+		}
+		m.mu.Unlock()
+		m.queueRefreshReschedule(id)
 		return nil, err
 	}
 	log.Debugf("refreshed %s, %s, %v", auth.Provider, auth.ID, err)
-	now := time.Now()
 	if err != nil {
 		unauthorized := isUnauthorizedError(err)
 		invalidGrant := isInvalidGrantError(err)
 		shouldReschedule := false
-		isPermanentlyDisabled := false
+		shouldUnschedule := false
 		var failedAuth *Auth
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil {
+			if hasUnauthorizedAuthFailure(current) && !forceRefresh {
+				m.mu.Unlock()
+				return nil, err
+			}
+			if wasTerminal := hasUnauthorizedAuthFailure(current); wasTerminal {
+				// The manual force refresh ran and failed again: re-terminate and
+				// stop scheduling until the tokens change.
+				current.UpdatedAt = now
+				current.Unavailable = true
+				current.Status = StatusError
+				current.NextRefreshAfter = time.Time{}
+				current.NextRetryAfter = time.Time{}
+				if isUnauthorizedError(err) || isInvalidGrantError(err) {
+					current.LastError = &Error{Code: "unauthorized", Message: err.Error(), HTTPStatus: http.StatusUnauthorized}
+					current.StatusMessage = "unauthorized (refresh token invalid)"
+				}
+				m.auths[id] = current
+				failedAuth = current
+				if m.scheduler != nil {
+					m.scheduler.upsertAuth(current.Clone())
+				}
+				m.mu.Unlock()
+				m.removeRefreshSchedule(id)
+				if perr := m.persist(ctx, current); perr != nil {
+					log.WithError(perr).WithField("auth_id", id).Warn("failed to persist refresh error state")
+				}
+				return nil, err
+			}
 			current.LastError = refreshErrorFromError(err)
 			hasValidAccessToken := current.HasValidAccessToken(now)
 			hasExpiredAccessToken := !hasValidAccessToken && current.HasExpiredAccessToken(now)
+			// The rejected marker is recorded by MarkResult when upstream 401s
+			// this exact access token; its expiry no longer proves it is usable.
+			accessTokenRejected := current.RejectedAccessToken != "" && authAccessToken(current) == current.RejectedAccessToken
 			if current.Disabled || current.Status == StatusDisabled {
 				// The credential was disabled while the refresh was in flight.
 				// A disabled credential whose refresh token was revoked
@@ -423,7 +497,7 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) (*Auth, error) {
 					current.NextRefreshAfter = time.Time{}
 					current.RefreshFailures = 0
 					current.StatusMessage = "disabled (invalid grant)"
-					isPermanentlyDisabled = true
+					shouldUnschedule = true
 				} else {
 					current.NextRefreshAfter = now.Add(refreshFailureBackoff)
 					if current.StatusMessage == "" {
@@ -431,11 +505,24 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) (*Auth, error) {
 					}
 					shouldReschedule = true
 				}
-			} else if unauthorized || hasExpiredAccessToken {
+			} else if accessTokenRejected && invalidGrant {
+				// Neither token can recover without a new login. Stop selecting the
+				// credential until its tokens change instead of retrying it after
+				// every cooldown and returning the same 401 to clients.
+				current.Unavailable = true
+				current.Status = StatusError
+				current.NextRefreshAfter = time.Time{}
+				current.NextRetryAfter = time.Time{}
+				current.RefreshFailures = 0
+				current.LastError = &Error{Code: "unauthorized", Message: err.Error(), HTTPStatus: http.StatusUnauthorized}
+				current.StatusMessage = "unauthorized (refresh token invalid)"
+				shouldUnschedule = true
+			} else if unauthorized || hasExpiredAccessToken || accessTokenRejected {
 				current.Unavailable = true
 				current.Status = StatusError
 				if unauthorized {
 					current.NextRefreshAfter = time.Time{}
+					current.NextRetryAfter = time.Time{}
 					current.RefreshFailures = 0
 					current.StatusMessage = "unauthorized"
 				} else if invalidGrant {
@@ -488,9 +575,9 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) (*Auth, error) {
 		m.mu.Unlock()
 		if shouldReschedule {
 			m.queueRefreshReschedule(id)
-		} else if isPermanentlyDisabled {
-			// Permanently unschedule disabled credentials whose refresh token
-			// was revoked so the auto-refresh loop stops retrying them.
+		} else if shouldUnschedule {
+			// Permanently unschedule credentials whose refresh token was revoked
+			// so the auto-refresh loop stops retrying them.
 			m.removeRefreshSchedule(id)
 		}
 		// Persist the error state so LastError/Status/Unavailable survive a
@@ -517,6 +604,7 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) (*Auth, error) {
 		updated.NextRefreshAfter = time.Time{}
 	}
 	updated.LastError = nil
+	updated.RejectedAccessToken = ""
 	updated.UpdatedAt = now
 	// The refresh recovered the credential, so any prior failure streak no
 	// longer applies to the next invalid_grant backoff computation.

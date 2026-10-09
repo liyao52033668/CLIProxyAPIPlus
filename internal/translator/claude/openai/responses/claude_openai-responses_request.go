@@ -27,6 +27,30 @@ var (
 	session = ""
 )
 
+const (
+	defaultClaudeResponsesMaxTokens = 32000
+	defaultFableResponsesMaxTokens  = 64000
+)
+
+func defaultClaudeResponsesMaxTokensForModel(modelName string) int {
+	normalized := strings.ToLower(strings.TrimSpace(modelName))
+	maxTokens := defaultClaudeResponsesMaxTokens
+	if strings.Contains(normalized, "fable") {
+		maxTokens = defaultFableResponsesMaxTokens
+	}
+	info := registry.LookupModelInfo(modelName, "claude")
+	if info == nil || info.MaxCompletionTokens <= 0 {
+		return maxTokens
+	}
+	// Fable keeps its conservative omitted-field ceiling. Every other registered
+	// model uses its output limit, including when that limit is above the
+	// historical 32000 default.
+	if strings.Contains(normalized, "fable") && info.MaxCompletionTokens >= maxTokens {
+		return maxTokens
+	}
+	return info.MaxCompletionTokens
+}
+
 // ConvertOpenAIResponsesRequestToClaude transforms an OpenAI Responses API request
 // into a Claude Messages API request using only gjson/sjson for JSON handling.
 // It supports:
@@ -55,7 +79,7 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	userID := fmt.Sprintf("user_%s_account_%s_session_%s", user, account, session)
 
 	// Base Claude message payload
-	out := fmt.Appendf(nil, `{"model":"","max_tokens":32000,"messages":[],"metadata":{"user_id":"%s"}}`, userID)
+	out := fmt.Appendf(nil, `{"model":"","max_tokens":%d,"messages":[],"metadata":{"user_id":"%s"}}`, defaultClaudeResponsesMaxTokensForModel(modelName), userID)
 
 	root := gjson.ParseBytes(rawJSON)
 
@@ -217,8 +241,12 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	out, _ = sjson.SetBytes(out, "model", modelName)
 
 	// Max tokens
-	if mot := root.Get("max_output_tokens"); mot.Exists() {
-		out, _ = sjson.SetBytes(out, "max_tokens", mot.Int())
+	if mot := root.Get("max_output_tokens"); mot.Exists() && mot.Type != gjson.Null {
+		val := mot.Int()
+		if info := registry.LookupModelInfo(modelName, "claude"); info != nil && info.MaxCompletionTokens > 0 && val > int64(info.MaxCompletionTokens) {
+			val = int64(info.MaxCompletionTokens)
+		}
+		out, _ = sjson.SetBytes(out, "max_tokens", val)
 	}
 
 	// Stream

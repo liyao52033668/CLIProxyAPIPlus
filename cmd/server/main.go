@@ -24,6 +24,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cmd"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/githubauth"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
@@ -363,7 +364,7 @@ func main() {
 	flag.BoolVar(&homeDisableClusterDiscovery, "home-disable-cluster-discovery", false, "Disable Home CLUSTER NODES discovery and keep using the configured -home-jwt address")
 	flag.BoolVar(&tuiMode, "tui", false, "Start with terminal management UI")
 	flag.BoolVar(&standalone, "standalone", false, "In TUI mode, start an embedded local server")
-	flag.BoolVar(&localModel, "local-model", false, "Use embedded model catalog only, skip remote model fetching")
+	flag.BoolVar(&localModel, "local-model", false, "Use embedded model catalogs unless models.catalog, models.codex-catalog, or models.devin-catalog explicitly overrides the source")
 
 	flag.CommandLine.Usage = func() {
 		out := flag.CommandLine.Output()
@@ -805,6 +806,7 @@ func main() {
 
 	// Set the log level based on the configuration.
 	util.SetLogLevel(cfg)
+	githubauth.SetToken(cfg.GitHubToken)
 	managementasset.SetCurrentConfig(cfg)
 
 	// Create login options to be used in authentication flows.
@@ -921,7 +923,7 @@ func main() {
 			return
 		}
 		if localModel && (!tuiMode || standalone) {
-			log.Info("Local model mode: using embedded model catalog, remote model updates disabled")
+			log.Info("Local model mode: using embedded catalogs unless an explicit catalog source is configured")
 		}
 		if tuiMode {
 			if standalone {
@@ -931,7 +933,7 @@ func main() {
 					misc.SetAntigravityFetchTimeout(time.Duration(cfg.Timeouts.AntigravityVersionFetchSeconds) * time.Second)
 				}
 				misc.StartAntigravityVersionUpdater(context.Background())
-				startModelCatalogUpdaters(localModel, cfg)
+				registry.SetLocalModelCatalogs(localModel)
 				hook := tui.NewLogHook(2000)
 				hook.SetFormatter(&logging.LogFormatter{})
 				log.AddHook(hook)
@@ -1008,7 +1010,8 @@ func main() {
 				misc.SetAntigravityFetchTimeout(time.Duration(cfg.Timeouts.AntigravityVersionFetchSeconds) * time.Second)
 			}
 			misc.StartAntigravityVersionUpdater(context.Background())
-			startModelCatalogUpdaters(localModel, cfg)
+			registry.SetLocalModelCatalogs(localModel)
+			registry.SetModelsRefreshInterval(time.Duration(cfg.Timeouts.ModelRegistryRefreshIntervalHours) * time.Hour)
 
 			if cfg.AuthDir != "" {
 				kiro.InitializeAndStart(cfg.AuthDir, cfg)
@@ -1051,25 +1054,4 @@ func modelCatalogUpdaterPlan(localModel, homeEnabled bool) (startModels, startCo
 		return false, false, false
 	}
 	return !homeEnabled, true, !homeEnabled
-}
-
-func startModelCatalogUpdaters(localModel bool, cfg *config.Config) {
-	startModels, startCodexClient, startDevin := modelCatalogUpdaterPlan(localModel, cfg.Home.Enabled)
-	if startCodexClient {
-		registry.StartCodexClientModelsUpdater(context.Background())
-	}
-	if startDevin {
-		registry.StartDevinModelsUpdater(context.Background())
-	}
-	if startModels {
-		if cfg.Timeouts.ModelRegistryFetchSeconds > 0 {
-			registry.SetModelsFetchTimeout(time.Duration(cfg.Timeouts.ModelRegistryFetchSeconds) * time.Second)
-		}
-		if cfg.Timeouts.ModelRegistryRefreshIntervalHours > 0 {
-			registry.SetModelsRefreshInterval(time.Duration(cfg.Timeouts.ModelRegistryRefreshIntervalHours) * time.Hour)
-		}
-		registry.StartModelsUpdater(context.Background())
-	} else if cfg.Home.Enabled && !localModel {
-		log.Info("Home mode: remote models.json updates disabled; Codex client model list follows Home model IDs")
-	}
 }

@@ -231,8 +231,11 @@ func (e *ClaudeExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Aut
 }
 
 func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
-	if opts.Alt == "responses/compact" {
-		return resp, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
+	if errExpand := helps.ExpandClaudeResponsesCompaction(&req, &opts); errExpand != nil {
+		return resp, statusErr{code: http.StatusBadRequest, msg: errExpand.Error()}
+	}
+	if helps.ClaudeResponsesCompactionRequested(req, opts) {
+		return e.executeClaudeCompaction(ctx, auth, req, opts)
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	upstreamModel := e.upstreamModel(baseModel)
@@ -280,6 +283,12 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	body, err = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
 	if err != nil {
 		return resp, err
+	}
+
+	// A compaction summary turn must produce text only: keep structured tool
+	// history when definitions exist, otherwise flatten orphan tool blocks.
+	if claudeCompactionSummaryFromContext(ctx) {
+		body = helps.FinalizeClaudeCompactionSummaryBody(body)
 	}
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
@@ -377,8 +386,11 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 }
 
 func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
-	if opts.Alt == "responses/compact" {
-		return nil, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
+	if errExpand := helps.ExpandClaudeResponsesCompaction(&req, &opts); errExpand != nil {
+		return nil, statusErr{code: http.StatusBadRequest, msg: errExpand.Error()}
+	}
+	if helps.ClaudeResponsesCompactionRequested(req, opts) {
+		return e.executeClaudeCompactionStream(ctx, auth, req, opts)
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	upstreamModel := e.upstreamModel(baseModel)
@@ -2670,4 +2682,93 @@ func logClaudeSignatureSanitizeReport(ctx context.Context, baseModel string, rep
 		fields["replaced_signatures"] = report.ReplacedSignatures
 	}
 	log.WithFields(fields).Debug("claude executor: sanitized messages for upstream")
+}
+
+type claudeCompactionSummaryContextKey struct{}
+
+func (e *ClaudeExecutor) executeClaudeCompaction(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	var resp cliproxyexecutor.Response
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	summaryPayload := helps.PrepareClaudeCompactionSummaryPayload(helps.ClaudeCompactionSourcePayload(req, opts), baseModel)
+	summaryReq := cliproxyexecutor.Request{
+		Model:    req.Model,
+		Payload:  summaryPayload,
+		Metadata: req.Metadata,
+	}
+	summaryOpts := opts
+	summaryOpts.Alt = ""
+	summaryOpts.Stream = false
+	summaryOpts.OriginalRequest = nil
+	summaryOpts.SourceFormat = sdktranslator.FormatOpenAIResponse
+	summaryOpts.ResponseFormat = sdktranslator.FormatClaude
+
+	summaryResp, errSummary := e.Execute(withClaudeCompactionSummary(ctx), auth, summaryReq, summaryOpts)
+	if errSummary != nil {
+		return resp, errSummary
+	}
+	summaryText, errExtract := helps.ExtractAntigravitySummaryText(summaryResp.Payload)
+	if errExtract != nil {
+		return resp, fmt.Errorf("extract summary: %w", errExtract)
+	}
+	capsule, errSeal := helps.SealAntigravityCompaction(summaryText, baseModel)
+	if errSeal != nil {
+		return resp, fmt.Errorf("seal compaction capsule: %w", errSeal)
+	}
+
+	inputTokens, outputTokens, totalTokens, cachedTokens := helps.ClaudeCompactionResponsesUsage(summaryResp.Payload)
+	respPayload := helps.BuildAntigravityCompactionResponse(baseModel, capsule, inputTokens, outputTokens, totalTokens)
+	respPayload, _ = sjson.SetBytes(respPayload, "usage.input_tokens_details.cached_tokens", cachedTokens)
+	return cliproxyexecutor.Response{
+		Payload: respPayload,
+		Headers: summaryResp.Headers,
+	}, nil
+}
+
+func (e *ClaudeExecutor) executeClaudeCompactionStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	summaryResp, errSummary := e.executeClaudeCompaction(ctx, auth, req, opts)
+	if errSummary != nil {
+		return nil, errSummary
+	}
+	// Reuse the capsule and usage already sealed for the non-stream response.
+	item := gjson.GetBytes(summaryResp.Payload, "output.0")
+	capsule := item.Get("encrypted_content").String()
+	if item.Get("type").String() != "compaction" || capsule == "" {
+		return nil, fmt.Errorf("extract summary: compaction item missing")
+	}
+	inputTokens := int(gjson.GetBytes(summaryResp.Payload, "usage.input_tokens").Int())
+	outputTokens := int(gjson.GetBytes(summaryResp.Payload, "usage.output_tokens").Int())
+	totalTokens := int(gjson.GetBytes(summaryResp.Payload, "usage.total_tokens").Int())
+	cachedTokens := int(gjson.GetBytes(summaryResp.Payload, "usage.input_tokens_details.cached_tokens").Int())
+	chunks := helps.BuildAntigravityCompactionStreamChunks(baseModel, capsule, inputTokens, outputTokens, totalTokens)
+	for i := range chunks {
+		chunks[i] = helps.PatchClaudeCompactionStreamUsage(chunks[i], inputTokens, outputTokens, totalTokens, cachedTokens)
+	}
+	out := make(chan cliproxyexecutor.StreamChunk, len(chunks))
+	for _, chunk := range chunks {
+		out <- cliproxyexecutor.StreamChunk{Payload: chunk}
+	}
+	close(out)
+
+	headers := summaryResp.Headers.Clone()
+	if headers == nil {
+		headers = make(http.Header)
+	}
+	headers.Set("Content-Type", "text/event-stream")
+	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}, nil
+}
+
+func withClaudeCompactionSummary(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, claudeCompactionSummaryContextKey{}, true)
+}
+
+func claudeCompactionSummaryFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	flag, ok := ctx.Value(claudeCompactionSummaryContextKey{}).(bool)
+	return ok && flag
 }

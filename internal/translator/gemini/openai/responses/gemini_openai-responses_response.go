@@ -24,6 +24,7 @@ type geminiDetachedReasoningItem struct {
 type geminiCompletedMessageItem struct {
 	ID          string
 	Text        string
+	Status      string
 	Annotations [][]byte
 }
 
@@ -33,12 +34,67 @@ type geminiCompletedReasoningItem struct {
 	Text      string
 }
 
+// Gemini usage frames are cumulative snapshots, not additive deltas.
+type geminiResponsesUsage struct {
+	Present    bool
+	Prompt     int64
+	Candidates int64
+	Thoughts   int64
+	Total      int64
+	Cached     int64
+}
+
+func (usage *geminiResponsesUsage) Merge(root gjson.Result) bool {
+	metadata := root.Get("usageMetadata")
+	if !metadata.Exists() {
+		metadata = root.Get("cpaUsageMetadata")
+	}
+	if !metadata.Exists() {
+		return false
+	}
+	usage.Present = true
+	for _, field := range []struct {
+		name  string
+		value *int64
+	}{
+		{"promptTokenCount", &usage.Prompt},
+		{"candidatesTokenCount", &usage.Candidates},
+		{"thoughtsTokenCount", &usage.Thoughts},
+		{"totalTokenCount", &usage.Total},
+		{"cachedContentTokenCount", &usage.Cached},
+	} {
+		if value := metadata.Get(field.name); value.Exists() {
+			*field.value = value.Int()
+		}
+	}
+	return true
+}
+
+func (usage geminiResponsesUsage) JSON() []byte {
+	out := []byte(`{"input_tokens":0,"input_tokens_details":{"cached_tokens":0},"output_tokens":0,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":0}`)
+	out, _ = sjson.SetBytes(out, "input_tokens", usage.Prompt)
+	out, _ = sjson.SetBytes(out, "input_tokens_details.cached_tokens", usage.Cached)
+	out, _ = sjson.SetBytes(out, "output_tokens", usage.Candidates+usage.Thoughts)
+	out, _ = sjson.SetBytes(out, "output_tokens_details.reasoning_tokens", usage.Thoughts)
+	out, _ = sjson.SetBytes(out, "total_tokens", usage.Total)
+	return out
+}
+
+func geminiResponsesTerminalState(finishReason string) (eventType, status string, incompleteDetails []byte) {
+	if strings.EqualFold(strings.TrimSpace(finishReason), "MAX_TOKENS") {
+		return "response.incomplete", "incomplete", []byte(`{"reason":"max_output_tokens"}`)
+	}
+	return "response.completed", "completed", nil
+}
+
 type geminiToResponsesState struct {
-	Seq        int
-	ResponseID string
-	CreatedAt  int64
-	Started    bool
-	Completed  bool
+	Seq          int
+	ResponseID   string
+	CreatedAt    int64
+	Started      bool
+	Completed    bool
+	FinishReason string
+	Usage        geminiResponsesUsage
 
 	// message aggregation
 	MsgOpened    bool
@@ -140,7 +196,7 @@ func unwrapGeminiResponseRoot(root gjson.Result) gjson.Result {
 		return root
 	}
 	// Vertex-style Gemini responses wrap the actual payload in a "response" object.
-	if resp.Get("candidates").Exists() || resp.Get("responseId").Exists() || resp.Get("usageMetadata").Exists() {
+	if resp.Get("candidates").Exists() || resp.Get("responseId").Exists() || resp.Get("usageMetadata").Exists() || resp.Get("cpaUsageMetadata").Exists() {
 		return resp
 	}
 	return root
@@ -285,11 +341,15 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 	if len(rawJSON) == 0 || st.Completed {
 		return [][]byte{}
 	}
-	if bytes.Equal(rawJSON, []byte("[DONE]")) {
+	done := bytes.Equal(rawJSON, []byte("[DONE]"))
+	if done {
 		if !st.Started {
 			return [][]byte{}
 		}
-		rawJSON = []byte(`{"candidates":[{"finishReason":"STOP"}]}`)
+		if st.FinishReason == "" {
+			st.FinishReason = "STOP"
+		}
+		rawJSON = []byte(`{}`)
 	}
 
 	root := gjson.ParseBytes(rawJSON)
@@ -297,6 +357,10 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 		return [][]byte{}
 	}
 	root = unwrapGeminiResponseRoot(root)
+	// Usage frames are cumulative snapshots; merge before any finalization so a
+	// usage tail in the same frame as the finish reason is included.
+	st.Usage.Merge(root)
+	messageStatus := "completed"
 
 	var out [][]byte
 	nextSeq := func() int { st.Seq++; return st.Seq }
@@ -563,6 +627,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 		final, _ = sjson.SetBytes(final, "sequence_number", nextSeq())
 		final, _ = sjson.SetBytes(final, "output_index", st.MsgIndex)
 		final, _ = sjson.SetBytes(final, "item.id", st.CurrentMsgID)
+		final, _ = sjson.SetBytes(final, "item.status", messageStatus)
 		final, _ = sjson.SetBytes(final, "item.content.0.text", fullText)
 		if len(msgCitations) > 0 {
 			final, _ = sjson.SetRawBytes(final, "item.content.0.annotations", translatorcommon.JoinRawArray(msgCitations))
@@ -573,6 +638,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 		st.CompletedMessages[st.MsgIndex] = geminiCompletedMessageItem{
 			ID:          st.CurrentMsgID,
 			Text:        fullText,
+			Status:      messageStatus,
 			Annotations: msgCitations,
 		}
 		st.MsgClosed = true
@@ -1155,8 +1221,17 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 		})
 	}
 
-	// Finalization on finishReason
-	if fr := root.Get("candidates.0.finishReason"); fr.Exists() && fr.String() != "" {
+	// Preserve the first source finish. [DONE] only finalizes when the source
+	// never delivered a finish reason.
+	if fr := root.Get("candidates.0.finishReason").String(); fr != "" && st.FinishReason == "" {
+		st.FinishReason = fr
+	}
+	if st.FinishReason != "" && !root.Get("candidates.0.finishReason").Exists() && !done {
+		return out
+	}
+	if st.FinishReason != "" {
+		eventType, status, incompleteDetails := geminiResponsesTerminalState(st.FinishReason)
+		messageStatus = status
 		if st.PendingReasoningSignature != "" {
 			emitTrailingDetachedReasoning(st.PendingReasoningSignature)
 			st.PendingReasoningSignature = ""
@@ -1229,8 +1304,13 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 
 		// Reasoning already finalized above if present
 
-		// Build response.completed with aggregated outputs and request echo fields
+		// Build the terminal response with aggregated outputs and request echo fields
 		completed := []byte(`{"type":"response.completed","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null}}`)
+		completed, _ = sjson.SetBytes(completed, "type", eventType)
+		completed, _ = sjson.SetBytes(completed, "response.status", status)
+		if incompleteDetails != nil {
+			completed, _ = sjson.SetRawBytes(completed, "response.incomplete_details", incompleteDetails)
+		}
 		completed, _ = sjson.SetBytes(completed, "sequence_number", nextSeq())
 		completed, _ = sjson.SetBytes(completed, "response.id", st.ResponseID)
 		completed, _ = sjson.SetBytes(completed, "response.created_at", st.CreatedAt)
@@ -1319,6 +1399,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 			if completedMessage, ok := st.CompletedMessages[idx]; ok {
 				item := []byte(`{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}`)
 				item, _ = sjson.SetBytes(item, "id", completedMessage.ID)
+				item, _ = sjson.SetBytes(item, "status", completedMessage.Status)
 				item, _ = sjson.SetBytes(item, "content.0.text", completedMessage.Text)
 				if len(completedMessage.Annotations) > 0 {
 					item, _ = sjson.SetRawBytes(item, "content.0.annotations", translatorcommon.JoinRawArray(completedMessage.Annotations))
@@ -1365,27 +1446,11 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 		}
 
 		// usage mapping
-		if um := root.Get("usageMetadata"); um.Exists() {
-			// input tokens = prompt only (thoughts go to output)
-			input := um.Get("promptTokenCount").Int()
-			completed, _ = sjson.SetBytes(completed, "response.usage.input_tokens", input)
-			// cached token details: align with OpenAI "cached_tokens" semantics.
-			completed, _ = sjson.SetBytes(completed, "response.usage.input_tokens_details.cached_tokens", um.Get("cachedContentTokenCount").Int())
-			// output tokens
-			completed, _ = sjson.SetBytes(completed, "response.usage.output_tokens", um.Get("candidatesTokenCount").Int()+um.Get("thoughtsTokenCount").Int())
-			if v := um.Get("thoughtsTokenCount"); v.Exists() {
-				completed, _ = sjson.SetBytes(completed, "response.usage.output_tokens_details.reasoning_tokens", v.Int())
-			} else {
-				completed, _ = sjson.SetBytes(completed, "response.usage.output_tokens_details.reasoning_tokens", 0)
-			}
-			if v := um.Get("totalTokenCount"); v.Exists() {
-				completed, _ = sjson.SetBytes(completed, "response.usage.total_tokens", v.Int())
-			} else {
-				completed, _ = sjson.SetBytes(completed, "response.usage.total_tokens", 0)
-			}
+		if st.Usage.Present {
+			completed, _ = sjson.SetRawBytes(completed, "response.usage", st.Usage.JSON())
 		}
 
-		out = append(out, emitEvent("response.completed", completed))
+		out = append(out, emitEvent(eventType, completed))
 		st.Completed = true
 	}
 
@@ -1402,6 +1467,11 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 
 	// Base response scaffold
 	resp := []byte(`{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null,"incomplete_details":null}`)
+	_, status, incompleteDetails := geminiResponsesTerminalState(root.Get("candidates.0.finishReason").String())
+	resp, _ = sjson.SetBytes(resp, "status", status)
+	if incompleteDetails != nil {
+		resp, _ = sjson.SetRawBytes(resp, "incomplete_details", incompleteDetails)
+	}
 
 	// id: prefer provider responseId, otherwise synthesize
 	id := root.Get("responseId").String()
@@ -1721,6 +1791,10 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 		})
 	}
 
+	activeMessageIndex := -1
+	if currentMessageText.Len() > 0 {
+		activeMessageIndex = len(messageOutputs)
+	}
 	flushReasoningOutput()
 	flushMessageOutput()
 
@@ -1800,6 +1874,9 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 			itemJSON := []byte(`{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}`)
 			itemJSON, _ = sjson.SetBytes(itemJSON, "id", fmt.Sprintf("msg_%s_%d", strings.TrimPrefix(id, "resp_"), outputItem.index))
 			itemJSON, _ = sjson.SetBytes(itemJSON, "content.0.text", messageOutput.text)
+			if outputItem.index == activeMessageIndex {
+				itemJSON, _ = sjson.SetBytes(itemJSON, "status", status)
+			}
 			if c := messageCitations[outputItem.index]; len(c) > 0 {
 				itemJSON, _ = sjson.SetRawBytes(itemJSON, "content.0.annotations", translatorcommon.JoinRawArray(c))
 			}
@@ -1828,20 +1905,9 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 	}
 
 	// usage mapping
-	if um := root.Get("usageMetadata"); um.Exists() {
-		// input tokens = prompt only (thoughts go to output)
-		input := um.Get("promptTokenCount").Int()
-		resp, _ = sjson.SetBytes(resp, "usage.input_tokens", input)
-		// cached token details: align with OpenAI "cached_tokens" semantics.
-		resp, _ = sjson.SetBytes(resp, "usage.input_tokens_details.cached_tokens", um.Get("cachedContentTokenCount").Int())
-		// output tokens
-		resp, _ = sjson.SetBytes(resp, "usage.output_tokens", um.Get("candidatesTokenCount").Int()+um.Get("thoughtsTokenCount").Int())
-		if v := um.Get("thoughtsTokenCount"); v.Exists() {
-			resp, _ = sjson.SetBytes(resp, "usage.output_tokens_details.reasoning_tokens", v.Int())
-		}
-		if v := um.Get("totalTokenCount"); v.Exists() {
-			resp, _ = sjson.SetBytes(resp, "usage.total_tokens", v.Int())
-		}
+	var usage geminiResponsesUsage
+	if usage.Merge(root) {
+		resp, _ = sjson.SetRawBytes(resp, "usage", usage.JSON())
 	}
 
 	return resp

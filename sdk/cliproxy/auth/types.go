@@ -95,6 +95,9 @@ type Auth struct {
 	// ModelStates tracks per-model runtime availability data.
 	ModelStates map[string]*ModelState `json:"model_states,omitempty"`
 
+	// RejectedAccessToken tracks the access token rejected by upstream 401 until a refresh succeeds.
+	RejectedAccessToken string `json:"-"`
+
 	// Runtime carries non-serialisable data used during execution (in-memory only).
 	// Success counts the total number of successful requests routed through this auth.
 	Success int64 `json:"-"`
@@ -619,7 +622,11 @@ func (a *Auth) ExpirationTime() (time.Time, bool) {
 	if a == nil {
 		return time.Time{}, false
 	}
-	if tokenStr := authAccessToken(a); tokenStr != "" {
+	tokenStr := authAccessToken(a)
+	if tokenStr != "" && a.RejectedAccessToken != "" && a.RejectedAccessToken == tokenStr {
+		return time.Unix(0, 0), true
+	}
+	if tokenStr != "" {
 		if jwtExp, ok := parseJWTExp(tokenStr); ok {
 			return jwtExp, true
 		}
@@ -655,6 +662,9 @@ func (a *Auth) AccessTokenExpirationTime() (time.Time, bool) {
 	tokenStr := authAccessToken(a)
 	if tokenStr == "" {
 		return time.Time{}, false
+	}
+	if a.RejectedAccessToken != "" && a.RejectedAccessToken == tokenStr {
+		return time.Unix(0, 0), true
 	}
 	if jwtExp, ok := parseJWTExp(tokenStr); ok {
 		return jwtExp, true

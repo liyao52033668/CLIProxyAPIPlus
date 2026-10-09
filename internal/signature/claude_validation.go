@@ -176,8 +176,8 @@ func IsValidClaudeThinkingSignature(rawSignature string, opts ...ClaudeSignature
 	return err == nil
 }
 
-// HasDecodableClaudeThinkingSignature reports whether rawSignature has the
-// Claude E/R shape and its expected base64 layer(s) can be decoded.
+// HasDecodableClaudeThinkingSignature checks legacy E/R encoding or a strictly
+// validated Antigravity double-layer CAQS envelope.
 func HasDecodableClaudeThinkingSignature(rawSignature string) bool {
 	sig := stripClaudeSignaturePrefix(rawSignature)
 	if sig == "" || len(sig) > MaxClaudeThinkingSignatureLen {
@@ -185,6 +185,9 @@ func HasDecodableClaudeThinkingSignature(rawSignature string) bool {
 	}
 
 	switch sig[0] {
+	case 'Q':
+		_, err := InspectAntigravityClaudeCAQSSignature(sig)
+		return err == nil
 	case 'E':
 		decoded, err := base64.StdEncoding.DecodeString(sig)
 		return err == nil && len(decoded) > 0
@@ -201,11 +204,15 @@ func HasDecodableClaudeThinkingSignature(rawSignature string) bool {
 }
 
 // HasClaudeThinkingSignaturePrefix reports whether rawSignature has the Claude
-// E/R signature prefix after stripping an optional cache prefix.
+// E/R prefix or a structurally validated Q envelope after cache-prefix removal.
 func HasClaudeThinkingSignaturePrefix(rawSignature string) bool {
 	sig := stripClaudeSignaturePrefix(rawSignature)
 	if sig == "" {
 		return false
+	}
+	if sig[0] == 'Q' {
+		_, err := InspectAntigravityClaudeCAQSSignature(sig)
+		return err == nil
 	}
 	return sig[0] == 'E' || sig[0] == 'R'
 }
@@ -258,8 +265,8 @@ func ValidateClaudeThinkingSignatures(inputRawJSON []byte, opts ...ClaudeSignatu
 }
 
 // NormalizeClaudeThinkingSignature strips any cache prefix, validates the
-// signature, and returns the double-layer R-form expected by Antigravity bypass
-// mode.
+// signature, and returns the double-layer R or Q form expected by Antigravity.
+// Q envelopes always require structural validation, even in shallow modes.
 func NormalizeClaudeThinkingSignature(rawSignature string, opts ...ClaudeSignatureValidationOptions) (string, error) {
 	opt := claudeSignatureValidationOptions(opts)
 	sig := stripClaudeSignaturePrefix(rawSignature)
@@ -272,6 +279,11 @@ func NormalizeClaudeThinkingSignature(rawSignature string, opts ...ClaudeSignatu
 	}
 
 	switch sig[0] {
+	case 'Q':
+		if _, err := InspectAntigravityClaudeCAQSSignature(sig); err != nil {
+			return "", err
+		}
+		return sig, nil
 	case 'R':
 		if err := validateClaudeDoubleLayerSignature(sig, opt); err != nil {
 			return "", err
@@ -283,7 +295,7 @@ func NormalizeClaudeThinkingSignature(rawSignature string, opts ...ClaudeSignatu
 		}
 		return base64.StdEncoding.EncodeToString([]byte(sig)), nil
 	default:
-		return "", fmt.Errorf("invalid signature: expected 'E' or 'R' prefix, got %q", string(sig[0]))
+		return "", fmt.Errorf("invalid signature: expected 'E', 'R' or 'Q' prefix, got %q", string(sig[0]))
 	}
 }
 
@@ -596,7 +608,9 @@ type ClaudeCAISSignatureInfo struct {
 	BlockKind       string
 	ContextID       string
 
-	SignatureLen int
+	Infrastructure       *uint64
+	SignatureLen         int
+	SignatureInContainer bool
 }
 
 // IsValidClaudeCAISSignature returns whether rawSignature is a valid Claude CAIS
@@ -629,6 +643,12 @@ func InspectClaudeCAISSignature(rawSignature string) (*ClaudeCAISSignatureInfo, 
 	if err != nil {
 		return nil, fmt.Errorf("invalid Claude CAIS signature: base64 decode failed: %w", err)
 	}
+	return inspectClaudeCAISPayload(decoded, false)
+}
+
+// inspectClaudeCAISPayload shares native envelope parsing with the Q replay gate.
+// Only Q rejects duplicate submessages; native CAIS/CAQS behavior is unchanged.
+func inspectClaudeCAISPayload(decoded []byte, rejectDuplicateMessages bool) (*ClaudeCAISSignatureInfo, error) {
 	if len(decoded) == 0 {
 		return nil, fmt.Errorf("invalid Claude CAIS signature: empty after decode")
 	}
@@ -640,7 +660,8 @@ func InspectClaudeCAISSignature(rawSignature string) (*ClaudeCAISSignatureInfo, 
 
 	var container []byte
 	var containerSignatureBytes []byte
-	err = walkClaudeProtobufFields(decoded, func(num protowire.Number, typ protowire.Type, raw []byte) error {
+	var haveContainer bool
+	err := walkClaudeProtobufFields(decoded, func(num protowire.Number, typ protowire.Type, raw []byte) error {
 		switch num {
 		case 1:
 			value, errField := decodeClaudeCAISVarint(raw, typ, "CAIS top-level field 1 envelope version")
@@ -649,6 +670,10 @@ func InspectClaudeCAISSignature(rawSignature string) (*ClaudeCAISSignatureInfo, 
 			}
 			info.EnvelopeVersion = value
 		case 2:
+			if rejectDuplicateMessages && haveContainer {
+				return fmt.Errorf("invalid Antigravity CAQS signature: duplicate container")
+			}
+			haveContainer = true
 			value, errField := decodeClaudeCAISBytes(raw, typ, "CAIS top-level field 2 container")
 			if errField != nil {
 				return errField
@@ -669,9 +694,14 @@ func InspectClaudeCAISSignature(rawSignature string) (*ClaudeCAISSignatureInfo, 
 	}
 
 	var channelBlock []byte
+	var haveChannelBlock bool
 	err = walkClaudeProtobufFields(container, func(num protowire.Number, typ protowire.Type, raw []byte) error {
 		switch num {
 		case 1:
+			if rejectDuplicateMessages && haveChannelBlock {
+				return fmt.Errorf("invalid Antigravity CAQS signature: duplicate channel block")
+			}
+			haveChannelBlock = true
 			value, errField := decodeClaudeCAISBytes(raw, typ, "CAIS container field 1 channel block")
 			if errField != nil {
 				return errField
@@ -703,6 +733,12 @@ func InspectClaudeCAISSignature(rawSignature string) (*ClaudeCAISSignatureInfo, 
 			}
 			info.ChannelID = value
 			haveChannelID = true
+		case 2:
+			value, errField := decodeClaudeCAISVarint(raw, typ, "CAIS channel field 2 infrastructure")
+			if errField != nil {
+				return errField
+			}
+			info.Infrastructure = &value
 		case 3:
 			if _, errField := decodeClaudeCAISVarint(raw, typ, "CAIS channel field 3 version"); errField != nil {
 				return errField
@@ -754,6 +790,7 @@ func InspectClaudeCAISSignature(rawSignature string) (*ClaudeCAISSignatureInfo, 
 	}
 	if !haveSignatureBytes && info.EnvelopeVersion >= 4 && len(containerSignatureBytes) > 0 {
 		info.SignatureLen = len(containerSignatureBytes)
+		info.SignatureInContainer = true
 		haveSignatureBytes = true
 	}
 	switch {
