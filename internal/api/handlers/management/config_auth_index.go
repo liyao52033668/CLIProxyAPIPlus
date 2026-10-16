@@ -41,6 +41,7 @@ type openAICompatibilityWithAuthIndex struct {
 	UpdatedAt             *time.Time                               `json:"updated-at,omitempty"`
 	Prefix                string                                   `json:"prefix,omitempty"`
 	BaseURL               string                                   `json:"base-url"`
+	ModelsFetchURL        string                                   `json:"models-fetch-url,omitempty"`
 	APIKeyEntries         []openAICompatibilityAPIKeyWithAuthIndex `json:"api-key-entries,omitempty"`
 	Models                []config.OpenAICompatibilityModel        `json:"models,omitempty"`
 	Headers               map[string]string                        `json:"headers,omitempty"`
@@ -227,6 +228,7 @@ func (h *Handler) openAICompatibilityWithAuthIndex() []openAICompatibilityWithAu
 			UpdatedAt:             entry.UpdatedAt,
 			Prefix:                entry.Prefix,
 			BaseURL:               entry.BaseURL,
+			ModelsFetchURL:        entry.ModelsFetchURL,
 			Models:                entry.Models,
 			Headers:               entry.Headers,
 			SupportPromptCacheKey: entry.SupportPromptCacheKey,

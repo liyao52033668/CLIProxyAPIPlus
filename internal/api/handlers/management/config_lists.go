@@ -644,6 +644,7 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 		Prefix                *string                             `json:"prefix"`
 		Disabled              *bool                               `json:"disabled"`
 		BaseURL               *string                             `json:"base-url"`
+		ModelsFetchURL        *string                             `json:"models-fetch-url"`
 		APIKeyEntries         *[]config.OpenAICompatibilityAPIKey `json:"api-key-entries"`
 		Models                *[]config.OpenAICompatibilityModel  `json:"models"`
 		Headers               *map[string]string                  `json:"headers"`
@@ -717,6 +718,9 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	}
 	if body.Value.SupportPromptCacheKey != nil {
 		entry.SupportPromptCacheKey = *body.Value.SupportPromptCacheKey
+	}
+	if body.Value.ModelsFetchURL != nil {
+		entry.ModelsFetchURL = strings.TrimSpace(*body.Value.ModelsFetchURL)
 	}
 	if body.Value.ForceStream != nil {
 		entry.ForceStream = *body.Value.ForceStream
@@ -1427,6 +1431,7 @@ func normalizeOpenAICompatibilityEntry(entry *config.OpenAICompatibility) {
 	}
 	// Trim base-url; empty base-url indicates provider should be removed by sanitization
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+	entry.ModelsFetchURL = strings.TrimSpace(entry.ModelsFetchURL)
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
 	existing := make(map[string]struct{}, len(entry.APIKeyEntries))
 	for i := range entry.APIKeyEntries {

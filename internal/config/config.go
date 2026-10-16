@@ -978,6 +978,11 @@ type OpenAICompatibility struct {
 	// Headers optionally adds extra HTTP headers for requests sent to this provider.
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
 
+	// ModelsFetchURL optionally overrides the full URL used to discover models
+	// for this provider via the management UI. When empty, the UI derives the
+	// /models endpoint from BaseURL.
+	ModelsFetchURL string `yaml:"models-fetch-url,omitempty" json:"models-fetch-url,omitempty"`
+
 	// SupportPromptCacheKey enables derived prompt_cache_key injection for supported requests.
 	SupportPromptCacheKey bool `yaml:"support-prompt-cache-key,omitempty" json:"support-prompt-cache-key,omitempty"`
 
@@ -1463,6 +1468,7 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 		e.Name = strings.TrimSpace(e.Name)
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
+		e.ModelsFetchURL = strings.TrimSpace(e.ModelsFetchURL)
 		e.Headers = NormalizeHeaders(e.Headers)
 		if e.BaseURL == "" {
 			// Skip providers with no base-url; treated as removed
