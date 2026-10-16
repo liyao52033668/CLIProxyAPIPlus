@@ -11,6 +11,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -160,23 +161,102 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	}
 	headers.Set("User-Agent", "cli-proxy-openai-compat")
 	tmpReq := &http.Request{Header: headers}
+	e.applyOpenCodeSessionHeader(tmpReq, baseURL, req, opts)
+	anonymousLane := isOpenCodeAnonymousLane(baseURL, apiKey)
+	outBody := translated
+	if anonymousLane {
+		// The anonymous free tier only accepts streaming bodies; the SSE
+		// response is aggregated back into a non-streaming payload below.
+		outBody = helps.OpenCodePrepareAnonymousBody(translated)
+	}
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(tmpReq, attrs)
+	if anonymousLane {
+		tmpReq.Header.Set("Accept", "text/event-stream")
+		tmpReq.Header.Set("Cache-Control", "no-cache")
+	}
 	headers = tmpReq.Header
 
-	_, body, respHeaders, errDo := helps.DoJSON(ctx, e.cfg, helps.UpstreamRequest{
-		Provider: e.Identifier(),
-		Auth:     auth,
-		Method:   http.MethodPost,
-		URL:      url,
-		Headers:  headers,
-		Body:     translated,
-	})
-	if errDo != nil {
-		return resp, toStatusErr(errDo)
+	var body []byte
+	var respHeaders http.Header
+	if anonymousLane {
+		httpResp, errDo := helps.DoStream(ctx, e.cfg, helps.UpstreamRequest{
+			Provider: e.Identifier(),
+			Auth:     auth,
+			Method:   http.MethodPost,
+			URL:      url,
+			Headers:  headers,
+			Body:     outBody,
+		})
+		if errDo != nil {
+			return resp, toStatusErr(errDo)
+		}
+		defer helps.CloseResponseBody(e.Identifier(), httpResp.Body)
+		respHeaders = httpResp.Header.Clone()
+
+		aggregator := newOpenAIChatStreamAggregator(baseModel)
+		scanner := bufio.NewScanner(httpResp.Body)
+		scanner.Buffer(make([]byte, 0, 64*1024), streamScannerBuffer)
+		for scanner.Scan() {
+			line := scanner.Bytes()
+			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+			if detail, ok := helps.ParseOpenAIStreamUsage(line); ok {
+				reporter.Publish(ctx, detail)
+			}
+			trimmedLine := bytes.TrimSpace(line)
+			if len(trimmedLine) == 0 {
+				continue
+			}
+			if !bytes.HasPrefix(trimmedLine, []byte("data:")) {
+				if bytes.HasPrefix(trimmedLine, []byte("{")) || bytes.HasPrefix(trimmedLine, []byte("[")) {
+					streamErr := statusErr{code: http.StatusBadGateway, msg: string(trimmedLine)}
+					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
+					reporter.PublishFailure(ctx, streamErr)
+					return resp, streamErr
+				}
+				continue
+			}
+			data := bytes.TrimSpace(trimmedLine[len("data:"):])
+			if bytes.Equal(data, []byte("[DONE]")) {
+				break
+			}
+			if errAdd := aggregator.Add(data); errAdd != nil {
+				helps.RecordAPIResponseError(ctx, e.cfg, errAdd)
+				reporter.PublishFailure(ctx, errAdd)
+				return resp, errAdd
+			}
+		}
+		if errScan := scanner.Err(); errScan != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+			reporter.PublishFailure(ctx, errScan)
+			return resp, errScan
+		}
+		body, err = aggregator.Build()
+		if err != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, err)
+			reporter.PublishFailure(ctx, err)
+			return resp, err
+		}
+	} else {
+		_, responseBody, responseHeaders, errDo := helps.DoJSON(ctx, e.cfg, helps.UpstreamRequest{
+			Provider: e.Identifier(),
+			Auth:     auth,
+			Method:   http.MethodPost,
+			URL:      url,
+			Headers:  headers,
+			Body:     outBody,
+		})
+		if errDo != nil {
+			return resp, toStatusErr(errDo)
+		}
+		body = responseBody
+		respHeaders = responseHeaders
+	}
+	if err != nil {
+		return resp, err
 	}
 	body = normalizeOpenAICompatThinkingResponse(body)
 	if opts.Alt != "responses/compact" {
@@ -236,6 +316,11 @@ func (e *OpenAICompatExecutor) executeChatCompletionsViaForcedStream(ctx context
 	}
 	headers.Set("User-Agent", "cli-proxy-openai-compat")
 	tmpReq := &http.Request{Header: headers}
+	e.applyOpenCodeSessionHeader(tmpReq, baseURL, req, opts)
+	outBody := translated
+	if isOpenCodeAnonymousLane(baseURL, apiKey) {
+		outBody = helps.OpenCodePrepareAnonymousBody(translated)
+	}
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
@@ -251,7 +336,7 @@ func (e *OpenAICompatExecutor) executeChatCompletionsViaForcedStream(ctx context
 		Method:   http.MethodPost,
 		URL:      url,
 		Headers:  headers,
-		Body:     translated,
+		Body:     outBody,
 	})
 	if errDo != nil {
 		return resp, toStatusErr(errDo)
@@ -346,6 +431,7 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
 	}
 	headers.Set("User-Agent", "cli-proxy-openai-compat")
 	tmpReq := &http.Request{Header: headers}
+	e.applyOpenCodeSessionHeader(tmpReq, baseURL, req, opts)
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
@@ -437,6 +523,11 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	}
 	headers.Set("User-Agent", "cli-proxy-openai-compat")
 	tmpReq := &http.Request{Header: headers}
+	e.applyOpenCodeSessionHeader(tmpReq, baseURL, req, opts)
+	outBody := translated
+	if isOpenCodeAnonymousLane(baseURL, apiKey) {
+		outBody = helps.OpenCodePrepareAnonymousBody(translated)
+	}
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
@@ -452,7 +543,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		Method:   http.MethodPost,
 		URL:      url,
 		Headers:  headers,
-		Body:     translated,
+		Body:     outBody,
 	})
 	if errDo != nil {
 		return nil, toStatusErr(errDo)
@@ -621,6 +712,7 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 	}
 	headers.Set("User-Agent", "cli-proxy-openai-compat")
 	tmpReq := &http.Request{Header: headers}
+	e.applyOpenCodeSessionHeader(tmpReq, baseURL, req, opts)
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
@@ -1339,6 +1431,57 @@ func (e *OpenAICompatExecutor) applyPromptCacheKey(ctx context.Context, auth *cl
 	}, "\x00")
 	promptCacheKey := uuid.NewSHA1(uuid.NameSpaceOID, []byte(identity)).String()
 	return helps.SetStringIfDifferent(translated, "prompt_cache_key", promptCacheKey), nil
+}
+
+// applyOpenCodeSessionHeader injects the header set the official OpenCode client
+// sends to its inference gateway. OpenCode's free tier rejects requests that do
+// not carry it, so it is enabled automatically whenever the configured base URL
+// points at an opencode host. The session ID is re-encoded into the official
+// descending Identifier layout so all input protocols map to the same stable
+// per-session identifier.
+func (e *OpenAICompatExecutor) applyOpenCodeSessionHeader(httpReq *http.Request, baseURL string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) {
+	if !isOpenCodeBaseURL(baseURL) {
+		return
+	}
+	identityKey := helps.ProviderSessionUUID(e.provider, opts.Metadata, req.Metadata)
+	if identityKey == "" {
+		// Plain HTTP chains (e.g. /v1/messages) carry no execution session
+		// metadata; derive a stable identity from the request itself. The
+		// affinity key is prefixed (header:/claude:/msg:), so re-encode it into
+		// the ses_ layout instead of echoing the raw client value upstream.
+		identityKey = cliproxyauth.ExtractSessionID(opts.Headers, req.Payload, opts.Metadata)
+	}
+	if identityKey == "" {
+		return
+	}
+	sessionID := helps.OpenCodeCanonicalSessionID(identityKey)
+	httpReq.Header.Set("x-opencode-session-id", sessionID)
+	httpReq.Header.Set("x-session-affinity", sessionID)
+	httpReq.Header.Set("X-Session-Id", sessionID)
+	httpReq.Header.Set("x-opencode-session", sessionID)
+	httpReq.Header.Set("x-opencode-project", helps.OpenCodeProjectID(identityKey))
+	httpReq.Header.Set("x-opencode-client", "cli")
+	httpReq.Header.Set("User-Agent", helps.OpenCodeUserAgent())
+}
+
+// isOpenCodeBaseURL reports whether the provider base URL points at OpenCode's
+// official gateway. Only the host is inspected, so a path mentioning opencode
+// on another host does not trigger the header.
+func isOpenCodeBaseURL(baseURL string) bool {
+	parsed, errParse := url.Parse(strings.TrimSpace(baseURL))
+	if errParse != nil || parsed.Host == "" {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	return host == "opencode.ai" || host == "www.opencode.ai" || strings.HasSuffix(host, ".opencode.ai")
+}
+
+// isOpenCodeAnonymousLane reports whether a request rides OpenCode's keyless
+// free-tier lane: an opencode base URL with the literal "public" credential.
+// Paid API keys use the standard upstream contract, so their bodies are left
+// untouched and only the session headers are applied.
+func isOpenCodeAnonymousLane(baseURL, apiKey string) bool {
+	return isOpenCodeBaseURL(baseURL) && strings.TrimSpace(apiKey) == "public"
 }
 
 func (e *OpenAICompatExecutor) resolveCredentials(auth *cliproxyauth.Auth) (baseURL, apiKey string) {
