@@ -421,3 +421,182 @@ func TestEndpointAliases(t *testing.T) {
 		t.Errorf("unexpected number of aliases: got %d, want %d", len(endpointAliases), len(expectedAliases))
 	}
 }
+
+func TestMapModelToKiro_MapsClaudeOpus47Variants(t *testing.T) {
+	executor := &KiroExecutor{}
+	tests := []struct {
+		name     string
+		model    string
+		expected string
+	}{
+		{
+			name:     "kiro alias",
+			model:    "kiro-claude-opus-4-7",
+			expected: "claude-opus-4.7",
+		},
+		{
+			name:     "kiro agentic alias",
+			model:    "kiro-claude-opus-4-7-agentic",
+			expected: "claude-opus-4.7",
+		},
+		{
+			name:     "native hyphen alias",
+			model:    "claude-opus-4-7",
+			expected: "claude-opus-4.7",
+		},
+		{
+			name:     "native dotted alias",
+			model:    "claude-opus-4.7",
+			expected: "claude-opus-4.7",
+		},
+		{
+			name:     "native agentic alias",
+			model:    "claude-opus-4.7-agentic",
+			expected: "claude-opus-4.7",
+		},
+		{
+			name:     "dated alias collapses to canonical version",
+			model:    "claude-sonnet-4-5-20250929",
+			expected: "claude-sonnet-4.5",
+		},
+		{
+			name:     "amazonq prefix",
+			model:    "amazonq-claude-sonnet-4-5",
+			expected: "claude-sonnet-4.5",
+		},
+		{
+			name:     "claude opus 4.5 hyphenated alias",
+			model:    "kiro-claude-opus-4-5",
+			expected: "claude-opus-4.5",
+		},
+		{
+			name:     "claude opus 4.8 hyphenated alias",
+			model:    "kiro-claude-opus-4-8",
+			expected: "claude-opus-4.8",
+		},
+		{
+			name:     "claude haiku 4.5 hyphenated alias",
+			model:    "kiro-claude-haiku-4-5",
+			expected: "claude-haiku-4.5",
+		},
+		{
+			name:     "claude sonnet 4.6 hyphenated alias",
+			model:    "kiro-claude-sonnet-4-6",
+			expected: "claude-sonnet-4.6",
+		},
+		{
+			name:     "minimax m2.1 hyphenated alias",
+			model:    "kiro-minimax-m2-1",
+			expected: "minimax-m2.1",
+		},
+		{
+			name:     "claude opus 5.5 hyphenated alias",
+			model:    "kiro-claude-opus-5-5",
+			expected: "claude-opus-5.5",
+		},
+		{
+			name:     "claude sonnet 5.5 hyphenated alias",
+			model:    "kiro-claude-sonnet-5-5",
+			expected: "claude-sonnet-5.5",
+		},
+		{
+			name:     "claude opus 5.5 canonical ID",
+			model:    "claude-opus-5.5",
+			expected: "claude-opus-5.5",
+		},
+		{
+			name:     "claude sonnet 5.5 canonical ID",
+			model:    "claude-sonnet-5.5",
+			expected: "claude-sonnet-5.5",
+		},
+		{
+			name:     "non-Claude model passes through",
+			model:    "kiro-glm-5",
+			expected: "glm-5",
+		},
+		{
+			name:     "non-Claude minimax versioned",
+			model:    "kiro-minimax-m2-5",
+			expected: "minimax-m2.5",
+		},
+		{
+			name:     "gpt version with trailing codename (terra)",
+			model:    "kiro-gpt-5-6-terra",
+			expected: "gpt-5.6-terra",
+		},
+		{
+			name:     "canonical gpt version remains unchanged",
+			model:    "gpt-5.6-terra",
+			expected: "gpt-5.6-terra",
+		},
+		{
+			name:     "gpt version with trailing codename (sol)",
+			model:    "kiro-gpt-5-6-sol",
+			expected: "gpt-5.6-sol",
+		},
+		{
+			name:     "gpt version with trailing codename (luna)",
+			model:    "kiro-gpt-5-6-luna",
+			expected: "gpt-5.6-luna",
+		},
+		{
+			name:     "kimi version with trailing codename",
+			model:    "kiro-kimi-k2-7-code",
+			expected: "kimi-k2.7-code",
+		},
+		{
+			name:     "canonical kimi version remains unchanged",
+			model:    "kimi-k2.7-code",
+			expected: "kimi-k2.7-code",
+		},
+		{
+			name:     "deepseek versioned",
+			model:    "kiro-deepseek-3-2",
+			expected: "deepseek-3.2",
+		},
+		{
+			name:     "canonical deepseek version remains unchanged",
+			model:    "deepseek-3.2",
+			expected: "deepseek-3.2",
+		},
+		{
+			name:     "grok version keeps trailing build segment",
+			model:    "kiro-grok-4-20-0309-reasoning",
+			expected: "grok-4.20-0309-reasoning",
+		},
+		{
+			name:     "canonical grok version remains unchanged",
+			model:    "grok-4.20-0309-reasoning",
+			expected: "grok-4.20-0309-reasoning",
+		},
+		{
+			name:     "single digit segment left alone",
+			model:    "kiro-claude-sonnet-5",
+			expected: "claude-sonnet-5",
+		},
+		{
+			name:     "identifier without trailing version unchanged",
+			model:    "kiro-qwen3-coder-next",
+			expected: "qwen3-coder-next",
+		},
+		{
+			name:     "unknown model passes through unchanged",
+			model:    "kiro-future-model-9",
+			expected: "future-model-9",
+		},
+		{
+			name:     "unknown date-like numeric ID passes through unchanged",
+			model:    "kiro-model-2024-05-preview",
+			expected: "model-2024-05-preview",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := executor.mapModelToKiro(tt.model)
+			if got != tt.expected {
+				t.Fatalf("mapModelToKiro(%q) = %q, want %q", tt.model, got, tt.expected)
+			}
+		})
+	}
+}

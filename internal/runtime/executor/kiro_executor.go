@@ -1287,106 +1287,108 @@ func getEffectiveProfileArnWithWarning(auth *cliproxyauth.Auth, profileArn strin
 	return profileArn
 }
 
-// mapModelToKiro maps external model names to Kiro model IDs.
-// Supports both Kiro and Amazon Q prefixes since they use the same API.
-// Agentic variants (-agentic suffix) map to the same backend model IDs.
+// mapModelToKiro maps external model names to Kiro backend model IDs.
+//
+// Kiro's API expects:
+//
+//  1. Trim surrounding whitespace and lowercase.
+//  2. Strip the leading "kiro-" or "amazonq-" prefix if present.
+//  3. Strip the trailing "-agentic" suffix (agentic variants share the
+//     underlying backend ID; the agentic behavior is applied separately
+//     via determineAgenticMode).
+//  4. Collapse dated aliases (e.g. "claude-sonnet-4-5-20250929") to the
+//     canonical version.
+//  5. Normalize version separators for known aliases derived from canonical
+//     model IDs — e.g. "claude-sonnet-4-5" → "claude-sonnet-4.5" and
+//     "gpt-5-6-terra" → "gpt-5.6-terra".
+//
+// Unknown model names are returned as-is rather than silently remapped
+// to claude-sonnet-4.5 — passing the client's chosen model through lets
+// Kiro itself decide whether the ID is valid.
 func (e *KiroExecutor) mapModelToKiro(model string) string {
-	modelMap := map[string]string{
-		// Amazon Q format (amazonq- prefix) - same API as Kiro
-		"amazonq-auto":                       "auto",
-		"amazonq-claude-opus-4-6":            "claude-opus-4.6",
-		"amazonq-claude-sonnet-4-6":          "claude-sonnet-4.6",
-		"amazonq-claude-opus-4-5":            "claude-opus-4.5",
-		"amazonq-claude-sonnet-4-5":          "claude-sonnet-4.5",
-		"amazonq-claude-sonnet-4-5-20250929": "claude-sonnet-4.5",
-		"amazonq-claude-sonnet-4":            "claude-sonnet-4",
-		"amazonq-claude-sonnet-4-20250514":   "claude-sonnet-4",
-		"amazonq-claude-haiku-4-5":           "claude-haiku-4.5",
-		// Kiro format (kiro- prefix) - valid model names that should be preserved
-		"kiro-claude-opus-4-6":            "claude-opus-4.6",
-		"kiro-claude-sonnet-4-6":          "claude-sonnet-4.6",
-		"kiro-claude-opus-4-5":            "claude-opus-4.5",
-		"kiro-claude-sonnet-4-5":          "claude-sonnet-4.5",
-		"kiro-claude-sonnet-4-5-20250929": "claude-sonnet-4.5",
-		"kiro-claude-sonnet-4":            "claude-sonnet-4",
-		"kiro-claude-sonnet-4-20250514":   "claude-sonnet-4",
-		"kiro-claude-haiku-4-5":           "claude-haiku-4.5",
-		"kiro-auto":                       "auto",
-		// Native format (no prefix) - used by Kiro IDE directly
-		"claude-opus-4-6":            "claude-opus-4.6",
-		"claude-opus-4.6":            "claude-opus-4.6",
-		"claude-sonnet-4-6":          "claude-sonnet-4.6",
-		"claude-sonnet-4.6":          "claude-sonnet-4.6",
-		"claude-opus-4-5":            "claude-opus-4.5",
-		"claude-opus-4.5":            "claude-opus-4.5",
-		"claude-haiku-4-5":           "claude-haiku-4.5",
-		"claude-haiku-4.5":           "claude-haiku-4.5",
-		"claude-sonnet-4-5":          "claude-sonnet-4.5",
-		"claude-sonnet-4-5-20250929": "claude-sonnet-4.5",
-		"claude-sonnet-4.5":          "claude-sonnet-4.5",
-		"claude-sonnet-4":            "claude-sonnet-4",
-		"claude-sonnet-4-20250514":   "claude-sonnet-4",
-		"auto":                       "auto",
-		// Agentic variants (same backend model IDs, but with special system prompt)
-		"claude-opus-4.6-agentic":        "claude-opus-4.6",
-		"claude-sonnet-4.6-agentic":      "claude-sonnet-4.6",
-		"claude-opus-4.5-agentic":        "claude-opus-4.5",
-		"claude-sonnet-4.5-agentic":      "claude-sonnet-4.5",
-		"claude-sonnet-4-agentic":        "claude-sonnet-4",
-		"claude-haiku-4.5-agentic":       "claude-haiku-4.5",
-		"kiro-claude-opus-4-6-agentic":   "claude-opus-4.6",
-		"kiro-claude-sonnet-4-6-agentic": "claude-sonnet-4.6",
-		"kiro-claude-opus-4-5-agentic":   "claude-opus-4.5",
-		"kiro-claude-sonnet-4-5-agentic": "claude-sonnet-4.5",
-		"kiro-claude-sonnet-4-agentic":   "claude-sonnet-4",
-		"kiro-claude-haiku-4-5-agentic":  "claude-haiku-4.5",
+	original := model
+	m := strings.TrimSpace(model)
+	if m == "" {
+		return ""
 	}
-	if kiroID, ok := modelMap[model]; ok {
-		return kiroID
-	}
+	m = strings.ToLower(m)
 
-	// Smart fallback: try to infer model type from name patterns
-	modelLower := strings.ToLower(model)
-
-	// Check for Haiku variants
-	if strings.Contains(modelLower, "haiku") {
-		log.Debugf("kiro: unknown Haiku model '%s', mapping to claude-haiku-4.5", model)
-		return "claude-haiku-4.5"
-	}
-
-	// Check for Sonnet variants
-	if strings.Contains(modelLower, "sonnet") {
-		// Check for specific version patterns
-		if strings.Contains(modelLower, "3-7") || strings.Contains(modelLower, "3.7") {
-			log.Debugf("kiro: unknown Sonnet 3.7 model '%s', mapping to claude-3-7-sonnet-20250219", model)
-			return "claude-3-7-sonnet-20250219"
+	// 1. Strip known vendor prefixes.
+	for _, prefix := range []string{"kiro-", "amazonq-"} {
+		if strings.HasPrefix(m, prefix) {
+			m = strings.TrimPrefix(m, prefix)
+			break
 		}
-		if strings.Contains(modelLower, "4-6") || strings.Contains(modelLower, "4.6") {
-			log.Debugf("kiro: unknown Sonnet 4.6 model '%s', mapping to claude-sonnet-4.6", model)
-			return "claude-sonnet-4.6"
-		}
-		if strings.Contains(modelLower, "4-5") || strings.Contains(modelLower, "4.5") {
-			log.Debugf("kiro: unknown Sonnet 4.5 model '%s', mapping to claude-sonnet-4.5", model)
-			return "claude-sonnet-4.5"
-		}
-		// Default to Sonnet 4
-		log.Debugf("kiro: unknown Sonnet model '%s', mapping to claude-sonnet-4", model)
-		return "claude-sonnet-4"
 	}
 
-	// Check for Opus variants
-	if strings.Contains(modelLower, "opus") {
-		if strings.Contains(modelLower, "4-6") || strings.Contains(modelLower, "4.6") {
-			log.Debugf("kiro: unknown Opus 4.6 model '%s', mapping to claude-opus-4.6", model)
-			return "claude-opus-4.6"
-		}
-		log.Debugf("kiro: unknown Opus model '%s', mapping to claude-opus-4.5", model)
-		return "claude-opus-4.5"
-	}
+	// 2. Strip agentic suffix — agentic variants share the backend ID.
+	m = strings.TrimSuffix(m, "-agentic")
 
-	// Final fallback to Sonnet 4.5 (most commonly used model)
-	log.Warnf("kiro: unknown model '%s', falling back to claude-sonnet-4.5", model)
-	return "claude-sonnet-4.5"
+	// 3. Collapse dated aliases (e.g. claude-sonnet-4-5-20250929) to the
+	//    canonical version. Only handles the common 8-digit date suffix.
+	m = trimKiroDateSuffix(m)
+
+	// 4. Normalize only known hyphenated aliases. Broad digit-based rewriting
+	//    would corrupt canonical or unrelated numeric IDs.
+	m = normalizeKiroVersion(m)
+
+	if m != original {
+		log.Debugf("kiro: mapped model '%s' to backend ID '%s'", original, m)
+	}
+	return m
+}
+
+// trimKiroDateSuffix removes a trailing "-YYYYMMDD" (8 digits) if present.
+// Used to collapse dated model IDs like "claude-sonnet-4-5-20250929" to
+// "claude-sonnet-4-5" before further normalization.
+func trimKiroDateSuffix(s string) string {
+	if len(s) < 9 || s[len(s)-9] != '-' {
+		return s
+	}
+	for i := len(s) - 8; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return s
+		}
+	}
+	return s[:len(s)-9]
+}
+
+var kiroVersionAliases = [...]struct {
+	hyphenated string
+	canonical  string
+}{
+	// Claude families
+	{"claude-sonnet-4-5", "claude-sonnet-4.5"},
+	{"claude-sonnet-4-6", "claude-sonnet-4.6"},
+	{"claude-sonnet-5-5", "claude-sonnet-5.5"},
+	{"claude-opus-4-5", "claude-opus-4.5"},
+	{"claude-opus-4-7", "claude-opus-4.7"},
+	{"claude-opus-4-8", "claude-opus-4.8"},
+	{"claude-opus-5-5", "claude-opus-5.5"},
+	{"claude-haiku-4-5", "claude-haiku-4.5"},
+	// Other Kiro backend families
+	{"minimax-m2-1", "minimax-m2.1"},
+	{"minimax-m2-5", "minimax-m2.5"},
+	{"gpt-5-6", "gpt-5.6"},
+	{"kimi-k2-7", "kimi-k2.7"},
+	{"deepseek-3-2", "deepseek-3.2"},
+	{"grok-4-20", "grok-4.20"},
+}
+
+// normalizeKiroVersion reverses the hyphenated version aliases generated for
+// known canonical Kiro model families. Matching the full alias prefix keeps
+// suffixes such as "-terra" and "-0309-reasoning", while canonical dotted IDs
+// and unknown numeric IDs pass through unchanged.
+func normalizeKiroVersion(s string) string {
+	for _, alias := range kiroVersionAliases {
+		if s == alias.hyphenated {
+			return alias.canonical
+		}
+		if strings.HasPrefix(s, alias.hyphenated+"-") {
+			return alias.canonical + s[len(alias.hyphenated):]
+		}
+	}
+	return s
 }
 
 func (e *KiroExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
