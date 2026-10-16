@@ -28,6 +28,9 @@ type claudeToResponsesState struct {
 	FuncNames   map[int]string // index -> function name
 	FuncCallIDs map[int]string // index -> call id
 	FuncCustom  map[int]bool   // index -> freeform custom tool
+	// FuncItemAdded marks tool_search_call items whose added event was already
+	// emitted and that carry no argument deltas.
+	FuncItemAdded map[int]bool
 	// tool metadata cached from the request (computed once per stream)
 	CustomToolNames map[string]struct{}
 	// message text aggregation
@@ -115,6 +118,22 @@ func pickRequestJSON(originalRequestRawJSON, requestRawJSON []byte) []byte {
 func applyResponsesFunctionCallNamespaceFields(item []byte, requestRawJSON []byte, qualifiedName string, itemPath string) []byte {
 	name, namespace := splitResponsesQualifiedFunctionCallFromRequest(requestRawJSON, qualifiedName)
 	return translatorcommon.SetResponsesToolCallIdentity(item, name, namespace, itemPath)
+}
+
+// isToolSearchToolName reports whether a Claude tool name maps to the client
+// tool_search declaration in the request.
+func isToolSearchToolName(requestRawJSON []byte, name string) bool {
+	if !ClientToolSearchEnabled() {
+		return false
+	}
+	root := gjson.ParseBytes(requestRawJSON)
+	winners := responsesToolWinners(root, ClientToolSearchEnabled())
+	descriptor, ok := winners[responsesToolSearchType]
+	if !ok || !descriptor.clientSearch {
+		return false
+	}
+	claudeName := buildClaudeToolNames(root, ClientToolSearchEnabled()).claudeName(responsesToolSearchType)
+	return name == claudeName
 }
 
 func emitEvent(event string, payload []byte) []byte {
@@ -251,6 +270,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 				st.FuncCustom = make(map[int]bool)
 			}
 			st.FuncCustom[idx] = isCustomTool
+			isToolSearch := isToolSearchToolName(requestForToolMetadata, name)
 			var item []byte
 			if isCustomTool {
 				item = []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"custom_tool_call","status":"in_progress","input":"","call_id":"","name":""}}`)
@@ -275,6 +295,14 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			// record function metadata for aggregation
 			st.FuncCallIDs[idx] = st.CurrentFCID
 			st.FuncNames[idx] = name
+			if isToolSearch {
+				// Replace the ordinary function_call added event with the
+				// tool_search_call item; Responses has no argument delta
+				// events for it, and Codex dispatches from output_item.done.
+				out = out[:len(out)-1]
+				st.FuncItemAdded[idx] = true
+				out = append(out, toolSearchCallEvent("response.output_item.added", nextSeq(), idx, buildResponsesToolSearchCallItem(st.CurrentFCID, "in_progress", "")))
+			}
 		} else if typ == "server_tool_use" {
 			if name := cb.Get("name").String(); name != claudeWebSearchToolName {
 				// Reachability guard: only web_search can be enabled on Claude by
@@ -349,7 +377,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 					st.FuncArgsBuf[idx] = &strings.Builder{}
 				}
 				st.FuncArgsBuf[idx].WriteString(pj.String())
-				if st.FuncCustom[idx] {
+				if st.FuncCustom[idx] || st.FuncItemAdded[idx] {
 					return [][]byte{}
 				}
 				msg := []byte(`{"type":"response.function_call_arguments.delta","sequence_number":0,"item_id":"","output_index":0,"delta":""}`)
@@ -407,7 +435,15 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 					args = buf.String()
 				}
 			}
-			if st.FuncCustom[idx] {
+			if st.FuncItemAdded[idx] {
+				// The tool_search_call item replaces the function_call pair.
+				status := "completed"
+				if stop := root.Get("delta.stop_reason").String(); stop == "max_tokens" || stop == "refusal" {
+					status = "incomplete"
+				}
+				out = append(out, toolSearchCallEvent("response.output_item.done", nextSeq(), idx, buildResponsesToolSearchCallItem(st.CurrentFCID, toolSearchCallStatus(status, args), args)))
+				st.InFuncBlock = false
+			} else if st.FuncCustom[idx] {
 				input := unwrapCustomToolInput(args)
 				inputDone := []byte(`{"type":"response.custom_tool_call_input.done","sequence_number":0,"item_id":"","output_index":0,"input":""}`)
 				inputDone, _ = sjson.SetBytes(inputDone, "sequence_number", nextSeq())

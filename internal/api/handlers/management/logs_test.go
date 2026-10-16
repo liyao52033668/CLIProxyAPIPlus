@@ -1,10 +1,12 @@
 package management
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -198,5 +200,133 @@ func TestGetRequestLogByID_SelectsLatestCrossYearBoundaryOnModTimeTie(t *testing
 
 	if body := rec.Body.String(); body != "2027 content" {
 		t.Fatalf("body = %q, want %q (2027-01-01 must beat 2026-12-31 on mod time tie)", body, "2027 content")
+	}
+}
+
+func TestGetLogs_BeforeFiltersByTimestamp(t *testing.T) {
+	dir := t.TempDir()
+	h := newLogsTestHandler(dir, true)
+
+	content := "" +
+		"2026-10-16 10:00:01 early line\n" +
+		"2026-10-16 10:00:02 middle line\n" +
+		"2026-10-16 10:00:03 late line\n"
+	if errWrite := os.WriteFile(filepath.Join(dir, "main.log"), []byte(content), 0o644); errWrite != nil {
+		t.Fatalf("write main.log: %v", errWrite)
+	}
+
+	before := time.Date(2026, 10, 16, 10, 0, 2, 0, time.Local).Unix()
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/logs?before="+strconv.FormatInt(before, 10), nil)
+
+	h.GetLogs(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rec.Code, rec.Body.String())
+	}
+
+	var body struct {
+		Lines []string `json:"lines"`
+	}
+	if errUnmarshal := json.Unmarshal(rec.Body.Bytes(), &body); errUnmarshal != nil {
+		t.Fatalf("unmarshal response: %v", errUnmarshal)
+	}
+
+	if len(body.Lines) != 2 {
+		t.Fatalf("lines = %v, want 2 lines before cutoff", body.Lines)
+	}
+	if body.Lines[0] != "2026-10-16 10:00:01 early line" || body.Lines[1] != "2026-10-16 10:00:02 middle line" {
+		t.Fatalf("lines = %v, want early+middle lines", body.Lines)
+	}
+}
+
+func TestGetLogs_AfterAndBeforeWindow(t *testing.T) {
+	dir := t.TempDir()
+	h := newLogsTestHandler(dir, true)
+
+	content := "" +
+		"2026-10-16 10:00:01 early line\n" +
+		"2026-10-16 10:00:02 in window\n" +
+		"2026-10-16 10:00:03 in window too\n" +
+		"2026-10-16 10:00:04 late line\n"
+	if errWrite := os.WriteFile(filepath.Join(dir, "main.log"), []byte(content), 0o644); errWrite != nil {
+		t.Fatalf("write main.log: %v", errWrite)
+	}
+
+	after := time.Date(2026, 10, 16, 10, 0, 1, 0, time.Local).Unix()
+	before := time.Date(2026, 10, 16, 10, 0, 3, 0, time.Local).Unix()
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet,
+		"/v0/management/logs?after="+strconv.FormatInt(after, 10)+"&before="+strconv.FormatInt(before, 10), nil)
+
+	h.GetLogs(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rec.Code, rec.Body.String())
+	}
+
+	var body struct {
+		Lines []string `json:"lines"`
+	}
+	if errUnmarshal := json.Unmarshal(rec.Body.Bytes(), &body); errUnmarshal != nil {
+		t.Fatalf("unmarshal response: %v", errUnmarshal)
+	}
+
+	if len(body.Lines) != 2 {
+		t.Fatalf("lines = %v, want 2 lines inside window", body.Lines)
+	}
+	if body.Lines[0] != "2026-10-16 10:00:02 in window" || body.Lines[1] != "2026-10-16 10:00:03 in window too" {
+		t.Fatalf("lines = %v, want window lines only", body.Lines)
+	}
+}
+
+func TestGetLogs_BeforeKeepsContinuationLines(t *testing.T) {
+	dir := t.TempDir()
+	h := newLogsTestHandler(dir, true)
+
+	// 无时间戳的续行跟随前一行的时间戳归属：before 截止点之后的续行不能泄漏
+	content := "" +
+		"2026-10-16 10:00:01 block one\n" +
+		"continuation of block one\n" +
+		"2026-10-16 10:00:03 block two\n" +
+		"continuation of block two\n"
+	if errWrite := os.WriteFile(filepath.Join(dir, "main.log"), []byte(content), 0o644); errWrite != nil {
+		t.Fatalf("write main.log: %v", errWrite)
+	}
+
+	before := time.Date(2026, 10, 16, 10, 0, 2, 0, time.Local).Unix()
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/logs?before="+strconv.FormatInt(before, 10), nil)
+
+	h.GetLogs(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rec.Code, rec.Body.String())
+	}
+
+	var body struct {
+		Lines []string `json:"lines"`
+	}
+	if errUnmarshal := json.Unmarshal(rec.Body.Bytes(), &body); errUnmarshal != nil {
+		t.Fatalf("unmarshal response: %v", errUnmarshal)
+	}
+
+	want := []string{
+		"2026-10-16 10:00:01 block one",
+		"continuation of block one",
+	}
+	if len(body.Lines) != len(want) {
+		t.Fatalf("lines = %v, want %v", body.Lines, want)
+	}
+	for i, line := range want {
+		if body.Lines[i] != line {
+			t.Fatalf("lines[%d] = %q, want %q", i, body.Lines[i], line)
+		}
 	}
 }

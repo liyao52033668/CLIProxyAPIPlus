@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"syscall"
@@ -41,6 +42,10 @@ type Config struct {
 
 	// GitHubToken is the global token for GitHub requests, taking precedence over GITHUB_TOKEN.
 	GitHubToken string `yaml:"github-token" json:"-"`
+
+	// MaxRequestBodyBytes limits the size (in bytes) of incoming HTTP request bodies.
+	// Values <= 0 disable the limit (default).
+	MaxRequestBodyBytes int64 `yaml:"max-request-body-bytes" json:"max-request-body-bytes"`
 
 	// TrustedProxies lists the IPs or CIDRs allowed to provide forwarded client IP headers.
 	// The server applies this list at startup; changing it requires a restart.
@@ -255,6 +260,25 @@ type ClaudeConfig struct {
 	// ModelLevelCooling scopes Claude quota cooldowns to the requested model
 	// rather than cooling down the entire credential across all sibling models.
 	ModelLevelCooling bool `yaml:"model-level-cooling" json:"model-level-cooling"`
+	// ToolSearch enables Codex client tool_search on Claude Responses routes:
+	// Anthropic native tool search where the credential supports it, a pre-tool_search
+	// translation elsewhere, and per-credential search advertising in the Codex
+	// catalog. Default false keeps the translation that predates tool_search support.
+	ToolSearch bool `yaml:"tool-search" json:"tool-search"`
+}
+
+// TLSHandshakeTimeout returns the configured upstream TLS establishment
+// bound from the root SDK request settings. A non-positive configured value
+// disables the bound and yields 0.
+func (c *SDKConfig) TLSHandshakeTimeout() time.Duration {
+	if c == nil || c.TLSHandshakeTimeoutSeconds <= 0 {
+		return 0
+	}
+	const maxTLSHandshakeTimeoutSeconds = math.MaxInt64 / int64(time.Second)
+	if int64(c.TLSHandshakeTimeoutSeconds) > maxTLSHandshakeTimeoutSeconds {
+		return time.Duration(math.MaxInt64)
+	}
+	return time.Duration(c.TLSHandshakeTimeoutSeconds) * time.Second
 }
 
 // AntigravityConfig configures provider-wide Antigravity request behavior.

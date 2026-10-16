@@ -42,16 +42,16 @@ func TestAntigravityLatestVersionUsesCurrentHubFallback(t *testing.T) {
 	defer restore()
 
 	version := AntigravityLatestVersion()
-	if version != "2.2.1" {
-		t.Fatalf("AntigravityLatestVersion() = %q, want %q", version, "2.2.1")
+	if version != "2.23.0" {
+		t.Fatalf("AntigravityLatestVersion() = %q, want %q", version, "2.23.0")
 	}
 }
 
 func TestAntigravityUserAgentUsesHubFamily(t *testing.T) {
-	restore := overrideAntigravityVersionCacheForTest(t, "2.2.1", time.Now().Add(time.Hour))
+	restore := overrideAntigravityVersionCacheForTest(t, "2.23.0", time.Now().Add(time.Hour))
 	defer restore()
 
-	want := "antigravity/hub/2.2.1 darwin/arm64"
+	want := "antigravity/hub/2.23.0 darwin/arm64"
 	if got := AntigravityUserAgent(); got != want {
 		t.Fatalf("AntigravityUserAgent() = %q, want %q", got, want)
 	}

@@ -438,3 +438,64 @@ func TestFilterOrphanedToolResults_RemovesHistoryAndCurrentOrphans(t *testing.T)
 		t.Fatalf("expected current tool results to keep only keep-1, got: %+v", filteredCurrent)
 	}
 }
+
+// TestBuildKiroPayloadFromOpenAI_SynthesizesToolSpecsFromHistory verifies that
+// when a client omits the tools array but history contains tool turns, the
+// payload synthesizes stub tool specs so Kiro does not reject the request
+// with "Improperly formed request".
+func TestBuildKiroPayloadFromOpenAI_SynthesizesToolSpecsFromHistory(t *testing.T) {
+	input := []byte(`{
+		"model": "kiro-claude-opus-4-5-agentic",
+		"messages": [
+			{"role": "user", "content": "list files"},
+			{
+				"role": "assistant",
+				"content": "searching",
+				"tool_calls": [
+					{
+						"id": "call_abc123",
+						"type": "function",
+						"function": {"name": "Grep", "arguments": "{\"pattern\": \"*.go\"}"}
+					}
+				]
+			},
+			{"role": "user", "content": "thanks"}
+		]
+	}`)
+
+	result, _ := BuildKiroPayloadFromOpenAI(input, "kiro-model", "", "CLI", false, false, nil, nil)
+
+	var payload KiroPayload
+	if err := json.Unmarshal(result, &payload); err != nil {
+		t.Fatalf("failed to unmarshal payload: %v", err)
+	}
+	tools := payload.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext
+	if tools == nil || len(tools.Tools) == 0 {
+		t.Fatalf("expected stub tools to be synthesized, got: %+v", tools)
+	}
+	if tools.Tools[0].ToolSpecification.Name != "Grep" {
+		t.Fatalf("expected stub spec for 'Grep', got: %s", tools.Tools[0].ToolSpecification.Name)
+	}
+}
+
+// TestBuildKiroPayloadFromOpenAI_FallbackContentNonEmpty verifies the fallback
+// current message gets non-empty content when there is no system prompt.
+func TestBuildKiroPayloadFromOpenAI_FallbackContentNonEmpty(t *testing.T) {
+	input := []byte(`{
+		"model": "kiro-claude-opus-4-5-agentic",
+		"messages": [
+			{"role": "assistant", "content": "done"}
+		]
+	}`)
+
+	result, _ := BuildKiroPayloadFromOpenAI(input, "kiro-model", "", "CLI", false, false, nil, nil)
+
+	var payload KiroPayload
+	if err := json.Unmarshal(result, &payload); err != nil {
+		t.Fatalf("failed to unmarshal payload: %v", err)
+	}
+	content := payload.ConversationState.CurrentMessage.UserInputMessage.Content
+	if content == "" {
+		t.Fatalf("expected fallback content to be non-empty, got empty string")
+	}
+}

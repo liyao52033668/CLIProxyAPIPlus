@@ -102,7 +102,13 @@ func (t *utlsRoundTripper) createConnection(ctx context.Context, host, addr stri
 	tlsConfig := &tls.Config{ServerName: host}
 	tlsConn := tls.UClient(conn, tlsConfig, tls.HelloChrome_Auto)
 
-	if errHandshake := tlsConn.HandshakeContext(ctx); errHandshake != nil {
+	// Apply the operator-configured TLS establishment bound, if any. The
+	// bound starts after dialing returned and is dropped once the handshake
+	// succeeds, so it never limits inference or streaming.
+	hsCtx, cancelHandshake := handshakeContext(ctx)
+	if errHandshake := tlsConn.HandshakeContext(hsCtx); errHandshake != nil {
+		errHandshake = classifyHandshakeError(ctx, hsCtx, errHandshake)
+		cancelHandshake()
 		if errors.Is(errHandshake, context.Canceled) || errors.Is(errHandshake, context.DeadlineExceeded) {
 			return nil, fmt.Errorf("utls: TLS handshake: %w", errHandshake)
 		}
@@ -111,6 +117,7 @@ func (t *utlsRoundTripper) createConnection(ctx context.Context, host, addr stri
 		}
 		return nil, fmt.Errorf("utls: TLS handshake: %w", errHandshake)
 	}
+	cancelHandshake()
 
 	return tlsConn, nil
 }
@@ -271,6 +278,13 @@ func newUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 	}
 	if cfg != nil && cfg.DisableUTLS {
 		transport = standardTransport
+	}
+	// Stamp the operator-configured TLS establishment bound onto every
+	// request so the uTLS dial path reads it per handshake.
+	if cfg != nil {
+		if hsTimeout := cfg.SDKConfig.TLSHandshakeTimeout(); hsTimeout > 0 {
+			transport = NewTLSHandshakeTimeoutRoundTripper(transport, hsTimeout)
+		}
 	}
 
 	client := &http.Client{Transport: transport}

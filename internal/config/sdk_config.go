@@ -188,6 +188,14 @@ type SDKConfig struct {
 	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
 	// <= 0 disables keep-alives. Value is in seconds.
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
+
+	// TLSHandshakeTimeoutSeconds bounds the upstream TLS handshake made by the
+	// shared built-in uTLS client, in seconds. The timer starts after TCP or
+	// proxy connection establishment returns; it does not bound dialing or
+	// proxy CONNECT. The bound applies only during the TLS handshake and is
+	// lifted once it succeeds, so inference and long-running streams are
+	// never time-limited. Set to 0 to disable (default).
+	TLSHandshakeTimeoutSeconds int `yaml:"tls-handshake-timeout-seconds,omitempty" json:"tls-handshake-timeout-seconds,omitempty"`
 }
 
 // StreamingConfig holds server streaming behavior configuration.
@@ -205,4 +213,8 @@ type StreamingConfig struct {
 	// to allow auth rotation / transient recovery.
 	// <= 0 disables bootstrap retries. Default is 0.
 	BootstrapRetries int `yaml:"bootstrap-retries,omitempty" json:"bootstrap-retries,omitempty"`
+
+	// SendKeepAliveBeforeFT controls whether SSE heartbeats are sent before the first token arrives
+	// when KeepAliveSeconds > 0. Default is false.
+	SendKeepAliveBeforeFT bool `yaml:"send-keepalive-before-ft,omitempty" json:"send-keepalive-before-ft,omitempty"`
 }

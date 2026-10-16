@@ -47,6 +47,18 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		authType = "unknown"
 	}
 	apiKey := strings.TrimSpace(record.APIKey)
+	accessProvider := strings.TrimSpace(record.AccessProvider)
+	if accessProvider == "" {
+		accessProvider = strings.TrimSpace(coreusage.AccessProviderFromContext(ctx))
+	}
+	isNativeKey := record.IsNativeKey
+	if !isNativeKey {
+		if nativeExplicit, ok := coreusage.IsNativeKeyFromContext(ctx); ok {
+			isNativeKey = nativeExplicit
+		} else if accessProvider != "" {
+			isNativeKey = coreusage.IsNativeAccessProvider(accessProvider)
+		}
+	}
 	requestID := strings.TrimSpace(internallogging.GetRequestID(ctx))
 
 	tokens := tokenStats{
@@ -104,6 +116,8 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		Endpoint:            resolveEndpoint(ctx),
 		AuthType:            authType,
 		APIKey:              apiKey,
+		IsNativeKey:         isNativeKey,
+		AccessProvider:      accessProvider,
 		RequestID:           requestID,
 		ServiceTier:         serviceTier,
 		ResponseServiceTier: responseServiceTier,
@@ -123,6 +137,8 @@ type queuedUsageDetail struct {
 	Endpoint            string `json:"endpoint"`
 	AuthType            string `json:"auth_type"`
 	APIKey              string `json:"api_key"`
+	IsNativeKey         bool   `json:"is_native_key"`
+	AccessProvider      string `json:"access_provider,omitempty"`
 	RequestID           string `json:"request_id"`
 	ServiceTier         string `json:"service_tier"`
 	ResponseServiceTier string `json:"response_service_tier,omitempty"`

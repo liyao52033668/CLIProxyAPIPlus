@@ -192,6 +192,11 @@ func isTransientTransportError(err error) bool {
 	if err == nil {
 		return false
 	}
+	// An internal TLS establishment deadline is a transient transport failure,
+	// not a caller-owned context lifecycle event.
+	if cliproxyexecutor.IsConfiguredTLSHandshakeTimeoutError(err) {
+		return true
+	}
 	// HTTP-status failures stay on the credential/status retry path.
 	if statusCodeFromError(err) != 0 {
 		return false
@@ -255,11 +260,19 @@ func isTransientTransportMessage(message string) bool {
 		strings.Contains(lower, "broken pipe"),
 		strings.Contains(lower, "connection aborted"),
 		strings.Contains(lower, "use of closed network connection"),
-		strings.Contains(lower, "unexpected eof"):
+		strings.Contains(lower, "unexpected eof"),
+		isHTTP2ClosedConnectionMessage(lower):
 		return true
 	default:
 		return false
 	}
+}
+
+// isHTTP2ClosedConnectionMessage reports HTTP/2 client connection shutdowns.
+// x/net/http2 keeps these errors unexported; allow common wrappers such as url.Error.
+func isHTTP2ClosedConnectionMessage(lower string) bool {
+	return strings.Contains(lower, "http2: client connection force closed via clientconn.close") ||
+		strings.Contains(lower, "http2: client conn is closed")
 }
 
 func waitForCooldown(ctx context.Context, wait time.Duration) error {
@@ -302,6 +315,22 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		}
 		wasTerminalUnauthorized := hasUnauthorizedAuthFailure(auth)
 
+		// RetainModelCooldown pins a still-live model cooldown against a success
+		// from an execution dispatched before that cooldown was recorded. Such a
+		// success predates the failure and proves nothing about recovery, so the
+		// state transition it normally causes is skipped entirely.
+		retainModelCooldown := result.Model != "" && !wasTerminalUnauthorized && result.ExecutionSeq > 0
+		if retainModelCooldown {
+			if existing := existingModelState(auth, result.Model); existing != nil && existing.NextRetryAfter.After(now) &&
+				existing.cooldownRecordedSeq > 0 && result.ExecutionSeq <= existing.cooldownRecordedSeq {
+				modelState = existing
+			} else {
+				retainModelCooldown = false
+			}
+		}
+		retainAuthCooldown := result.Model == "" && !wasTerminalUnauthorized && result.ExecutionSeq > 0 &&
+			isAuthActiveCooldown(auth, now) && auth.cooldownRecordedSeq > 0 && result.ExecutionSeq <= auth.cooldownRecordedSeq
+
 		if result.Success {
 			if wasTerminalUnauthorized {
 				// A terminal unauthorized credential stays blocked; only the
@@ -312,6 +341,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					resetModelState(state, now)
 					auth.UpdatedAt = now
 				}
+			} else if retainModelCooldown || retainAuthCooldown {
+				// Retain a cooldown recorded after this execution was dispatched.
 			} else if result.Model != "" {
 				state := ensureModelState(auth, result.Model)
 				modelState = state
@@ -446,6 +477,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						state.NextRetryAfter = prevModelRetryAfter
 					}
 
+					// Capture the dispatch watermark of the cooldown just recorded.
+					cooldownSeq := m.currentExecutionSeq()
+					state.cooldownRecordedSeq = cooldownSeq
+
 					auth.Status = StatusError
 					auth.UpdatedAt = now
 					updateAggregatedAvailability(auth, now)
@@ -453,6 +488,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			} else {
 				if !wasTerminalUnauthorized {
 					applyAuthFailureState(auth, result.Error, result.RetryAfter, now)
+					auth.cooldownRecordedSeq = m.currentExecutionSeq()
 				}
 			}
 		}
@@ -517,6 +553,44 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	m.hook.OnResult(ctx, result)
 }
 
+// nextExecutionSeq stamps a new upstream dispatch with the next monotonic
+// execution sequence. The stamp travels on the execution's Result so that
+// MarkResult can order the execution against cooldowns recorded meanwhile.
+func (m *Manager) nextExecutionSeq() uint64 {
+	if m == nil {
+		return 0
+	}
+	return m.executionSeq.Add(1)
+}
+
+// currentExecutionSeq returns the latest execution sequence issued so far.
+// Capturing it as the cooldown watermark when a cooldown is recorded marks
+// every execution dispatched up to that moment as predating the cooldown.
+func (m *Manager) currentExecutionSeq() uint64 {
+	if m == nil {
+		return 0
+	}
+	return m.executionSeq.Load()
+}
+
+// isAuthActiveCooldown reports whether the auth carries a still-live
+// auth-level cooldown recorded without a model key.
+func isAuthActiveCooldown(auth *Auth, now time.Time) bool {
+	if auth == nil || auth.Disabled || auth.Status == StatusDisabled {
+		return false
+	}
+	if !auth.NextRetryAfter.IsZero() && auth.NextRetryAfter.After(now) {
+		return true
+	}
+	if !auth.Quota.NextRecoverAt.IsZero() && auth.Quota.NextRecoverAt.After(now) {
+		return true
+	}
+	if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.IsZero() {
+		return true
+	}
+	return false
+}
+
 func existingModelState(auth *Auth, model string) *ModelState {
 	model = canonicalModelKey(model)
 	if auth == nil || model == "" {
@@ -550,6 +624,7 @@ func resetModelState(state *ModelState, now time.Time) {
 	state.StatusMessage = ""
 	state.NextRetryAfter = time.Time{}
 	state.LastError = nil
+	state.cooldownRecordedSeq = 0
 	applyCooldownFields(&state.Quota, QuotaState{})
 	state.UpdatedAt = now
 }
@@ -693,6 +768,7 @@ func clearAuthStateOnSuccess(auth *Auth, now time.Time) {
 	auth.Quota.BackoffLevel = 0
 	auth.LastError = nil
 	auth.NextRetryAfter = time.Time{}
+	auth.cooldownRecordedSeq = 0
 	auth.UpdatedAt = now
 }
 

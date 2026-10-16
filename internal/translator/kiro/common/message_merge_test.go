@@ -104,3 +104,25 @@ func TestMergeAdjacentMessages_ToolMessagesRemainUnmerged(t *testing.T) {
 		t.Fatalf("expected tool messages to remain separate, got %d", len(merged))
 	}
 }
+
+func TestMergeMessageContent_NullContentProducesTextBlock(t *testing.T) {
+	messages := parseMessages(t, `[
+		{"role":"user"},
+		{"role":"user"}
+	]`)
+
+	merged := MergeAdjacentMessages(messages)
+	if len(merged) != 1 {
+		t.Fatalf("expected 1 message after merge, got %d", len(merged))
+	}
+
+	// Kiro rejects "content":[] with "Improperly formed request"; the merge
+	// of two null/missing contents must produce a minimal text block instead.
+	content := merged[0].Get("content")
+	if !content.IsArray() || len(content.Array()) == 0 {
+		t.Fatalf("expected non-empty merged content array, got: %s", content.Raw)
+	}
+	if content.Array()[0].Get("type").String() != "text" {
+		t.Fatalf("expected first merged block to be text, got: %s", content.Array()[0].Raw)
+	}
+}

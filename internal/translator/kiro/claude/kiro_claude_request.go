@@ -244,7 +244,25 @@ func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isA
 		// Deduplicate currentToolResults
 		currentToolResults = deduplicateToolResults(currentToolResults)
 
-		// Build userInputMessageContext with tools and tool results
+		// Build userInputMessageContext with tools and tool results.
+		//
+		// When history contains any toolUses or toolResults, Kiro's schema
+		// validator requires currentMessage.userInputMessageContext.tools to be
+		// a non-empty array of tool specifications. Without it the API returns
+		// "Improperly formed request" (HTTP 400) — even if the current turn
+		// itself doesn't carry any tool use. This commonly happens during
+		// client-side compaction or when a client (e.g. OpenCode) sends a
+		// follow-up request without re-attaching the original `tools` array.
+		//
+		// To stay robust to those clients, synthesize minimal stub tool specs
+		// from the names referenced in history whenever the client didn't
+		// provide tools but history references them.
+		if len(kiroTools) == 0 && !isChatOnly {
+			kiroTools = synthesizeToolSpecsFromHistory(history)
+			if len(kiroTools) > 0 {
+				log.Infof("kiro: synthesized %d stub tool spec(s) from history (client did not send tools)", len(kiroTools))
+			}
+		}
 		if len(kiroTools) > 0 || len(currentToolResults) > 0 {
 			currentUserMsg.UserInputMessageContext = &KiroUserInputMessageContext{
 				Tools:       kiroTools,
@@ -261,6 +279,15 @@ func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isA
 		fallbackContent := ""
 		if systemPrompt != "" {
 			fallbackContent = "--- SYSTEM PROMPT ---\n" + systemPrompt + "\n--- END SYSTEM PROMPT ---\n"
+		} else {
+			log.Debugf("kiro: no system prompt present in fallback user message")
+		}
+		// Kiro API requires non-empty content for currentMessage.
+		// When system prompt injection is disabled, fallbackContent is empty.
+		// Use DefaultUserContent to avoid "Improperly formed request" 400 error.
+		if strings.TrimSpace(fallbackContent) == "" {
+			fallbackContent = kirocommon.DefaultUserContent
+			log.Debugf("kiro: fallback user message content was empty, using default: %s", fallbackContent)
 		}
 		currentMessage = KiroCurrentMessage{UserInputMessage: KiroUserInputMessage{
 			Content: fallbackContent,
@@ -573,6 +600,49 @@ func ensureKiroInputSchema(parameters any) any {
 	}
 }
 
+// synthesizeToolSpecsFromHistory builds a minimal set of stub KiroToolWrapper
+// entries from any toolUse names referenced in history. This is the fallback
+// path used when the client request does not include the `tools` array but
+// history contains tool turns — Kiro's schema validator rejects such payloads
+// with "Improperly formed request" unless tools is non-empty.
+//
+// The synthesized spec is intentionally permissive: schema is an open object
+// (any properties allowed) and the description is a generic placeholder. The
+// real schema does not matter here because Kiro only uses tools to decide
+// what the model is allowed to call going forward, and the history toolUses
+// are already serialized JSON.
+func synthesizeToolSpecsFromHistory(history []KiroHistoryMessage) []KiroToolWrapper {
+	if len(history) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var stubs []KiroToolWrapper
+	for _, h := range history {
+		if h.AssistantResponseMessage == nil {
+			continue
+		}
+		for _, tu := range h.AssistantResponseMessage.ToolUses {
+			name := strings.TrimSpace(tu.Name)
+			if name == "" || seen[name] {
+				continue
+			}
+			seen[name] = true
+			stubs = append(stubs, KiroToolWrapper{
+				ToolSpecification: KiroToolSpecification{
+					Name:        shortenToolNameIfNeeded(name),
+					Description: fmt.Sprintf("Tool: %s", name),
+					InputSchema: KiroInputSchema{JSON: map[string]any{
+						"type":                 "object",
+						"properties":           map[string]any{},
+						"additionalProperties": true,
+					}},
+				},
+			})
+		}
+	}
+	return stubs
+}
+
 // convertClaudeToolsToKiro converts Claude tools to Kiro format
 func convertClaudeToolsToKiro(tools gjson.Result) []KiroToolWrapper {
 	var kiroTools []KiroToolWrapper
@@ -637,13 +707,55 @@ func convertClaudeToolsToKiro(tools gjson.Result) []KiroToolWrapper {
 }
 
 // processMessages processes Claude messages and builds Kiro history
+// normalizeInArraySystemMessages rewrites role:"system" entries inside the
+// messages array as user messages, wrapping their text in <system-reminder>
+// tags (the same convention Claude Code uses for system notes inside user
+// turns). The top-level "system" request field is handled separately and is
+// not affected. Non-text blocks in a system message are dropped, matching how
+// the Claude API treats system message content as plain text.
+func normalizeInArraySystemMessages(messages []gjson.Result) []gjson.Result {
+	for i, msg := range messages {
+		if msg.Get("role").String() != "system" {
+			continue
+		}
+		var text strings.Builder
+		content := msg.Get("content")
+		if content.IsArray() {
+			for _, part := range content.Array() {
+				if part.Get("type").String() == "text" {
+					text.WriteString(part.Get("text").String())
+				}
+			}
+		} else {
+			text.WriteString(content.String())
+		}
+		converted, err := json.Marshal(map[string]interface{}{
+			"role": "user",
+			"content": []map[string]string{
+				{"type": "text", "text": "<system-reminder>\n" + text.String() + "\n</system-reminder>"},
+			},
+		})
+		if err != nil {
+			continue
+		}
+		messages[i] = gjson.ParseBytes(converted)
+	}
+	return messages
+}
+
 func processMessages(messages gjson.Result, modelID, origin string) ([]KiroHistoryMessage, *KiroUserInputMessage, []KiroToolResult) {
 	var history []KiroHistoryMessage
 	var currentUserMsg *KiroUserInputMessage
 	var currentToolResults []KiroToolResult
 
-	// Merge adjacent messages with the same role
-	messagesArray := kirocommon.MergeAdjacentMessages(messages.Array())
+	// Claude Code's mid-conversation-system beta can place role:"system"
+	// messages inside the messages array, including as the final message. Kiro
+	// has no system role, so rewrite them as user messages before merging.
+	// Critically, a trailing system message must still produce a current user
+	// message — otherwise no tool specs are attached to
+	// currentMessage.userInputMessageContext and the model, seeing no tools,
+	// hallucinates text-format tool calls instead of emitting toolUseEvents.
+	messagesArray := kirocommon.MergeAdjacentMessages(normalizeInArraySystemMessages(messages.Array()))
 
 	// FIX: Kiro API requires history to start with a user message.
 	// Some clients (e.g., OpenClaw) send conversations starting with an assistant message,

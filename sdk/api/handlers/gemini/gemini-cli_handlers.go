@@ -98,7 +98,7 @@ func (h *GeminiCLIAPIHandler) CLIHandler(c *gin.Context) {
 		}
 		maps.Copy(req.Header, c.Request.Header)
 
-		httpClient := util.SetProxy(h.Cfg, &http.Client{})
+		httpClient := util.SetProxy(h.CurrentConfig(), &http.Client{})
 
 		resp, err := httpClient.Do(req)
 		if err != nil {

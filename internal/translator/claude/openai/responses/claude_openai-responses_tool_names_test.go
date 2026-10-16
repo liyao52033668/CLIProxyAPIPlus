@@ -26,7 +26,7 @@ func TestBuildClaudeToolNames_RoundTripAndStability(t *testing.T) {
 	}`)
 
 	root := gjson.ParseBytes(reqJSON)
-	names := buildClaudeToolNames(root)
+	names := buildClaudeToolNames(root, false)
 
 	// Verify all declared tools are unique and match pattern
 	seenClaudeNames := map[string]string{}
@@ -85,8 +85,8 @@ func TestBuildClaudeToolNames_DeclarationOrderInvariance(t *testing.T) {
 		]
 	}`)
 
-	namesA := buildClaudeToolNames(gjson.ParseBytes(reqA))
-	namesB := buildClaudeToolNames(gjson.ParseBytes(reqB))
+	namesA := buildClaudeToolNames(gjson.ParseBytes(reqA), false)
+	namesB := buildClaudeToolNames(gjson.ParseBytes(reqB), false)
 
 	if namesA.claudeName(tool1) != namesB.claudeName(tool1) {
 		t.Fatalf("order affected tool1 mapping: %q vs %q", namesA.claudeName(tool1), namesB.claudeName(tool1))
@@ -104,7 +104,7 @@ func TestBuildClaudeToolNames_SingleLongName(t *testing.T) {
 		]
 	}`)
 
-	names := buildClaudeToolNames(gjson.ParseBytes(reqJSON))
+	names := buildClaudeToolNames(gjson.ParseBytes(reqJSON), false)
 	claudeName := names.claudeName(longTool)
 	if len(claudeName) > 64 {
 		t.Fatalf("claudeName length = %d > 64: %q", len(claudeName), claudeName)
@@ -129,7 +129,7 @@ func TestBuildClaudeToolNames_CustomToolCollision(t *testing.T) {
 	}`, tool1, tool2))
 
 	root := gjson.ParseBytes(reqJSON)
-	names := buildClaudeToolNames(root)
+	names := buildClaudeToolNames(root, false)
 	customMap := responsesCustomToolNames(reqJSON)
 
 	cName1 := names.claudeName(tool1)
@@ -182,7 +182,7 @@ func TestBuildClaudeToolNames_DeclaredToolsPrecedeHistory(t *testing.T) {
 		]
 	}`)
 
-	names := buildClaudeToolNames(gjson.ParseBytes(reqJSON))
+	names := buildClaudeToolNames(gjson.ParseBytes(reqJSON), false)
 
 	// tool_x must keep its exact name
 	if names.claudeName("tool_x") != "tool_x" {

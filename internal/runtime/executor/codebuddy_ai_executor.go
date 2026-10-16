@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"strings"
@@ -150,6 +152,9 @@ func (e *CodeBuddyAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	headers := make(http.Header)
 	tmpReq := &http.Request{Header: headers}
 	e.applyHeaders(tmpReq, accessToken, userID, domain)
+	// The chat endpoint runs a sampled channel verification that demands the
+	// conversation header family; without it a sampled request is rejected.
+	applyCodeBuddyAIConversationHeaders(tmpReq)
 	tmpReq.Header.Set("Accept", "text/event-stream")
 	tmpReq.Header.Set("Cache-Control", "no-cache")
 	headers = tmpReq.Header
@@ -219,6 +224,9 @@ func (e *CodeBuddyAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	headers := make(http.Header)
 	tmpReq := &http.Request{Header: headers}
 	e.applyHeaders(tmpReq, accessToken, userID, domain)
+	// The chat endpoint runs a sampled channel verification that demands the
+	// conversation header family; without it a sampled request is rejected.
+	applyCodeBuddyAIConversationHeaders(tmpReq)
 	tmpReq.Header.Set("Accept", "text/event-stream")
 	tmpReq.Header.Set("Cache-Control", "no-cache")
 	headers = tmpReq.Header
@@ -330,6 +338,58 @@ func (e *CodeBuddyAIExecutor) applyHeaders(req *http.Request, accessToken, userI
 	req.Header.Set("X-IDE-Version", codebuddy_ai.WorkBuddyAIVersion())
 	req.Header.Set("X-Product", "cloud")
 	req.Header.Set("X-Product-Version", codebuddy_ai.WorkBuddyAIVersion())
+}
+
+// codeBuddyAINewHexID returns 32 lowercase hex chars, the shape the official
+// WorkBuddy client uses for X-Request-ID and the request/message trace ids.
+func codeBuddyAINewHexID() string {
+	var b [16]byte
+	if _, errRand := rand.Read(b[:]); errRand != nil {
+		// crypto/rand is effectively infallible; fall back to time so a
+		// transient failure still yields a well-formed, unique-enough id.
+		n := uint64(time.Now().UnixNano())
+		for i := 0; i < 8; i++ {
+			b[i] = byte(n >> (8 * i))
+		}
+	}
+	return hex.EncodeToString(b[:])
+}
+
+// codeBuddyAINewUUID returns a dashed (8-4-4-4-12) UUIDv4, matching the
+// conversation id shape captured from the official desktop client.
+func codeBuddyAINewUUID() string {
+	var b [16]byte
+	if _, errRand := rand.Read(b[:]); errRand != nil {
+		n := uint64(time.Now().UnixNano())
+		for i := 0; i < 8; i++ {
+			b[i] = byte(n >> (8 * i))
+		}
+	}
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // RFC 4122 variant
+	h := hex.EncodeToString(b[:])
+	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
+}
+
+// applyCodeBuddyAIConversationHeaders adds the conversation header family
+// that upstream's sampled channel verification requires on
+// /v2/chat/completions. Without it a sampled request is rejected with
+// 400 / code 11128 ("conversation id missing", displayTips "this call failed
+// channel verification"). Because the check is sampled, the failure appears
+// intermittently and can look like a broken account.
+//
+// Shape: the conversation id is a dashed UUID that is fresh per call (upstream
+// keeps no server-side history keyed by it), while the request /
+// conversation-request / root-request / message ids are one and the same
+// 32-hex value. The existing IDE identity headers set by applyHeaders are
+// untouched — only the missing conversation family is added.
+func applyCodeBuddyAIConversationHeaders(req *http.Request) {
+	reqID := codeBuddyAINewHexID()
+	req.Header.Set("X-Request-ID", reqID)
+	req.Header.Set("X-Conversation-ID", codeBuddyAINewUUID())
+	req.Header.Set("X-Conversation-Request-ID", reqID)
+	req.Header.Set("X-Root-Request-ID", reqID)
+	req.Header.Set("X-Conversation-Message-ID", reqID)
 }
 
 var codeBuddyAIInternalModelPrefixes = []string{

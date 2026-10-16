@@ -47,7 +47,6 @@ func TestValidateCodexClientModelsJSON(t *testing.T) {
 		{name: "empty", raw: []byte(`{"models":[]}`)},
 		{name: "empty slug", raw: testCodexClientCatalog(t, emptySlug)},
 		{name: "duplicate slug", raw: testCodexClientCatalog(t, validDefault, validDefault)},
-		{name: "missing default", raw: testCodexClientCatalog(t, validOther)},
 		{name: "missing required field", raw: testCodexClientCatalog(t, missingField)},
 		{name: "wrong required field type", raw: testCodexClientCatalog(t, wrongFieldType)},
 		{name: "default reasoning level not supported", raw: testCodexClientCatalog(t, unsupportedDefault)},

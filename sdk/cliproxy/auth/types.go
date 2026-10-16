@@ -108,6 +108,11 @@ type Auth struct {
 
 	recentRequests recentRequestRing `json:"-"`
 
+	// cooldownRecordedSeq captures the dispatch watermark of the cooldown last
+	// recorded on this auth, so a success dispatched before that cooldown cannot
+	// clear it (in-memory only).
+	cooldownRecordedSeq uint64 `json:"-"`
+
 	indexAssigned bool `json:"-"`
 }
 
@@ -181,6 +186,9 @@ type ModelState struct {
 	Quota QuotaState `json:"quota"`
 	// UpdatedAt tracks the last update timestamp for this model state.
 	UpdatedAt time.Time `json:"updated_at"`
+	// cooldownRecordedSeq captures the dispatch watermark of the cooldown last
+	// recorded on this state (in-memory only).
+	cooldownRecordedSeq uint64 `json:"-"`
 }
 
 func recentRequestBucketID(now time.Time) int64 {

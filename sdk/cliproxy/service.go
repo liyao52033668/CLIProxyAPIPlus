@@ -20,6 +20,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	clauderesponses "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/claude/openai/responses"
 	keeperapp "github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/app"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage/keeper/service"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -784,6 +785,7 @@ func (s *Service) applyConfigUpdate(newCfg *config.Config) {
 
 	s.applyRetryConfig(newCfg)
 	s.applyPprofConfig(newCfg)
+	clauderesponses.SetClientToolSearchEnabled(newCfg.Claude.ToolSearch)
 	if s.server != nil {
 		s.server.UpdateClients(newCfg)
 	}

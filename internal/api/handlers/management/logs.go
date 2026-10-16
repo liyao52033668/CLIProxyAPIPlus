@@ -65,7 +65,9 @@ func (h *Handler) GetLogs(c *gin.Context) {
 	}
 
 	cutoff := parseCutoff(c.Query("after"))
+	before := parseCutoff(c.Query("before"))
 	acc := newLogAccumulator(cutoff, limit)
+	acc.before = before
 	for i := range files {
 		if errProcess := acc.consumeFile(files[i]); errProcess != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read log file %s: %v", files[i], errProcess)})
@@ -481,6 +483,7 @@ func (h *Handler) collectLogFiles(dir string) ([]string, error) {
 
 type logAccumulator struct {
 	cutoff  int64
+	before  int64
 	limit   int
 	lines   []string
 	total   int
@@ -532,13 +535,17 @@ func (acc *logAccumulator) addLine(raw string) {
 		acc.latest = ts
 	}
 	if ts > 0 {
-		acc.include = acc.cutoff == 0 || ts > acc.cutoff
-		if acc.cutoff == 0 || acc.include {
+		acc.include = (acc.cutoff == 0 || ts > acc.cutoff) && (acc.before == 0 || ts <= acc.before)
+		if acc.include {
 			acc.append(line)
 		}
 		return
 	}
-	if acc.cutoff == 0 || acc.include {
+	// Continuation line (no timestamp): include if we're already including,
+	// or if no cutoff filter and no timestamped line has been seen yet.
+	// This ensures leading continuation lines are not dropped when querying
+	// without an 'after' parameter.
+	if acc.include || (acc.cutoff == 0 && acc.latest == 0) {
 		acc.append(line)
 	}
 }

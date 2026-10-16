@@ -319,11 +319,13 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(make([]byte, 0, 64*1024), maxScannerBufferSize)
 		var param any
+		brokeOnTerminal := false
 
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			terminalResponse := false
+			isResponseCompleted := false
 
 			// Parse SSE data
 			if bytes.HasPrefix(line, dataTag) {
@@ -334,7 +336,14 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 				if useResponses {
 					if gjson.ValidBytes(data) {
 						switch gjson.GetBytes(data, "type").String() {
-						case "response.completed", "response.incomplete":
+						case "response.completed":
+							terminalResponse = true
+							isResponseCompleted = true
+							if detail, ok := helps.ParseCodexUsage(data); ok {
+								reporter.Publish(ctx, detail)
+							}
+							reporter.EnsurePublished(ctx)
+						case "response.incomplete":
 							terminalResponse = true
 							if detail, ok := helps.ParseCodexUsage(data); ok {
 								reporter.Publish(ctx, detail)
@@ -353,8 +362,10 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 			var chunks [][]byte
 			if useResponses && from.String() == "claude" {
 				chunks = translateGitHubCopilotResponsesStreamToClaude(bytes.Clone(line), &param)
-				if terminalResponse {
+				if terminalResponse && !isResponseCompleted {
 					// Finish the converted Claude stream without another upstream read.
+					// Only append synthetic response.completed when the upstream event
+					// is NOT already response.completed (e.g. response.incomplete/failed/error).
 					chunks = append(chunks, translateGitHubCopilotResponsesStreamToClaude([]byte("event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n"), &param)...)
 				}
 			} else {
@@ -385,7 +396,8 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 				out <- cliproxyexecutor.StreamChunk{Payload: bytes.Clone(chunks[i])}
 			}
 			if terminalResponse {
-				return
+				brokeOnTerminal = true
+				break
 			}
 		}
 
@@ -393,7 +405,7 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.PublishFailure(ctx)
 			out <- cliproxyexecutor.StreamChunk{Err: errScan}
-		} else {
+		} else if !brokeOnTerminal {
 			reporter.EnsurePublished(ctx)
 		}
 	}()

@@ -816,23 +816,56 @@ func normalizeKimiTools(body []byte) []byte {
 	}
 	body = normalizeKimiToolList(body, "tools", true)
 	body = normalizeKimiToolList(body, "functions", false)
+	if input := gjson.GetBytes(body, "input"); input.Exists() && input.IsArray() {
+		for idx, item := range input.Array() {
+			switch strings.TrimSpace(item.Get("type").String()) {
+			case "additional_tools", "tool_search_output":
+				body = normalizeKimiToolList(body, fmt.Sprintf("input.%d.tools", idx), true)
+			}
+		}
+	}
 	return body
 }
 
 func normalizeKimiToolList(body []byte, arrayKey string, isTools bool) []byte {
 	items := gjson.GetBytes(body, arrayKey)
-	if !items.Exists() || !items.IsArray() {
-		return body
-	}
-	arr := items.Array()
-	if len(arr) == 0 {
+	normalized, changed := normalizeKimiToolArray(items, isTools)
+	if !changed {
 		return body
 	}
 
+	out, errSetRaw := sjson.SetRawBytes(body, arrayKey, normalized)
+	if errSetRaw != nil {
+		return body
+	}
+	return out
+}
+
+func normalizeKimiToolArray(items gjson.Result, isTools bool) ([]byte, bool) {
+	if !items.Exists() || !items.IsArray() {
+		return nil, false
+	}
+	arr := items.Array()
+	if len(arr) == 0 {
+		return nil, false
+	}
+
 	changed := false
-	var updatedItems [][]byte
+	updatedItems := make([][]byte, 0, len(arr))
 	for _, item := range arr {
 		itemRaw := []byte(item.Raw)
+		if isTools && strings.TrimSpace(item.Get("type").String()) == "namespace" {
+			for _, nestedKey := range []string{"tools", "children"} {
+				if nested := gjson.GetBytes(itemRaw, nestedKey); nested.Exists() && nested.IsArray() {
+					if normalizedNested, nestedChanged := normalizeKimiToolArray(nested, true); nestedChanged {
+						if updated, errSet := sjson.SetRawBytes(itemRaw, nestedKey, normalizedNested); errSet == nil {
+							itemRaw = updated
+							changed = true
+						}
+					}
+				}
+			}
+		}
 		var paramPath string
 		if isTools && item.Get("function.parameters").Exists() {
 			paramPath = "function.parameters"
@@ -856,14 +889,9 @@ func normalizeKimiToolList(body []byte, arrayKey string, isTools bool) []byte {
 	}
 
 	if !changed {
-		return body
+		return nil, false
 	}
-
-	out, errSetRaw := sjson.SetRawBytes(body, arrayKey, helps.JoinRawJSONArray(updatedItems))
-	if errSetRaw != nil {
-		return body
-	}
-	return out
+	return helps.JoinRawJSONArray(updatedItems), true
 }
 
 func normalizeKimiParametersSchema(paramsRaw string) string {

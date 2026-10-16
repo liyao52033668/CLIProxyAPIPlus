@@ -457,6 +457,8 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	if errDo != nil {
 		return nil, toStatusErr(errDo)
 	}
+	// First-packet fallback only; effective TTFT is marked on the first token frame below.
+	reporter.ObserveResponsePacketOnly(httpResp)
 	out := make(chan cliproxyexecutor.StreamChunk, 16)
 	go func() {
 		defer close(out)
@@ -481,7 +483,6 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-			reporter.ObserveResponseModel(line)
 			if detail, ok := helps.ParseOpenAIStreamUsage(line); ok {
 				reporter.Publish(ctx, detail)
 			}
@@ -510,6 +511,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 
 			// OpenAI-compatible streams must use SSE data lines.
 			data := bytes.TrimSpace(trimmedLine[len("data:"):])
+			// Observe complete upstream frames before translation or downstream backpressure.
+			// Early role/empty frames are only first-packet fallbacks, not effective tokens.
+			helps.ObserveChatTokenEvent(reporter, data)
 			if bytes.Equal(data, []byte("[DONE]")) {
 				for _, pending := range thinkingState.Flush() {
 					reasoningCapture.Observe(pending)

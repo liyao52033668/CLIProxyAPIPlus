@@ -158,8 +158,10 @@ func TestCleanJSONSchemaForAntigravity_OneOfFlattening(t *testing.T) {
 		"type": "object",
 		"properties": {
 			"config": {
-				"type": "string",
-				"description": "Accepts: string | integer"
+				"anyOf": [
+					{ "type": "string" },
+					{ "type": "integer" }
+				]
 			}
 		}
 	}`
@@ -447,12 +449,20 @@ func TestCleanJSONSchemaForAntigravity_AnyOfAlternativeHints(t *testing.T) {
 
 	result := CleanJSONSchemaForAntigravity(input)
 
-	if !strings.Contains(result, "Accepts:") {
-		t.Errorf("Expected alternative types hint, got: %s", result)
-	}
-	if !strings.Contains(result, "string") || !strings.Contains(result, "integer") {
-		t.Errorf("Expected all alternative types in hint, got: %s", result)
-	}
+	expected := `{
+		"type": "object",
+		"properties": {
+			"value": {
+				"anyOf": [
+					{ "type": "string" },
+					{ "type": "integer" }
+				],
+				"nullable": true,
+				"description": "(nullable)"
+			}
+		}
+	}`
+	compareJSON(t, expected, result)
 }
 
 func TestCleanJSONSchemaForAntigravity_NullableHint(t *testing.T) {
@@ -549,7 +559,34 @@ func TestCleanJSONSchemaForAntigravity_AdditionalPropertiesHint(t *testing.T) {
 }
 
 func TestCleanJSONSchemaForAntigravity_AnyOfFlattening_PreservesDescription(t *testing.T) {
-	input := `{
+	nullableInput := `{
+		"type": "object",
+		"properties": {
+			"config": {
+				"description": "Parent desc",
+				"anyOf": [
+					{ "type": "string", "description": "Child desc" },
+					{ "type": "null" }
+				]
+			}
+		}
+	}`
+
+	expectedNullable := `{
+		"type": "object",
+		"properties": {
+			"config": {
+				"type": "string",
+				"nullable": true,
+				"description": "Parent desc (Child desc) (Accepts: string | null)"
+			}
+		}
+	}`
+
+	resultNullable := CleanJSONSchemaForAntigravity(nullableInput)
+	compareJSON(t, expectedNullable, resultNullable)
+
+	multiBranchInput := `{
 		"type": "object",
 		"properties": {
 			"config": {
@@ -562,18 +599,8 @@ func TestCleanJSONSchemaForAntigravity_AnyOfFlattening_PreservesDescription(t *t
 		}
 	}`
 
-	expected := `{
-		"type": "object",
-		"properties": {
-			"config": {
-				"type": "string",
-				"description": "Parent desc (Child desc) (Accepts: string | integer)"
-			}
-		}
-	}`
-
-	result := CleanJSONSchemaForAntigravity(input)
-	compareJSON(t, expected, result)
+	resultMulti := CleanJSONSchemaForAntigravity(multiBranchInput)
+	compareJSON(t, multiBranchInput, resultMulti)
 }
 
 func TestCleanJSONSchemaForAntigravity_SingleEnumBecomesHint(t *testing.T) {
@@ -2304,8 +2331,15 @@ func TestCleanJSONSchemaForAntigravityResponse_AnyOfRequiredOnlyBranches(t *test
 	if !parsed.Get("properties.left").Exists() || !parsed.Get("properties.right").Exists() {
 		t.Fatalf("properties were wiped out; cleaned: %s", got)
 	}
-	if parsed.Get("anyOf").Exists() {
-		t.Fatalf("anyOf was not removed; cleaned: %s", got)
+	branches := parsed.Get("anyOf").Array()
+	if len(branches) != 2 {
+		t.Fatalf("anyOf branch count = %d, want 2; cleaned: %s", len(branches), got)
+	}
+	if branches[0].Get("type").String() != "object" || !branches[0].Get("properties.left").Exists() || branches[0].Get("required.0").String() != "left" {
+		t.Fatalf("anyOf[0] was not materialized into valid object branch: %s", branches[0].Raw)
+	}
+	if branches[1].Get("type").String() != "object" || !branches[1].Get("properties.right").Exists() || branches[1].Get("required.0").String() != "right" {
+		t.Fatalf("anyOf[1] was not materialized into valid object branch: %s", branches[1].Raw)
 	}
 }
 

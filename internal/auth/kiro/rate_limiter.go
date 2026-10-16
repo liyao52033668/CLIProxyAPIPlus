@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 const (
@@ -101,6 +103,13 @@ func NewRateLimiterWithConfig(cfg RateLimiterConfig) *RateLimiter {
 	}
 	if cfg.SuspendCooldown > 0 {
 		rl.suspendCooldown = cfg.SuspendCooldown
+	}
+
+	// Validate interval bounds: max must be > min to avoid rand.Int63n panic
+	if rl.maxTokenInterval <= rl.minTokenInterval {
+		log.Warnf("kiro: rate limiter max-token-interval (%v) <= min-token-interval (%v), clamping max to min+1s",
+			rl.maxTokenInterval, rl.minTokenInterval)
+		rl.maxTokenInterval = rl.minTokenInterval + time.Second
 	}
 	return rl
 }

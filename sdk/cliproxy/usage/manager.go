@@ -44,12 +44,17 @@ type Record struct {
 	ResponseServiceTier string
 	// ResponseModel stores the model name reported by the upstream response, empty when unknown.
 	ResponseModel string
-	RequestedAt   time.Time
-	Latency       time.Duration
-	TTFT          time.Duration
-	Failed        bool
-	Fail          Failure
-	Detail        Detail
+	// AccessProvider stores the client authentication provider identifier (e.g. "gemini-api-key").
+	AccessProvider string
+	// IsNativeKey reports that the request was authenticated with a native provider key
+	// rather than a proxy-issued key.
+	IsNativeKey bool
+	RequestedAt time.Time
+	Latency     time.Duration
+	TTFT        time.Duration
+	Failed      bool
+	Fail        Failure
+	Detail      Detail
 	// ResponseHeaders stores a snapshot of upstream response headers for usage sinks.
 	ResponseHeaders http.Header
 }
@@ -76,6 +81,100 @@ type Detail struct {
 type requestedModelAliasContextKey struct{}
 type reasoningEffortContextKey struct{}
 type serviceTierContextKey struct{}
+type apiKeyContextKey struct{}
+type accessProviderContextKey struct{}
+type isNativeKeyContextKey struct{}
+
+// Native access providers authenticate directly against the upstream provider
+// rather than through a proxy-issued key.
+var nativeAccessProviders = map[string]struct{}{
+	"gemini-api-key":       {},
+	"claude-api-key":       {},
+	"codex-api-key":        {},
+	"openai-compatibility": {},
+	"vertex-api-key":       {},
+}
+
+// IsNativeAccessProvider reports whether the given access provider authenticates
+// with a native provider key.
+func IsNativeAccessProvider(provider string) bool {
+	_, ok := nativeAccessProviders[strings.ToLower(strings.TrimSpace(provider))]
+	return ok
+}
+
+// WithAPIKey stores the authenticated client API key for usage sinks.
+func WithAPIKey(ctx context.Context, apiKey string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, apiKeyContextKey{}, apiKey)
+}
+
+// APIKeyFromContext returns the authenticated client API key stored in ctx.
+func APIKeyFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	raw := ctx.Value(apiKeyContextKey{})
+	switch value := raw.(type) {
+	case string:
+		return strings.TrimSpace(value)
+	case []byte:
+		return strings.TrimSpace(string(value))
+	default:
+		return ""
+	}
+}
+
+// WithAccessProvider stores the client authentication provider identifier for usage sinks.
+func WithAccessProvider(ctx context.Context, provider string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, accessProviderContextKey{}, provider)
+}
+
+// AccessProviderFromContext returns the client authentication provider stored in ctx.
+func AccessProviderFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	raw := ctx.Value(accessProviderContextKey{})
+	switch value := raw.(type) {
+	case string:
+		return strings.TrimSpace(value)
+	case []byte:
+		return strings.TrimSpace(string(value))
+	default:
+		return ""
+	}
+}
+
+// WithIsNativeKey stores whether the request used a native provider key.
+func WithIsNativeKey(ctx context.Context, isNative bool) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, isNativeKeyContextKey{}, isNative)
+}
+
+// IsNativeKeyFromContext reports whether ctx carries an explicit native-key marker.
+func IsNativeKeyFromContext(ctx context.Context) (bool, bool) {
+	if ctx == nil {
+		return false, false
+	}
+	raw := ctx.Value(isNativeKeyContextKey{})
+	isNative, ok := raw.(bool)
+	return isNative, ok
+}
 
 // WithRequestedModelAlias stores the client-requested model name for usage sinks.
 func WithRequestedModelAlias(ctx context.Context, alias string) context.Context {

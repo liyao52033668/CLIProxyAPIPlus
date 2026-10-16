@@ -402,7 +402,6 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 	textBuilder := strings.Builder{}
 	thinkingBuilder := strings.Builder{}
 	var thinkingSignature string
-	toolIDCounter := 0
 	hasToolCall := false
 	var blocks [][]byte
 
@@ -494,9 +493,8 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 				upstreamToolName := functionCall.Get("name").String()
 				upstreamToolName = util.RestoreSanitizedToolName(sanitizedNameMap, upstreamToolName)
 				clientToolName := util.MapToolName(toolNameMap, upstreamToolName)
-				toolIDCounter++
 				toolBlock := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
-				toolBlock, _ = sjson.SetBytes(toolBlock, "id", util.SanitizeClaudeToolID(fmt.Sprintf("%s-%d", upstreamToolName, toolIDCounter)))
+				toolBlock, _ = sjson.SetBytes(toolBlock, "id", util.SanitizeClaudeToolID(fmt.Sprintf("%s-%d", upstreamToolName, atomic.AddUint64(&toolUseIDCounter, 1))))
 				toolBlock, _ = sjson.SetBytes(toolBlock, "name", clientToolName)
 				inputRaw := "{}"
 				if args := functionCall.Get("args"); args.Exists() && gjson.Valid(args.Raw) && args.IsObject() {

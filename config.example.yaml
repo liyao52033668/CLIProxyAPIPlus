@@ -16,6 +16,13 @@ host: ''
 # Server port
 port: 8317
 
+# Global token for GitHub requests (e.g. model catalog fetches from github.com).
+# Takes precedence over the GITHUB_TOKEN environment variable. Leave empty to use the environment only.
+# github-token: ""
+
+# Maximum size (in bytes) of incoming HTTP request bodies. Values <= 0 disable the limit (default).
+# max-request-body-bytes: 0
+
 # IP addresses or CIDRs of proxies allowed to supply forwarded client IP headers.
 # An empty list (the default) does not trust forwarded headers. Restart after changing this setting.
 trusted-proxies: []
@@ -145,6 +152,15 @@ force-model-prefix: false
 # When true, forward filtered upstream response headers to downstream clients.
 # Default is false (disabled).
 passthrough-headers: false
+
+# Maximum time, in seconds, for upstream TLS handshakes made by the shared built-in
+# uTLS client. The timer starts after TCP or proxy connection establishment returns;
+# it does not bound dialing or proxy CONNECT. When the upstream path accepts the
+# connection but never answers the TLS ClientHello, the request would otherwise wait
+# indefinitely and request-retry could never engage. The bound applies only during
+# the TLS handshake and is lifted once it succeeds, so inference and long-running
+# streams are never time-limited. Set to 0 to disable (default).
+tls-handshake-timeout-seconds: 0
 
 # Number of times to retry a request. Retries will occur if the HTTP response code is 403, 408, 500, 502, 503, or 504.
 request-retry: 3
@@ -285,6 +301,13 @@ claude:
   # cooling down the entire credential across all sibling models.
   # Default is false (cool the entire credential on any model's quota hit).
   model-level-cooling: false
+
+  # When true, enable Codex client tool_search on Claude Responses routes. Credentials on
+  # api.anthropic.com (or keys with native-tool-search: true) receive it as Anthropic native
+  # tool search (defer_loading + tool_reference), which keeps the prompt-cache prefix stable
+  # across tool discoveries; other credentials fall back to the plain translation.
+  # Default false keeps the translation and catalog behavior that predate tool_search support.
+  tool-search: false
 
 # When true, enable Gemini CLI internal endpoints (/v1internal:*).
 # Default is false for safety.

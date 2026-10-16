@@ -58,8 +58,33 @@ func TestNewRateLimiterWithConfig_PartialConfig(t *testing.T) {
 	if rl.minTokenInterval != 5*time.Second {
 		t.Errorf("expected minTokenInterval 5s, got %v", rl.minTokenInterval)
 	}
-	if rl.maxTokenInterval != DefaultMaxTokenInterval {
-		t.Errorf("expected default maxTokenInterval, got %v", rl.maxTokenInterval)
+	// Default max (2s) is below the custom min (5s), so the bounds validator
+	// clamps max to min+1s to keep calculateInterval's rand range positive.
+	if rl.maxTokenInterval != 6*time.Second {
+		t.Errorf("expected clamped maxTokenInterval 6s, got %v", rl.maxTokenInterval)
+	}
+}
+
+// TestNewRateLimiterWithConfig_MaxBelowMinClamped verifies that a config with
+// max <= min gets max clamped to min+1s instead of panicking later in
+// calculateInterval's rand.Int63n with a non-positive range.
+func TestNewRateLimiterWithConfig_MaxBelowMinClamped(t *testing.T) {
+	cfg := RateLimiterConfig{
+		MinTokenInterval: 10 * time.Second,
+		MaxTokenInterval: 5 * time.Second,
+	}
+
+	rl := NewRateLimiterWithConfig(cfg)
+	if rl.maxTokenInterval != 11*time.Second {
+		t.Errorf("expected maxTokenInterval clamped to 11s, got %v", rl.maxTokenInterval)
+	}
+
+	// Must not panic across many draws.
+	for i := 0; i < 100; i++ {
+		interval := rl.calculateInterval()
+		if interval <= 0 {
+			t.Fatalf("expected positive interval, got %v", interval)
+		}
 	}
 }
 
