@@ -320,7 +320,7 @@ func mapAnthropicStopReasonToOpenAI(anthropicReason string) string {
 		return "stop"
 	case "tool_use":
 		return "tool_calls"
-	case "max_tokens":
+	case "max_tokens", "model_context_window_exceeded":
 		return "length"
 	case "stop_sequence":
 		return "stop"
@@ -502,10 +502,10 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 			out, _ = sjson.SetBytes(out, argumentsPath, arguments)
 			toolCallsCount++
 		}
-		if toolCallsCount > 0 {
+		if finishReason := mapAnthropicStopReasonToOpenAI(stopReason); toolCallsCount > 0 && finishReason != "length" {
 			out, _ = sjson.SetBytes(out, "choices.0.finish_reason", "tool_calls")
-		} else {
-			out, _ = sjson.SetBytes(out, "choices.0.finish_reason", mapAnthropicStopReasonToOpenAI(stopReason))
+		} else if finishReason != "stop" {
+			out, _ = sjson.SetBytes(out, "choices.0.finish_reason", finishReason)
 		}
 	} else {
 		out, _ = sjson.SetBytes(out, "choices.0.finish_reason", mapAnthropicStopReasonToOpenAI(stopReason))

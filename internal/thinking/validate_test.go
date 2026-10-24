@@ -78,7 +78,10 @@ func TestValidateConfigModeNoneFallsBackForClaudeCompatibleLevelModel(t *testing
 	if err != nil {
 		t.Fatalf("ValidateConfig() error = %v", err)
 	}
-	if got.Mode != ModeNone || got.Level != LevelLow {
-		t.Fatalf("ValidateConfig() = %#v, want ModeNone fallback level low", got)
+	// Cannot-disable models fall back to the lowest level encoded as ModeLevel so
+	// the applier emits adaptive thinking rather than a disable request upstream
+	// (see lowestSupportedLevel).
+	if got.Mode != ModeLevel || got.Level != LevelLow {
+		t.Fatalf("ValidateConfig() = %#v, want ModeLevel fallback level low", got)
 	}
 }

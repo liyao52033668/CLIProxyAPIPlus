@@ -2,6 +2,7 @@ package management
 
 import (
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -31,9 +32,21 @@ func (h *Handler) GetStaticModelDefinitions(c *gin.Context) {
 		models = registry.GetStaticModelDefinitionsByChannel(channel)
 	}
 
-	if models == nil {
+	if len(models) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "unknown channel", "channel": channel})
 		return
+	}
+
+	if len(models) > 1 {
+		sort.Slice(models, func(i, j int) bool {
+			if models[i] == nil {
+				return models[j] != nil
+			}
+			if models[j] == nil {
+				return false
+			}
+			return models[i].ID < models[j].ID
+		})
 	}
 
 	c.JSON(http.StatusOK, gin.H{

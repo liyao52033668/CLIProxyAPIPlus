@@ -41,8 +41,9 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		return
 	}
 
+	cfg := h.configSnapshot()
 	// Initialize Codex auth service
-	openaiAuth := codex.NewCodexAuth(h.cfg)
+	openaiAuth := codex.NewCodexAuth(cfg)
 
 	// Generate authorization URL
 	authURL, err := openaiAuth.GenerateAuthURL(state, pkceCodes)
@@ -66,7 +67,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 			defer stopCallbackForwarderInstance(codexCallbackPort, forwarder)
 		}
 
-		callbackPayload, errWait := waitForOAuthCallbackFile(h.cfg.AuthDir, "codex", state, defaultOAuthCallbackWait)
+		callbackPayload, errWait := waitForOAuthCallbackFile(cfg.AuthDir, "codex", state, defaultOAuthCallbackWait)
 		if errWait != nil {
 			if errors.Is(errWait, errOAuthSessionNotPending) {
 				return

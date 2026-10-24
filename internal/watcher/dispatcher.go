@@ -6,7 +6,9 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
 
@@ -49,7 +51,12 @@ func (w *Watcher) dispatchRuntimeAuthUpdate(update AuthUpdate) bool {
 		w.runtimeAuths = make(map[string]*coreauth.Auth)
 	}
 	switch update.Action {
+	// Runtime entries pushed from providers must not keep a stale file-observation
+	// binding; the manager treats such bindings as unversioned file snapshots.
 	case AuthUpdateActionAdd, AuthUpdateActionModify:
+		if update.Auth != nil {
+			update.Auth.ClearFileSnapshot()
+		}
 		if update.Auth != nil && update.Auth.ID != "" {
 			clone := update.Auth.Clone()
 			w.runtimeAuths[clone.ID] = clone
@@ -88,7 +95,7 @@ func (w *Watcher) refreshAuthState(force bool) {
 	previous := maps.Clone(w.authRevisions)
 	previousFiles := maps.Clone(w.fileObservations)
 	w.clientsMutex.Unlock()
-	auths := snapshotCoreAuthsFunc(cfg, authDir)
+	auths, incompleteFiles := snapshotCoreAuthsFunc(cfg, authDir)
 	w.clientsMutex.Lock()
 	w.activeAuthScans--
 	// A full scan may finish after a newer file or persisted-auth update. Keep
@@ -104,6 +111,50 @@ func (w *Watcher) refreshAuthState(force bool) {
 		normalized := w.normalizeAuthPath(path)
 		return previous[auth.ID] != w.authRevisions[auth.ID] ||
 			previousFiles[normalized] != w.fileObservations[normalized]
+	}
+	incompletePathOrDir := func(rawPath string, checkDir bool) bool {
+		if len(incompleteFiles) == 0 {
+			return false
+		}
+		target := rawPath
+		if checkDir {
+			if strings.TrimSpace(rawPath) == "" {
+				return false
+			}
+			target = filepath.Dir(rawPath)
+		}
+		normalized := w.normalizeAuthPath(target)
+		if normalized == "" {
+			return false
+		}
+		if _, ok := incompleteFiles[normalized]; ok {
+			return true
+		}
+		if abs, errAbs := filepath.Abs(normalized); errAbs == nil {
+			if _, ok := incompleteFiles[w.normalizeAuthPath(abs)]; ok {
+				return true
+			}
+		}
+		return false
+	}
+	// Credentials from files whose read failed with a non-NotExist error must
+	// survive the scan, so a transient I/O failure cannot publish deletions.
+	if len(incompleteFiles) > 0 {
+		for _, auth := range w.currentAuths {
+			if auth == nil {
+				continue
+			}
+			path := ""
+			if auth.Attributes != nil {
+				path = auth.Attributes[coreauth.AttributePath]
+				if path == "" {
+					path = auth.Attributes[coreauth.AttributeSource]
+				}
+			}
+			if incompletePathOrDir(path, false) {
+				auths = append(auths, auth.Clone())
+			}
+		}
 	}
 	for index, auth := range auths {
 		if auth != nil && changedDuringScan(auth) {
@@ -310,7 +361,7 @@ func normalizeAuth(a *coreauth.Auth) *coreauth.Auth {
 	return clone
 }
 
-func snapshotCoreAuths(cfg *config.Config, authDir string) []*coreauth.Auth {
+func snapshotCoreAuths(cfg *config.Config, authDir string) ([]*coreauth.Auth, map[string]struct{}) {
 	ctx := &synthesizer.SynthesisContext{
 		Config:      cfg,
 		AuthDir:     authDir,
@@ -330,5 +381,5 @@ func snapshotCoreAuths(cfg *config.Config, authDir string) []*coreauth.Auth {
 		out = append(out, auths...)
 	}
 
-	return out
+	return out, ctx.IncompleteFiles
 }

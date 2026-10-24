@@ -41,6 +41,7 @@ func TestBase64AlphabetSet_MatchesEncoderAlphabets(t *testing.T) {
 	}{
 		{"grok unpadded std", grokEncryptedContentCharSet, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"},
 		{"gpt base64url", gptReasoningSignatureCharSet, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_="},
+		{"meta base64url unpadded", metaReasoningSignatureCharSet, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"},
 	}
 	for _, tc := range cases {
 		allowed := map[byte]bool{}
@@ -72,6 +73,7 @@ func replaySafeEnvelopeFixtures() map[string]struct {
 		"claude CAIS":            {testClaudeCAISSignature("claude-fable-5"), SignatureProviderClaude},
 		"gemini protobuf field2": {testGeminiThoughtSignatureEnvelope(), SignatureProviderGemini},
 		"gpt fernet":             {testGPTReasoningSignature(), SignatureProviderGPT},
+		"meta muse":              {testMetaReasoningSignature(1024), SignatureProviderMeta},
 	}
 }
 

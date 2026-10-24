@@ -1085,7 +1085,11 @@ func (e *DevinExecutor) streamDevinFrames(
 	}
 }
 
-func consumeDevinFramesToInteractions(body io.Reader, model, chatModelUID string) ([]byte, *helps.DevinUpstreamResponseLog, error) {
+func consumeDevinFramesToInteractions(body io.Reader, model, chatModelUID string, original ...[]byte) ([]byte, *helps.DevinUpstreamResponseLog, error) {
+	return consumeDevinFramesToInteractionsForAuth(body, model, chatModelUID, nil, original...)
+}
+
+func consumeDevinFramesToInteractionsForAuth(body io.Reader, model, chatModelUID string, auth *cliproxyauth.Auth, original ...[]byte) ([]byte, *helps.DevinUpstreamResponseLog, error) {
 	interactionID := fmt.Sprintf("interaction_%s", uuid.New().String()[:12])
 	var preToolTextParts []string
 	var postToolTextParts []string
@@ -2261,12 +2265,32 @@ func parseSignatureBytes(sigStr string) ([]byte, string) {
 		return []byte(s), "openai"
 	case internalsignature.SignatureProviderGemini:
 		return []byte(s), "gemini"
+	case internalsignature.SignatureProviderMeta:
+		// Positively foreign to the Devin backend: never supplement it as a
+		// sealed signature.
+		return nil, ""
 	}
 	if strings.HasPrefix(s, "AY") {
 		return []byte(s), "gemini"
 	}
 	if decoded, err := base64.StdEncoding.DecodeString(s); err == nil && len(decoded) > 0 {
 		decStr := string(decoded)
+		if strings.HasPrefix(decStr, "cpa-codex-gemini-carrier-v1:") {
+			inner := strings.TrimSpace(strings.TrimPrefix(decStr, "cpa-codex-gemini-carrier-v1:"))
+			if strings.HasPrefix(inner, "sealed.v1.") {
+				return []byte(inner), "sealed"
+			}
+			switch internalsignature.DetectSignatureProvider(inner) {
+			case internalsignature.SignatureProviderClaude:
+				return []byte(inner), "anthropic"
+			case internalsignature.SignatureProviderGPT:
+				return []byte(inner), "openai"
+			case internalsignature.SignatureProviderGemini:
+				return []byte(inner), "gemini"
+			default:
+				return nil, ""
+			}
+		}
 		if strings.HasPrefix(decStr, "sealed.v1.") {
 			return decoded, "sealed"
 		}
@@ -2277,6 +2301,8 @@ func parseSignatureBytes(sigStr string) ([]byte, string) {
 			return decoded, "openai"
 		case internalsignature.SignatureProviderGemini:
 			return []byte(s), "gemini"
+		case internalsignature.SignatureProviderMeta:
+			return nil, ""
 		}
 		if strings.HasPrefix(decStr, "CAQS") || strings.HasPrefix(decStr, "CAIS") {
 			return decoded, "anthropic"
@@ -2312,6 +2338,8 @@ func detectSignatureType(sig string) string {
 		return "openai"
 	case internalsignature.SignatureProviderGemini:
 		return "gemini"
+	case internalsignature.SignatureProviderMeta:
+		return ""
 	}
 	if strings.HasPrefix(s, "CAQS") || strings.HasPrefix(s, "CAIS") {
 		return "anthropic"
@@ -2415,6 +2443,13 @@ func (e *DevinExecutor) getSensitiveWordMatcher() *helps.SensitiveWordMatcher {
 }
 
 func newDevinStatusError(code int, headers http.Header, body []byte) statusErr {
+	return newDevinStatusErrorForAuth(code, headers, body, nil)
+}
+
+// newDevinStatusErrorForAuth builds the scheduling view of a direct HTTP
+// (non-trailer) upstream failure. Daily/weekly quota exhaustion becomes
+// credential-scoped and, when auth is known, retries at the observed reset.
+func newDevinStatusErrorForAuth(code int, headers http.Header, body []byte, auth *cliproxyauth.Auth) statusErr {
 	err := statusErr{code: code, msg: string(body)}
 	if code == http.StatusTooManyRequests && headers != nil {
 		if raw := strings.TrimSpace(headers.Get("Retry-After")); raw != "" {
@@ -2428,6 +2463,40 @@ func newDevinStatusError(code int, headers http.Header, body []byte) statusErr {
 				}
 			}
 		}
+	}
+	// An explicit Retry-After header parsed above keeps precedence inside
+	// devinQuotaScopedStatusError; signal data only fills the gap.
+	return devinQuotaScopedStatusError(err, auth, time.Now())
+}
+
+// devinTrailerStatusError builds the scheduling view of a Connect trailer
+// error. Explicit account-wide daily/weekly usage quota exhaustion (issue
+// #6690) is credential-scoped and, when auth carries a valid observed reset
+// timestamp for that window, retries only after the reset. Transient
+// capacity and generic rate-limit 429s stay model-scoped.
+func devinTrailerStatusError(code int, msg string, auth *cliproxyauth.Auth) statusErr {
+	return devinQuotaScopedStatusError(statusErr{code: code, msg: msg}, auth, time.Now())
+}
+
+// devinQuotaScopedStatusError upgrades a 429 to credential scope when its
+// message reports daily/weekly usage quota exhaustion, deriving RetryAfter
+// from the matching observed reset signal. An explicit Retry-After already
+// carried by err is preserved and never overwritten by signal data.
+func devinQuotaScopedStatusError(err statusErr, auth *cliproxyauth.Auth, now time.Time) statusErr {
+	if err.code != http.StatusTooManyRequests {
+		return err
+	}
+	period := helps.DevinUsageQuotaExhaustionPeriod(err.msg)
+	if period == helps.DevinQuotaPeriodNone {
+		return err
+	}
+	err.credentialScoped = true
+	if err.retryAfter == nil && auth != nil {
+		key := "daily_quota_reset_at"
+		if period == helps.DevinQuotaPeriodWeekly {
+			key = "weekly_quota_reset_at"
+		}
+		err.retryAfter = helps.DevinQuotaRetryAfter(auth.Quota.Signals[key], now)
 	}
 	return err
 }

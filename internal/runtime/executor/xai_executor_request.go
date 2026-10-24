@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -264,9 +265,21 @@ func logXAIResolvedBaseURL(ctx context.Context, baseURL string) {
 	helps.LogWithRequestID(ctx).Infof("xai: using base_url=%s source=%s", baseURL, xaiBaseURLSource(baseURL))
 }
 
-func applyXAIHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, sessionID string) {
+func xaiDefaultUserAgent() string {
+	return "xai-grok-workspace/" + xaiClientVersion()
+}
+
+func ensureXAIUserAgent(r *http.Request, clientHeaders ...http.Header) {
+	if r == nil {
+		return
+	}
+	misc.EnsureHeader(r.Header, util.ResolveClientHeaders(r, clientHeaders...), "User-Agent", xaiDefaultUserAgent())
+}
+
+func applyXAIHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, sessionID string, clientHeaders ...http.Header) {
 	applyXAIDefaultHeaders(r, token, stream, sessionID)
-	applyXAICustomHeaders(r, auth)
+	ensureXAIUserAgent(r, clientHeaders...)
+	applyXAICustomHeaders(r, auth, clientHeaders...)
 }
 
 func applyXAIDefaultHeaders(r *http.Request, token string, stream bool, sessionID string) {
@@ -285,12 +298,12 @@ func applyXAIDefaultHeaders(r *http.Request, token string, stream bool, sessionI
 	}
 }
 
-func applyXAICustomHeaders(r *http.Request, auth *cliproxyauth.Auth) {
+func applyXAICustomHeaders(r *http.Request, auth *cliproxyauth.Auth, clientHeaders ...http.Header) {
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
 	}
-	util.ApplyCustomHeadersFromAttrs(r, attrs)
+	util.ApplyCustomHeadersFromAttrs(r, attrs, clientHeaders...)
 }
 
 // applyXAIChatProxyIdentityHeaders attaches the fixed Grok CLI fingerprint
@@ -307,20 +320,22 @@ func applyXAIChatProxyIdentityHeaders(r *http.Request) {
 }
 
 // applyXAIChatHeaders applies standard xAI headers for non-image/video chat
-// requests. When using_api is true, this matches the standard
-// applyXAIHeaders behavior. CLI chat-proxy identity headers are only attached
-// when using_api is false and the resolved chat base URL is the official CLI
-// chat-proxy endpoint.
-func applyXAIChatHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, sessionID string) {
-	if xaiUsingAPI(auth) {
-		applyXAIHeaders(r, auth, token, stream, sessionID)
+// requests. When using_api is true or a custom non-CLI-proxy base URL is used,
+// this matches the standard applyXAIHeaders behavior (forwarding the downstream
+// User-Agent or falling back to the Grok workspace User-Agent). CLI chat-proxy
+// identity headers are only attached when using_api is false and the resolved
+// chat base URL is the official CLI chat-proxy endpoint.
+func applyXAIChatHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, sessionID string, clientHeaders ...http.Header) {
+	if xaiUsingAPI(auth) || !xaiIsCLIChatProxyBaseURL(xaiChatBaseURL(auth)) {
+		applyXAIHeaders(r, auth, token, stream, sessionID, clientHeaders...)
 		return
 	}
 	applyXAIDefaultHeaders(r, token, stream, sessionID)
+	ensureXAIUserAgent(r, clientHeaders...)
 	if xaiIsCLIChatProxyBaseURL(xaiChatBaseURL(auth)) {
 		applyXAIChatProxyIdentityHeaders(r)
 	}
-	applyXAICustomHeaders(r, auth)
+	applyXAICustomHeaders(r, auth, clientHeaders...)
 }
 
 func xaiResolveComposerSessionID(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, baseModel string) (string, error) {

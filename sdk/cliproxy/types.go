@@ -92,6 +92,8 @@ type WatcherWrapper struct {
 	setUpdateQueue        func(queue chan<- watcher.AuthUpdate)
 	dispatchRuntimeUpdate func(update watcher.AuthUpdate) bool
 	notifyTokenRefreshed  func(tokenID, accessToken, refreshToken, expiresAt string) // Background refresh notification
+
+	rereadDiscardedFileSnapshot func(auth *coreauth.Auth)
 }
 
 // Start proxies to the underlying watcher Start implementation.
@@ -148,6 +150,15 @@ func (w *WatcherWrapper) SnapshotAuths() []*coreauth.Auth {
 		return nil
 	}
 	return w.snapshotAuths()
+}
+
+// RereadDiscardedFileSnapshot asks the underlying watcher to invalidate and
+// re-read a file snapshot discarded by the manager's digest fence.
+func (w *WatcherWrapper) RereadDiscardedFileSnapshot(auth *coreauth.Auth) {
+	if w == nil || w.rereadDiscardedFileSnapshot == nil {
+		return
+	}
+	w.rereadDiscardedFileSnapshot(auth)
 }
 
 // SnapshotInvalidAuths returns the current watcher-owned invalid auth snapshot.

@@ -19,6 +19,7 @@ import (
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
@@ -280,14 +281,12 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 				excludedModels = append(excludedModels, model)
 			}
 			sort.Strings(excludedModels)
+			delete(targetAuth.Metadata, "excluded-models")
 			if len(excludedModels) == 0 {
 				delete(targetAuth.Metadata, "excluded_models")
-				delete(targetAuth.Metadata, "excluded-models")
 				delete(targetAuth.Attributes, "excluded_models")
 			} else {
 				targetAuth.Metadata["excluded_models"] = excludedModels
-				delete(targetAuth.Metadata, "excluded-models")
-				targetAuth.Attributes["excluded_models"] = strings.Join(excludedModels, ",")
 			}
 		}
 		if len(req.DisableCooling) > 0 {
@@ -405,6 +404,20 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 
 	targetAuth.UpdatedAt = time.Now()
 
+	if req.ExcludedModels != nil {
+		authKind := targetAuth.AuthKind()
+		if authKind == "" {
+			authKind = coreauth.AuthKindOAuth
+		}
+		h.mu.Lock()
+		perKey, errExport := synthesizer.ExportExcludedModelsFromMetadata(targetAuth.Metadata)
+		if errExport != nil {
+			log.WithError(errExport).Warnf("invalid excluded_models entries in auth file %s after PATCH", targetAuth.FileName)
+		}
+		synthesizer.ApplyAuthExcludedModelsMeta(targetAuth, perKey, authKind)
+		h.mu.Unlock()
+	}
+
 	if _, err := h.authManager.Update(ctx, targetAuth); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
 		return
@@ -471,9 +484,9 @@ func (h *Handler) tokenStoreWithBaseDir() coreauth.Store {
 		store = sdkAuth.GetTokenStore()
 		h.tokenStore = store
 	}
-	if h.cfg != nil {
+	if cfg := h.configSnapshot(); cfg != nil {
 		if dirSetter, ok := store.(interface{ SetBaseDir(string) }); ok {
-			dirSetter.SetBaseDir(h.cfg.AuthDir)
+			dirSetter.SetBaseDir(cfg.AuthDir)
 		}
 	}
 	return store

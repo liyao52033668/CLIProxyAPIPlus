@@ -13,6 +13,7 @@ const (
 	codexBuiltinImage25ModelID         = "gpt-image-2.5"
 	xaiBuiltinImageModelID             = "grok-imagine-image"
 	xaiBuiltinImageQualityModelID      = "grok-imagine-image-quality"
+	xaiBuiltinImage20ModelID           = "grok-imagine-image-2.0"
 	xaiBuiltinVideoModelID             = "grok-imagine-video"
 	xaiBuiltinVideo15ModelID           = "grok-imagine-video-1.5"
 	xaiBuiltinVideo15PreviewAlias      = "grok-imagine-video-1.5-preview"
@@ -883,7 +884,7 @@ func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
 // WithXAIBuiltins injects hard-coded xAI image, video, and speech model definitions
 // that should not depend on remote models.json updates.
 func WithXAIBuiltins(models []*ModelInfo) []*ModelInfo {
-	return upsertModelInfos(models, xaiBuiltinImageModelInfo(), xaiBuiltinImageQualityModelInfo(), xaiBuiltinVideoModelInfo(), xaiBuiltinVideo15ModelInfo(), xaiBuiltinVideo15PreviewModelInfo(), xaiBuiltinSpeechModelInfo(), xaiBuiltinSpeechVoiceModelInfo())
+	return upsertModelInfos(models, xaiBuiltinImageModelInfo(), xaiBuiltinImageQualityModelInfo(), xaiBuiltinImage20ModelInfo(), xaiBuiltinVideoModelInfo(), xaiBuiltinVideo15ModelInfo(), xaiBuiltinVideo15PreviewModelInfo(), xaiBuiltinSpeechModelInfo(), xaiBuiltinSpeechVoiceModelInfo())
 }
 
 func codexBuiltinImageModelInfo() *ModelInfo {
@@ -957,6 +958,19 @@ func xaiBuiltinImageQualityModelInfo() *ModelInfo {
 		DisplayName: "Grok Imagine Image Quality",
 		Name:        xaiBuiltinImageQualityModelID,
 		Description: "xAI Grok higher-fidelity image generation model.",
+	}
+}
+
+func xaiBuiltinImage20ModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:          xaiBuiltinImage20ModelID,
+		Object:      "model",
+		Created:     1786060800, // 2026-08-07
+		OwnedBy:     "xai",
+		Type:        "xai",
+		DisplayName: "Grok Imagine Image 2.0",
+		Name:        xaiBuiltinImage20ModelID,
+		Description: "xAI Grok image generation model.",
 	}
 }
 
@@ -1272,7 +1286,47 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		}
 	}
 
+	// Dated and bracketed Claude variants (claude-sonnet-5-5-20261001,
+	// claude-opus-5-5[1m]) share the capabilities of their catalog entry.
+	for _, familyID := range claudeFamilyModelIDs(modelID) {
+		for _, m := range data.Claude {
+			if m != nil && m.ID == familyID {
+				return cloneModelInfo(m)
+			}
+		}
+	}
+
 	return nil
+}
+
+// claudeFamilyModelIDs returns the catalog IDs a Claude model variant may belong
+// to: without a "[...]" context suffix, then also without a "-YYYYMMDD" date.
+func claudeFamilyModelIDs(modelID string) []string {
+	if !strings.HasPrefix(modelID, "claude-") {
+		return nil
+	}
+	var ids []string
+	base := modelID
+	if i := strings.IndexByte(base, '['); i > 0 && strings.HasSuffix(base, "]") {
+		base = base[:i]
+		ids = append(ids, base)
+	}
+	if n := len(base); n > 9 && base[n-9] == '-' && isEightDigits(base[n-8:]) {
+		ids = append(ids, base[:n-9])
+	}
+	return ids
+}
+
+func isEightDigits(s string) bool {
+	if len(s) != 8 {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // defaultCopilotClaudeContextLength is the conservative prompt token limit for

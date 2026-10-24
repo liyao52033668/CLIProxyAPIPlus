@@ -54,6 +54,7 @@ var (
 	qoderCallbackServersMu sync.Mutex
 	qoderCallbackServers   = make(map[int]*qoderCallbackServer)
 	errAuthFileMustBeJSON  = errors.New("auth file must be .json")
+	errInvalidAuthFile     = errors.New("invalid auth file")
 	errAuthFileNotFound    = errors.New("auth file not found")
 )
 

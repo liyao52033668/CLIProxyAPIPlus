@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -257,44 +258,86 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		defer close(out)
 		defer reporter.EnsurePublished(ctx)
 		defer helps.CloseResponseBody(e.Identifier(), httpResp.Body)
+		var streamUsage helps.StreamUsageBuffer
+		var terminalDelivered bool
+		defer func() {
+			if errContext := ctx.Err(); errContext != nil && !terminalDelivered {
+				streamUsage.PublishFailure(ctx, reporter, errContext)
+				return
+			}
+			streamUsage.Publish(ctx, reporter)
+		}()
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(make([]byte, 0, 64*1024), streamScannerBuffer)
 		var param any
+		var sawFinishReason bool
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			reporter.ObserveResponseModel(line)
 			filtered := helps.FilterSSEUsageMetadata(line)
 			payload := helps.JSONPayload(filtered)
+			if !sawFinishReason && geminiStreamHasFinishSignal(payload) {
+				sawFinishReason = true
+			}
+			if detail, ok := helps.ParseGeminiStreamUsage(line); ok {
+				streamUsage.Observe(detail, true)
+			}
 			if len(payload) == 0 {
 				continue
-			}
-			if detail, ok := helps.ParseGeminiStreamUsage(payload); ok {
-				reporter.Publish(ctx, detail)
 			}
 			lines := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(payload), &param)
 			for i := range lines {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}:
+					if helps.IsGeminiTerminalStreamChunk(lines[i]) {
+						terminalDelivered = true
+					}
 				case <-ctx.Done():
 					return
 				}
 			}
 		}
+		if errScan := scanner.Err(); errScan != nil {
+			if terminalDelivered && errors.Is(errScan, context.Canceled) {
+				return
+			}
+			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+			if !streamUsage.PublishFailure(ctx, reporter, errScan) {
+				reporter.PublishFailure(ctx, errScan)
+			}
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
+			case <-ctx.Done():
+			}
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		// Formats that require explicit termination signals should error on truncation
+		// rather than silently completing with incomplete data.
+		if (from == sdktranslator.FormatClaude || from == sdktranslator.FormatOpenAIResponse) && !sawFinishReason {
+			truncErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before finishReason"}
+			helps.RecordAPIResponseError(ctx, e.cfg, truncErr)
+			if !streamUsage.PublishFailure(ctx, reporter, truncErr) {
+				reporter.PublishFailure(ctx, truncErr)
+			}
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: truncErr}:
+			case <-ctx.Done():
+			}
+			return
+		}
 		lines := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param)
 		for i := range lines {
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}:
+				if helps.IsGeminiTerminalStreamChunk(lines[i]) {
+					terminalDelivered = true
+				}
 			case <-ctx.Done():
 				return
-			}
-		}
-		if errScan := scanner.Err(); errScan != nil {
-			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.PublishFailure(ctx, errScan)
-			select {
-			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
-			case <-ctx.Done():
 			}
 		}
 		reporter.EnsurePublished(ctx)
@@ -303,6 +346,33 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 }
 
 // CountTokens counts tokens for the given request using the Gemini API.
+// geminiStreamHasFinishSignal reports whether a streaming payload carries a
+// terminal finishReason or block reason, so a stream that closes without one
+// is treated as truncated rather than completed.
+func geminiStreamHasFinishSignal(payload []byte) bool {
+	if len(payload) == 0 {
+		return false
+	}
+	for _, path := range []string{
+		"candidates.#.finishReason",
+		"response.candidates.#.finishReason",
+		"promptFeedback.blockReason",
+		"response.promptFeedback.blockReason",
+	} {
+		res := gjson.GetBytes(payload, path)
+		if res.IsArray() {
+			for _, item := range res.Array() {
+				if strings.TrimSpace(item.String()) != "" {
+					return true
+				}
+			}
+		} else if res.Exists() && strings.TrimSpace(res.String()) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func (e *GeminiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 

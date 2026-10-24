@@ -1062,7 +1062,7 @@ func isOpenAIImageOnlyModel(model string) bool {
 		return true
 	}
 	switch strings.ToLower(strings.TrimSpace(base)) {
-	case "gpt-image-2.5", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst":
+	case "gpt-image-2.5", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "grok-imagine-image", "grok-imagine-image-quality", "grok-imagine-image-2.0":
 		return true
 	default:
 		return false

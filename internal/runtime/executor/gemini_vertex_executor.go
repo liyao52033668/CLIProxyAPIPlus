@@ -53,34 +53,6 @@ func getVertexAction(model string, isStream bool) string {
 	return "generateContent"
 }
 
-func isGeminiVertexTerminalStreamChunk(chunk []byte) bool {
-	for _, line := range bytes.Split(chunk, []byte("\n")) {
-		trimmed := bytes.TrimSpace(line)
-		if bytes.Equal(trimmed, []byte("data: [DONE]")) || bytes.Equal(trimmed, []byte("[DONE]")) {
-			return true
-		}
-		payload := helps.JSONPayload(line)
-		if len(payload) == 0 {
-			continue
-		}
-		eventType := gjson.GetBytes(payload, "type").String()
-		if eventType == "response.completed" || eventType == "response.incomplete" || eventType == "response.done" || eventType == "message_stop" {
-			return true
-		}
-		for _, path := range []string{
-			"choices.0.finish_reason",
-			"response.choices.0.finish_reason",
-			"candidates.0.finishReason",
-			"response.candidates.0.finishReason",
-		} {
-			if finishReason := gjson.GetBytes(payload, path); finishReason.Exists() && strings.TrimSpace(finishReason.String()) != "" {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // convertImagenToGeminiResponse converts Imagen API response to Gemini format
 // so it can be processed by the standard translation pipeline.
 // This ensures Imagen models return responses in the same format as gemini-3-pro-image-preview.
@@ -619,22 +591,28 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 		defer close(out)
 		defer reporter.EnsurePublished(ctx)
 		defer helps.CloseResponseBody(e.Identifier(), httpResp.Body)
+		var streamUsage helps.StreamUsageBuffer
+		defer streamUsage.Publish(ctx, reporter)
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(make([]byte, 0, 64*1024), streamScannerBuffer)
 		var terminalDelivered bool
+		var sawFinishReason bool
 		var param any
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			reporter.ObserveResponseModel(line)
+			if !sawFinishReason && geminiStreamHasFinishSignal(helps.JSONPayload(line)) {
+				sawFinishReason = true
+			}
 			if detail, ok := helps.ParseGeminiStreamUsage(line); ok {
-				reporter.Publish(ctx, detail)
+				streamUsage.Observe(detail, true)
 			}
 			lines := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param)
 			for i := range lines {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}:
-					if isGeminiVertexTerminalStreamChunk(lines[i]) {
+					if helps.IsGeminiTerminalStreamChunk(lines[i]) {
 						terminalDelivered = true
 					}
 				case <-ctx.Done():
@@ -642,26 +620,44 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 				}
 			}
 		}
-		lines := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param)
-		for i := range lines {
-			select {
-			case out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}:
-				if isGeminiVertexTerminalStreamChunk(lines[i]) {
-					terminalDelivered = true
-				}
-			case <-ctx.Done():
-				return
-			}
-		}
 		if errScan := scanner.Err(); errScan != nil {
 			if terminalDelivered && errors.Is(errScan, context.Canceled) {
 				return
 			}
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.PublishFailure(ctx, errScan)
+			if !streamUsage.PublishFailure(ctx, reporter, errScan) {
+				reporter.PublishFailure(ctx, errScan)
+			}
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
 			case <-ctx.Done():
+			}
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		if from == sdktranslator.FormatClaude && !sawFinishReason {
+			truncErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before finishReason"}
+			helps.RecordAPIResponseError(ctx, e.cfg, truncErr)
+			if !streamUsage.PublishFailure(ctx, reporter, truncErr) {
+				reporter.PublishFailure(ctx, truncErr)
+			}
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: truncErr}:
+			case <-ctx.Done():
+			}
+			return
+		}
+		lines := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param)
+		for i := range lines {
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}:
+				if helps.IsGeminiTerminalStreamChunk(lines[i]) {
+					terminalDelivered = true
+				}
+			case <-ctx.Done():
+				return
 			}
 		}
 		reporter.EnsurePublished(ctx)
@@ -749,22 +745,28 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 		defer close(out)
 		defer reporter.EnsurePublished(ctx)
 		defer helps.CloseResponseBody(e.Identifier(), httpResp.Body)
+		var streamUsage helps.StreamUsageBuffer
+		defer streamUsage.Publish(ctx, reporter)
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(make([]byte, 0, 64*1024), streamScannerBuffer)
 		var terminalDelivered bool
+		var sawFinishReason bool
 		var param any
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			reporter.ObserveResponseModel(line)
+			if !sawFinishReason && geminiStreamHasFinishSignal(helps.JSONPayload(line)) {
+				sawFinishReason = true
+			}
 			if detail, ok := helps.ParseGeminiStreamUsage(line); ok {
-				reporter.Publish(ctx, detail)
+				streamUsage.Observe(detail, true)
 			}
 			lines := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param)
 			for i := range lines {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}:
-					if isGeminiVertexTerminalStreamChunk(lines[i]) {
+					if helps.IsGeminiTerminalStreamChunk(lines[i]) {
 						terminalDelivered = true
 					}
 				case <-ctx.Done():
@@ -772,26 +774,44 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 				}
 			}
 		}
-		lines := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param)
-		for i := range lines {
-			select {
-			case out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}:
-				if isGeminiVertexTerminalStreamChunk(lines[i]) {
-					terminalDelivered = true
-				}
-			case <-ctx.Done():
-				return
-			}
-		}
 		if errScan := scanner.Err(); errScan != nil {
 			if terminalDelivered && errors.Is(errScan, context.Canceled) {
 				return
 			}
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.PublishFailure(ctx, errScan)
+			if !streamUsage.PublishFailure(ctx, reporter, errScan) {
+				reporter.PublishFailure(ctx, errScan)
+			}
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
 			case <-ctx.Done():
+			}
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		if from == sdktranslator.FormatClaude && !sawFinishReason {
+			truncErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before finishReason"}
+			helps.RecordAPIResponseError(ctx, e.cfg, truncErr)
+			if !streamUsage.PublishFailure(ctx, reporter, truncErr) {
+				reporter.PublishFailure(ctx, truncErr)
+			}
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: truncErr}:
+			case <-ctx.Done():
+			}
+			return
+		}
+		lines := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param)
+		for i := range lines {
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}:
+				if helps.IsGeminiTerminalStreamChunk(lines[i]) {
+					terminalDelivered = true
+				}
+			case <-ctx.Done():
+				return
 			}
 		}
 		reporter.EnsurePublished(ctx)
@@ -1020,8 +1040,11 @@ func vertexBaseURL(location string) string {
 	loc := strings.TrimSpace(location)
 	if loc == "" {
 		loc = "us-central1"
-	} else if loc == "global" {
+	} else if strings.EqualFold(loc, "global") {
 		return "https://aiplatform.googleapis.com"
+	} else if strings.EqualFold(loc, "us") || strings.EqualFold(loc, "eu") {
+		// Multi-region locations use the regional endpoint (REP) host form.
+		return fmt.Sprintf("https://aiplatform.%s.rep.googleapis.com", strings.ToLower(loc))
 	}
 	return fmt.Sprintf("https://%s-aiplatform.googleapis.com", loc)
 }

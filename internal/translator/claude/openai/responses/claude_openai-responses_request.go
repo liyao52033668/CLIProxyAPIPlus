@@ -200,8 +200,10 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 					out, _ = sjson.DeleteBytes(out, "thinking.budget_tokens")
 					out, _ = sjson.DeleteBytes(out, "output_config.effort")
 				default:
-					if mapped, ok := thinking.MapToClaudeEffort(effort, supportsMax); ok {
-						effort = mapped
+					if !thinking.HasLevel(mi.Thinking.Levels, effort) {
+						if mapped, ok := thinking.MapToClaudeEffort(effort, supportsMax); ok {
+							effort = mapped
+						}
 					}
 					out, _ = sjson.SetBytes(out, "thinking.type", "adaptive")
 					out, _ = sjson.DeleteBytes(out, "thinking.budget_tokens")
@@ -686,6 +688,8 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	}
 
 	// Map tool_choice similar to Chat Completions translator (optional in docs, safe to handle)
+	toolChoiceNone := false
+	forcedToolFilteredOut := false
 	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
 		switch toolChoice.Type {
 		case gjson.String:
@@ -694,14 +698,19 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"auto"}`))
 			case "none":
 				// Leave unset; implies no tools
+				toolChoiceNone = true
 			case "required":
 				if len(includedToolNames) > 0 {
 					out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"any"}`))
+				} else {
+					forcedToolFilteredOut = true
 				}
 			}
 		case gjson.JSON:
-			choiceType := toolChoice.Get("type").String()
-			if choiceType == "function" || choiceType == "custom" {
+			choiceType := strings.TrimSpace(toolChoice.Get("type").String())
+			if choiceType == "none" {
+				toolChoiceNone = true
+			} else if choiceType == "function" || choiceType == "custom" {
 				fn := toolChoice.Get("function.name").String()
 				if fn == "" {
 					fn = toolChoice.Get("custom.name").String()
@@ -726,10 +735,30 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 					toolChoiceJSON := []byte(`{"name":"","type":"tool"}`)
 					toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "name", names.claudeName(fn))
 					out, _ = sjson.SetRawBytes(out, "tool_choice", toolChoiceJSON)
+				} else {
+					forcedToolFilteredOut = true
+				}
+			} else if choiceType != "" && choiceType != "auto" {
+				if _, ok := includedToolNames[choiceType]; !ok {
+					forcedToolFilteredOut = true
 				}
 			}
 		default:
 
+		}
+	}
+
+	// parallel_tool_calls=false maps to Anthropic's disable_parallel_tool_use,
+	// mirroring the Chat Completions translator. It is not added when the
+	// effective choice is none, when no tool survived conversion, or when a
+	// forced tool was filtered out (no tool_choice was produced for it).
+	if parallelToolCalls := root.Get("parallel_tool_calls"); parallelToolCalls.Type == gjson.False && !toolChoiceNone && !forcedToolFilteredOut && len(toolItems) > 0 {
+		if choice := gjson.GetBytes(out, "tool_choice"); choice.Exists() {
+			if choice.Get("type").String() != "none" {
+				out, _ = sjson.SetBytes(out, "tool_choice.disable_parallel_tool_use", true)
+			}
+		} else {
+			out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"auto","disable_parallel_tool_use":true}`))
 		}
 	}
 

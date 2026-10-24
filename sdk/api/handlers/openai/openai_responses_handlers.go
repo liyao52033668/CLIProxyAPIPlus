@@ -105,8 +105,9 @@ func (f *responsesSSEFramer) writeFrame(w io.Writer, frame []byte) {
 
 // shouldFilterPrivateEvent reports whether an SSE event name or payload type must be
 // dropped before reaching the downstream client. Internal WebSocket timing telemetry
-// (responsesapi.*) is always filtered. Official Codex clients keep codex.response.metadata
-// but lose codex.rate_limits; standard Responses API clients lose every codex.* event.
+// (responsesapi.*) and Meta subscription usage are always filtered. Official Codex
+// clients keep codex.response.metadata but lose codex.rate_limits; standard Responses
+// API clients lose every codex.* event.
 func (f *responsesSSEFramer) shouldFilterPrivateEvent(streamEvent, payloadType string) bool {
 	check := func(name string) bool {
 		name = strings.TrimSpace(name)
@@ -117,8 +118,8 @@ func (f *responsesSSEFramer) shouldFilterPrivateEvent(streamEvent, payloadType s
 			return false
 		}
 
-		// Always filter internal WebSocket timing telemetry from SSE streams.
-		if strings.HasPrefix(name, "responsesapi.") {
+		// Always filter internal WebSocket timing telemetry and Meta subscription usage from SSE streams.
+		if strings.HasPrefix(name, "responsesapi.") || name == "response.subscription_usage" {
 			return true
 		}
 

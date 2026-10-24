@@ -166,15 +166,35 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 		}
 	}
 
-	if config.Mode == ModeNone && toFormat == "claude" && (support.ZeroAllowed || isLevelSupported(string(LevelNone), support.Levels)) {
-		// Claude supports explicit disable via thinking.type="disabled" when the
-		// selected model allows zero thinking.
+	if config.Mode == ModeNone && toFormat == "claude" && support.ZeroAllowed {
+		// Claude supports explicit disable via thinking.type="disabled" (or the
+		// model's DisableType). Keep Budget=0 so applier can omit budget_tokens.
 		config.Budget = 0
 		config.Level = ""
 	} else {
-		switch config.Mode {
-		case ModeBudget, ModeAuto, ModeNone:
-			config.Budget = clampBudget(config.Budget, modelInfo, toFormat)
+		if config.Mode == ModeNone && toFormat == "claude" && isLevelSupported(string(LevelNone), support.Levels) {
+			// Models advertising a "none" level disable thinking that way.
+			config.Budget = 0
+			config.Level = ""
+			return &config, nil
+		}
+		if config.Mode == ModeNone && toFormat == "claude" && !support.ZeroAllowed {
+			if lowest, ok := lowestSupportedLevel(support.Levels); ok && len(support.Levels) > 0 {
+				// Adaptive-only Claude models (for example claude-opus-5-5, claude-fable-5,
+				// and claude-fable-5-1) reject thinking.type="disabled". Like other models
+				// that cannot be disabled, fall back to the lowest supported level.
+				config.Mode = ModeLevel
+				config.Budget = 0
+				config.Level = lowest
+			} else {
+				config.Budget = 0
+				config.Level = ""
+			}
+		} else {
+			switch config.Mode {
+			case ModeBudget, ModeAuto, ModeNone:
+				config.Budget = clampBudget(config.Budget, modelInfo, toFormat)
+			}
 		}
 
 		// ModeNone for a model that cannot be disabled falls back to the lowest
@@ -183,7 +203,9 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 		// their Min/Max range is zero.
 		cannotDisableLevelModel := !support.ZeroAllowed && !isLevelSupported(string(LevelNone), support.Levels)
 		if config.Mode == ModeNone && len(support.Levels) > 0 && (config.Budget > 0 || cannotDisableLevelModel) {
-			config.Level = ThinkingLevel(support.Levels[0])
+			if lowest, ok := lowestSupportedLevel(support.Levels); ok {
+				config.Level = lowest
+			}
 		}
 	}
 
@@ -238,6 +260,23 @@ func convertAutoToMidRange(config ThinkingConfig, support *registry.ThinkingSupp
 
 // standardLevelOrder defines the canonical ordering of thinking levels from lowest to highest.
 var standardLevelOrder = []ThinkingLevel{LevelMinimal, LevelLow, LevelMedium, LevelHigh, LevelXHigh, LevelMax}
+
+// lowestSupportedLevel returns the lowest canonical effort level in supported,
+// ignoring mode markers such as "none" and "auto".
+func lowestSupportedLevel(supported []string) (ThinkingLevel, bool) {
+	bestIdx := -1
+	for _, s := range supported {
+		if idx := levelIndex(strings.TrimSpace(s)); idx != -1 {
+			if bestIdx == -1 || idx < bestIdx {
+				bestIdx = idx
+			}
+		}
+	}
+	if bestIdx >= 0 {
+		return standardLevelOrder[bestIdx], true
+	}
+	return "", false
+}
 
 // clampLevel clamps the given level to the nearest supported level.
 // On tie, prefers the lower level.

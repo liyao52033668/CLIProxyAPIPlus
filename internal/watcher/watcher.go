@@ -183,7 +183,26 @@ func (w *Watcher) SyncConfig(cfg *config.Config) {
 	w.clientsMutex.Lock()
 	w.config = cfg
 	w.oldConfigYaml, _ = yaml.Marshal(cfg)
-	auths := snapshotCoreAuthsFunc(cfg, w.authDir)
+	auths, incompleteFiles := snapshotCoreAuthsFunc(cfg, w.authDir)
+	// Keep credentials from files whose read failed transiently so the config
+	// reload cannot publish deletions for still-existing auth files.
+	if len(incompleteFiles) > 0 {
+		for _, auth := range w.currentAuths {
+			if auth == nil {
+				continue
+			}
+			path := ""
+			if auth.Attributes != nil {
+				path = auth.Attributes[coreauth.AttributePath]
+				if path == "" {
+					path = auth.Attributes[coreauth.AttributeSource]
+				}
+			}
+			if _, hit := incompleteFiles[w.normalizeAuthPath(path)]; hit {
+				auths = append(auths, auth.Clone())
+			}
+		}
+	}
 	if len(w.runtimeAuths) > 0 {
 		for _, auth := range w.runtimeAuths {
 			if auth != nil {
@@ -225,7 +244,17 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 	w.clientsMutex.RLock()
 	cfg := w.config
 	w.clientsMutex.RUnlock()
-	return snapshotCoreAuths(cfg, w.authDir)
+	auths, _ := snapshotCoreAuths(cfg, w.authDir)
+	return auths
+}
+
+// RereadDiscardedFileSnapshot invalidates watcher caches for a file snapshot
+// discarded by the manager's digest fence and re-reads the backing file.
+func (w *Watcher) RereadDiscardedFileSnapshot(auth *coreauth.Auth) {
+	if w == nil {
+		return
+	}
+	w.rereadDiscardedFileSnapshot(auth)
 }
 
 // InvalidAuthEntries returns a sorted snapshot of watcher-owned invalid auth file state.

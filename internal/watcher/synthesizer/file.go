@@ -2,7 +2,9 @@ package synthesizer
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -14,6 +16,7 @@ import (
 	kimiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kimi"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/geminicli"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	log "github.com/sirupsen/logrus"
 )
 
 // FileSynthesizer generates Auth entries from OAuth JSON files.
@@ -34,7 +37,10 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 
 	entries, err := os.ReadDir(ctx.AuthDir)
 	if err != nil {
-		// Not an error if directory doesn't exist
+		// A missing directory holds no auths; any other read failure keeps the loaded ones.
+		if !errors.Is(err, fs.ErrNotExist) {
+			ctx.RecordIncompleteFile(ctx.AuthDir)
+		}
 		return out, nil
 	}
 
@@ -48,7 +54,15 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 		}
 		full := filepath.Join(ctx.AuthDir, name)
 		data, errRead := os.ReadFile(full)
-		if errRead != nil || len(data) == 0 {
+		if errRead != nil {
+			// A transient read failure (permissions, I/O error) must not look like a
+			// deleted credential; record it so callers retain existing auth state.
+			if !errors.Is(errRead, fs.ErrNotExist) {
+				ctx.RecordIncompleteFile(full)
+			}
+			continue
+		}
+		if len(data) == 0 {
 			continue
 		}
 		auths := synthesizeFileAuths(ctx, full, data)
@@ -71,7 +85,6 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 		return nil
 	}
 	now := ctx.Now
-	cfg := ctx.Config
 	var metadata map[string]any
 	if errUnmarshal := json.Unmarshal(data, &metadata); errUnmarshal != nil {
 		return nil
@@ -119,8 +132,13 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 		status = coreauth.StatusDisabled
 	}
 
-	// Read per-account excluded models from the OAuth JSON file.
-	perAccountExcluded := extractExcludedModelsFromMetadata(metadata)
+	// Read per-account excluded models from the OAuth JSON file. Invalid rules must
+	// not drop an existing credential: keep the valid entries and warn. Write entry
+	// points (upload and PATCH) reject them before persisting.
+	perAccountExcluded, errExcluded := extractExcludedModelsFromMetadata(metadata)
+	if errExcluded != nil {
+		log.WithError(errExcluded).Warnf("ignoring invalid excluded models in auth file %s", filepath.Base(fullPath))
+	}
 
 	a := &coreauth.Auth{
 		ID:       id,
@@ -160,7 +178,7 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 		}
 	}
 	coreauth.ApplyCustomHeadersFromMetadata(a)
-	ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, "oauth")
+	ApplyAuthExcludedModelsMeta(a, perAccountExcluded, "oauth")
 	// For Kimi auth files, preserve domain and base_url attributes.
 	if provider == "kimi" || provider == "kimi-ai" || provider == "kimi.ai" || provider == "kimi.com" {
 		if bu, ok := metadata["base_url"].(string); ok && strings.TrimSpace(bu) != "" {
@@ -194,14 +212,16 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 	if provider == "gemini-cli" {
 		if virtuals := SynthesizeGeminiVirtualAuths(a, metadata, now); len(virtuals) > 0 {
 			for _, v := range virtuals {
-				ApplyAuthExcludedModelsMeta(v, cfg, perAccountExcluded, "oauth")
+				ApplyAuthExcludedModelsMeta(v, perAccountExcluded, "oauth")
 			}
 			out := make([]*coreauth.Auth, 0, 1+len(virtuals))
+			a.BindFileSnapshot(fullPath, data)
 			out = append(out, a)
 			out = append(out, virtuals...)
 			return out
 		}
 	}
+	a.BindFileSnapshot(fullPath, data)
 	return []*coreauth.Auth{a}
 }
 
@@ -336,9 +356,12 @@ func buildGeminiVirtualID(baseID, projectID string) string {
 
 // extractExcludedModelsFromMetadata reads per-account excluded models from the OAuth JSON metadata.
 // Supports both "excluded_models" and "excluded-models" keys, and accepts both []string and []interface{}.
-func extractExcludedModelsFromMetadata(metadata map[string]any) []string {
+// A single comma-separated string is also accepted for older hand-written files, because model IDs
+// never contain commas. For non-string array elements the valid string entries are still returned
+// with the error, so lenient readers can keep the usable rules while strict writers reject the value.
+func extractExcludedModelsFromMetadata(metadata map[string]any) ([]string, error) {
 	if metadata == nil {
-		return nil
+		return nil, nil
 	}
 	// Try both key formats
 	raw, ok := metadata["excluded_models"]
@@ -346,21 +369,29 @@ func extractExcludedModelsFromMetadata(metadata map[string]any) []string {
 		raw, ok = metadata["excluded-models"]
 	}
 	if !ok || raw == nil {
-		return nil
+		return nil, nil
 	}
 	var stringSlice []string
+	var errInvalid error
 	switch v := raw.(type) {
+	case string:
+		stringSlice = strings.Split(v, ",")
 	case []string:
 		stringSlice = v
 	case []any:
 		stringSlice = make([]string, 0, len(v))
-		for _, item := range v {
-			if s, ok := item.(string); ok {
-				stringSlice = append(stringSlice, s)
+		for index, item := range v {
+			s, okString := item.(string)
+			if !okString {
+				if errInvalid == nil {
+					errInvalid = fmt.Errorf("metadata excluded_models[%d] must be a string, got %T", index, item)
+				}
+				continue
 			}
+			stringSlice = append(stringSlice, s)
 		}
 	default:
-		return nil
+		return nil, fmt.Errorf("metadata excluded_models must be a string array, got %T", raw)
 	}
 	result := make([]string, 0, len(stringSlice))
 	for _, s := range stringSlice {
@@ -368,5 +399,5 @@ func extractExcludedModelsFromMetadata(metadata map[string]any) []string {
 			result = append(result, trimmed)
 		}
 	}
-	return result
+	return result, errInvalid
 }

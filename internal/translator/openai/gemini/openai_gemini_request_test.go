@@ -53,3 +53,38 @@ func TestConvertGeminiRequestToOpenAI_PreservesExplicitToolCallID(t *testing.T) 
 		t.Fatalf("tool response ID = %q, want explicit-call", got)
 	}
 }
+
+func TestConvertGeminiRequestToOpenAI_PreservesFunctionCallThoughtSignature(t *testing.T) {
+	inputJSON := []byte(`{
+		"contents": [
+			{"role": "user", "parts": [{"text": "weather in Paris and London?"}]},
+			{
+				"role": "model",
+				"parts": [
+					{
+						"functionCall": {"name": "get_weather", "args": {"city": "Paris"}},
+						"thoughtSignature": "SIG_PARIS"
+					},
+					{
+						"functionCall": {"name": "get_weather", "args": {"city": "London"}}
+					}
+				]
+			},
+			{
+				"role": "user",
+				"parts": [
+					{"functionResponse": {"name": "get_weather", "response": {"t": 20}}},
+					{"functionResponse": {"name": "get_weather", "response": {"t": 15}}}
+				]
+			}
+		]
+	}`)
+
+	out := ConvertGeminiRequestToOpenAI("google/gemini-3-pro", inputJSON, false)
+	if got := gjson.GetBytes(out, "messages.1.tool_calls.0.extra_content.google.thought_signature").String(); got != "SIG_PARIS" {
+		t.Fatalf("messages.1.tool_calls.0.extra_content.google.thought_signature = %q, want SIG_PARIS; out=%s", got, string(out))
+	}
+	if gjson.GetBytes(out, "messages.1.tool_calls.1.extra_content").Exists() {
+		t.Fatalf("expected unsigned sibling tool call not to have extra_content; out=%s", string(out))
+	}
+}

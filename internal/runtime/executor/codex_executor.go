@@ -341,6 +341,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	}
 	originalPayload := originalPayloadSource
 	isCompat := e.resolveCodexModelIsCompat(auth, req, baseModel)
+	targetModel := resolveResponsesSignatureTargetModel(baseModel, req, opts)
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
 
@@ -358,17 +359,18 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body, _ = sjson.DeleteBytes(body, "stream_options")
+	body = ensureWebSearchToolForHistory(body, opts.Headers)
 	body = normalizeCodexInstructions(body)
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
 		body = ensureImageGenerationTool(body, baseModel, auth, opts.Headers)
 	}
-	body = sanitizeOpenAIResponsesReasoningEncryptedContentWithCompat(ctx, e.Identifier(), body, isCompat)
 	body = normalizeCodexParallelToolCalls(body, opts.Headers)
 	body = helps.NormalizeCodexToolSchemas(body)
 	body, replayScope, err := applyCodexReasoningReplayCache(ctx, from, req, opts, body)
 	if err != nil {
 		return resp, err
 	}
+	body = sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModelAndBaseURL(ctx, e.Identifier(), body, isCompat, targetModel, baseURL)
 
 	url := helps.JoinBaseURL(baseURL, "/responses")
 	httpReq, body, err := e.cacheHelper(ctx, from, url, req, body)
@@ -494,7 +496,8 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	body = normalizeCodexInstructions(body)
 	// Compact requests should not inject image_generation tools; keep the body
 	// focused on history + compaction_trigger.
-	body = sanitizeOpenAIResponsesReasoningEncryptedContentWithCompat(ctx, e.Identifier(), body, isCompat)
+	body = ensureWebSearchToolForHistory(body, opts.Headers)
+	body = sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModelAndBaseURL(ctx, e.Identifier(), body, isCompat, resolveResponsesSignatureTargetModel(baseModel, req, opts), baseURL)
 	body = normalizeCodexParallelToolCalls(body, opts.Headers)
 	body = helps.NormalizeCodexToolSchemas(body)
 
@@ -553,6 +556,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 	originalPayload := originalPayloadSource
 	isCompat := e.resolveCodexModelIsCompat(auth, req, baseModel)
+	targetModel := resolveResponsesSignatureTargetModel(baseModel, req, opts)
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 
@@ -569,17 +573,18 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body, _ = sjson.DeleteBytes(body, "stream_options")
 	body, _ = sjson.SetBytes(body, "model", baseModel)
+	body = ensureWebSearchToolForHistory(body, opts.Headers)
 	body = normalizeCodexInstructions(body)
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
 		body = ensureImageGenerationTool(body, baseModel, auth, opts.Headers)
 	}
-	body = sanitizeOpenAIResponsesReasoningEncryptedContentWithCompat(ctx, e.Identifier(), body, isCompat)
 	body = normalizeCodexParallelToolCalls(body, opts.Headers)
 	body = helps.NormalizeCodexToolSchemas(body)
 	body, replayScope, err := applyCodexReasoningReplayCache(ctx, from, req, opts, body)
 	if err != nil {
 		return nil, err
 	}
+	body = sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModelAndBaseURL(ctx, e.Identifier(), body, isCompat, targetModel, baseURL)
 
 	url := helps.JoinBaseURL(baseURL, "/responses")
 	httpReq, body, err := e.cacheHelper(ctx, from, url, req, body)
@@ -1355,6 +1360,82 @@ func codexInstructionTextFromMessage(item gjson.Result) string {
 
 var imageGenToolJSON = []byte(`{"type":"image_generation","output_format":"png"}`)
 var imageGenToolArrayJSON = []byte(`[{"type":"image_generation","output_format":"png"}]`)
+var webSearchToolJSON = []byte(`{"type":"web_search"}`)
+var webSearchToolArrayJSON = []byte(`[{"type":"web_search"}]`)
+
+func isCodexWebSearchToolType(toolType string) bool {
+	switch strings.TrimSpace(toolType) {
+	case "web_search", "web_search_preview", "web_search_preview_2025_03_11":
+		return true
+	default:
+		return false
+	}
+}
+
+// ensureWebSearchToolForHistory reconciles replayed web_search_call input items
+// with the request's tool declarations so upstream Codex does not fail with
+// "response protection is unavailable" (issue #6770). Standard Responses
+// requests receive a {"type":"web_search"} tool declaration when missing, while
+// Responses Lite requests (which omit top-level hosted tools) strip the
+// replayed search items.
+func ensureWebSearchToolForHistory(body []byte, headers http.Header) []byte {
+	if !bytes.Contains(body, []byte("web_search_call")) {
+		return body
+	}
+	input := util.GetGJSONBytesNoCopy(body, "input")
+	if !input.IsArray() {
+		return body
+	}
+	hasWebSearchCall := false
+	input.ForEach(func(_, item gjson.Result) bool {
+		if strings.TrimSpace(item.Get("type").String()) == "web_search_call" {
+			hasWebSearchCall = true
+			return false
+		}
+		return true
+	})
+	if !hasWebSearchCall {
+		return body
+	}
+
+	tools := util.GetGJSONBytesNoCopy(body, "tools")
+	if tools.IsArray() {
+		for _, t := range tools.Array() {
+			if isCodexWebSearchToolType(t.Get("type").String()) {
+				return body
+			}
+		}
+	}
+
+	if isCodexResponsesLiteRequest(body, headers) {
+		items := input.Array()
+		rebuilt := make([]string, 0, len(items))
+		for _, item := range items {
+			if strings.TrimSpace(item.Get("type").String()) == "web_search_call" {
+				continue
+			}
+			rebuilt = append(rebuilt, item.Raw)
+		}
+		updated, errSet := sjson.SetRawBytes(body, "input", []byte("["+strings.Join(rebuilt, ",")+"]"))
+		if errSet != nil {
+			return body
+		}
+		return updated
+	}
+
+	if !tools.Exists() || !tools.IsArray() {
+		updated, errSet := sjson.SetRawBytes(body, "tools", webSearchToolArrayJSON)
+		if errSet != nil {
+			return body
+		}
+		return updated
+	}
+	updated, errSet := sjson.SetRawBytes(body, "tools.-1", webSearchToolJSON)
+	if errSet != nil {
+		return body
+	}
+	return updated
+}
 
 func isCodexFreePlanAuth(auth *cliproxyauth.Auth) bool {
 	if auth == nil || auth.Attributes == nil {
@@ -2252,7 +2333,9 @@ const codexBootstrapMaxBufferedEvents = 16
 
 func isCodexHandshakeMetadataEvent(eventType string) bool {
 	switch eventType {
-	case "response.created", "response.in_progress", "codex.rate_limits", "codex.response.metadata":
+	// response.metadata carries prompt-moderation flags, not generated output. Upstream now sends it
+	// during stream bootstrap, so it must buffer like the other handshake metadata events.
+	case "response.created", "response.in_progress", "codex.rate_limits", "codex.response.metadata", "response.metadata":
 		return true
 	default:
 		return false

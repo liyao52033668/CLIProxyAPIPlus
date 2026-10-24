@@ -89,8 +89,10 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 					out, _ = sjson.DeleteBytes(out, "thinking.budget_tokens")
 					out, _ = sjson.DeleteBytes(out, "output_config.effort")
 				default:
-					if mapped, ok := thinking.MapToClaudeEffort(effort, supportsMax); ok {
-						effort = mapped
+					if !thinking.HasLevel(mi.Thinking.Levels, effort) {
+						if mapped, ok := thinking.MapToClaudeEffort(effort, supportsMax); ok {
+							effort = mapped
+						}
 					}
 					out, _ = sjson.SetBytes(out, "thinking.type", "adaptive")
 					out, _ = sjson.DeleteBytes(out, "thinking.budget_tokens")
@@ -179,7 +181,7 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 			// developer role silently removed operator instructions from upstream.
 			case "system", "developer":
 				systemStart := len(gjson.GetBytes(out, "system").Array())
-				if contentResult.Exists() && contentResult.Type == gjson.String && contentResult.String() != "" {
+				if contentResult.Exists() && contentResult.Type == gjson.String && strings.TrimSpace(contentResult.String()) != "" {
 					textPart := []byte(`{"type":"text","text":""}`)
 					textPart, _ = sjson.SetBytes(textPart, "text", contentResult.String())
 					textPart = common.AttachCacheControl(textPart, message)
@@ -187,13 +189,26 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 				} else if contentResult.Exists() && contentResult.IsArray() {
 					contentResult.ForEach(func(_, part gjson.Result) bool {
 						if part.Get("type").String() == "text" {
+							txt := part.Get("text").String()
+							if strings.TrimSpace(txt) == "" {
+								if part.Get("cache_control").Exists() && len(gjson.GetBytes(out, "system").Array()) > systemStart {
+									prevIdx := len(gjson.GetBytes(out, "system").Array()) - 1
+									if !gjson.GetBytes(out, fmt.Sprintf("system.%d", prevIdx)).Get("cache_control").Exists() {
+										path := fmt.Sprintf("system.%d", prevIdx)
+										block := common.AttachCacheControl([]byte(gjson.GetBytes(out, path).Raw), part)
+										out, _ = sjson.SetRawBytes(out, path, block)
+									}
+								}
+								return true
+							}
 							textPart := []byte(`{"type":"text","text":""}`)
-							textPart, _ = sjson.SetBytes(textPart, "text", part.Get("text").String())
+							textPart, _ = sjson.SetBytes(textPart, "text", txt)
 							textPart = common.AttachCacheControl(textPart, part)
 							out, _ = sjson.SetRawBytes(out, "system.-1", textPart)
 						}
 						return true
 					})
+					// Message-level cache_control applies to the last system block from this message.
 					if message.Get("cache_control").Exists() {
 						systemArr := gjson.GetBytes(out, "system").Array()
 						if len(systemArr) > systemStart {
@@ -211,7 +226,7 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 				msg, _ = sjson.SetBytes(msg, "role", role)
 
 				// Handle content based on its type (string or array)
-				if contentResult.Exists() && contentResult.Type == gjson.String && contentResult.String() != "" {
+				if contentResult.Exists() && contentResult.Type == gjson.String && strings.TrimSpace(contentResult.String()) != "" {
 					part := []byte(`{"type":"text","text":""}`)
 					part, _ = sjson.SetBytes(part, "text", contentResult.String())
 					msg, _ = sjson.SetRawBytes(msg, "content.-1", part)
@@ -220,6 +235,15 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 						claudePart := convertOpenAIContentPartToClaudePart(part)
 						if claudePart != "" {
 							msg, _ = sjson.SetRawBytes(msg, "content.-1", []byte(claudePart))
+						} else if part.Get("type").String() == "text" {
+							if part.Get("cache_control").Exists() && gjson.GetBytes(msg, "content.#").Int() > 0 {
+								prevIdx := int(gjson.GetBytes(msg, "content.#").Int()) - 1
+								if !gjson.GetBytes(msg, fmt.Sprintf("content.%d", prevIdx)).Get("cache_control").Exists() {
+									path := fmt.Sprintf("content.%d", prevIdx)
+									block := common.AttachCacheControl([]byte(gjson.GetBytes(msg, path).Raw), part)
+									msg, _ = sjson.SetRawBytes(msg, path, block)
+								}
+							}
 						}
 						return true
 					})
@@ -463,8 +487,12 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 func convertOpenAIContentPartToClaudePartRaw(part gjson.Result) []byte {
 	switch part.Get("type").String() {
 	case "text":
+		txt := part.Get("text").String()
+		if strings.TrimSpace(txt) == "" {
+			return nil
+		}
 		textPart := []byte(`{"type":"text","text":""}`)
-		textPart, _ = sjson.SetBytes(textPart, "text", part.Get("text").String())
+		textPart, _ = sjson.SetBytes(textPart, "text", txt)
 		return textPart
 
 	case "image_url":
@@ -539,9 +567,14 @@ func convertOpenAIToolResultContent(content gjson.Result) (string, bool) {
 	if content.IsArray() {
 		claudeContent := []byte("[]")
 		partCount := 0
+		droppedEmptyText := false
 
 		content.ForEach(func(_, part gjson.Result) bool {
 			if part.Type == gjson.String {
+				if strings.TrimSpace(part.String()) == "" {
+					droppedEmptyText = true
+					return true
+				}
 				textPart := []byte(`{"type":"text","text":""}`)
 				textPart, _ = sjson.SetBytes(textPart, "text", part.String())
 				claudeContent, _ = sjson.SetRawBytes(claudeContent, "-1", textPart)
@@ -552,12 +585,17 @@ func convertOpenAIToolResultContent(content gjson.Result) (string, bool) {
 			if claudePart := convertOpenAIContentPartToClaudePartRaw(part); len(claudePart) > 0 {
 				claudeContent, _ = sjson.SetRawBytes(claudeContent, "-1", claudePart)
 				partCount++
+			} else if part.Get("type").String() == "text" {
+				droppedEmptyText = true
 			}
 			return true
 		})
 
 		if partCount > 0 || len(content.Array()) == 0 {
 			return string(claudeContent), true
+		}
+		if droppedEmptyText {
+			return "", false
 		}
 
 		return content.Raw, false

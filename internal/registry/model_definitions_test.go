@@ -241,6 +241,19 @@ func TestWithXAIBuiltinsAddsVideoModel(t *testing.T) {
 	}
 }
 
+func TestWithXAIBuiltinsIncludesImage20(t *testing.T) {
+	models := WithXAIBuiltins(nil)
+	for _, model := range models {
+		if model != nil && model.ID == xaiBuiltinImage20ModelID {
+			if model.Created != 1786060800 {
+				t.Fatalf("created = %d, want 1786060800 (2026-08-07)", model.Created)
+			}
+			return
+		}
+	}
+	t.Fatalf("expected xAI builtin model %s", xaiBuiltinImage20ModelID)
+}
+
 func TestWithXAIBuiltinsIncludesSpeechModels(t *testing.T) {
 	models := WithXAIBuiltins(nil)
 	found := map[string]*ModelInfo{}

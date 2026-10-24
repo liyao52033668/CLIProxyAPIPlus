@@ -119,7 +119,7 @@ func MergeRefreshedAuth(base, current, updated *Auth) *Auth {
 			merged.Status = current.Status
 			merged.Unavailable = current.Unavailable
 			merged.StatusMessage = current.StatusMessage
-		} else if current.Quota.Exceeded && current.Quota.Reason == "credential_quota" && current.Quota.NextRecoverAt.After(time.Now()) {
+		} else if current.Quota.Exceeded && current.Quota.Reason == "credential_quota" && current.Quota.NextRecoverAt.After(time.Now()) && !devinQuotaObservationRestored(merged, current, time.Now()) {
 			// Preserve active credential quota
 			merged.Unavailable = current.Unavailable
 			merged.Status = current.Status
@@ -137,6 +137,12 @@ func MergeRefreshedAuth(base, current, updated *Auth) *Auth {
 			merged.LastError = nil
 		}
 	}
+
+	// 2b. Quota observations: adopt the refreshed snapshot when it is newer.
+	// Without this, executor Refresh results (e.g. Devin quota reset signals)
+	// never reach the stored auth and cannot drive scheduling. Cooldown
+	// fields stay with current so concurrent failures are never lost.
+	merged.Quota = mergeQuotaObservation(merged.Quota, updated.Quota)
 
 	// 3. ModelStates: three-way merge to preserve concurrent cooldown/quota
 	var baseModels map[string]*ModelState

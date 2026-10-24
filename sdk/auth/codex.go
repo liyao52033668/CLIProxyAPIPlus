@@ -32,7 +32,7 @@ func (a *CodexAuthenticator) Provider() string {
 }
 
 func (a *CodexAuthenticator) RefreshLead() *time.Duration {
-	d := 24 * time.Hour
+	d := coreauth.CodexOuterRefreshLead
 	return &d
 }
 

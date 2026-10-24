@@ -45,7 +45,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 	url := helps.JoinBaseURL(baseURL, "/responses")
 	headers := make(http.Header)
 	tmpReq := &http.Request{Header: headers}
-	applyXAIChatHeaders(tmpReq, auth, token, true, prepared.sessionID)
+	applyXAIChatHeaders(tmpReq, auth, token, true, prepared.sessionID, opts.Headers)
 	headers = tmpReq.Header
 	e.recordXAIRequest(ctx, auth, url, headers.Clone(), prepared.body)
 
@@ -141,7 +141,7 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 	tmpReq := &http.Request{Header: headers}
 	// Official API / custom compact endpoints use standard API headers, not CLI
 	// chat-proxy identity headers (which applyXAIChatHeaders may still attach for OAuth chat).
-	applyXAIHeaders(tmpReq, auth, token, false, prepared.sessionID)
+	applyXAIHeaders(tmpReq, auth, token, false, prepared.sessionID, opts.Headers)
 	headers = tmpReq.Header
 	e.recordXAIRequest(ctx, auth, requestURL, headers.Clone(), prepared.body)
 

@@ -24,10 +24,9 @@ import (
 
 func TestApplyAuthExcludedModelsMeta_APIKey(t *testing.T) {
 	auth := &coreauth.Auth{Attributes: map[string]string{}}
-	cfg := &config.Config{}
 	perKey := []string{" Model-1 ", "model-2"}
 
-	synthesizer.ApplyAuthExcludedModelsMeta(auth, cfg, perKey, "apikey")
+	synthesizer.ApplyAuthExcludedModelsMeta(auth, perKey, "apikey")
 
 	expected := diff.ComputeExcludedModelsHash([]string{"model-1", "model-2"})
 	if got := auth.Attributes["excluded_models_hash"]; got != expected {
@@ -43,17 +42,14 @@ func TestApplyAuthExcludedModelsMeta_OAuthProvider(t *testing.T) {
 		Provider:   "TestProv",
 		Attributes: map[string]string{},
 	}
-	cfg := &config.Config{
-		OAuthExcludedModels: map[string][]string{
-			"testprov": {"A", "b"},
-		},
-	}
 
-	synthesizer.ApplyAuthExcludedModelsMeta(auth, cfg, nil, "oauth")
+	synthesizer.ApplyAuthExcludedModelsMeta(auth, nil, "oauth")
 
-	expected := diff.ComputeExcludedModelsHash([]string{"a", "b"})
-	if got := auth.Attributes["excluded_models_hash"]; got != expected {
-		t.Fatalf("expected hash %s, got %s", expected, got)
+	// Global oauth-excluded-models are resolved at model registration, not stored on the auth.
+	for _, key := range []string{"excluded_models", "excluded_models_hash"} {
+		if got, ok := auth.Attributes[key]; ok {
+			t.Fatalf("expected %s to be absent, got %q", key, got)
+		}
 	}
 	if got := auth.Attributes["auth_kind"]; got != "oauth" {
 		t.Fatalf("expected auth_kind=oauth, got %s", got)
@@ -183,9 +179,9 @@ func TestSnapshotCoreAuths_ConfigAndAuthFiles(t *testing.T) {
 	if !geminiPrimary.Disabled || geminiPrimary.Status != coreauth.StatusDisabled {
 		t.Fatal("expected primary gemini-cli auth to be disabled when virtual auths are synthesized")
 	}
-	expectedOAuthHash := diff.ComputeExcludedModelsHash([]string{"Foo", "bar"})
-	if geminiPrimary.Attributes["excluded_models_hash"] != expectedOAuthHash {
-		t.Fatalf("expected OAuth excluded hash %s, got %s", expectedOAuthHash, geminiPrimary.Attributes["excluded_models_hash"])
+	// Global oauth-excluded-models are resolved at model registration, not stored on the auth.
+	if _, ok := geminiPrimary.Attributes["excluded_models_hash"]; ok {
+		t.Fatalf("expected no OAuth excluded hash on primary auth, got %s", geminiPrimary.Attributes["excluded_models_hash"])
 	}
 	if geminiPrimary.Attributes["auth_kind"] != "oauth" {
 		t.Fatalf("expected auth_kind=oauth, got %s", geminiPrimary.Attributes["auth_kind"])
@@ -198,8 +194,8 @@ func TestSnapshotCoreAuths_ConfigAndAuthFiles(t *testing.T) {
 		if v.Attributes["gemini_virtual_parent"] != geminiPrimary.ID {
 			t.Fatalf("virtual auth missing parent link to %s", geminiPrimary.ID)
 		}
-		if v.Attributes["excluded_models_hash"] != expectedOAuthHash {
-			t.Fatalf("expected virtual excluded hash %s, got %s", expectedOAuthHash, v.Attributes["excluded_models_hash"])
+		if _, ok := v.Attributes["excluded_models_hash"]; ok {
+			t.Fatalf("expected no excluded hash on virtual auth, got %s", v.Attributes["excluded_models_hash"])
 		}
 		if v.Status != coreauth.StatusActive {
 			t.Fatalf("expected virtual auth to be active, got %s", v.Status)
@@ -518,7 +514,7 @@ func TestAuthFileEventsDoNotInvokeSnapshotCoreAuths(t *testing.T) {
 
 	origSnapshot := snapshotCoreAuthsFunc
 	var snapshotCalls int32
-	snapshotCoreAuthsFunc = func(cfg *config.Config, authDir string) []*coreauth.Auth {
+	snapshotCoreAuthsFunc = func(cfg *config.Config, authDir string) ([]*coreauth.Auth, map[string]struct{}) {
 		atomic.AddInt32(&snapshotCalls, 1)
 		return origSnapshot(cfg, authDir)
 	}

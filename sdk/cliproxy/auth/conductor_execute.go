@@ -69,6 +69,8 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 		auth.ID = uuid.NewString()
 	}
 	auth.EnsureIndex()
+	auth.ClearFileSnapshot()
+	auth.Generation++
 	authClone := auth.Clone()
 	m.mu.Lock()
 	m.auths[auth.ID] = authClone
@@ -122,6 +124,27 @@ func (m *Manager) updateMerged(ctx context.Context, base *Auth, auth *Auth, requ
 	if auth == nil || auth.ID == "" {
 		return nil, nil
 	}
+	isFileSnapshot := mode == updateModeReplace && auth.HasFileSnapshot()
+	if isFileSnapshot {
+		// Validate file snapshot freshness under the per-auth read without
+		// holding m.mu across filesystem I/O.
+		m.mu.RLock()
+		existingSnap, okSnap := m.auths[auth.ID]
+		if okSnap && existingSnap != nil {
+			if !auth.FileSnapshotMatchesDisk() {
+				current := existingSnap.Clone()
+				m.mu.RUnlock()
+				return current, nil
+			}
+		} else {
+			m.mu.RUnlock()
+			if requireActive || auth.Disabled || auth.Status == StatusDisabled {
+				return nil, nil
+			}
+			return m.Register(ctx, auth)
+		}
+		m.mu.RUnlock()
+	}
 	m.mu.Lock()
 	existing, ok := m.auths[auth.ID]
 	if !ok || existing == nil {
@@ -158,7 +181,37 @@ func (m *Manager) updateMerged(ctx context.Context, base *Auth, auth *Auth, requ
 	auth.Failed = existing.Failed
 	auth.recentRequests = existing.recentRequests
 	if !existing.Disabled && existing.Status != StatusDisabled && !auth.Disabled && auth.Status != StatusDisabled {
-		if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
+		if isFileSnapshot {
+			// A file snapshot observed the file on disk, but runtime cooldown and
+			// refresh state live only in memory; preserve them across the replace.
+			auth.ModelStates = existing.ModelStates
+			auth.LastRefreshedAt = existing.LastRefreshedAt
+			auth.NextRefreshAfter = existing.NextRefreshAfter
+			auth.RefreshFailures = existing.RefreshFailures
+			if (auth.Status == "" || auth.Status == StatusActive) && existing.Status != "" {
+				auth.Status = existing.Status
+			}
+			if auth.StatusMessage == "" {
+				auth.StatusMessage = existing.StatusMessage
+			}
+			auth.Unavailable = existing.Unavailable
+			auth.NextRetryAfter = existing.NextRetryAfter
+			if auth.LastError == nil && existing.LastError != nil {
+				auth.LastError = cloneError(existing.LastError)
+			}
+			// A refresh that confirms quota restoration (issue #6690) releases the
+			// credential-wide cooldown early; otherwise the active credential
+			// quota below is preserved exactly as before.
+			if mode == updateModeRefresh && applyDevinQuotaRestoration(auth, existing, time.Now()) {
+				auth.cooldownRecordedSeq = existing.cooldownRecordedSeq
+			} else {
+				observation := mergeQuotaObservation(auth.Quota, existing.Quota)
+				auth.Quota = existing.Quota.Clone()
+				auth.Quota.ObservedAt = observation.ObservedAt
+				auth.Quota.Signals = observation.Signals
+				auth.cooldownRecordedSeq = existing.cooldownRecordedSeq
+			}
+		} else if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
 			auth.ModelStates = existing.ModelStates
 		}
 		// When credentials change, stale unauthorized failures and model cooldowns
@@ -167,6 +220,8 @@ func (m *Manager) updateMerged(ctx context.Context, base *Auth, auth *Auth, requ
 			auth.RejectedAccessToken = ""
 			if hasUnauthorizedAuthFailure(existing) || (auth.LastError != nil && isUnauthorizedError(auth.LastError)) {
 				auth.Unavailable = false
+				auth.NextRetryAfter = time.Time{}
+				auth.cooldownRecordedSeq = 0
 				auth.LastError = nil
 				auth.StatusMessage = ""
 				auth.Status = StatusActive
@@ -186,7 +241,14 @@ func (m *Manager) updateMerged(ctx context.Context, base *Auth, auth *Auth, requ
 			auth.RejectedAccessToken = existing.RejectedAccessToken
 		}
 	}
+	if isFileSnapshot && auth.CreatedAt.IsZero() {
+		auth.CreatedAt = existing.CreatedAt
+	}
 	auth.EnsureIndex()
+	if existing.Generation >= auth.Generation {
+		auth.Generation = existing.Generation + 1
+	}
+	auth.ClearFileSnapshot()
 	authClone := auth.Clone()
 	m.auths[auth.ID] = authClone
 	m.mu.Unlock()
@@ -777,11 +839,17 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
+				if isCredentialScopedError(errExec) {
+					result.CredentialScope = true
+				}
 				m.MarkResult(execCtx, result)
 				if isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
 				authErr = errExec
+				if result.CredentialScope {
+					break
+				}
 				continue
 			}
 			m.MarkResult(execCtx, result)
@@ -870,11 +938,17 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
+				if isCredentialScopedError(errExec) {
+					result.CredentialScope = true
+				}
 				m.MarkResult(execCtx, result)
 				if isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
 				authErr = errExec
+				if result.CredentialScope {
+					break
+				}
 				continue
 			}
 			m.MarkResult(execCtx, result)

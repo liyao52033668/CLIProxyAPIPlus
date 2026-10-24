@@ -7,7 +7,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
@@ -100,6 +102,9 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 	if rescanAuth {
 		w.clientsMutex.Lock()
 
+		prevAuthHashes := w.lastAuthHashes
+		prevAuthContents := w.lastAuthContents
+		prevFileAuthsByPath := w.fileAuthsByPath
 		w.lastAuthHashes = make(map[string]string)
 		cacheAuthContents := log.IsLevelEnabled(log.DebugLevel)
 		if cacheAuthContents {
@@ -108,11 +113,16 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 			w.lastAuthContents = nil
 		}
 		w.fileAuthsByPath = make(map[string]map[string]*coreauth.Auth)
+		var incompleteRescanPaths map[string]struct{}
+		var incompleteRescanDir string
 		if resolvedAuthDir, errResolveAuthDir := util.ResolveAuthDir(cfg.AuthDir); errResolveAuthDir != nil {
 			log.Errorf("failed to resolve auth directory for hash cache: %v", errResolveAuthDir)
 		} else if resolvedAuthDir != "" {
 			entries, errReadDir := os.ReadDir(resolvedAuthDir)
 			if errReadDir != nil {
+				if !errors.Is(errReadDir, fs.ErrNotExist) {
+					incompleteRescanDir = resolvedAuthDir
+				}
 				log.Errorf("failed to read auth directory for hash cache: %v", errReadDir)
 			} else {
 				for _, entry := range entries {
@@ -124,7 +134,20 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 						continue
 					}
 					fullPath := filepath.Join(resolvedAuthDir, name)
-					if data, errReadFile := os.ReadFile(fullPath); errReadFile == nil && len(data) > 0 {
+					data, errReadFile := os.ReadFile(fullPath)
+					if errReadFile != nil {
+						// A transient read failure must not evict the tracked hash,
+						// or the next event-driven rescan would treat the unchanged
+						// file as new and republish its credentials.
+						if !errors.Is(errReadFile, fs.ErrNotExist) {
+							if incompleteRescanPaths == nil {
+								incompleteRescanPaths = make(map[string]struct{})
+							}
+							incompleteRescanPaths[w.normalizeAuthPath(fullPath)] = struct{}{}
+						}
+						continue
+					}
+					if len(data) > 0 {
 						sum := sha256.Sum256(data)
 						normalizedPath := w.normalizeAuthPath(fullPath)
 						w.lastAuthHashes[normalizedPath] = hex.EncodeToString(sum[:])
@@ -150,6 +173,40 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 				}
 			}
 		}
+		// Every tracked file inside an unreadable auth directory is incomplete:
+		// the rescan could not observe it, so its prior state must survive.
+		if incompleteRescanDir != "" {
+			markDirMemberIncomplete := func(trackedPath string) {
+				if !w.sameNormalizedAuthPath(filepath.Dir(trackedPath), incompleteRescanDir) {
+					return
+				}
+				if incompleteRescanPaths == nil {
+					incompleteRescanPaths = make(map[string]struct{})
+				}
+				incompleteRescanPaths[trackedPath] = struct{}{}
+			}
+			for trackedPath := range prevAuthHashes {
+				markDirMemberIncomplete(trackedPath)
+			}
+			for trackedPath := range prevFileAuthsByPath {
+				markDirMemberIncomplete(trackedPath)
+			}
+		}
+		// Carry forward tracked state for files whose read failed transiently so
+		// the new snapshots retain the previous hashes, contents, and credentials.
+		for normalizedPath := range incompleteRescanPaths {
+			if prevHash, ok := prevAuthHashes[normalizedPath]; ok {
+				w.lastAuthHashes[normalizedPath] = prevHash
+			}
+			if cacheAuthContents {
+				if prevContent, ok := prevAuthContents[normalizedPath]; ok {
+					w.lastAuthContents[normalizedPath] = prevContent
+				}
+			}
+			if prevAuths, ok := prevFileAuthsByPath[normalizedPath]; ok && len(prevAuths) > 0 {
+				w.fileAuthsByPath[normalizedPath] = maps.Clone(prevAuths)
+			}
+		}
 		w.clientsMutex.Unlock()
 	}
 
@@ -171,6 +228,81 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 		codexAPIKeyCount,
 		openAICompatCount,
 	)
+}
+
+// sameNormalizedAuthPath reports whether two paths normalize to the same auth
+// path, resolving through absolute forms when the cleaned forms differ.
+func (w *Watcher) sameNormalizedAuthPath(pathA, pathB string) bool {
+	normA := w.normalizeAuthPath(pathA)
+	normB := w.normalizeAuthPath(pathB)
+	if normA == "" || normB == "" {
+		return false
+	}
+	if normA == normB {
+		return true
+	}
+	if absA, errAbsA := filepath.Abs(normA); errAbsA == nil {
+		normA = w.normalizeAuthPath(absA)
+	}
+	if absB, errAbsB := filepath.Abs(normB); errAbsB == nil {
+		normB = w.normalizeAuthPath(absB)
+	}
+	return normA != "" && normA == normB
+}
+
+// rereadDiscardedFileSnapshot invalidates watcher caches for a file snapshot the
+// manager discarded via its digest fence (e.g. runtime state superseded it) and
+// re-reads the backing file so the published snapshot is fresh again.
+func (w *Watcher) rereadDiscardedFileSnapshot(auth *coreauth.Auth) {
+	if w == nil || auth == nil || !auth.HasFileSnapshot() {
+		return
+	}
+	path := auth.SnapshotFilePath()
+	if path == "" {
+		return
+	}
+	w.clientsMutex.Lock()
+	existing := w.currentAuths[auth.ID]
+	if existing == nil || !existing.SameFileSnapshot(auth) {
+		w.clientsMutex.Unlock()
+		return
+	}
+	normalized := w.invalidateAuthFileHashLocked(path)
+	if normalized == "" {
+		w.clientsMutex.Unlock()
+		return
+	}
+	existing.ClearFileSnapshot()
+	for id := range w.fileAuthsByPath[normalized] {
+		if sibling := w.currentAuths[id]; sibling != nil && sibling.SameFileSnapshot(auth) {
+			sibling.ClearFileSnapshot()
+		}
+	}
+	w.clientsMutex.Unlock()
+
+	w.addOrUpdateClient(path)
+}
+
+// invalidateAuthFileHashLocked clears the tracked hash for path (and its absolute
+// form), forcing the next rescan to treat the file as changed. Returns the
+// normalized path, or empty if untrackable. Callers hold clientsMutex.
+func (w *Watcher) invalidateAuthFileHashLocked(path string) string {
+	normalized := w.normalizeAuthPath(path)
+	if normalized == "" {
+		return ""
+	}
+	if w.lastAuthHashes == nil {
+		w.lastAuthHashes = make(map[string]string)
+	}
+	w.lastAuthHashes[normalized] = ""
+	if abs, errAbs := filepath.Abs(normalized); errAbs == nil {
+		if normalizedAbs := w.normalizeAuthPath(abs); normalizedAbs != "" {
+			if _, known := w.lastAuthHashes[normalizedAbs]; known {
+				w.lastAuthHashes[normalizedAbs] = ""
+			}
+		}
+	}
+	return normalized
 }
 
 func (w *Watcher) addOrUpdateClient(path string) {

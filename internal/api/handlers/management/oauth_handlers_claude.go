@@ -39,8 +39,9 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		return
 	}
 
+	cfg := h.configSnapshot()
 	// Initialize Claude auth service
-	anthropicAuth := claude.NewClaudeAuth(h.cfg)
+	anthropicAuth := claude.NewClaudeAuth(cfg)
 
 	// Generate authorization URL (then override redirect_uri to reuse server port)
 	authURL, state, err := anthropicAuth.GenerateAuthURL(state, pkceCodes)
@@ -65,7 +66,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		}
 
 		fmt.Println("Waiting for authentication callback...")
-		callbackPayload, errWait := waitForOAuthCallbackFile(h.cfg.AuthDir, "anthropic", state, defaultOAuthCallbackWait)
+		callbackPayload, errWait := waitForOAuthCallbackFile(cfg.AuthDir, "anthropic", state, defaultOAuthCallbackWait)
 		if errWait != nil {
 			if errors.Is(errWait, errOAuthSessionNotPending) {
 				return

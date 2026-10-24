@@ -24,7 +24,8 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 
 	fmt.Println("Initializing Antigravity authentication...")
 
-	authSvc := antigravity.NewAntigravityAuth(h.cfg, nil)
+	cfg := h.configSnapshot()
+	authSvc := antigravity.NewAntigravityAuth(cfg, nil)
 
 	state, errState := misc.GenerateRandomState()
 	if errState != nil {
@@ -50,7 +51,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 			defer stopCallbackForwarderInstance(antigravity.CallbackPort, forwarder)
 		}
 
-		callbackPayload, errWait := waitForOAuthCallbackFile(h.cfg.AuthDir, "antigravity", state, defaultOAuthCallbackWait)
+		callbackPayload, errWait := waitForOAuthCallbackFile(cfg.AuthDir, "antigravity", state, defaultOAuthCallbackWait)
 		if errWait != nil {
 			if errors.Is(errWait, errOAuthSessionNotPending) {
 				return

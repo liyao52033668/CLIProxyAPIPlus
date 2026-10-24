@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -14,55 +13,11 @@ import (
 // ExpandClaudeResponsesCompaction rewrites sealed compaction items into context
 // before translation. Unrecognized capsules fail the request instead of being dropped.
 func ExpandClaudeResponsesCompaction(req *cliproxyexecutor.Request, opts *cliproxyexecutor.Options) error {
-	if req != nil {
-		req.Payload = DropForeignClaudeCompactionItems(req.Payload)
-		if HasResponsesCompactionItem(req.Payload) {
-			expanded, errExpand := ExpandAntigravityCompactionCapsules(req.Payload)
-			if errExpand != nil {
-				return errExpand
-			}
-			req.Payload = expanded
-		}
-	}
-	if opts != nil {
-		opts.OriginalRequest = DropForeignClaudeCompactionItems(opts.OriginalRequest)
-		if HasResponsesCompactionItem(opts.OriginalRequest) {
-			expanded, errExpand := ExpandAntigravityCompactionCapsules(opts.OriginalRequest)
-			if errExpand != nil {
-				return errExpand
-			}
-			opts.OriginalRequest = expanded
-		}
-	}
-	return nil
-}
-
-func DropForeignClaudeCompactionItems(payload []byte) []byte {
-	input := gjson.GetBytes(payload, "input")
-	if !input.IsArray() {
-		return payload
-	}
-	dropped := 0
-	items := make([]string, 0, len(input.Array()))
-	for _, item := range input.Array() {
-		if item.Get("type").String() == "compaction" && !RecognizedAntigravityCompactionCapsule(item.Get("encrypted_content").String()) {
-			dropped++
-			continue
-		}
-		items = append(items, item.Raw)
-	}
-	if dropped == 0 {
-		return payload
-	}
-	log.Warnf("claude compaction: dropped %d non-CPA compaction item(s)", dropped)
-	out, _ := sjson.SetRawBytes(payload, "input", []byte("["+strings.Join(items, ",")+"]"))
-	return out
+	return ExpandResponsesCompactionCapsules(req, opts, "claude")
 }
 
 func ClaudeResponsesCompactionRequested(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) bool {
-	return opts.Alt == "responses/compact" ||
-		HasResponsesCompactionTrigger(req.Payload) ||
-		HasResponsesCompactionTrigger(opts.OriginalRequest)
+	return opts.Alt == "responses/compact" || HasResponsesCompactionTriggerRequest(req, opts)
 }
 
 func ClaudeCompactionSourcePayload(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) []byte {

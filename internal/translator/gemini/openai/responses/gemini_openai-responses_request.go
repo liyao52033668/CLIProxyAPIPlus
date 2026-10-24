@@ -33,6 +33,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 	// Extract tools and forward map early so request contents and toolDeclarations use the exact same forward map
 	functionDeclarations, forwardMap, _ := util.BuildGeminiFunctionDeclarations(root)
 	var toolBlocks [][]byte
+	hasGoogleSearch := false
 	if HasResponsesWebSearchTool(root) && ModelSupportsWebSearch(modelName) && AllowsResponsesWebSearchToolChoice(root) {
 		googleSearchBlock := []byte(`{"googleSearch":{}}`)
 		if allowedDomains := ExtractResponsesWebSearchAllowedDomains(root); len(allowedDomains) > 0 {
@@ -41,6 +42,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 			}
 		}
 		toolBlocks = append(toolBlocks, googleSearchBlock)
+		hasGoogleSearch = true
 	}
 	if len(functionDeclarations) > 0 {
 		fnBlock := []byte(`{"functionDeclarations":[]}`)
@@ -58,6 +60,11 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				out, _ = sjson.SetRawBytes(out, "toolConfig.functionCallingConfig", toolConfig)
 			}
 		}
+	}
+	// Gemini rejects built-in googleSearch combined with functionDeclarations
+	// unless server-side tool invocations are declared.
+	if hasGoogleSearch && len(functionDeclarations) > 0 {
+		out, _ = sjson.SetBytes(out, "toolConfig.includeServerSideToolInvocations", true)
 	}
 
 	// Extract system instruction from OpenAI "instructions" field.

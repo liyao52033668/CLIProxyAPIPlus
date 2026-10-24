@@ -63,7 +63,9 @@ func classifyClaudeUpstreamError(err error, headers http.Header, modelLevelCooli
 	}
 	se := statusErr{code: ue.Code, msg: ue.Msg}
 	if ue.Code == http.StatusTooManyRequests || (ue.Code >= 400 && ue.Code < 600) {
-		se.retryAfter = helps.ParseClaudeRateLimitReset(headers, time.Now())
+		// The body-aware parser narrows an explicit per-minute rate limit to its
+		// short Retry-After instead of inheriting an unclassified unified reset.
+		se.retryAfter = helps.ParseClaudeRateLimitResetForError(headers, []byte(ue.Msg), time.Now())
 	}
 	if ue.Code == http.StatusTooManyRequests {
 		if !modelLevelCooling && helps.ClaudeHeadersIndicateUnifiedRateLimitRejection(headers) {

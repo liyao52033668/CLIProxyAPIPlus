@@ -102,6 +102,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	if serviceTier == "" {
 		serviceTier = coreusage.ServiceTierFromContext(ctx)
 	}
+	effectiveServiceTier := strings.TrimSpace(record.EffectiveServiceTier)
 	responseServiceTier := strings.TrimSpace(record.ResponseServiceTier)
 	if responseServiceTier == "" {
 		responseServiceTier = strings.TrimSpace(record.Detail.ResponseServiceTier)
@@ -109,19 +110,20 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	responseModel := strings.TrimSpace(record.ResponseModel)
 
 	payload, err := json.Marshal(queuedUsageDetail{
-		requestDetail:       detail,
-		Provider:            provider,
-		Model:               modelName,
-		Alias:               aliasName,
-		Endpoint:            resolveEndpoint(ctx),
-		AuthType:            authType,
-		APIKey:              apiKey,
-		IsNativeKey:         isNativeKey,
-		AccessProvider:      accessProvider,
-		RequestID:           requestID,
-		ServiceTier:         serviceTier,
-		ResponseServiceTier: responseServiceTier,
-		ResponseModel:       responseModel,
+		requestDetail:        detail,
+		Provider:             provider,
+		Model:                modelName,
+		Alias:                aliasName,
+		Endpoint:             resolveEndpoint(ctx),
+		AuthType:             authType,
+		APIKey:               apiKey,
+		IsNativeKey:          isNativeKey,
+		AccessProvider:       accessProvider,
+		RequestID:            requestID,
+		ServiceTier:          serviceTier,
+		EffectiveServiceTier: effectiveServiceTier,
+		ResponseServiceTier:  responseServiceTier,
+		ResponseModel:        responseModel,
 	})
 	if err != nil {
 		return
@@ -131,18 +133,19 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 
 type queuedUsageDetail struct {
 	requestDetail
-	Provider            string `json:"provider"`
-	Model               string `json:"model"`
-	Alias               string `json:"alias"`
-	Endpoint            string `json:"endpoint"`
-	AuthType            string `json:"auth_type"`
-	APIKey              string `json:"api_key"`
-	IsNativeKey         bool   `json:"is_native_key"`
-	AccessProvider      string `json:"access_provider,omitempty"`
-	RequestID           string `json:"request_id"`
-	ServiceTier         string `json:"service_tier"`
-	ResponseServiceTier string `json:"response_service_tier,omitempty"`
-	ResponseModel       string `json:"response_model,omitempty"`
+	Provider             string `json:"provider"`
+	Model                string `json:"model"`
+	Alias                string `json:"alias"`
+	Endpoint             string `json:"endpoint"`
+	AuthType             string `json:"auth_type"`
+	APIKey               string `json:"api_key"`
+	IsNativeKey          bool   `json:"is_native_key"`
+	AccessProvider       string `json:"access_provider,omitempty"`
+	RequestID            string `json:"request_id"`
+	ServiceTier          string `json:"service_tier"`
+	EffectiveServiceTier string `json:"effective_service_tier,omitempty"`
+	ResponseServiceTier  string `json:"response_service_tier,omitempty"`
+	ResponseModel        string `json:"response_model,omitempty"`
 }
 
 type requestDetail struct {

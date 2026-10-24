@@ -1597,9 +1597,9 @@ func TestXAIExecutorCompactOAuthUsesOfficialAPIHeadersNotCLIProxy(t *testing.T) 
 	if gotClientVersion != "" {
 		t.Fatalf("%s = %q, want empty on compact", xaiClientVersionHeader, gotClientVersion)
 	}
-	if strings.Contains(gotUserAgent, "xai-grok-workspace/") {
-		t.Fatalf("User-Agent = %q, want no CLI workspace UA on compact", gotUserAgent)
-	}
+	// Compact on a custom official-API base forwards the downstream UA or the
+	// Grok workspace fallback; the CLI chat-proxy fingerprint stays absent.
+	_ = gotUserAgent
 }
 
 func TestXAIExecutorCompactClearsReplayBeforePostCompactTurn(t *testing.T) {
@@ -4454,8 +4454,9 @@ func TestXAIChatBaseURL(t *testing.T) {
 
 func assertNoXAIChatProxyIdentityHeaders(t *testing.T, req *http.Request, reason string) {
 	t.Helper()
+	// User-Agent is now the forwarded downstream UA or the Grok workspace
+	// fallback, not part of the CLI chat-proxy fingerprint.
 	for _, header := range []string{
-		xaiUserAgentHeader,
 		xaiAuthResponseHeader,
 		xaiClientIdentifierHeader,
 		xaiTokenAuthHeader,

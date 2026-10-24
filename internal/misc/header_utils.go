@@ -110,6 +110,8 @@ func EnsureHeader(target http.Header, source http.Header, key, defaultValue stri
 	if target == nil {
 		return
 	}
+	// http.Header.Get already performs a case-insensitive lookup via
+	// textproto.MIMEHeader, so no manual loop is needed.
 	if source != nil {
 		if val := strings.TrimSpace(source.Get(key)); val != "" {
 			target.Set(key, val)

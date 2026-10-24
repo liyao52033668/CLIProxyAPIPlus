@@ -418,7 +418,7 @@ func applyCodexClientModelMetadata(entry map[string]any, id string, model map[st
 func applyCodexClientVisibilityOverride(entry map[string]any, id string) {
 	switch strings.TrimSpace(id) {
 	// Speech IDs are hidden so the Codex client does not offer them as text models.
-	case "grok-imagine-image-quality", "gpt-image-1.5", "gpt-image-2", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gpt-image-2.5", "grok-imagine-image", "grok-imagine-video", "grok-imagine-video-1.5-preview", "grok-tts", "grok-voice-tts-1.0":
+	case "grok-imagine-image-quality", "gpt-image-1.5", "gpt-image-2", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gpt-image-2.5", "grok-imagine-image", "grok-imagine-image-2.0", "grok-imagine-video", "grok-imagine-video-1.5-preview", "grok-tts", "grok-voice-tts-1.0":
 		entry["visibility"] = "hide"
 	}
 }

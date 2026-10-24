@@ -390,7 +390,10 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 	var err error
 	if existing, ok := s.coreManager.GetByID(auth.ID); ok {
 		auth.CreatedAt = existing.CreatedAt
-		if !existing.Disabled && existing.Status != coreauth.StatusDisabled && !auth.Disabled && auth.Status != coreauth.StatusDisabled {
+		// A file snapshot's runtime state is preserved by the manager's own
+		// file-snapshot merge; pre-copying refresh state here would defeat the
+		// generation-based staleness check that discards stale snapshots.
+		if !auth.HasFileSnapshot() && !existing.Disabled && existing.Status != coreauth.StatusDisabled && !auth.Disabled && auth.Status != coreauth.StatusDisabled {
 			auth.LastRefreshedAt = existing.LastRefreshedAt
 			auth.NextRefreshAfter = existing.NextRefreshAfter
 			if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
@@ -398,9 +401,27 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 			}
 		}
 		op = "update"
-		_, err = s.coreManager.Update(ctx, auth)
+		updated, errUpdate := s.coreManager.Update(ctx, auth)
+		err = errUpdate
+		if errUpdate == nil && updated != nil {
+			if auth.HasFileSnapshot() || updated.Generation == existing.Generation {
+				log.Debugf("skipping stale auth update for %s: incoming snapshot did not advance generation (gen=%d)", auth.ID, existing.Generation)
+				if auth.HasFileSnapshot() {
+					if w := s.watcher; w != nil {
+						w.RereadDiscardedFileSnapshot(auth)
+					}
+				}
+				auth = updated
+			} else {
+				auth = updated
+			}
+		}
 	} else {
-		_, err = s.coreManager.Register(ctx, auth)
+		registered, errRegister := s.coreManager.Register(ctx, auth)
+		err = errRegister
+		if errRegister == nil && registered != nil {
+			auth = registered
+		}
 	}
 	if err != nil {
 		log.Errorf("failed to %s auth %s: %v", op, auth.ID, err)

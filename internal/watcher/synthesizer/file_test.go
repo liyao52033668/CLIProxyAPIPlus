@@ -380,7 +380,7 @@ func TestFileSynthesizer_Synthesize_PriorityParsing(t *testing.T) {
 	}
 }
 
-func TestFileSynthesizer_Synthesize_OAuthExcludedModelsMerged(t *testing.T) {
+func TestFileSynthesizer_Synthesize_OAuthExcludedModelsCredentialPriority(t *testing.T) {
 	tempDir := t.TempDir()
 	authData := map[string]any{
 		"type":            "claude",
@@ -413,7 +413,7 @@ func TestFileSynthesizer_Synthesize_OAuthExcludedModelsMerged(t *testing.T) {
 	}
 
 	got := auths[0].Attributes["excluded_models"]
-	want := "custom-model,model-b,shared"
+	want := "custom-model,model-b"
 	if got != want {
 		t.Fatalf("expected excluded_models %q, got %q", want, got)
 	}

@@ -14,6 +14,7 @@ import (
 func ConvertInteractionsRequestToCodex(modelName string, inputRawJSON []byte, stream bool) []byte {
 	root := gjson.ParseBytes(inputRawJSON)
 	out := []byte(`{"model":"","instructions":"","input":[]}`)
+	signatureTargetModel := translatorcommon.ResolveCodexReplayTargetModel(modelName, inputRawJSON)
 	out, _ = sjson.SetBytes(out, "model", modelName)
 	if stream || root.Get("stream").Bool() {
 		out, _ = sjson.SetBytes(out, "stream", true)
@@ -21,10 +22,11 @@ func ConvertInteractionsRequestToCodex(modelName string, inputRawJSON []byte, st
 	out = copyInteractionsSystemToCodex(out, root)
 	out = copyInteractionsGenerationConfigToCodex(out, root)
 	inputItems := translatorcommon.NewRawArrayItems(root.Get("input.#").Int())
-	appendInteractionsInputToCodex(&inputItems, root.Get("input"))
+	appendInteractionsInputToCodex(&inputItems, root.Get("input"), signatureTargetModel)
 	out = translatorcommon.SetRawArrayItems(out, "input", inputItems)
 	out = copyInteractionsToolsToCodex(out, root)
 	out = copyInteractionsCodexTopLevel(out, root)
+	out = ensureInteractionsCodexEncryptedContentInclude(out)
 	return out
 }
 
@@ -181,7 +183,7 @@ func interactionsCodexReasoningSummary(cfg gjson.Result) string {
 	return ""
 }
 
-func appendInteractionsInputToCodex(items *[][]byte, input gjson.Result) {
+func appendInteractionsInputToCodex(items *[][]byte, input gjson.Result, modelName string) {
 	if !input.Exists() {
 		return
 	}
@@ -190,24 +192,26 @@ func appendInteractionsInputToCodex(items *[][]byte, input gjson.Result) {
 		return
 	}
 	if input.IsArray() {
+		emittedSignatures := make(map[string]bool)
 		input.ForEach(func(_, step gjson.Result) bool {
-			appendInteractionsStepToCodex(items, step, "user")
+			appendInteractionsStepToCodex(items, step, "user", modelName, emittedSignatures)
 			return true
 		})
 		return
 	}
 	if steps := input.Get("steps"); steps.Exists() && steps.IsArray() {
 		defaultRole := interactionsCodexDefaultRole(input.Get("role").String(), "user")
+		emittedSignatures := make(map[string]bool)
 		steps.ForEach(func(_, step gjson.Result) bool {
-			appendInteractionsStepToCodex(items, step, defaultRole)
+			appendInteractionsStepToCodex(items, step, defaultRole, modelName, emittedSignatures)
 			return true
 		})
 		return
 	}
-	appendInteractionsStepToCodex(items, input, "user")
+	appendInteractionsStepToCodex(items, input, "user", modelName, make(map[string]bool))
 }
 
-func appendInteractionsStepToCodex(items *[][]byte, step gjson.Result, defaultRole string) {
+func appendInteractionsStepToCodex(items *[][]byte, step gjson.Result, defaultRole string, modelName string, emittedSignatures map[string]bool) {
 	if step.Type == gjson.String {
 		appendInteractionsTextToCodex(items, defaultRole, step.String())
 		return
@@ -215,7 +219,7 @@ func appendInteractionsStepToCodex(items *[][]byte, step gjson.Result, defaultRo
 	if steps := step.Get("steps"); steps.Exists() && steps.IsArray() {
 		role := interactionsCodexDefaultRole(step.Get("role").String(), defaultRole)
 		steps.ForEach(func(_, nested gjson.Result) bool {
-			appendInteractionsStepToCodex(items, nested, role)
+			appendInteractionsStepToCodex(items, nested, role, modelName, emittedSignatures)
 			return true
 		})
 		return
@@ -229,7 +233,7 @@ func appendInteractionsStepToCodex(items *[][]byte, step gjson.Result, defaultRo
 	case "model_output", "assistant":
 		appendInteractionsContentToCodexItem(items, step.Get("content"), "assistant")
 	case "thought", "reasoning":
-		appendInteractionsThoughtToCodex(items, step)
+		appendInteractionsThoughtToCodex(items, step, modelName, emittedSignatures)
 	case "user_input", "message", "":
 		role := interactionsCodexDefaultRole(step.Get("role").String(), defaultRole)
 		if content := step.Get("content"); content.Exists() {
@@ -370,19 +374,50 @@ func setInteractionsCodexRawIfDifferent(out []byte, path string, value gjson.Res
 	return updated
 }
 
-func appendInteractionsThoughtToCodex(items *[][]byte, step gjson.Result) {
+func appendInteractionsThoughtToCodex(items *[][]byte, step gjson.Result, modelName string, emittedSignatures map[string]bool) {
 	text := interactionsCodexContentText(step.Get("content"))
 	if text == "" {
 		text = step.Get("text").String()
 	}
-	item := []byte(`{"type":"reasoning"}`)
-	if text != "" {
-		item, _ = sjson.SetBytes(item, "content", text)
+	if raw := interactionsThoughtStepSignature(step); raw != "" {
+		if normalized, ok := translatorcommon.CodexReplaySignatureForTarget(modelName, raw); ok && !emittedSignatures[normalized] {
+			emittedSignatures[normalized] = true
+			item := []byte(`{"type":"reasoning","encrypted_content":"","summary":[]}`)
+			item, _ = sjson.SetBytes(item, "encrypted_content", normalized)
+			if text != "" {
+				summaryPart := []byte(`{"type":"summary_text","text":""}`)
+				summaryPart, _ = sjson.SetBytes(summaryPart, "text", text)
+				item, _ = sjson.SetRawBytes(item, "summary", translatorcommon.JoinRawArray([][]byte{summaryPart}))
+			}
+			*items = append(*items, item)
+		}
 	}
-	if id := step.Get("id"); id.Exists() {
-		item, _ = sjson.SetBytes(item, "id", id.String())
+}
+
+// interactionsThoughtStepSignature extracts a thought step's signature under
+// any of the field spellings seen on the wire.
+func interactionsThoughtStepSignature(step gjson.Result) string {
+	for _, path := range []string{"signature", "thought_signature", "thoughtSignature"} {
+		if signature := strings.TrimSpace(step.Get(path).String()); signature != "" {
+			return signature
+		}
 	}
-	*items = append(*items, item)
+	return ""
+}
+
+// ensureInteractionsCodexEncryptedContentInclude opts the Codex upstream into
+// emitting reasoning encrypted_content so signatures can round-trip.
+func ensureInteractionsCodexEncryptedContentInclude(out []byte) []byte {
+	for _, existing := range gjson.GetBytes(out, "include").Array() {
+		if existing.Type == gjson.String && existing.String() == "reasoning.encrypted_content" {
+			return out
+		}
+	}
+	updated, err := sjson.SetRawBytes(out, "include.-1", []byte(`"reasoning.encrypted_content"`))
+	if err != nil {
+		return out
+	}
+	return updated
 }
 
 func appendInteractionsTextToCodex(items *[][]byte, role, text string) {

@@ -530,15 +530,23 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 		// means a server-tool iteration is unfinished: report an incomplete
 		// response so clients can distinguish it from a full answer.
 		switch strings.ToLower(strings.TrimSpace(st.StopReason)) {
-		case "max_tokens":
+		case "max_tokens", "model_context_window_exceeded":
+			// A filled context window is a truncation, not a request fault: keep
+			// the generated output, tool calls, and usage as incomplete output.
 			completed, _ = sjson.SetBytes(completed, "response.status", "incomplete")
 			completed, _ = sjson.SetBytes(completed, "response.incomplete_details.reason", "max_output_tokens")
+		case "refusal":
+			// Safety classifiers stop the turn with a normal 200. Responses clients
+			// treat content_filter as a retryable refusal instead of a finished answer.
+			completed, _ = sjson.SetBytes(completed, "response.status", "incomplete")
+			completed, _ = sjson.SetBytes(completed, "response.incomplete_details.reason", "content_filter")
 		case "pause_turn":
 			// Anthropic's server-tool iteration pause is unfinished, not a token limit:
 			// https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons#pause_turn
 			// Responses has no matching incomplete reason, so keep its nullable details null.
 			completed, _ = sjson.SetBytes(completed, "response.status", "incomplete")
 			completed, _ = sjson.SetBytes(completed, "response.incomplete_details", nil)
+			completed, _ = sjson.SetBytes(completed, "response.end_turn", false)
 		}
 		// Inject original request fields into response as per docs/response.completed.json
 
@@ -808,8 +816,16 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 					state.args.WriteString(input.Raw)
 				}
 			case "web_search_tool_result":
-				if state := webSearchByToolID[cb.Get("tool_use_id").String()]; state != nil {
+				toolUseID := cb.Get("tool_use_id").String()
+				if state := webSearchByToolID[toolUseID]; state != nil {
 					state.results = claudeWebSearchResultsToResponses(cb.Get("content"))
+				} else if toolUseID != "" {
+					// Continuation after pause_turn: the search started in the
+					// previous response; keep its result under the same id.
+					state := &toolState{id: toolUseID, itemType: "web_search_call"}
+					state.results = claudeWebSearchResultsToResponses(cb.Get("content"))
+					toolCalls[idx] = state
+					webSearchByToolID[toolUseID] = state
 				} else {
 					log.Debugf("claude->responses: web_search_tool_result without matching server_tool_use at block %d", idx)
 				}
@@ -871,15 +887,23 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 	// means a server-tool iteration is unfinished: report an incomplete
 	// response so clients can distinguish it from a full answer.
 	switch strings.ToLower(strings.TrimSpace(stopReason)) {
-	case "max_tokens":
+	case "max_tokens", "model_context_window_exceeded":
+		// A filled context window is a truncation, not a request fault: keep
+		// the generated output, tool calls, and usage as incomplete output.
 		out, _ = sjson.SetBytes(out, "status", "incomplete")
 		out, _ = sjson.SetBytes(out, "incomplete_details.reason", "max_output_tokens")
+	case "refusal":
+		// Safety classifiers stop the turn with a normal 200. Responses clients
+		// treat content_filter as a retryable refusal instead of a finished answer.
+		out, _ = sjson.SetBytes(out, "status", "incomplete")
+		out, _ = sjson.SetBytes(out, "incomplete_details.reason", "content_filter")
 	case "pause_turn":
 		// Anthropic's server-tool iteration pause is unfinished, not a token limit:
 		// https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons#pause_turn
 		// Responses has no matching incomplete reason, so keep its nullable details null.
 		out, _ = sjson.SetBytes(out, "status", "incomplete")
 		out, _ = sjson.SetBytes(out, "incomplete_details", nil)
+		out, _ = sjson.SetBytes(out, "end_turn", false)
 	}
 
 	// Inject request echo fields as top-level (similar to streaming variant)
@@ -987,6 +1011,11 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 			st := toolCalls[i]
 			if st.itemType == "web_search_call" {
 				item := buildResponsesWebSearchCallItem(st.id, claudeWebSearchQuery(st.args.String()), st.results)
+				// A paused search that never received its result stays in_progress
+				// so the next request can send it back without a result.
+				if strings.EqualFold(strings.TrimSpace(stopReason), "pause_turn") && len(st.results) == 0 {
+					item, _ = sjson.SetBytes(item, "status", "in_progress")
+				}
 				outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
 				continue
 			}

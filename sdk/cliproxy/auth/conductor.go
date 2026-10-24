@@ -122,6 +122,8 @@ type Result struct {
 	Success bool
 	// RetryAfter carries a provider supplied retry hint (e.g. 429 retryDelay).
 	RetryAfter *time.Duration
+	// CredentialScope indicates that the failure affects the whole credential across models (e.g. Anthropic 5h/7d unified limits).
+	CredentialScope bool
 	// Error describes the failure when Success is false.
 	Error *Error
 	// IsAuto indicates this was an auto-resolved model (from "auto" model selection).
@@ -136,6 +138,19 @@ type Result struct {
 	// cooldown. Zero means unknown (direct MarkResult callers) and is exempt
 	// from the ordering guard.
 	ExecutionSeq uint64
+}
+
+// isCredentialScopedError reports whether the execution error explicitly
+// marks itself as affecting the whole credential (issue #6690).
+func isCredentialScopedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	type credentialScopedProvider interface {
+		IsCredentialScoped() bool
+	}
+	var csp credentialScopedProvider
+	return errors.As(err, &csp) && csp != nil && csp.IsCredentialScoped()
 }
 
 func newErrorFromExecution(err error) *Error {

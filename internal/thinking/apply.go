@@ -7,6 +7,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // providerAppliers maps provider names to their ProviderApplier implementations.
@@ -121,6 +122,12 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 	// 3. Model capability check
 	// Unknown models are treated as user-defined so thinking config can still be applied.
 	// The upstream service is responsible for validating the configuration.
+	// Native Claude effort is independent of thinking activation. Preserve the
+	// model's thinking default unless a suffix or explicit summary changes it.
+	// Local fork: summary config is not plumbed through, so this is a passthrough.
+	if fromFormat == "claude" && providerFormat == "claude" && !suffixResult.HasSuffix && !gjson.GetBytes(body, "thinking").Exists() {
+		return applySummaryConfigForProvider(body, providerFormat, baseModel, providerKey, modelInfo, SummaryConfig{}), nil
+	}
 	if IsUserDefinedModel(modelInfo) {
 		return applyUserDefinedModel(body, modelInfo, fromFormat, providerFormat, suffixResult)
 	}
@@ -204,7 +211,26 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 	}).Debug("thinking: processed config to apply |")
 
 	// 6. Apply configuration using provider-specific applier
-	return applier.Apply(body, *validated, modelInfo)
+	applied, errApply := applier.Apply(body, *validated, modelInfo)
+	if errApply != nil {
+		return applied, errApply
+	}
+	if providerFormat == "claude" && thinkingRequestedOff(config) {
+		// The model cannot turn thinking off, so ValidateConfig fell back to its
+		// lowest level. Drop any stale block_binding and display from the off
+		// request and keep the caller's intent of seeing no thinking: without an
+		// explicit omitted display, cloaking would add progress updates.
+		applied, _ = sjson.DeleteBytes(applied, "thinking.block_binding")
+		applied, _ = sjson.DeleteBytes(applied, "thinking.display")
+	}
+	return applied, nil
+}
+
+// thinkingRequestedOff reports whether the validated config still expresses the
+// caller's intent to turn thinking off (validate may have re-encoded it as the
+// lowest adaptive level for models that reject disabled states).
+func thinkingRequestedOff(config ThinkingConfig) bool {
+	return config.Mode == ModeNone || (config.Mode == ModeBudget && config.Budget == 0)
 }
 
 // parseSuffixToConfig converts a raw suffix string to ThinkingConfig.
@@ -438,11 +464,15 @@ func extractClaudeConfig(body []byte) ThinkingConfig {
 	if thinkingType == "disabled" {
 		return ThinkingConfig{Mode: ModeNone, Budget: 0}
 	}
+	// between_tools is how claude-sonnet-5-5 turns thinking off.
+	if thinkingType == "between_tools" {
+		return ThinkingConfig{Mode: ModeNone, Budget: 0}
+	}
 
-	// Only honor output_config.effort when a thinking field is present.
-	// Without this guard, a bare output_config.effort (no thinking field) would
-	// unexpectedly activate thinking mode for requests that never requested it.
-	if thinkingType == "enabled" || thinkingType == "adaptive" || thinkingType == "auto" {
+	// Claude output_config.effort also applies when thinking is omitted.
+	// We only treat it as a thinking config when effort is explicitly present;
+	// otherwise we passthrough and let upstream defaults apply.
+	if !gjson.GetBytes(body, "thinking").Exists() || thinkingType == "adaptive" || thinkingType == "auto" {
 		if effort := ClaudeOutputEffort(body); effort != "" {
 			switch effort {
 			case "none":

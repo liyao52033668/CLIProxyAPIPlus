@@ -511,24 +511,55 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		if from == to {
 			scanner := bufio.NewScanner(decodedBody)
 			scanner.Buffer(make([]byte, 0, 64*1024), streamScannerBuffer)
+			var upstreamMessageID string
+			var upstreamStreamErr error
+			upstreamCompleted := false
+			var eventBuf bytes.Buffer
+			forwardStopped := false
 			for scanner.Scan() {
 				line := scanner.Bytes()
 				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 				reporter.ObserveResponseModel(line)
 				streamUsage.ObserveClaudeStream(line)
-				line = restoreClaudeOAuthToolNamesFromStreamLine(line, claudeToolPrefix, auth.ToolPrefixDisabled(), oauthToolNamesReverseMap)
-				line = e.restoreResponseModel(line, req.Model)
+				// Track SSE event boundaries so an upstream error event or a
+				// premature close is detected even though forwarding is
+				// line-based. Lines after the failing event are dropped.
+				eventBuf.Write(line)
+				eventBuf.WriteByte('\n')
+				if len(bytes.TrimSpace(line)) == 0 {
+					observeClaudeSSEEvent(eventBuf.Bytes(), &upstreamMessageID, &upstreamCompleted, &upstreamStreamErr)
+					eventBuf.Reset()
+					if upstreamStreamErr != nil || upstreamCompleted {
+						forwardStopped = upstreamStreamErr != nil
+					}
+				}
+				if forwardStopped {
+					continue
+				}
+				outLine := restoreClaudeOAuthToolNamesFromStreamLine(line, claudeToolPrefix, auth.ToolPrefixDisabled(), oauthToolNamesReverseMap)
+				outLine = e.restoreResponseModel(outLine, req.Model)
 				// Forward the line as-is to preserve SSE format
-				cloned := make([]byte, len(line)+1)
-				copy(cloned, line)
-				cloned[len(line)] = '\n'
+				cloned := make([]byte, len(outLine)+1)
+				copy(cloned, outLine)
+				cloned[len(outLine)] = '\n'
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: cloned}:
 				case <-ctx.Done():
 					return
 				}
 			}
-			if errScan := scanner.Err(); errScan != nil {
+			if eventBuf.Len() > 0 {
+				observeClaudeSSEEvent(eventBuf.Bytes(), &upstreamMessageID, &upstreamCompleted, &upstreamStreamErr)
+				eventBuf.Reset()
+			}
+			errScan := scanner.Err()
+			if errScan == nil {
+				errScan = upstreamStreamErr
+			}
+			if errScan == nil && !upstreamCompleted && ctx.Err() == nil {
+				errScan = statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before message_stop"}
+			}
+			if errScan != nil {
 				helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 				streamUsage.PublishFailure(ctx, reporter, errScan)
 				select {
@@ -547,8 +578,27 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		scanner := bufio.NewScanner(decodedBody)
 		scanner.Buffer(make([]byte, 0, 64*1024), streamScannerBuffer)
 		var param any
+		var upstreamMessageID string
+		var upstreamStreamErr error
+		upstreamCompleted := false
+		var eventBuf bytes.Buffer
 		for scanner.Scan() {
 			line := scanner.Bytes()
+			// Track SSE event boundaries for truncation/error detection while
+			// translation keeps operating per line.
+			eventBuf.Write(line)
+			eventBuf.WriteByte('\n')
+			if len(bytes.TrimSpace(line)) == 0 {
+				observeClaudeSSEEvent(eventBuf.Bytes(), &upstreamMessageID, &upstreamCompleted, &upstreamStreamErr)
+				eventBuf.Reset()
+				if upstreamStreamErr != nil || upstreamCompleted {
+					// Drain remaining bytes without translating further
+					// events; the failure is reported after the loop.
+					for scanner.Scan() {
+					}
+					break
+				}
+			}
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			reporter.ObserveResponseModel(line)
 			streamUsage.ObserveClaudeStream(line)
@@ -572,7 +622,18 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				}
 			}
 		}
-		if errScan := scanner.Err(); errScan != nil {
+		if eventBuf.Len() > 0 {
+			observeClaudeSSEEvent(eventBuf.Bytes(), &upstreamMessageID, &upstreamCompleted, &upstreamStreamErr)
+			eventBuf.Reset()
+		}
+		errScan := scanner.Err()
+		if errScan == nil {
+			errScan = upstreamStreamErr
+		}
+		if errScan == nil && !upstreamCompleted && ctx.Err() == nil {
+			errScan = statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before message_stop"}
+		}
+		if errScan != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 			streamUsage.PublishFailure(ctx, reporter, errScan)
 			select {
@@ -2494,10 +2555,11 @@ func injectMessagesCacheControl(payload []byte) []byte {
 	content := gjson.GetBytes(payload, contentPath)
 
 	if content.IsArray() {
-		// Add cache_control to the last content block of this message
-		contentCount := int(content.Get("#").Int())
-		if contentCount > 0 {
-			cacheControlPath := fmt.Sprintf("messages.%d.content.%d.cache_control", secondToLastUserIdx, contentCount-1)
+		// Add cache_control to the last content block of this message, skipping
+		// empty/whitespace text blocks since Anthropic rejects cache_control on them.
+		targetBlockIndex := lastCacheableClaudeMessageContentBlockIndex(messages.Get(fmt.Sprintf("%d", secondToLastUserIdx)))
+		if targetBlockIndex >= 0 {
+			cacheControlPath := fmt.Sprintf("messages.%d.content.%d.cache_control", secondToLastUserIdx, targetBlockIndex)
 			result, err := sjson.SetBytes(payload, cacheControlPath, map[string]string{"type": "ephemeral"})
 			if err != nil {
 				log.Warnf("failed to inject cache_control into messages: %v", err)
@@ -2505,7 +2567,7 @@ func injectMessagesCacheControl(payload []byte) []byte {
 			}
 			payload = result
 		}
-	} else if content.Type == gjson.String {
+	} else if content.Type == gjson.String && strings.TrimSpace(content.String()) != "" {
 		// Convert string content to array with cache_control
 		text := content.String()
 		newContent := []map[string]any{
@@ -2564,6 +2626,64 @@ func injectToolsCacheControl(payload []byte) []byte {
 	return result
 }
 
+func lastCacheableClaudeMessageContentBlockIndex(message gjson.Result) int {
+	content := message.Get("content")
+	if !content.IsArray() {
+		return -1
+	}
+	blocks := content.Array()
+	if len(blocks) == 0 {
+		return -1
+	}
+	isAssistant := message.Get("role").String() == "assistant"
+	for i := len(blocks) - 1; i >= 0; i-- {
+		block := blocks[i]
+		if isEmptyClaudeTextBlock(block) {
+			continue
+		}
+		if isAssistant {
+			switch block.Get("type").String() {
+			case "thinking", "redacted_thinking":
+				return -1
+			}
+		}
+		if claudeContentBlockCanHostCacheControl(block) {
+			return i
+		}
+	}
+	return -1
+}
+
+func isEmptyClaudeTextBlock(block gjson.Result) bool {
+	return block.IsObject() &&
+		block.Get("type").String() == "text" &&
+		strings.TrimSpace(block.Get("text").String()) == ""
+}
+
+func claudeContentBlockCanHostCacheControl(block gjson.Result) bool {
+	if !block.IsObject() {
+		return false
+	}
+	switch block.Get("type").String() {
+	case "", "thinking", "redacted_thinking":
+		return false
+	case "text":
+		return strings.TrimSpace(block.Get("text").String()) != ""
+	default:
+		return true
+	}
+}
+
+func claudeSystemBlockCanHostCacheControl(item gjson.Result) bool {
+	if !item.IsObject() {
+		return false
+	}
+	if typ := item.Get("type").String(); typ != "" && typ != "text" {
+		return false
+	}
+	return strings.TrimSpace(item.Get("text").String()) != ""
+}
+
 // injectSystemCacheControl adds cache_control to the last element in the system prompt.
 // Converts string system prompts to array format if needed.
 // This only adds cache_control if NO system element already has it.
@@ -2574,26 +2694,29 @@ func injectSystemCacheControl(payload []byte) []byte {
 	}
 
 	if system.IsArray() {
-		count := int(system.Get("#").Int())
-		if count == 0 {
+		if int(system.Get("#").Int()) == 0 {
 			return payload
 		}
 
-		// Check if ANY system element already has cache_control
+		// Check if ANY system element already has cache_control and find the last cacheable element.
 		hasCacheControlInSystem := false
-		system.ForEach(func(_, item gjson.Result) bool {
+		lastEligibleSystemIndex := -1
+		system.ForEach(func(index, item gjson.Result) bool {
 			if isValidClaudeCacheControl(item.Get("cache_control")) {
 				hasCacheControlInSystem = true
 				return false
 			}
+			if claudeSystemBlockCanHostCacheControl(item) {
+				lastEligibleSystemIndex = int(index.Int())
+			}
 			return true
 		})
-		if hasCacheControlInSystem {
+		if hasCacheControlInSystem || lastEligibleSystemIndex < 0 {
 			return payload
 		}
 
-		// Add cache_control to the last system element
-		lastSystemPath := fmt.Sprintf("system.%d.cache_control", count-1)
+		// Add cache_control to the last cacheable system element
+		lastSystemPath := fmt.Sprintf("system.%d.cache_control", lastEligibleSystemIndex)
 		result, err := sjson.SetBytes(payload, lastSystemPath, map[string]string{"type": "ephemeral"})
 		if err != nil {
 			log.Warnf("failed to inject cache_control into system array: %v", err)
