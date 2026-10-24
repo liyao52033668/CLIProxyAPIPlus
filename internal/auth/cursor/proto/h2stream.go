@@ -211,7 +211,7 @@ func DialH2Conn(host, proxyURL string) (*H2Conn, error) {
 				sf.ForeachSetting(func(s http2.Setting) error {
 					if s.ID == http2.SettingInitialWindowSize {
 						serverInitialWindowSize = int32(s.Val)
-						log.Debugf("h2: server initial window size: %d", s.Val)
+					//	log.Debugf("h2: server initial window size: %d", s.Val)
 					}
 					return nil
 				})
@@ -222,7 +222,7 @@ func DialH2Conn(host, proxyURL string) (*H2Conn, error) {
 		case *http2.WindowUpdateFrame:
 			if sf.StreamID == 0 {
 				connWindowSize += int32(sf.Increment)
-				log.Debugf("h2: initial conn window update: +%d, total=%d", sf.Increment, connWindowSize)
+			//	log.Debugf("h2: initial conn window update: +%d, total=%d", sf.Increment, connWindowSize)
 			}
 		default:
 			// unexpected but continue
@@ -375,7 +375,7 @@ func (s *H2Stream) readLoop() {
 		if err != nil {
 			if err != io.EOF {
 				s.err = err
-				log.Debugf("h2stream[%s]: readLoop error: %v", s.id, err)
+				//	log.Debugf("h2stream[%s]: readLoop error: %v", s.id, err)
 			}
 			return
 		}
@@ -409,7 +409,7 @@ func (s *H2Stream) readLoop() {
 
 		case *http2.RSTStreamFrame:
 			s.err = fmt.Errorf("h2: RST_STREAM code=%d", frame.ErrCode)
-			log.Debugf("h2stream[%s]: received RST_STREAM code=%d", s.id, frame.ErrCode)
+			// log.Debugf("h2stream[%s]: received RST_STREAM code=%d", s.id, frame.ErrCode)
 			return
 
 		case *http2.GoAwayFrame:
