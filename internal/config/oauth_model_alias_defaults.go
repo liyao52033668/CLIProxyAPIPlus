@@ -21,22 +21,38 @@ func defaultKiroAliases() []OAuthModelAlias {
 	}
 }
 
-func defaultQoderAliases() []OAuthModelAlias {
-	return []OAuthModelAlias{
-		{Name: "smodel", Alias: "sonus"},
-		{Name: "cmodel", Alias: "cantus"},
-		{Name: "qmodel_38max", Alias: "qwen3.8-max"},
-		{Name: "qfmodel", Alias: "qwen3.8-flash"},
-		{Name: "qmodel_latest", Alias: "qwen3.7-max"},
-		{Name: "qmodel", Alias: "qwen3.7-plus"},
-		{Name: "dmodel", Alias: "deepseek-v4-pro"},
-		{Name: "dfmodel", Alias: "deepseek-v4.1-flash"},
-		{Name: "gmodel", Alias: "glm-5.3"},
-		{Name: "gfmodel", Alias: "glm-5.3-flash"},
-		{Name: "kmodel_latest", Alias: "kimi-k3"},
-		{Name: "kmodel", Alias: "kimi-k2.8-code"},
-		{Name: "mmodel", Alias: "minimax-m3"},
+// QoderAliasesFromModels generates oauth-model-alias entries from a dynamic
+// list of Qoder models. Each alias is the lower-cased upstream DisplayName
+// (e.g. "Qwen3.8-Max" → "qwen3.8-max"), so newly released upstream models
+// become addressable without code or config changes. Entries whose alias is
+// case-identical to the model ID are skipped (identity mapping).
+func QoderAliasesFromModels(models []QoderModelRef) []OAuthModelAlias {
+	var aliases []OAuthModelAlias
+	seen := make(map[string]struct{})
+	for _, model := range models {
+		id := strings.TrimSpace(model.ID)
+		displayName := strings.TrimSpace(model.DisplayName)
+		if id == "" || displayName == "" {
+			continue
+		}
+		alias := strings.ToLower(displayName)
+		if strings.EqualFold(alias, id) {
+			continue
+		}
+		key := id + "→" + alias
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		aliases = append(aliases, OAuthModelAlias{Name: id, Alias: alias})
 	}
+	return aliases
+}
+
+// QoderModelRef is the minimal model metadata needed to derive Qoder aliases.
+type QoderModelRef struct {
+	ID          string
+	DisplayName string
 }
 
 // GitHubCopilotAliasesFromModels generates oauth-model-alias entries from a dynamic

@@ -1339,6 +1339,8 @@ func (cfg *Config) SanitizeClaudeHeaderDefaults() {
 // allows multiple aliases per upstream name, and ensures aliases are unique within each channel.
 // It also injects default aliases for channels that have built-in defaults (e.g., kiro)
 // when no user-configured aliases exist for those channels.
+// Qoder aliases are not injected here; they are derived from the fetched model
+// catalog's DisplayNames at registration time (QoderAliasesFromModels).
 func (cfg *Config) SanitizeOAuthModelAlias() {
 	if cfg == nil {
 		return
@@ -1360,10 +1362,6 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 
 	if !hasChannel("kiro") {
 		cfg.OAuthModelAlias["kiro"] = defaultKiroAliases()
-	}
-
-	if !hasChannel("qoder") {
-		cfg.OAuthModelAlias["qoder"] = defaultQoderAliases()
 	}
 
 	if len(cfg.OAuthModelAlias) == 0 {

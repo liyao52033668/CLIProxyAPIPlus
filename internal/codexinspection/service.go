@@ -442,6 +442,7 @@ func (s *Service) UpdateSettings(ctx context.Context, settings InspectionSetting
 		}
 	}
 	settings.Schedules = mergedSchedules
+	settings.ProbeModels = normalizeProbeModels(settings.ProbeModels)
 
 	previousSchedule := snapshot.Settings.ScheduleFor(settings.TargetType)
 	selectProviderView(&snapshot, settings.TargetType)

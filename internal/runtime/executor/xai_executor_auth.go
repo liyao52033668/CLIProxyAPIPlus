@@ -17,14 +17,24 @@ import (
 
 // ProbeAuth verifies xAI OAuth chat access without relying on token refresh.
 func (e *XAIExecutor) ProbeAuth(ctx context.Context, auth *cliproxyauth.Auth) error {
+	return e.ProbeAuthWithModel(ctx, auth, xaiInspectionProbeModel)
+}
+
+// ProbeAuthWithModel verifies xAI OAuth chat access using the supplied model
+// name; an empty model falls back to the built-in probe model.
+func (e *XAIExecutor) ProbeAuthWithModel(ctx context.Context, auth *cliproxyauth.Auth, model string) error {
 	if auth == nil {
 		return fmt.Errorf("xai executor: auth is nil")
 	}
 	if xaiUsingAPI(auth) {
 		return fmt.Errorf("xai executor: API key auth inspection unsupported")
 	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		model = xaiInspectionProbeModel
+	}
 
-	primaryBody := []byte(fmt.Sprintf(`{"model":%q,"input":"ping","stream":false}`, xaiInspectionProbeModel))
+	primaryBody := []byte(fmt.Sprintf(`{"model":%q,"input":"ping","stream":false}`, model))
 	primary, err := e.probeAuthRequest(ctx, auth, xaiResponsesPath, primaryBody)
 	if err != nil {
 		return err
@@ -49,7 +59,7 @@ func (e *XAIExecutor) ProbeAuth(ctx context.Context, auth *cliproxyauth.Auth) er
 		return xaiStatusErr(primary.statusCode, primary.body)
 	}
 
-	fallbackBody := []byte(fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"ping"}],"stream":false}`, xaiInspectionProbeModel))
+	fallbackBody := []byte(fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"ping"}],"stream":false}`, model))
 	fallback, errFallback := e.probeAuthRequest(ctx, auth, xaiChatCompletionsPath, fallbackBody)
 	if errFallback != nil {
 		return xaiStatusErr(primary.statusCode, primary.body)

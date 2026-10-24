@@ -2045,3 +2045,29 @@ func (r *ModelRegistry) GetModelsForClient(clientID string) []*ModelInfo {
 	}
 	return result
 }
+
+// LookupMetadataModelID returns the MetadataModelID for a specific model registered
+// under a given client. It performs a direct O(1) map lookup without cloning the
+// full ModelInfo, making it suitable for hot-path reverse alias resolution.
+// Returns empty string if the client, model, or MetadataModelID is not found.
+func (r *ModelRegistry) LookupMetadataModelID(clientID, modelID string) string {
+	if r == nil {
+		return ""
+	}
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return ""
+	}
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	if clientInfos, ok := r.clientModelInfos[clientID]; ok {
+		if info, ok := clientInfos[modelID]; ok && info != nil {
+			return strings.TrimSpace(info.MetadataModelID)
+		}
+	}
+	if reg, ok := r.models[modelID]; ok && reg != nil && reg.Info != nil {
+		return strings.TrimSpace(reg.Info.MetadataModelID)
+	}
+	return ""
+}

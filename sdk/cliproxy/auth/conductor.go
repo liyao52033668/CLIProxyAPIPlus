@@ -39,6 +39,12 @@ type AuthProber interface {
 	ProbeAuth(ctx context.Context, auth *Auth) error
 }
 
+// AuthModelProber is an optional extension of AuthProber for executors whose
+// credential check depends on a caller-supplied model name.
+type AuthModelProber interface {
+	ProbeAuthWithModel(ctx context.Context, auth *Auth, model string) error
+}
+
 // ExecutionSessionCloser allows executors to release per-session runtime resources.
 type ExecutionSessionCloser interface {
 	CloseExecutionSession(sessionID string)

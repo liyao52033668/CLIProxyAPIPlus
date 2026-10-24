@@ -283,14 +283,21 @@ func TestSanitizeOAuthModelAlias_InjectsDefaultKiroWhenEmpty(t *testing.T) {
 	}
 }
 
-// func TestSanitizeOAuthModelAlias_InjectsDefaultQoderWhenEmpty(t *testing.T) {
-// 	// When OAuthModelAlias is nil, qoder defaults should still be injected
-// 	cfg := &Config{}
+// Qoder no longer has static default aliases; aliases are derived from the
+// fetched catalog's DisplayNames at registration time (QoderAliasesFromModels).
+func TestQoderAliasesFromModels_LowerCasesDisplayNames(t *testing.T) {
+	aliases := QoderAliasesFromModels([]QoderModelRef{
+		{ID: "qmodel_38max", DisplayName: "Qwen3.8-Max"},
+		{ID: "auto", DisplayName: "Auto"},
+		{ID: "", DisplayName: "NoID"},
+		{ID: "nodisplay", DisplayName: ""},
+		{ID: "qmodel_38max", DisplayName: "Qwen3.8-Max"}, // duplicate
+	})
 
-// 	cfg.SanitizeOAuthModelAlias()
-
-// 	qoderAliases := cfg.OAuthModelAlias["qoder"]
-// 	if len(qoderAliases) == 0 {
-// 		t.Fatal("expected default qoder aliases to be injected when OAuthModelAlias is nil")
-// 	}
-// }
+	if len(aliases) != 1 {
+		t.Fatalf("expected 1 alias, got %d: %+v", len(aliases), aliases)
+	}
+	if aliases[0].Name != "qmodel_38max" || aliases[0].Alias != "qwen3.8-max" {
+		t.Fatalf("unexpected alias entry: %+v", aliases[0])
+	}
+}

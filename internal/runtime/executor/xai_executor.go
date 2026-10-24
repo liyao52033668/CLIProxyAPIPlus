@@ -40,7 +40,7 @@ const (
 	xaiTTSPath                    = "/tts"
 	xaiResponsesPath              = "/responses"
 	xaiChatCompletionsPath        = "/chat/completions"
-	xaiInspectionProbeModel       = "grok-4.5"
+	xaiInspectionProbeModel       = "grok-4.7"
 	xaiInspectionProbeBodyLimit   = 64 << 10
 	xaiInspectionRetryBackoff     = 350 * time.Millisecond
 	xaiIdempotencyKeyMetaKey      = "idempotency_key"

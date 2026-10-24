@@ -2256,6 +2256,46 @@ func rewriteModelInfoName(name, oldID, newID string) string {
 	return name
 }
 
+// channelAliasAutoDeriver generates auto-derived aliases from a channel's model
+// catalog. It merges derived entries with user-configured aliases; configured
+// entries take priority on key conflicts.
+type channelAliasAutoDeriver func(configured []config.OAuthModelAlias, models []*ModelInfo) []config.OAuthModelAlias
+
+// channelAliasAutoDerivers registers per-channel auto-derivers. A channel
+// present in this map supplements user-configured aliases with entries derived
+// from the fetched model catalog at registration time, so new upstream models
+// become addressable without code or config changes.
+var channelAliasAutoDerivers = map[string]channelAliasAutoDeriver{
+	"qoder":          mergeQoderAliasesFromModels,
+	"github-copilot": deriveGitHubCopilotAliases,
+}
+
+// channelsNeedingMetadataModelID lists channels whose auto-derived clones must
+// carry MetadataModelID so request-time reverse resolution can map the
+// client-visible alias back to the real upstream model name (the upstream API
+// needs the exact model key).
+var channelsNeedingMetadataModelID = map[string]bool{
+	"qoder": true,
+}
+
+// deriveGitHubCopilotAliases generates GitHub Copilot aliases from the model
+// catalog when no user-configured aliases exist for the channel.
+func deriveGitHubCopilotAliases(configured []config.OAuthModelAlias, models []*ModelInfo) []config.OAuthModelAlias {
+	if len(configured) > 0 {
+		return configured
+	}
+	modelIDs := make([]string, 0, len(models))
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		if id := strings.TrimSpace(model.ID); id != "" {
+			modelIDs = append(modelIDs, id)
+		}
+	}
+	return internalconfig.GitHubCopilotAliasesFromModels(modelIDs)
+}
+
 func applyOAuthModelAlias(cfg *config.Config, provider, authKind string, models []*ModelInfo) []*ModelInfo {
 	if cfg == nil || len(models) == 0 {
 		return models
@@ -2265,23 +2305,18 @@ func applyOAuthModelAlias(cfg *config.Config, provider, authKind string, models 
 		return models
 	}
 	aliases, hasConfiguredChannel := cfg.OAuthModelAlias[channel]
+
+	// An explicitly empty channel is a "disabled" marker: honor it and skip
+	// auto-derived aliases entirely.
+	if hasConfiguredChannel && len(aliases) == 0 {
+		return models
+	}
+
+	if deriver, ok := channelAliasAutoDerivers[channel]; ok {
+		aliases = deriver(aliases, models)
+	}
 	if len(aliases) == 0 {
-		if channel != "github-copilot" || hasConfiguredChannel {
-			return models
-		}
-		modelIDs := make([]string, 0, len(models))
-		for _, model := range models {
-			if model == nil {
-				continue
-			}
-			if id := strings.TrimSpace(model.ID); id != "" {
-				modelIDs = append(modelIDs, id)
-			}
-		}
-		aliases = internalconfig.GitHubCopilotAliasesFromModels(modelIDs)
-		if len(aliases) == 0 {
-			return models
-		}
+		return models
 	}
 
 	type aliasEntry struct {
@@ -2362,6 +2397,11 @@ func applyOAuthModelAlias(cfg *config.Config, provider, authKind string, models 
 			seen[aliasKey] = struct{}{}
 			clone := *model
 			clone.ID = mappedID
+			// Remember the upstream ID so request-time alias resolution can
+			// map the client-visible alias back to the real model name.
+			if channelsNeedingMetadataModelID[channel] {
+				clone.MetadataModelID = id
+			}
 			if entry.displayName != "" {
 				clone.DisplayName = entry.displayName
 			}
@@ -2381,6 +2421,44 @@ func applyOAuthModelAlias(cfg *config.Config, provider, authKind string, models 
 		}
 	}
 	return out
+}
+
+// mergeQoderAliasesFromModels merges user-configured qoder aliases with entries
+// auto-derived from the fetched model catalog. Auto entries map each upstream
+// model's lower-cased DisplayName to its ID (e.g. "Qwen3.8-Max" →
+// "qwen3.8-max"); user entries win on alias-key conflicts so manual overrides
+// keep working.
+func mergeQoderAliasesFromModels(configured []config.OAuthModelAlias, models []*ModelInfo) []config.OAuthModelAlias {
+	refs := make([]internalconfig.QoderModelRef, 0, len(models))
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		refs = append(refs, internalconfig.QoderModelRef{ID: model.ID, DisplayName: model.DisplayName})
+	}
+	auto := internalconfig.QoderAliasesFromModels(refs)
+	if len(auto) == 0 {
+		return configured
+	}
+	// User-configured aliases win: skip auto entries for upstream names the
+	// user already mapped, so a manual alias replaces the auto-derived one.
+	userNames := make(map[string]struct{}, len(configured))
+	for _, entry := range configured {
+		key := strings.ToLower(strings.TrimSpace(entry.Name))
+		if key == "" {
+			continue
+		}
+		userNames[key] = struct{}{}
+	}
+	merged := make([]config.OAuthModelAlias, 0, len(configured)+len(auto))
+	merged = append(merged, configured...)
+	for _, entry := range auto {
+		if _, ok := userNames[strings.ToLower(entry.Name)]; ok {
+			continue
+		}
+		merged = append(merged, entry)
+	}
+	return merged
 }
 
 func applyOAuthSettings(cfg *config.Config, provider, authKind string, models []*ModelInfo) []*ModelInfo {

@@ -1,6 +1,9 @@
 package codexinspection
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"strings"
+)
 
 type RunStatus string
 
@@ -44,6 +47,7 @@ type InspectionSettings struct {
 	FiveHourUsedPercentThreshold int                           `json:"fiveHourUsedPercentThreshold"`
 	WeeklyUsedPercentThreshold   int                           `json:"weeklyUsedPercentThreshold"`
 	StatusCodeActions            map[string]map[int]Action     `json:"statusCodeActions,omitempty"`
+	ProbeModels                  map[string]string             `json:"probeModels,omitempty"`
 	Schedules                    map[string]InspectionSchedule `json:"schedules,omitempty"`
 }
 
@@ -68,6 +72,7 @@ func (s *InspectionSettings) UnmarshalJSON(data []byte) error {
 		}
 	}
 	s.Schedules = normalizeSchedules(s.Schedules)
+	s.ProbeModels = normalizeProbeModels(s.ProbeModels)
 	if aux.Schedule != nil {
 		provider := normalizeProvider(s.TargetType)
 		if provider == "" {
@@ -92,6 +97,24 @@ func DefaultSchedule() InspectionSchedule {
 		Mode:            "interval",
 		IntervalMinutes: 60,
 	}
+}
+
+// ProbeModelFor returns the configured inspection probe model for a provider.
+// An empty result means the provider's built-in default should be used.
+func (s InspectionSettings) ProbeModelFor(provider string) string {
+	if len(s.ProbeModels) == 0 {
+		return ""
+	}
+	model := strings.TrimSpace(s.ProbeModels[normalizeProvider(provider)])
+	if model == "" {
+		for key, value := range s.ProbeModels {
+			if strings.EqualFold(strings.TrimSpace(key), strings.TrimSpace(provider)) {
+				model = strings.TrimSpace(value)
+				break
+			}
+		}
+	}
+	return model
 }
 
 func (s InspectionSettings) ScheduleFor(provider string) InspectionSchedule {
@@ -275,5 +298,25 @@ func applyDefaultSettings(settings InspectionSettings) InspectionSettings {
 	}
 	settings.TargetType = normalizeProvider(settings.TargetType)
 	settings.Schedules = normalizeSchedules(settings.Schedules)
+	settings.ProbeModels = normalizeProbeModels(settings.ProbeModels)
 	return settings
+}
+
+func normalizeProbeModels(probeModels map[string]string) map[string]string {
+	if len(probeModels) == 0 {
+		return nil
+	}
+	normalized := make(map[string]string, len(probeModels))
+	for provider, model := range probeModels {
+		provider = normalizeProvider(provider)
+		model = strings.TrimSpace(model)
+		if provider == "" || model == "" {
+			continue
+		}
+		normalized[provider] = model
+	}
+	if len(normalized) == 0 {
+		return nil
+	}
+	return normalized
 }

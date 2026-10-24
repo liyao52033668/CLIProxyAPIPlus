@@ -1,6 +1,7 @@
 package cliproxy
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -196,5 +197,82 @@ func TestApplyOAuthModelAlias_GitHubCopilotGeneratesAliasesFromDynamicModels(t *
 	}
 	if out[1].Name != "models/claude-opus-4-6" {
 		t.Fatalf("expected generated alias model name %q, got %q", "models/claude-opus-4-6", out[1].Name)
+	}
+}
+
+// Qoder aliases are auto-derived from the fetched catalog's DisplayNames and
+// replace the client-visible model ID; MetadataModelID carries the upstream ID
+// so request-time resolution can map the alias back.
+func TestApplyOAuthModelAlias_QoderGeneratesAliasesFromDisplayNames(t *testing.T) {
+	cfg := &config.Config{}
+
+	models := []*ModelInfo{
+		{ID: "qmodel_38max", DisplayName: "Qwen3.8-Max"},
+		{ID: "auto", DisplayName: "Auto"},
+	}
+
+	out := applyOAuthModelAlias(cfg, "qoder", "oauth", models)
+	if len(out) != 2 {
+		t.Fatalf("expected 2 models (identity 'auto' + alias), got %d", len(out))
+	}
+	byID := make(map[string]*ModelInfo, len(out))
+	for _, model := range out {
+		byID[strings.ToLower(model.ID)] = model
+	}
+	alias, ok := byID["qwen3.8-max"]
+	if !ok {
+		t.Fatalf("expected auto-generated alias id %q, got ids %v", "qwen3.8-max", len(byID))
+	}
+	if alias.MetadataModelID != "qmodel_38max" {
+		t.Fatalf("expected MetadataModelID %q, got %q", "qmodel_38max", alias.MetadataModelID)
+	}
+	if alias.DisplayName != "Qwen3.8-Max" {
+		t.Fatalf("expected display name %q, got %q", "Qwen3.8-Max", alias.DisplayName)
+	}
+	// "Auto" lower-cases to the ID itself: identity mapping, no rename.
+	if _, ok := byID["auto"]; !ok {
+		t.Fatal("expected identity model 'auto' to keep its ID")
+	}
+}
+
+// User-configured qoder aliases win over auto-derived ones on alias conflicts.
+func TestApplyOAuthModelAlias_QoderUserAliasOverridesAuto(t *testing.T) {
+	cfg := &config.Config{
+		OAuthModelAlias: map[string][]config.OAuthModelAlias{
+			"qoder": {{Name: "qmodel_38max", Alias: "my-max"}},
+		},
+	}
+
+	models := []*ModelInfo{
+		{ID: "qmodel_38max", DisplayName: "Qwen3.8-Max"},
+	}
+
+	out := applyOAuthModelAlias(cfg, "qoder", "oauth", models)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 model, got %d", len(out))
+	}
+	if out[0].ID != "my-max" {
+		t.Fatalf("expected user alias id %q, got %q", "my-max", out[0].ID)
+	}
+	if out[0].MetadataModelID != "qmodel_38max" {
+		t.Fatalf("expected MetadataModelID %q, got %q", "qmodel_38max", out[0].MetadataModelID)
+	}
+}
+
+// An explicitly emptied qoder channel is a "disabled" marker: no auto aliases.
+func TestApplyOAuthModelAlias_QoderExplicitEmptyDisablesAutoAliases(t *testing.T) {
+	cfg := &config.Config{
+		OAuthModelAlias: map[string][]config.OAuthModelAlias{
+			"qoder": nil,
+		},
+	}
+
+	models := []*ModelInfo{
+		{ID: "qmodel_38max", DisplayName: "Qwen3.8-Max"},
+	}
+
+	out := applyOAuthModelAlias(cfg, "qoder", "oauth", models)
+	if len(out) != 1 || out[0].ID != "qmodel_38max" {
+		t.Fatalf("expected upstream model without aliasing, got %+v", out)
 	}
 }

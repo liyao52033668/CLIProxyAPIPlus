@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 )
 
@@ -204,7 +205,33 @@ func (m *Manager) resolveOAuthUpstreamModel(auth *Auth, requestedModel string) s
 			return ""
 		}
 	}
-	return resolveUpstreamModelFromAliasTable(m, auth, requestedModel, modelAliasChannel(auth))
+	resolved := resolveUpstreamModelFromAliasTable(m, auth, requestedModel, modelAliasChannel(auth))
+	if resolved != "" {
+		return resolved
+	}
+	// Fall back to registry-derived aliases (e.g. qoder aliases auto-generated
+	// from the fetched catalog's DisplayNames), which never enter the static
+	// config table because they are derived at registration time.
+	return m.resolveUpstreamModelFromRegistration(auth, requestedModel)
+}
+
+// resolveUpstreamModelFromRegistration maps a requested model back to its
+// upstream ID using the auth's registered model clones: clones created by
+// applyOAuthModelAlias carry the original upstream ID in MetadataModelID.
+func (m *Manager) resolveUpstreamModelFromRegistration(auth *Auth, requestedModel string) string {
+	if m == nil || auth == nil {
+		return ""
+	}
+	requestResult := thinking.ParseSuffix(requestedModel)
+	baseModel := strings.TrimSpace(requestResult.ModelName)
+	if baseModel == "" {
+		return ""
+	}
+	original := registry.GetGlobalRegistry().LookupMetadataModelID(auth.ID, baseModel)
+	if original == "" || strings.EqualFold(original, baseModel) {
+		return ""
+	}
+	return preserveResolvedModelSuffix(original, requestResult)
 }
 
 func resolveUpstreamModelFromAliasTable(m *Manager, auth *Auth, requestedModel, channel string) string {

@@ -90,7 +90,6 @@ func (p *codexInspectionProber) inspectFile(ctx context.Context, file codexinspe
 	if !strings.EqualFold(strings.TrimSpace(file.Provider), "codex") {
 		return p.inspectProviderAuth(ctx, file, settings, result)
 	}
-
 	if strings.TrimSpace(file.AuthIndex) == "" {
 		result.Error = "auth index missing"
 		result.ActionReason = "auth index missing"
@@ -186,8 +185,9 @@ func (p *codexInspectionProber) inspectProviderAuth(ctx context.Context, file co
 	probeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	if prober, okProbe := executor.(coreauth.AuthProber); okProbe {
-		if probeErr := prober.ProbeAuth(probeCtx, auth.Clone()); probeErr != nil {
+	if _, okProbe := executor.(coreauth.AuthProber); okProbe {
+		probeErr := p.probeAuth(probeCtx, executor, auth.Clone(), settings, file.Provider)
+		if probeErr != nil {
 			if strings.EqualFold(strings.TrimSpace(file.Provider), "xai") {
 				return inspectionXAIProbeErrorResult(result, settings, file.Provider, probeErr)
 			}
@@ -219,6 +219,23 @@ func (p *codexInspectionProber) inspectProviderAuth(ctx context.Context, file co
 		result.ActionReason = result.Error
 	}
 	return result
+}
+
+// probeAuth runs the provider credential check, honoring a per-provider probe
+// model from inspection settings when the executor supports it.
+func (p *codexInspectionProber) probeAuth(ctx context.Context, executor coreauth.ProviderExecutor, auth *coreauth.Auth, settings codexinspection.InspectionSettings, provider string) error {
+	prober, ok := executor.(coreauth.AuthProber)
+	if !ok {
+		return fmt.Errorf("provider executor does not support auth probing")
+	}
+	model := settings.ProbeModelFor(provider)
+	if model == "" {
+		return prober.ProbeAuth(ctx, auth)
+	}
+	if modelProber, okModel := executor.(coreauth.AuthModelProber); okModel {
+		return modelProber.ProbeAuthWithModel(ctx, auth, model)
+	}
+	return prober.ProbeAuth(ctx, auth)
 }
 
 func inspectionProviderErrorResult(result codexinspection.InspectionResultItem, settings codexinspection.InspectionSettings, provider string, probeErr error) codexinspection.InspectionResultItem {

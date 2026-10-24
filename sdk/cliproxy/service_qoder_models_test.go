@@ -51,8 +51,13 @@ func TestRegisterModelsForAuth_QoderStoresDynamicModelsAndContracts(t *testing.T
 	if len(models) != 1 {
 		t.Fatalf("expected 1 dynamically fetched qoder model, got %d", len(models))
 	}
-	if models[0].ID != "qoder-dynamic" {
-		t.Fatalf("expected dynamic qoder model id %q, got %q", "qoder-dynamic", models[0].ID)
+	// The auto-derived alias (lower-cased DisplayName) replaces the upstream ID
+	// in the client-visible registration; MetadataModelID keeps the upstream ID.
+	if models[0].ID != "qoder dynamic" {
+		t.Fatalf("expected auto-aliased qoder model id %q, got %q", "qoder dynamic", models[0].ID)
+	}
+	if models[0].MetadataModelID != "qoder-dynamic" {
+		t.Fatalf("expected upstream model id %q in MetadataModelID, got %q", "qoder-dynamic", models[0].MetadataModelID)
 	}
 	if _, ok := executor.LoadQoderModelContract(auth.ID, "qoder-dynamic"); !ok {
 		t.Fatal("expected dynamic qoder contract to be stored")

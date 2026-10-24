@@ -1514,6 +1514,14 @@ func (e *XAIAutoExecutor) ProbeAuth(ctx context.Context, auth *cliproxyauth.Auth
 	return e.httpExec.ProbeAuth(ctx, auth)
 }
 
+// ProbeAuthWithModel verifies xAI OAuth chat access with a caller-supplied model.
+func (e *XAIAutoExecutor) ProbeAuthWithModel(ctx context.Context, auth *cliproxyauth.Auth, model string) error {
+	if e == nil || e.httpExec == nil {
+		return fmt.Errorf("xai auto executor: http executor is nil")
+	}
+	return e.httpExec.ProbeAuthWithModel(ctx, auth, model)
+}
+
 func (e *XAIAutoExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	if e == nil || e.httpExec == nil {
 		return cliproxyexecutor.Response{}, fmt.Errorf("xai auto executor: http executor is nil")
