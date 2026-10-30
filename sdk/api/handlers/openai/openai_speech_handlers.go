@@ -73,7 +73,7 @@ func (h *OpenAIAPIHandler) handleXAISpeech(c *gin.Context) {
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	// Keep-alive newlines would be prefixed onto the audio body.
-	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, xaiSpeechHandlerType, model, payload, "")
+	resp, upstreamHeaders, errMsg := h.ExecuteSpeechWithAuthManager(cliCtx, xaiSpeechHandlerType, model, payload, "")
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
 		if errMsg.Error != nil {

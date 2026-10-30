@@ -1477,6 +1477,17 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		if a.Attributes != nil {
 			codexPlanType = strings.TrimSpace(a.Attributes["plan_type"])
 		}
+		// API-key credentials (often custom upstream URLs) must serve exactly
+		// the models the user configured: never fall back to a plan catalog,
+		// which would silently inject the built-in Codex image models and
+		// make them scheduling candidates.
+		if authKind == "apikey" {
+			if entry := s.resolveConfigCodexKey(a); entry != nil {
+				models = buildCodexConfigModels(entry)
+				excluded = entry.ExcludedModels
+			}
+			break
+		}
 		switch strings.ToLower(codexPlanType) {
 		case "pro":
 			models = registry.GetCodexProModels()
@@ -1491,10 +1502,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		}
 		if entry := s.resolveConfigCodexKey(a); entry != nil {
 			if len(entry.Models) > 0 {
-				models = buildCodexConfigModels(entry)
-			}
-			if authKind == "apikey" {
-				excluded = entry.ExcludedModels
+				models = buildCodexConfigModelsWithBuiltins(entry, true)
 			}
 		}
 	case "kimi", "kimi-ai", "kimi.ai", "kimi.com":
@@ -2160,11 +2168,21 @@ func buildClaudeConfigModels(entry *config.ClaudeKey) []*ModelInfo {
 }
 
 func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
+	return buildCodexConfigModelsWithBuiltins(entry, false)
+}
+
+func buildCodexConfigModelsWithBuiltins(entry *config.CodexKey, includeBuiltins bool) []*ModelInfo {
 	if entry == nil {
 		return nil
 	}
 
-	models := registry.WithCodexBuiltins(buildConfigModels(entry.Models, "openai", "openai"))
+	base := buildConfigModels(entry.Models, "openai", "openai")
+	var models []*ModelInfo
+	if includeBuiltins {
+		models = registry.WithCodexBuiltins(base)
+	} else {
+		models = base
+	}
 	configuredDisplayNames := make(map[string]string, len(entry.Models))
 	seenConfiguredModels := make(map[string]struct{}, len(entry.Models))
 	for i := range entry.Models {

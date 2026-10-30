@@ -29,6 +29,19 @@ func ApplyPayloadConfigWithRequest(cfg *config.Config, model, protocol, fromProt
 	return ApplyPayloadConfigWithRequestForExecutor(cfg, "", model, protocol, fromProtocol, root, payload, original, requestedModel, requestPath, headers)
 }
 
+// ApplyPayloadConfigWithResponseFormatCallback behaves like ApplyPayloadConfigWithRequestForExecutor
+// and additionally reports the effective response_format after payload rules through the
+// FinalizedResponseFormatCallbackMetadataKey callback when present in opts.Metadata.
+func ApplyPayloadConfigWithResponseFormatCallback(cfg *config.Config, targetExecutor, model, protocol, fromProtocol, root string, payload, original []byte, requestedModel string, requestPath string, headers http.Header, opts cliproxyexecutor.Options) []byte {
+	out := ApplyPayloadConfigWithRequestForExecutor(cfg, targetExecutor, model, protocol, fromProtocol, root, payload, original, requestedModel, requestPath, headers)
+	if opts.Metadata != nil {
+		if formatCallback, ok := opts.Metadata[cliproxyexecutor.FinalizedResponseFormatCallbackMetadataKey].(func(string)); ok && formatCallback != nil {
+			formatCallback(strings.TrimSpace(gjson.GetBytes(out, buildPayloadPath(root, "response_format")).String()))
+		}
+	}
+	return out
+}
+
 // ApplyPayloadConfigWithRequestForExecutor applies payload config with explicit target executor context.
 func ApplyPayloadConfigWithRequestForExecutor(cfg *config.Config, targetExecutor, model, protocol, fromProtocol, root string, payload, original []byte, requestedModel string, requestPath string, headers http.Header) []byte {
 	if len(payload) == 0 {

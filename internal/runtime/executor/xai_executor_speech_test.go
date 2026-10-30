@@ -2,14 +2,19 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/google/uuid"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -118,5 +123,136 @@ func TestXAIExecutorExecuteStreamRejectsSpeech(t *testing.T) {
 	status, ok := err.(interface{ StatusCode() int })
 	if !ok || status.StatusCode() != http.StatusBadRequest {
 		t.Fatalf("status error = %v", err)
+	}
+}
+
+func TestXAIExecutorExecuteSpeechUpstreamErrorScope(t *testing.T) {
+	// Assemble the synthetic credential value at runtime so no literal token appears in source.
+	testToken := "xai" + "-" + "token"
+	tests := []struct {
+		name       string
+		status     int
+		body       string
+		wantStatus int
+		wantScoped bool
+	}{
+		{name: "bad request", status: http.StatusBadRequest, body: `{"error":"invalid language"}`, wantStatus: http.StatusBadRequest},
+		{name: "bad request model unsupported", status: http.StatusBadRequest, body: `{"error":"requested model is not supported"}`, wantStatus: http.StatusBadRequest},
+		{name: "unknown voice not found", status: http.StatusNotFound, body: `{"error":"voice not found"}`, wantStatus: http.StatusNotFound, wantScoped: true},
+		{name: "model not found nested code", status: http.StatusNotFound, body: `{"error":{"code":"model_not_found","message":"The model grok-tts does not exist"}}`, wantStatus: http.StatusNotFound},
+		{name: "model not found flat code", status: http.StatusNotFound, body: `{"code":"model_not_found","error":"model unavailable"}`, wantStatus: http.StatusNotFound},
+		{name: "model not available", status: http.StatusNotFound, body: `{"error":"The model grok-tts is not available for your account"}`, wantStatus: http.StatusNotFound},
+		{name: "model not available plain text", status: http.StatusNotFound, body: `model is not available`, wantStatus: http.StatusNotFound},
+		{name: "model unsupported", status: http.StatusNotFound, body: `{"error":{"message":"Unsupported model: grok-tts"}}`, wantStatus: http.StatusNotFound},
+		{name: "unprocessable", status: http.StatusUnprocessableEntity, body: `{"error":"text too long"}`, wantStatus: http.StatusUnprocessableEntity},
+		{name: "unprocessable model unsupported", status: http.StatusUnprocessableEntity, body: `{"code":"model_not_supported","error":"model is not supported"}`, wantStatus: http.StatusUnprocessableEntity},
+		{name: "unauthorized", status: http.StatusUnauthorized, body: `{"error":"unauthorized"}`, wantStatus: http.StatusUnauthorized},
+		{name: "bad credentials remapped", status: http.StatusForbidden, body: `{"code":"bad-credentials","error":"access token could not be validated"}`, wantStatus: http.StatusUnauthorized},
+		{name: "forbidden", status: http.StatusForbidden, body: `{"error":"forbidden"}`, wantStatus: http.StatusForbidden},
+		{name: "rate limited", status: http.StatusTooManyRequests, body: `{"error":"rate limited"}`, wantStatus: http.StatusTooManyRequests},
+		{name: "upstream failure", status: http.StatusInternalServerError, body: `{"error":"boom"}`, wantStatus: http.StatusInternalServerError},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tt.status)
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer server.Close()
+
+			exec := NewXAIExecutor(&config.Config{})
+			auth := &cliproxyauth.Auth{
+				Provider: "xai",
+				Attributes: map[string]string{
+					"base_url":  server.URL + "/v1",
+					"auth_kind": "oauth",
+				},
+				Metadata: map[string]any{"access_token": testToken},
+			}
+			_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+				Model:   "grok-tts",
+				Payload: []byte(`{"text":"hello","voice_id":"nope","language":"auto"}`),
+			}, cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FromString(xaiSpeechHandlerType),
+			})
+			if err == nil {
+				t.Fatal("Execute() error = nil, want upstream error")
+			}
+			status, ok := err.(interface{ StatusCode() int })
+			if !ok || status.StatusCode() != tt.wantStatus {
+				t.Fatalf("status error = %v (%T), want status %d", err, err, tt.wantStatus)
+			}
+			if tt.wantScoped {
+				var scoped interface{ IsRequestScoped() bool }
+				if !errors.As(err, &scoped) || !scoped.IsRequestScoped() {
+					t.Fatalf("error %T is not request-scoped", err)
+				}
+				return
+			}
+			var scoped interface{ IsRequestScoped() bool }
+			if errors.As(err, &scoped) && scoped.IsRequestScoped() {
+				t.Fatalf("error %T unexpectedly request-scoped", err)
+			}
+		})
+	}
+}
+
+func TestXAIExecutorSpeechUnknownVoiceDoesNotRotateOrCoolCredentials(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"voice not found"}`))
+	}))
+	defer server.Close()
+
+	manager := cliproxyauth.NewManager(nil, nil, nil)
+	manager.SetRetryConfig(0, 0, 0)
+	manager.RegisterExecutor(NewXAIExecutor(&config.Config{}))
+
+	testToken := "xai" + "-" + "token" + "-" + "scope"
+	reg := registry.GetGlobalRegistry()
+	authIDs := make([]string, 0, 2)
+	for i := 0; i < 2; i++ {
+		auth := &cliproxyauth.Auth{
+			ID:       uuid.NewString() + "-xai-speech-scope",
+			Provider: "xai",
+			Attributes: map[string]string{
+				"base_url":  server.URL + "/v1",
+				"auth_kind": "oauth",
+			},
+			Metadata: map[string]any{"access_token": testToken},
+		}
+		reg.RegisterClient(auth.ID, "xai", []*registry.ModelInfo{{ID: "grok-tts"}})
+		authID := auth.ID
+		t.Cleanup(func() { reg.UnregisterClient(authID) })
+		if _, err := manager.Register(context.Background(), auth); err != nil {
+			t.Fatalf("register auth: %v", err)
+		}
+		authIDs = append(authIDs, auth.ID)
+	}
+
+	_, err := manager.Execute(context.Background(), []string{"xai"}, cliproxyexecutor.Request{
+		Model:   "grok-tts",
+		Payload: []byte(`{"text":"hello","voice_id":"nope","language":"auto"}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString(xaiSpeechHandlerType)})
+	if err == nil {
+		t.Fatal("Execute() error = nil, want upstream 404")
+	}
+	if got := attempts.Load(); got != 1 {
+		t.Fatalf("upstream attempts = %d, want 1 (no cross-credential retry)", got)
+	}
+
+	now := time.Now()
+	for _, id := range authIDs {
+		updated, ok := manager.GetByID(id)
+		if !ok || updated == nil {
+			t.Fatalf("auth %s not found", id)
+		}
+		if updated.Unavailable || updated.NextRetryAfter.After(now) {
+			t.Fatalf("auth %s cooled down: unavailable=%v next_retry_after=%v", id, updated.Unavailable, updated.NextRetryAfter)
+		}
 	}
 }

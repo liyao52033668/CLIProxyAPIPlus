@@ -61,6 +61,8 @@ const (
 
 type pinnedAuthContextKey struct{}
 type selectedAuthCallbackContextKey struct{}
+type finalizedResponseFormatCallbackContextKey struct{}
+type originalRequestContextKey struct{}
 type executionSessionContextKey struct{}
 type disallowFreeAuthContextKey struct{}
 
@@ -85,6 +87,28 @@ func WithSelectedAuthIDCallback(ctx context0.Context, callback func(string)) con
 		ctx = context0.Background()
 	}
 	return context0.WithValue(ctx, selectedAuthCallbackContextKey{}, callback)
+}
+
+// WithFinalizedResponseFormatCallback returns a child context that receives the effective response_format after payload rules.
+func WithFinalizedResponseFormatCallback(ctx context0.Context, callback func(string)) context0.Context {
+	if callback == nil {
+		return ctx
+	}
+	if ctx == nil {
+		ctx = context0.Background()
+	}
+	return context0.WithValue(ctx, finalizedResponseFormatCallbackContextKey{}, callback)
+}
+
+// WithOriginalRequest returns a child context that preserves the un-defaulted original request bytes for payload rules.
+func WithOriginalRequest(ctx context0.Context, rawJSON []byte) context0.Context {
+	if len(rawJSON) == 0 {
+		return ctx
+	}
+	if ctx == nil {
+		ctx = context0.Background()
+	}
+	return context0.WithValue(ctx, originalRequestContextKey{}, cloneBytes(rawJSON))
 }
 
 // WithExecutionSessionID returns a child context tagged with a long-lived execution session ID.
@@ -320,6 +344,9 @@ func requestExecutionMetadata(ctx context0.Context) map[string]any {
 	if selectedCallback := selectedAuthIDCallbackFromContext(ctx); selectedCallback != nil {
 		meta[coreexecutor.SelectedAuthCallbackMetadataKey] = selectedCallback
 	}
+	if finalizedFormatCallback := finalizedResponseFormatCallbackFromContext(ctx); finalizedFormatCallback != nil {
+		meta[coreexecutor.FinalizedResponseFormatCallbackMetadataKey] = finalizedFormatCallback
+	}
 	if ginCtx != nil && !websocket.IsWebSocketUpgrade(ginCtx.Request) {
 		if traceCallback := logging.GinCPATraceIDCallback(ginCtx); traceCallback != nil {
 			meta[coreexecutor.SelectedAuthIndexCallbackMetadataKey] = traceCallback
@@ -384,6 +411,28 @@ func selectedAuthIDCallbackFromContext(ctx context0.Context) func(string) {
 		return callback
 	}
 	return nil
+}
+
+func finalizedResponseFormatCallbackFromContext(ctx context0.Context) func(string) {
+	if ctx == nil {
+		return nil
+	}
+	raw := ctx.Value(finalizedResponseFormatCallbackContextKey{})
+	if callback, ok := raw.(func(string)); ok && callback != nil {
+		return callback
+	}
+	return nil
+}
+
+func originalRequestFromContext(ctx context0.Context) []byte {
+	if ctx == nil {
+		return nil
+	}
+	raw, ok := ctx.Value(originalRequestContextKey{}).([]byte)
+	if !ok || len(raw) == 0 {
+		return nil
+	}
+	return raw
 }
 
 func executionSessionIDFromContext(ctx context0.Context) string {
@@ -663,18 +712,27 @@ func PendingStreamError(errs <-chan *interfaces.ErrorMessage) (*interfaces.Error
 // ExecuteWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context0.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
-	return h.executeWithAuthManager(ctx, handlerType, modelName, rawJSON, alt, false)
+	// Speech-only models are reachable solely through the speech entry protocol.
+	return h.executeWithAuthManager(ctx, handlerType, modelName, rawJSON, alt, false, isSpeechHandlerType(handlerType))
 }
 
 // ExecuteImageWithAuthManager executes an OpenAI-compatible image endpoint request.
 func (h *BaseAPIHandler) ExecuteImageWithAuthManager(ctx context0.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
-	return h.executeWithAuthManager(ctx, handlerType, modelName, rawJSON, alt, true)
+	return h.executeWithAuthManager(ctx, handlerType, modelName, rawJSON, alt, true, false)
 }
 
-func (h *BaseAPIHandler) executeWithAuthManager(ctx context0.Context, handlerType, modelName string, rawJSON []byte, alt string, allowImageModel bool) ([]byte, http.Header, *interfaces.ErrorMessage) {
-	providers, normalizedModel, isAuto, errMsg := h.getRequestDetailsWithOptions(modelName, allowImageModel)
+// ExecuteSpeechWithAuthManager executes an OpenAI-compatible speech endpoint request.
+func (h *BaseAPIHandler) ExecuteSpeechWithAuthManager(ctx context0.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
+	return h.executeWithAuthManager(ctx, handlerType, modelName, rawJSON, alt, false, true)
+}
+
+func (h *BaseAPIHandler) executeWithAuthManager(ctx context0.Context, handlerType, modelName string, rawJSON []byte, alt string, allowImageModel, allowSpeechModel bool) ([]byte, http.Header, *interfaces.ErrorMessage) {
+	providers, normalizedModel, isAuto, errMsg := h.getRequestDetailsWithOptions(modelName, allowImageModel, allowSpeechModel)
 	if errMsg != nil {
 		return nil, nil, errMsg
+	}
+	if ctxOriginal := originalRequestFromContext(ctx); len(ctxOriginal) > 0 {
+		rawJSON = ctxOriginal
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
@@ -773,21 +831,25 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context0.Context, handl
 // This path is the only supported execution route.
 // The returned http.Header carries upstream response headers captured before streaming begins.
 func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context0.Context, handlerType, modelName string, rawJSON []byte, alt string) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
-	return h.executeStreamWithAuthManager(ctx, handlerType, modelName, rawJSON, alt, false)
+	// Speech-only models are reachable solely through the speech entry protocol.
+	return h.executeStreamWithAuthManager(ctx, handlerType, modelName, rawJSON, alt, false, isSpeechHandlerType(handlerType))
 }
 
 // ExecuteImageStreamWithAuthManager executes a streaming OpenAI-compatible image endpoint request.
 func (h *BaseAPIHandler) ExecuteImageStreamWithAuthManager(ctx context0.Context, handlerType, modelName string, rawJSON []byte, alt string) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
-	return h.executeStreamWithAuthManager(ctx, handlerType, modelName, rawJSON, alt, true)
+	return h.executeStreamWithAuthManager(ctx, handlerType, modelName, rawJSON, alt, true, false)
 }
 
-func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context0.Context, handlerType, modelName string, rawJSON []byte, alt string, allowImageModel bool) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
-	providers, normalizedModel, isAuto, errMsg := h.getRequestDetailsWithOptions(modelName, allowImageModel)
+func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context0.Context, handlerType, modelName string, rawJSON []byte, alt string, allowImageModel, allowSpeechModel bool) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
+	providers, normalizedModel, isAuto, errMsg := h.getRequestDetailsWithOptions(modelName, allowImageModel, allowSpeechModel)
 	if errMsg != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		errChan <- errMsg
 		close(errChan)
 		return nil, nil, errChan
+	}
+	if ctxOriginal := originalRequestFromContext(ctx); len(ctxOriginal) > 0 {
+		rawJSON = ctxOriginal
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
@@ -1000,10 +1062,10 @@ func statusFromError(err error) int {
 }
 
 func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string, normalizedModel string, isAuto bool, err *interfaces.ErrorMessage) {
-	return h.getRequestDetailsWithOptions(modelName, false)
+	return h.getRequestDetailsWithOptions(modelName, false, false)
 }
 
-func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowImageModel bool) (providers []string, normalizedModel string, isAuto bool, err *interfaces.ErrorMessage) {
+func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowImageModel, allowSpeechModel bool) (providers []string, normalizedModel string, isAuto bool, err *interfaces.ErrorMessage) {
 	resolvedModelName := modelName
 	isAuto = false
 	initialSuffix := thinking.ParseSuffix(modelName)
@@ -1026,6 +1088,13 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 		return nil, "", false, &interfaces.ErrorMessage{
 			StatusCode: http.StatusServiceUnavailable,
 			Error:      fmt.Errorf("model %s is only supported on /v1/images/generations and /v1/images/edits", routeModelBaseName(baseModel)),
+		}
+	}
+
+	if isXAISpeechOnlyModel(baseModel) && !allowSpeechModel {
+		return nil, "", false, &interfaces.ErrorMessage{
+			StatusCode: http.StatusBadRequest,
+			Error:      fmt.Errorf("model %s is only supported on /v1/audio/speech and /v1/tts", routeModelBaseName(baseModel)),
 		}
 	}
 
@@ -1067,6 +1136,21 @@ func isOpenAIImageOnlyModel(model string) bool {
 	default:
 		return false
 	}
+}
+
+// isXAISpeechOnlyModel reports whether the model can only run on the speech endpoints.
+func isXAISpeechOnlyModel(model string) bool {
+	switch strings.ToLower(strings.TrimSpace(routeModelBaseName(model))) {
+	case "grok-tts", "grok-voice-tts-1.0":
+		return true
+	default:
+		return false
+	}
+}
+
+// isSpeechHandlerType reports whether the handler type is the OpenAI speech entry protocol.
+func isSpeechHandlerType(handlerType string) bool {
+	return strings.EqualFold(strings.TrimSpace(handlerType), "openai-speech")
 }
 
 func cloneBytes(src []byte) []byte {

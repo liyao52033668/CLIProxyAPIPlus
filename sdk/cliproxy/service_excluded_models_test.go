@@ -157,21 +157,44 @@ func TestBuildConfigModelsUsesConfiguredDisplayNameAndFallback(t *testing.T) {
 }
 
 func TestBuildCodexConfigModelsPreservesConfiguredBuiltinDisplayName(t *testing.T) {
-	models := buildCodexConfigModels(&config.CodexKey{Models: []internalconfig.CodexModel{{
+	entry := &config.CodexKey{Models: []internalconfig.CodexModel{{
 		Name:        "gpt-image-2",
 		Alias:       "gpt-image-2",
 		DisplayName: "Configured GPT Image",
-	}}})
+	}}}
 
-	for _, model := range models {
+	// With builtins injected (OAuth path), the configured entry wins over the
+	// hard-coded builtin definition.
+	withBuiltins := buildCodexConfigModelsWithBuiltins(entry, true)
+	found := false
+	for _, model := range withBuiltins {
 		if model != nil && model.ID == "gpt-image-2" {
 			if model.DisplayName != "Configured GPT Image" {
 				t.Fatalf("builtin display name = %q, want Configured GPT Image", model.DisplayName)
 			}
-			return
+			found = true
 		}
 	}
-	t.Fatal("gpt-image-2 builtin model not found")
+	if !found {
+		t.Fatal("gpt-image-2 builtin model not found")
+	}
+}
+
+func TestBuildCodexConfigModelsSkipsBuiltins(t *testing.T) {
+	// API-key credentials must serve only the models the user configured:
+	// no built-in image models injected on top.
+	entry := &config.CodexKey{Models: []internalconfig.CodexModel{{
+		Name:  "some-upstream-chat-model",
+		Alias: "some-upstream-chat-model",
+	}}}
+
+	models := buildCodexConfigModels(entry)
+	if len(models) != 1 {
+		t.Fatalf("models length = %d, want 1 (configured model only)", len(models))
+	}
+	if models[0].ID != "some-upstream-chat-model" {
+		t.Fatalf("model ID = %q, want some-upstream-chat-model", models[0].ID)
+	}
 }
 
 func TestRegisterModelsForAuth_DevinSWE16SlowIncluded(t *testing.T) {

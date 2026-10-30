@@ -12,7 +12,7 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, endpointPath string) (resp cliproxyexecutor.Response, err error) {
+func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, endpointPath string) (resp cliproxyexecutor.Response, err error) {
 	model := strings.TrimSpace(gjson.GetBytes(req.Payload, "model").String())
 	if model == "" {
 		model = strings.TrimSpace(req.Model)
@@ -27,7 +27,15 @@ func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth
 		endpointPath = xaiDefaultImageEndpointPath
 	}
 
+	originalPayloadSource := req.Payload
+	if len(opts.OriginalRequest) > 0 {
+		originalPayloadSource = opts.OriginalRequest
+	}
+	originalPayload := normalizeXAIImageRefs(originalPayloadSource)
 	payload := normalizeXAIImageRefs(req.Payload)
+	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
+	requestPath := helps.PayloadRequestPath(opts)
+	payload = helps.ApplyPayloadConfigWithResponseFormatCallback(e.cfg, e.Identifier(), model, "openai", opts.SourceFormat.String(), "", payload, originalPayload, requestedModel, requestPath, opts.Headers, opts)
 	url := helps.JoinBaseURL(baseURL, endpointPath)
 	headers := make(http.Header)
 	tmpReq := &http.Request{Header: headers}
@@ -53,11 +61,18 @@ func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth
 	}
 
 	reporter.ObserveResponseModel(data)
-	reporter.EnsurePublished(ctx)
+	reporter.Publish(ctx, helps.ParseXAIImageUsage(payload, data))
 	return cliproxyexecutor.Response{Payload: data, Headers: respHeaders}, nil
 }
 
 func (e *XAIExecutor) executeVideos(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	model := strings.TrimSpace(gjson.GetBytes(req.Payload, "model").String())
+	if model == "" {
+		model = strings.TrimSpace(req.Model)
+	}
+	reporter := helps.NewExecutorUsageReporter(ctx, e, model, auth)
+	defer reporter.TrackFailure(ctx, &err)
+
 	token, _ := xaiCreds(auth)
 	baseURL := xaiOfficialOrExplicitBaseURL(auth)
 	logXAIResolvedBaseURL(ctx, baseURL)
@@ -112,5 +127,7 @@ func (e *XAIExecutor) executeVideos(ctx context.Context, auth *cliproxyauth.Auth
 		return resp, errDo
 	}
 
+	reporter.ObserveResponseModel(data)
+	reporter.Publish(ctx, helps.ParseXAIVideoUsage(payload, data))
 	return cliproxyexecutor.Response{Payload: data, Headers: respHeaders}, nil
 }
