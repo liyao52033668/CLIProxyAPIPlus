@@ -371,6 +371,7 @@ nonstream-keepalive-interval: 0
 #       - "gpt-5-*"         # wildcard matching prefix (e.g. gpt-5-medium, gpt-5-codex)
 #       - "*-mini"          # wildcard matching suffix (e.g. gpt-5-codex-mini)
 #       - "*codex*"         # wildcard matching substring (e.g. gpt-5-codex-low)
+#     disable-image-generation: false # optional: true stops the proxy from injecting the image_generation tool into requests sent with this key (e.g. Azure OpenAI endpoints that reject it)
 
 # Claude API keys
 # claude-api-key:

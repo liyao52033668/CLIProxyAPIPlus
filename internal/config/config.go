@@ -784,6 +784,11 @@ type CodexKey struct {
 
 	// DisableCooling disables auth/model cooldown scheduling for this credential when true.
 	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+
+	// DisableImageGeneration suppresses the proxy-injected image_generation tool for this credential.
+	// Use this for Responses-compatible endpoints (e.g. Azure OpenAI) that reject requests carrying
+	// the injected tool; omitted or false keeps the global injection behavior.
+	DisableImageGeneration *bool `yaml:"disable-image-generation,omitempty" json:"disable-image-generation,omitempty"`
 }
 
 func (k CodexKey) GetAPIKey() string  { return k.APIKey }

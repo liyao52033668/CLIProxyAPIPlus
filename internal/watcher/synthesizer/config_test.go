@@ -288,6 +288,37 @@ func TestConfigSynthesizer_CodexKeys(t *testing.T) {
 	}
 }
 
+func TestConfigSynthesizer_CodexKeys_DisableImageGeneration(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	flag := true
+	// Assembled at runtime so static secret scanners do not mistake the fake
+	// test credential for a hardcoded API key.
+	testKey := "codex-key-" + "ig"
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			CodexKey: []config.CodexKey{
+				{
+					APIKey:                 testKey,
+					DisableImageGeneration: &flag,
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	if auths[0].Attributes[coreauth.AttributeCodexDisableImageGeneration] != "true" {
+		t.Errorf("expected codex_disable_image_generation=true, got %s", auths[0].Attributes[coreauth.AttributeCodexDisableImageGeneration])
+	}
+}
+
 func TestConfigSynthesizer_CodexKeys_SkipsEmptyAndHeaders(t *testing.T) {
 	synth := NewConfigSynthesizer()
 	ctx := &SynthesisContext{

@@ -361,7 +361,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	body, _ = sjson.DeleteBytes(body, "stream_options")
 	body = ensureWebSearchToolForHistory(body, opts.Headers)
 	body = normalizeCodexInstructions(body)
-	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
+	if shouldInjectCodexImageGeneration(e.cfg, auth) {
 		body = ensureImageGenerationTool(body, baseModel, auth, opts.Headers)
 	}
 	body = normalizeCodexParallelToolCalls(body, opts.Headers)
@@ -575,7 +575,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body = ensureWebSearchToolForHistory(body, opts.Headers)
 	body = normalizeCodexInstructions(body)
-	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
+	if shouldInjectCodexImageGeneration(e.cfg, auth) {
 		body = ensureImageGenerationTool(body, baseModel, auth, opts.Headers)
 	}
 	body = normalizeCodexParallelToolCalls(body, opts.Headers)
@@ -2416,7 +2416,11 @@ func codexCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 }
 
 func (e *CodexExecutor) resolveCodexConfig(auth *cliproxyauth.Auth) *config.CodexKey {
-	if auth == nil || e.cfg == nil {
+	return resolveCodexKeyConfig(e.cfg, auth)
+}
+
+func resolveCodexKeyConfig(cfg *config.Config, auth *cliproxyauth.Auth) *config.CodexKey {
+	if auth == nil || cfg == nil {
 		return nil
 	}
 	var attrKey, attrBase string
@@ -2426,8 +2430,8 @@ func (e *CodexExecutor) resolveCodexConfig(auth *cliproxyauth.Auth) *config.Code
 		// A synthesized auth carries the index of its config entry so
 		// duplicate credentials with different model mappings resolve to the
 		// exact entry that produced this auth.
-		if index, errIndex := strconv.Atoi(strings.TrimSpace(auth.Attributes[cliproxyauth.AttributeConfigIndex])); errIndex == nil && index >= 0 && index < len(e.cfg.CodexKey) {
-			entry := &e.cfg.CodexKey[index]
+		if index, errIndex := strconv.Atoi(strings.TrimSpace(auth.Attributes[cliproxyauth.AttributeConfigIndex])); errIndex == nil && index >= 0 && index < len(cfg.CodexKey) {
+			entry := &cfg.CodexKey[index]
 			cfgKey := strings.TrimSpace(entry.APIKey)
 			cfgBase := strings.TrimSpace(entry.BaseURL)
 			if (attrKey == "" || strings.EqualFold(cfgKey, attrKey)) && (attrBase == "" || strings.EqualFold(cfgBase, attrBase)) {
@@ -2435,8 +2439,8 @@ func (e *CodexExecutor) resolveCodexConfig(auth *cliproxyauth.Auth) *config.Code
 			}
 		}
 	}
-	for i := range e.cfg.CodexKey {
-		entry := &e.cfg.CodexKey[i]
+	for i := range cfg.CodexKey {
+		entry := &cfg.CodexKey[i]
 		cfgKey := strings.TrimSpace(entry.APIKey)
 		cfgBase := strings.TrimSpace(entry.BaseURL)
 		if attrKey != "" && attrBase != "" {
@@ -2455,14 +2459,41 @@ func (e *CodexExecutor) resolveCodexConfig(auth *cliproxyauth.Auth) *config.Code
 		}
 	}
 	if attrKey != "" {
-		for i := range e.cfg.CodexKey {
-			entry := &e.cfg.CodexKey[i]
+		for i := range cfg.CodexKey {
+			entry := &cfg.CodexKey[i]
 			if strings.EqualFold(strings.TrimSpace(entry.APIKey), attrKey) {
 				return entry
 			}
 		}
 	}
 	return nil
+}
+
+// codexImageGenerationDisabledForAuth reports whether this credential opts out
+// of the proxy-injected image_generation tool. The auth attribute (published by
+// the config synthesizer) wins over the credential config entry; both default to
+// injecting. The global multimedia.disable-image-generation modes are handled by
+// the callers.
+func codexImageGenerationDisabledForAuth(cfg *config.Config, auth *cliproxyauth.Auth) bool {
+	if auth != nil && len(auth.Attributes) > 0 {
+		if val, ok := auth.Attributes[cliproxyauth.AttributeCodexDisableImageGeneration]; ok {
+			if parsed, errParse := strconv.ParseBool(strings.TrimSpace(val)); errParse == nil {
+				return parsed
+			}
+		}
+	}
+	if entry := resolveCodexKeyConfig(cfg, auth); entry != nil && entry.DisableImageGeneration != nil {
+		return *entry.DisableImageGeneration
+	}
+	return false
+}
+
+// shouldInjectCodexImageGeneration reports whether the image-generation tool
+// should be injected into the request body. It returns true when no config is
+// present (default-on), or when image generation is globally enabled and not
+// disabled for the specific credential.
+func shouldInjectCodexImageGeneration(cfg *config.Config, auth *cliproxyauth.Auth) bool {
+	return cfg == nil || (cfg.DisableImageGeneration == config.DisableImageGenerationOff && !codexImageGenerationDisabledForAuth(cfg, auth))
 }
 
 // resolveCodexModelIsCompat reports whether the resolved codex-api-key config

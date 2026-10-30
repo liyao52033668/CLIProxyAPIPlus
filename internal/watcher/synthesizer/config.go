@@ -190,6 +190,9 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 		if ck.Websockets {
 			attrs["websockets"] = "true"
 		}
+		if ck.DisableImageGeneration != nil {
+			attrs[coreauth.AttributeCodexDisableImageGeneration] = strconv.FormatBool(*ck.DisableImageGeneration)
+		}
 		if hash := diff.ComputeCodexModelsHash(ck.Models); hash != "" {
 			attrs["models_hash"] = hash
 		}
