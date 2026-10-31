@@ -88,14 +88,14 @@ func TestShouldCaptureRequestBody(t *testing.T) {
 		want          bool
 	}{
 		{
-			name:          "logger enabled still requires known size",
+			name:          "logger enabled captures unknown size (deferred capture spools it)",
 			loggerEnabled: true,
 			req: &http.Request{
 				Body:          io.NopCloser(strings.NewReader("{}")),
 				ContentLength: -1,
 				Header:        http.Header{"Content-Type": []string{"application/json"}},
 			},
-			want: false,
+			want: true,
 		},
 		{
 			name:          "logger enabled captures within full cap",
@@ -108,14 +108,14 @@ func TestShouldCaptureRequestBody(t *testing.T) {
 			want: true,
 		},
 		{
-			name:          "logger enabled skips over full cap",
+			name:          "logger enabled captures over full cap (bounded read at capture time)",
 			loggerEnabled: true,
 			req: &http.Request{
 				Body:          io.NopCloser(strings.NewReader("x")),
 				ContentLength: maxFullCapturedRequestBodyBytes + 1,
 				Header:        http.Header{"Content-Type": []string{"application/json"}},
 			},
-			want: false,
+			want: true,
 		},
 		{
 			name:          "nil request",
@@ -124,14 +124,14 @@ func TestShouldCaptureRequestBody(t *testing.T) {
 			want:          false,
 		},
 		{
-			name:          "small known size json in error-only mode",
+			name:          "small known size json skipped for eager capture in error-only mode",
 			loggerEnabled: false,
 			req: &http.Request{
 				Body:          io.NopCloser(strings.NewReader("{}")),
 				ContentLength: 2,
 				Header:        http.Header{"Content-Type": []string{"application/json"}},
 			},
-			want: true,
+			want: false,
 		},
 		{
 			name:          "large known size skipped in error-only mode",
@@ -342,15 +342,21 @@ func TestAttachDeferredRequestBodyCaptureSkipsMultipart(t *testing.T) {
 	requestInfo := &RequestInfo{}
 
 	capture := attachDeferredRequestBodyCapture(request, requestLogger, requestInfo, false, false)
-	if capture != nil || requestInfo.deferredBodyCapture != nil {
-		t.Fatal("multipart request received deferred body capture")
+	if capture == nil || requestInfo.deferredBodyCapture != capture {
+		t.Fatal("multipart request must still be wrapped for body tracking")
+	}
+	if !capture.skipCapture {
+		t.Fatal("multipart capture must skip body spooling")
+	}
+	if capture.bytesCaptured != 0 {
+		t.Fatalf("multipart capture read %d bytes before any handler read", capture.bytesCaptured)
 	}
 	entries, errReadDir := os.ReadDir(logsDir)
 	if errReadDir != nil {
 		t.Fatalf("read logs directory: %v", errReadDir)
 	}
 	if len(entries) != 0 {
-		t.Fatalf("multipart request left %d log artifacts", len(entries))
+		t.Fatalf("multipart request left %d log artifacts before any read", len(entries))
 	}
 }
 

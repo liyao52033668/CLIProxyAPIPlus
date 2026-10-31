@@ -453,8 +453,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 
 	// Create HTTP server
 	s.server = &http.Server{
-		Addr:    fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-		Handler: engine,
+		Addr:              fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+		Handler:           wrapUnconsumedRequestBodyHandler(engine),
+		ReadHeaderTimeout: muxSniffDeadline,
 	}
 
 	return s
@@ -495,6 +496,7 @@ func (s *Server) homeHeartbeatMiddleware() gin.HandlerFunc {
 		}
 		client := home.Current()
 		if client == nil || !client.HeartbeatOK() {
+			closeUnconsumedRequestOnAbort(c)
 			c.AbortWithStatus(http.StatusServiceUnavailable)
 			return
 		}
@@ -961,6 +963,10 @@ func (s *Server) AttachWebsocketRoute(path string, handler http.Handler) {
 	authMiddleware := AuthMiddleware(s.accessManager)
 	conditionalAuth := func(c *gin.Context) {
 		if !s.wsAuthEnabled.Load() {
+			middleware.CaptureAuthenticatedRequestBody(c)
+			if c.IsAborted() {
+				return
+			}
 			c.Next()
 			return
 		}
@@ -2097,6 +2103,7 @@ func (s *Server) corsMiddleware() gin.HandlerFunc {
 		c.Header("Access-Control-Expose-Headers", corsExposedResponseHeadersJoined)
 
 		if c.Request.Method == http.MethodOptions {
+			closeUnconsumedRequestOnAbort(c)
 			c.AbortWithStatus(http.StatusNoContent)
 			return
 		}
@@ -2584,6 +2591,10 @@ func (g *codexInspectionGatewayAdapter) findAuth(name string) (*auth.Auth, bool)
 func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if manager == nil {
+			middleware.CaptureAuthenticatedRequestBody(c)
+			if c.IsAborted() {
+				return
+			}
 			c.Next()
 			return
 		}
@@ -2601,10 +2612,15 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 				reqCtx = coreusage.WithIsNativeKey(reqCtx, coreusage.IsNativeAccessProvider(result.Provider))
 				c.Request = c.Request.WithContext(reqCtx)
 			}
+			middleware.CaptureAuthenticatedRequestBody(c)
+			if c.IsAborted() {
+				return
+			}
 			c.Next()
 			return
 		}
 
+		closeUnconsumedRequestOnAbort(c)
 		statusCode := err.HTTPStatusCode()
 		if statusCode >= http.StatusInternalServerError {
 			log.Errorf("authentication middleware error: %v", err)

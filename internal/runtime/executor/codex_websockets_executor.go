@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -101,6 +102,13 @@ type codexWebsocketSession struct {
 	proxyURL string
 
 	writeMu sync.Mutex
+
+	// recoverTransport (under connMu): the current turn belongs to a downstream websocket,
+	// so a transport loss ends the turn but not the downstream socket.
+	recoverTransport bool
+	// turnContext is the attempt context of the current downstream turn; it carries the
+	// websocket input loss epoch so a loss can fence input read before it.
+	turnContext context.Context
 
 	activeMu     sync.Mutex
 	activeConn   *websocket.Conn
@@ -493,6 +501,10 @@ func (s *codexWebsocketSession) notifyUpstreamDisconnect(err error) {
 	if s == nil {
 		return
 	}
+	if cliproxyexecutor.IsUpstreamWebsocketTurnError(err) {
+		// The active turn reports it; an idle loss ends no turn and keeps the downstream socket.
+		return
+	}
 	s.upstreamDisconnectOnce.Do(func() {
 		if s.upstreamDisconnectCh == nil {
 			return
@@ -834,6 +846,20 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		if sess != nil && streamSessionLocked {
 			sess.reqMu.Unlock()
 		}
+	}
+	if sess != nil {
+		sess.connMu.Lock()
+		// A downstream-scoped turn keeps its websocket open across a transport loss:
+		// the loss ends the turn, not the client socket.
+		sess.recoverTransport = cliproxyexecutor.DownstreamWebsocket(ctx)
+		sess.turnContext = ctx
+		sess.connMu.Unlock()
+		defer func() {
+			sess.connMu.Lock()
+			sess.recoverTransport = false
+			sess.turnContext = nil
+			sess.connMu.Unlock()
+		}()
 	}
 
 	wsReqBody := buildCodexWebsocketRequestBody(body)
@@ -1200,6 +1226,31 @@ func mapCodexWebsocketReadError(err error) error {
 		}}
 	}
 	return err
+}
+
+// codexWebsocketTurnTransportError turns a transport loss (EOF, reset, close 1006) into
+// the turn error that keeps the downstream websocket open. Status, policy and other
+// close codes are returned unchanged and keep ending the downstream socket.
+func codexWebsocketTurnTransportError(err error) error {
+	if err == nil || cliproxyexecutor.IsUpstreamWebsocketTurnError(err) {
+		return err
+	}
+	var status interface{ StatusCode() int }
+	if errors.As(err, &status) && status.StatusCode() != 0 {
+		return err
+	}
+	var closeErr *websocket.CloseError
+	if errors.As(err, &closeErr) {
+		if closeErr.Code != websocket.CloseAbnormalClosure {
+			return err
+		}
+	} else if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) &&
+		!errors.Is(err, net.ErrClosed) && !errors.Is(err, io.ErrClosedPipe) &&
+		!errors.Is(err, syscall.ECONNRESET) && !errors.Is(err, syscall.ECONNABORTED) &&
+		!errors.Is(err, syscall.EPIPE) {
+		return err
+	}
+	return &cliproxyexecutor.UpstreamWebsocketTurnError{Cause: err}
 }
 
 func normalizeCodexWebsocketParallelToolCalls(body []byte, headers http.Header) []byte {
@@ -1942,14 +1993,26 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 		_ = conn.SetReadDeadline(time.Now().Add(codexWebsocketIdleTimeout(e.cfg)))
 		msgType, payload, errRead := conn.ReadMessage()
 		if errRead != nil {
+			sess.connMu.Lock()
+			recoverTransport := sess.recoverTransport
+			sess.connMu.Unlock()
+			if recoverTransport {
+				errRead = codexWebsocketTurnTransportError(errRead)
+			}
 			sess.markTerminalError(conn, errRead)
 			invalidate := func() {
 				e.invalidateUpstreamConn(sess, conn, "upstream_disconnected", errRead)
 			}
 			invalidated := false
+			if cliproxyexecutor.IsUpstreamWebsocketTurnError(errRead) {
+				// Drop the dead connection before the turn error is visible, so the next
+				// create reconnects instead of writing to it.
+				invalidate()
+				invalidated = true
+			}
 			ch, done := sess.activeForConn(conn)
 			if ch != nil {
-				invalidated = sendTerminalWebsocketRead(ch, done, codexWebsocketRead{conn: conn, err: errRead}, invalidate)
+				invalidated = sendTerminalWebsocketRead(ch, done, codexWebsocketRead{conn: conn, err: errRead}, invalidate) || invalidated
 				if sess.clearActive(conn, ch) {
 					close(ch)
 				}
@@ -2020,9 +2083,14 @@ func (e *CodexWebsocketsExecutor) invalidateUpstreamConn(sess *codexWebsocketSes
 		sess.connMu.Unlock()
 		return
 	}
+	turnContext := sess.turnContext
+	sess.turnContext = nil
 	sess.conn = nil
 	if sess.readerConn == conn {
 		sess.readerConn = nil
+	}
+	if cliproxyexecutor.IsUpstreamWebsocketTurnError(err) {
+		cliproxyexecutor.NotifyWebsocketInputLoss(turnContext)
 	}
 	sess.connMu.Unlock()
 
