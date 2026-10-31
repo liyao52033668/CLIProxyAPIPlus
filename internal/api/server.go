@@ -73,6 +73,8 @@ var corsExposedResponseHeaders = []string{
 	"X-CPA-SUPPORT-PLUGIN",
 	"X-CPA-HOME-VERSION",
 	"X-CPA-HOME-BUILD-DATE",
+	"X-Auth-Files-Count",
+	"X-Auth-Files-Missing",
 }
 
 var corsExposedResponseHeadersJoined = strings.Join(corsExposedResponseHeaders, ", ")
@@ -1184,6 +1186,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.POST("/auth-files/refresh-all", s.mgmt.RefreshAuthFiles)
 		mgmt.GET("/model-definitions/:channel", s.mgmt.GetStaticModelDefinitions)
 		mgmt.GET("/auth-files/download", secretExport, s.mgmt.DownloadAuthFile)
+		mgmt.GET("/auth-files/download-batch", secretExport, s.mgmt.DownloadAuthFilesBatch)
 		mgmt.POST("/auth-files", s.mgmt.UploadAuthFile)
 		mgmt.DELETE("/auth-files", s.mgmt.DeleteAuthFile)
 		mgmt.PATCH("/auth-files/status", s.mgmt.PatchAuthFileStatus)
