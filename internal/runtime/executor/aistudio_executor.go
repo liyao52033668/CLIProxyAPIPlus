@@ -256,6 +256,29 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 		defer reporter.EnsurePublished(ctx)
 		var param any
 		metadataLogged := false
+		var relayFrames helps.RelaySSEBuffer
+		processRelayFrames := func(payloads [][]byte) bool {
+			for _, payload := range payloads {
+				// A relay chunk may hold several SSE frames; the translators read one frame per call (gjson parses the first
+				// JSON object only), so each frame goes through the whole per-frame path: model, usage, translation.
+				for _, frame := range splitRelayFrames(payload) {
+					reporter.ObserveResponseModel(frame)
+					if detail, ok := helps.ParseGeminiStreamUsage(frame); ok {
+						reporter.Publish(ctx, detail)
+					}
+					filtered := helps.FilterSSEUsageMetadata(frame)
+					lines := sdktranslator.TranslateStream(ctx, body.toFormat, opts.SourceFormat, req.Model, opts.OriginalRequest, translatedReq, filtered, &param)
+					for i := range lines {
+						select {
+						case out <- cliproxyexecutor.StreamChunk{Payload: ensureColonSpacedJSON(lines[i])}:
+						case <-ctx.Done():
+							return false
+						}
+					}
+				}
+			}
+			return true
+		}
 		processEvent := func(event wsrelay.StreamEvent) bool {
 			if event.Err != nil {
 				helps.RecordAPIResponseError(ctx, e.cfg, event.Err)
@@ -275,22 +298,15 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 			case wsrelay.MessageTypeStreamChunk:
 				if len(event.Payload) > 0 {
 					helps.AppendAPIResponseChunk(ctx, e.cfg, event.Payload)
-					reporter.ObserveResponseModel(event.Payload)
-					filtered := helps.FilterSSEUsageMetadata(event.Payload)
-					if detail, ok := helps.ParseGeminiStreamUsage(filtered); ok {
-						reporter.Publish(ctx, detail)
-					}
-					lines := sdktranslator.TranslateStream(ctx, body.toFormat, opts.SourceFormat, req.Model, opts.OriginalRequest, translatedReq, filtered, &param)
-					for i := range lines {
-						select {
-						case out <- cliproxyexecutor.StreamChunk{Payload: ensureColonSpacedJSON(lines[i])}:
-						case <-ctx.Done():
-							return false
-						}
+					if !processRelayFrames(relayFrames.Feed(event.Payload)) {
+						return false
 					}
 					break
 				}
 			case wsrelay.MessageTypeStreamEnd:
+				if !processRelayFrames(relayFrames.Finish()) {
+					return false
+				}
 				return false
 			case wsrelay.MessageTypeHTTPResp:
 				if !metadataLogged && event.Status > 0 {
@@ -467,6 +483,42 @@ func (e *AIStudioExecutor) buildEndpoint(model, action, alt string) string {
 		return base + "?$alt=" + url.QueryEscape(alt)
 	}
 	return base
+}
+
+// splitRelayFrames splits one relay stream stream chunk into the SSE frames it holds. A chunk that starts with an SSE field (data:, event:,
+// id:, retry: or a comment) is cut at its blank lines and each frame is reduced to its data: lines (the translators read data
+// lines; event:, id:, retry: and comment lines carry nothing they use, and a frame without data, a keep-alive comment, is dropped),
+// each frame ending with the blank line. A chunk that starts anything else (a bare or pretty-printed JSON value, "[DONE]") is one
+// frame as it is, never cut.
+func splitRelayFrames(payload []byte) [][]byte {
+	trimmed := bytes.TrimLeft(payload, " \t\r\n")
+	if !startsWithSSEField(trimmed) {
+		return [][]byte{payload}
+	}
+	normalized := bytes.ReplaceAll(payload, []byte("\r\n"), []byte("\n"))
+	var frames [][]byte
+	for _, block := range bytes.Split(normalized, []byte("\n\n")) {
+		var frame []byte
+		for _, line := range bytes.Split(block, []byte("\n")) {
+			if bytes.HasPrefix(bytes.TrimLeft(line, " \t"), []byte("data:")) {
+				frame = append(frame, bytes.TrimLeft(line, " \t")...)
+				frame = append(frame, '\n')
+			}
+		}
+		if len(frame) > 0 {
+			frames = append(frames, append(frame, '\n'))
+		}
+	}
+	return frames
+}
+
+func startsWithSSEField(b []byte) bool {
+	for _, prefix := range []string{"data:", "event:", "id:", "retry:", ":"} {
+		if bytes.HasPrefix(b, []byte(prefix)) {
+			return true
+		}
+	}
+	return false
 }
 
 // ensureColonSpacedJSON normalizes JSON objects so that colons are followed by a single space while

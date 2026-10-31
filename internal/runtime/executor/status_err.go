@@ -2,7 +2,10 @@ package executor
 
 import (
 	"fmt"
+	"math"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
@@ -14,10 +17,11 @@ import (
 // It intentionally mirrors helps.UpstreamStatusError so auth conductor can
 // inspect StatusCode()/RetryAfter() uniformly for both types.
 type statusErr struct {
-	code             int
-	msg              string
-	retryAfter       *time.Duration
-	credentialScoped bool
+	code               int
+	msg                string
+	retryAfter         *time.Duration
+	credentialScoped   bool
+	transientRateLimit bool
 }
 
 func (e statusErr) Error() string {
@@ -34,6 +38,42 @@ func (e statusErr) RetryAfter() *time.Duration { return e.retryAfter }
 // credential instead of a single model (e.g. Codex usage_limit_reached).
 func (e statusErr) IsCredentialScoped() bool { return e.credentialScoped }
 
+// IsTransientRateLimit marks a transient per-model capacity/admission 429
+// that must not be recorded as credential quota exhaustion.
+func (e statusErr) IsTransientRateLimit() bool { return e.transientRateLimit }
+
+// parseRetryAfterHeader parses an HTTP Retry-After header in either the
+// delay-seconds or HTTP-date form. A present, valid value always yields a
+// non-nil result so that an explicit immediate retry (0 seconds or a past
+// date) stays distinguishable from an absent hint; missing or malformed
+// values yield nil and let body-derived hints apply.
+func parseRetryAfterHeader(headers http.Header, now time.Time) *time.Duration {
+	if headers == nil {
+		return nil
+	}
+	raw := strings.TrimSpace(headers.Get("Retry-After"))
+	if raw == "" {
+		return nil
+	}
+	if seconds, errParse := strconv.ParseFloat(raw, 64); errParse == nil && seconds >= 0 {
+		delay := time.Duration(seconds * float64(time.Second))
+		if seconds > float64(math.MaxInt64)/float64(time.Second) {
+			// Out of representable range: clamp to the largest duration so
+			// far-future deadlines only ever over-report recovery.
+			delay = time.Duration(math.MaxInt64)
+		}
+		return &delay
+	}
+	if deadline, errParse := http.ParseTime(raw); errParse == nil {
+	 delay := deadline.Sub(now)
+		if delay < 0 {
+			delay = 0
+		}
+		return &delay
+	}
+	return nil
+}
+
 // toStatusErr converts a helps.UpstreamStatusError into the local statusErr
 // shape when a call site still needs the package-local type.
 func toStatusErr(err error) error {
@@ -44,7 +84,12 @@ func toStatusErr(err error) error {
 		return se
 	}
 	if ue, ok := err.(helps.UpstreamStatusError); ok {
-		return statusErr{code: ue.Code, msg: ue.Msg, retryAfter: ue.RetryAfter()}
+		return statusErr{
+			code:               ue.Code,
+			msg:                ue.Msg,
+			retryAfter:         ue.RetryAfter(),
+			transientRateLimit: false,
+		}
 	}
 	return err
 }

@@ -143,6 +143,16 @@ type RequestScopedError interface {
 	IsRequestScoped() bool
 }
 
+// TransientRateLimitError identifies a transient per-model capacity or
+// admission rejection (for example a Codex turn_rate_limit_exceeded 429).
+// The credential's plan quota is not exhausted, so auth managers must not
+// record quota exhaustion or advance the quota exponential backoff for it.
+// The rejecting model may still cool until any provider RetryAfter hint.
+type TransientRateLimitError interface {
+	error
+	IsTransientRateLimit() bool
+}
+
 // ResponseFormatOrSource returns the response target format for an execution.
 func ResponseFormatOrSource(opts Options) sdktranslator.Format {
 	if opts.ResponseFormat != "" {
