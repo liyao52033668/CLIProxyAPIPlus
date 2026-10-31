@@ -215,6 +215,15 @@ var devinCompoundSuffixes = []struct {
 	{suffix: "-thinking", effort: ""},
 	{suffix: "-max-1m", effort: "max", readd: "-1m"},
 	{suffix: "-none-1m", effort: "none", readd: "-1m"},
+	// Lightning tier keeps the effort before the -lightning suffix upstream
+	// (e.g. swe-2-high-lightning), so it aggregates as <base>-lightning.
+	{suffix: "-minimal-lightning", effort: "minimal", readd: "-lightning"},
+	{suffix: "-low-lightning", effort: "low", readd: "-lightning"},
+	{suffix: "-medium-lightning", effort: "medium", readd: "-lightning"},
+	{suffix: "-high-lightning", effort: "high", readd: "-lightning"},
+	{suffix: "-xhigh-lightning", effort: "xhigh", readd: "-lightning"},
+	{suffix: "-max-lightning", effort: "max", readd: "-lightning"},
+	{suffix: "-none-lightning", effort: "none", readd: "-lightning"},
 }
 
 var devinSimpleEffortSuffixes = []struct {
@@ -237,7 +246,7 @@ var devinDisplayNameSuffixes = []string{
 	" Low Thinking", " Medium Thinking", " High Thinking", " XHigh Thinking",
 	" Max Thinking", " No Thinking",
 	" Low", " Medium", " High", " XHigh", " Max", " None", " Minimal",
-	" Thinking", " Fast",
+	" Thinking", " Fast", " Lightning",
 }
 
 var devinLevelOrder = map[string]int{
@@ -332,6 +341,21 @@ func CleanDevinDisplayName(name string) string {
 	return trimmed
 }
 
+// AppendLightningSuffixIfNeeded appends " Lightning" to the display name when
+// the model ID ends with "-lightning" and the display name does not already
+// end with "lightning" (case-insensitive). Shared between the registry
+// aggregator and the fetch_devin_models command to keep naming consistent.
+func AppendLightningSuffixIfNeeded(id, displayName string) string {
+	lowerID := strings.ToLower(strings.TrimPrefix(id, "devin/"))
+	if !strings.HasSuffix(lowerID, "-lightning") {
+		return displayName
+	}
+	if strings.HasSuffix(strings.ToLower(displayName), "lightning") {
+		return displayName
+	}
+	return strings.TrimSpace(displayName + " Lightning")
+}
+
 func aggregateDevinModels(models []*ModelInfo) []*ModelInfo {
 	type aggEntry struct {
 		model  *ModelInfo
@@ -421,6 +445,10 @@ func aggregateDevinModels(models []*ModelInfo) []*ModelInfo {
 	for _, id := range order {
 		entry := aggregated[id]
 		m := entry.model
+
+		// Lightning display names strip both the effort word and "Lightning";
+		// re-append it so devin/swe-2-lightning shows as "SWE-2 Lightning".
+		m.DisplayName = AppendLightningSuffixIfNeeded(id, m.DisplayName)
 
 		if len(entry.levels) > 0 {
 			lvls := make([]string, 0, len(entry.levels))

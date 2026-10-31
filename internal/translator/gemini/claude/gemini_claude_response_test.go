@@ -380,8 +380,8 @@ func TestConvertGeminiResponseToClaudeStream_PartlessMalformedFunctionCallCloses
 		if strings.HasPrefix(line, "data: ") && strings.Contains(line, `"type":"message_delta"`) {
 			foundDelta = true
 			deltaJSON := gjson.Parse(strings.TrimPrefix(line, "data: "))
-			if got := deltaJSON.Get("delta.stop_reason").String(); got != "refusal" {
-				t.Fatalf("stop_reason = %q, want refusal. Payload: %s", got, line)
+			if got := deltaJSON.Get("delta.stop_reason").String(); got != "end_turn" {
+				t.Fatalf("stop_reason = %q, want end_turn. Payload: %s", got, line)
 			}
 		}
 	}
@@ -439,14 +439,14 @@ func TestConvertGeminiResponseToClaudeStream_PartlessStopClosesMessageWithEndTur
 	}
 }
 
-func TestConvertGeminiResponseToClaudeNonStream_SafetyAndMalformedFunctionCallRefusal(t *testing.T) {
+func TestConvertGeminiResponseToClaudeNonStream_SafetyFinishReasonsMapToRefusal(t *testing.T) {
 	requestJSON := []byte(`{"model":"claude-opus-5-5","messages":[{"role":"user","content":"hi"}]}`)
 	testCases := []struct {
 		finishReason string
 		wantReason   string
 	}{
 		{finishReason: "SAFETY", wantReason: "refusal"},
-		{finishReason: "MALFORMED_FUNCTION_CALL", wantReason: "refusal"},
+		{finishReason: "MALFORMED_FUNCTION_CALL", wantReason: "end_turn"},
 		{finishReason: "RECITATION", wantReason: "refusal"},
 		{finishReason: "PROHIBITED_CONTENT", wantReason: "refusal"},
 		{finishReason: "SPII", wantReason: "refusal"},

@@ -489,12 +489,16 @@ func aggregateModels(raw []rawDevinModel) []devinModelJSON {
 			}
 		}
 
+		// Lightning display names strip both the effort word and "Lightning";
+		// re-append it so swe-2-lightning shows as "SWE-2 Lightning".
+		displayName := registry.AppendLightningSuffixIfNeeded(entry.baseID, entry.displayName)
+
 		res = append(res, devinModelJSON{
 			ID:                        entry.baseID,
 			Object:                    "model",
 			Type:                      "devin",
 			OwnedBy:                   vendorName(entry.vendorID),
-			DisplayName:               entry.displayName,
+			DisplayName:               displayName,
 			ContextLength:             entry.contextLength,
 			MaxCompletionTokens:       64000,
 			SupportedInputModalities:  modalities,
