@@ -14,6 +14,9 @@ import (
 	"strconv"
 	"strings"
 
+	log "github.com/sirupsen/logrus"
+
+	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -131,7 +134,11 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 
 			flushMessage := func() {
 				if hasContent {
-					template, _ = sjson.SetRawBytes(template, "input.-1", message)
+					var err error
+					template, err = sjson.SetRawBytes(template, "input.-1", message)
+					if err != nil {
+						log.Warnf("failed to flush message to template: %v", err)
+					}
 					message = newMessage()
 					contentIndex = 0
 					hasContent = false
@@ -164,12 +171,36 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 				hasContent = true
 			}
 
+			appendCommentaryContent := func(part gjson.Result) {
+				if messageRole != "assistant" {
+					return
+				}
+				text := part.Get("thinking").String()
+				if text == "" {
+					return
+				}
+				// A relayed commentary block becomes its own assistant message item
+				// carrying phase "commentary", mirroring the Codex output item it
+				// came from. The internal marker is consumed here and never
+				// forwarded upstream.
+				flushMessage()
+				content := []byte(`{"type":"output_text","text":""}`)
+				content, _ = sjson.SetBytes(content, "text", text)
+				commentaryMessage := []byte(`{"type":"message","role":"assistant","phase":"commentary"}`)
+				commentaryMessage, _ = sjson.SetRawBytes(commentaryMessage, "content", translatorcommon.JoinRawArray([][]byte{content}))
+				template, _ = sjson.SetRawBytes(template, "input.-1", commentaryMessage)
+			}
+
 			appendReasoningContent := func(part gjson.Result) {
 				if messageRole != "assistant" {
 					return
 				}
 
 				rawSignature := part.Get("signature").String()
+				if sigcompat.IsCodexCommentarySignatureMarker(rawSignature) {
+					appendCommentaryContent(part)
+					return
+				}
 				signature, ok := translatorcommon.CodexReplaySignatureForTarget(signatureTargetModel, rawSignature)
 				if !ok {
 					return

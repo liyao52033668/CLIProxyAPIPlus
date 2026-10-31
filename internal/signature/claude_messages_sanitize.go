@@ -28,6 +28,94 @@ type SignatureSanitizeReport struct {
 	Decisions          []SignatureCompatibilityDecision
 }
 
+// CodexCommentarySignatureMarker is the CLIProxyAPI-internal marker carried in
+// the signature field of the Claude thinking block that relays a Codex
+// commentary message. It is not a provider signature and must never be
+// forwarded to any upstream: consumers either restore the block as assistant
+// commentary text (Claude-to-Codex request translation) or rewrite it as a
+// plain text block (this sanitizer).
+const CodexCommentarySignatureMarker = "cpa:commentary:v1"
+
+// IsCodexCommentarySignatureMarker reports whether rawSignature is exactly the
+// internal commentary marker, ignoring surrounding whitespace. The marker is a
+// plain, forgeable literal rather than a credential; it only distinguishes
+// CPA-relayed commentary from real reasoning history.
+func IsCodexCommentarySignatureMarker(rawSignature string) bool {
+	return strings.TrimSpace(rawSignature) == CodexCommentarySignatureMarker
+}
+
+// buildCommentaryTextBlock constructs a plain text block from commentary content.
+// This helper eliminates duplication across RestoreCodexCommentaryMarkers and
+// SanitizeClaudeMessagesSignaturesForTarget.
+func buildCommentaryTextBlock(text string) string {
+	textBlock := []byte(`{"type":"text","text":""}`)
+	textBlock, _ = sjson.SetBytes(textBlock, "text", text)
+	return string(textBlock)
+}
+
+// RestoreCodexCommentaryMarkers rewrites every assistant thinking block that
+// carries the internal commentary marker as a plain assistant text block and
+// reports how many blocks were restored. It is deliberately independent of
+// provider signature compatibility policy: the marker must never reach any
+// upstream, including Claude-compatible endpoints whose model name maps to a
+// non-Claude family and therefore skips full signature sanitization. Blocks
+// with empty thinking text are dropped because they carry no history. When no
+// marker is present the payload is returned unchanged.
+func RestoreCodexCommentaryMarkers(payload []byte) ([]byte, int, error) {
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.IsArray() {
+		return payload, 0, nil
+	}
+	messageResults := messages.Array()
+	restored := 0
+	keptMessages := make([]string, 0, len(messageResults))
+	for _, message := range messageResults {
+		content := message.Get("content")
+		if !content.IsArray() {
+			keptMessages = append(keptMessages, message.Raw)
+			continue
+		}
+		contentResults := content.Array()
+		keptParts := make([]string, 0, len(contentResults))
+		messageModified := false
+		for _, part := range contentResults {
+			if part.Get("type").String() != "thinking" || !IsCodexCommentarySignatureMarker(part.Get("signature").String()) {
+				keptParts = append(keptParts, part.Raw)
+				continue
+			}
+			restored++
+			messageModified = true
+			if text := part.Get("thinking").String(); text != "" {
+				keptParts = append(keptParts, buildCommentaryTextBlock(text))
+			}
+		}
+		if !messageModified {
+			keptMessages = append(keptMessages, message.Raw)
+			continue
+		}
+		// Even if all content parts were commentary markers with empty text,
+		// preserve the message structure to avoid breaking conversation turn counting.
+		// An empty content array is valid and preferable to a missing message.
+		if len(keptParts) == 0 {
+			keptMessages = append(keptMessages, message.Raw)
+			continue
+		}
+		updated, err := sjson.SetRaw(message.Raw, "content", "["+strings.Join(keptParts, ",")+"]")
+		if err != nil {
+			return payload, restored, fmt.Errorf("failed to update message content: %w", err)
+		}
+		keptMessages = append(keptMessages, updated)
+	}
+	if restored == 0 {
+		return payload, 0, nil
+	}
+	output, err := sjson.SetRawBytes(payload, "messages", []byte("["+strings.Join(keptMessages, ",")+"]"))
+	if err != nil {
+		return payload, restored, fmt.Errorf("failed to rebuild messages array: %w", err)
+	}
+	return output, restored, nil
+}
+
 // SanitizeClaudeMessagesSignaturesForModel removes or preserves Claude
 // /v1/messages signed history according to the provider family implied by
 // targetModel.
@@ -125,6 +213,20 @@ func SanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessag
 			}
 
 			rawSignature := part.Get("signature").String()
+			if IsCodexCommentarySignatureMarker(rawSignature) {
+				// The internal commentary marker is not a provider signature:
+				// restore its text as a plain assistant text block so neither
+				// the marker nor a fake signature reaches the upstream.
+				if text := part.Get("thinking").String(); text != "" {
+					keptParts = append(keptParts, buildCommentaryTextBlock(text))
+					report.DroppedSignatures++
+					messageModified = true
+					continue
+				}
+				report.DroppedBlocks++
+				messageModified = true
+				continue
+			}
 			if opts.PreserveEmptyThinkingBlocks {
 				report.Preserved++
 				keptParts = append(keptParts, part.Raw)

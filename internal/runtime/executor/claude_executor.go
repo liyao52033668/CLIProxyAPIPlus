@@ -2775,11 +2775,23 @@ func shouldSanitizeClaudeMessagesForUpstream(baseModel string) bool {
 }
 
 func sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx context.Context, body []byte, baseModel string, preserveEmptyThinkingBlocks ...bool) []byte {
+	// The internal commentary marker must never reach any upstream, so its
+	// restore runs unconditionally, independent of the provider signature
+	// sanitization gate below (which non-Claude model names skip entirely).
+	// Optimization: only parse the payload if the marker string is present.
 	sanitized := body
+	if bytes.Contains(body, []byte(sigcompat.CodexCommentarySignatureMarker)) {
+		var err error
+		sanitized, _, err = sigcompat.RestoreCodexCommentaryMarkers(body)
+		if err != nil {
+			log.Warnf("failed to restore commentary markers: %v", err)
+			sanitized = body
+		}
+	}
 	preserveEmpty := len(preserveEmptyThinkingBlocks) > 0 && preserveEmptyThinkingBlocks[0]
 	if shouldSanitizeClaudeMessagesForUpstream(baseModel) || preserveEmpty {
 		var report sigcompat.SignatureSanitizeReport
-		sanitized, report = sigcompat.SanitizeClaudeMessagesForClaudeUpstream(body, baseModel)
+		sanitized, report = sigcompat.SanitizeClaudeMessagesForClaudeUpstream(sanitized, baseModel)
 		logClaudeSignatureSanitizeReport(ctx, baseModel, report)
 	}
 	return helps.NormalizeClaudeToolCallIDs(sanitizeClaudeWebSearchDomains(sanitized))

@@ -42,7 +42,9 @@ func ConvertClaudeRequestToGeminiWithCompat(modelName string, inputRawJSON []byt
 }
 
 func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool, preserveEmptyThinkingBlocks bool) []byte {
-	rawJSON := inputRawJSON
+	// The internal commentary marker must be restored as assistant text before
+	// any thinking handling, so it is never dropped or mapped to thought.
+	rawJSON, _, _ := sigcompat.RestoreCodexCommentaryMarkers(inputRawJSON)
 	// Build output Gemini request JSON
 	out := []byte(`{"contents":[]}`)
 	out, _ = sjson.SetBytes(out, "model", modelName)

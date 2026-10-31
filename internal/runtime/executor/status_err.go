@@ -65,7 +65,7 @@ func parseRetryAfterHeader(headers http.Header, now time.Time) *time.Duration {
 		return &delay
 	}
 	if deadline, errParse := http.ParseTime(raw); errParse == nil {
-	 delay := deadline.Sub(now)
+		delay := deadline.Sub(now)
 		if delay < 0 {
 			delay = 0
 		}
