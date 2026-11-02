@@ -41,11 +41,11 @@ tls:
 remote-management:
   # Whether to allow remote (non-localhost) management access.
   # When false, only localhost can access management endpoints (a key is still required).
-  allow-remote: false
+  allow-remote: true
 
   # Allow remote clients to read plaintext API keys, raw config YAML, and auth files.
   # This high-risk capability remains available to localhost when false.
-  allow-secret-export: false
+  allow-secret-export: true
 
   # Management key. If a plaintext value is provided here, it will be hashed on startup.
   # All management requests (even from localhost) require this key.
@@ -60,7 +60,7 @@ remote-management:
   # disable-auto-update-panel: false
 
   # GitHub repository for the management control panel. Accepts a repository URL or releases API URL.
-  panel-github-repository: 'https://github.com/router-for-me/Cli-Proxy-API-Management-Center'
+  panel-github-repository: 'https://github.com/liyao52033668/Cli-Proxy-API-Management-Center'
 
   # Browser origins allowed to call Management API cross-origin (custom connection).
   # Empty keeps the default no-CORS policy. Same-origin /management.html does not need this.
@@ -311,19 +311,19 @@ claude:
   # tool search (defer_loading + tool_reference), which keeps the prompt-cache prefix stable
   # across tool discoveries; other credentials fall back to the plain translation.
   # Default false keeps the translation and catalog behavior that predate tool_search support.
-  tool-search: false
+  tool-search: true
 
 # When true, enable Gemini CLI internal endpoints (/v1internal:*).
 # Default is false for safety.
 enable-gemini-cli-endpoint: false
 
 # When > 0, emit blank lines every N seconds for non-streaming responses to prevent idle timeouts.
-nonstream-keepalive-interval: 0
+nonstream-keepalive-interval: 10
 # Streaming behavior (SSE keep-alives + safe bootstrap retries).
-# streaming:
-#   keepalive-seconds: 15   # Default: 0 (disabled). <= 0 disables keep-alives.
-#   bootstrap-retries: 1    # Default: 0 (disabled). Retries before first byte is sent.
-#   codex-stream-bootstrap-buffering: false # Hold Codex handshake events for overload failover.
+streaming:
+  keepalive-seconds: 15   # Default: 0 (disabled). <= 0 disables keep-alives.
+  bootstrap-retries: 3    # Default: 0 (disabled). Retries before first byte is sent.
+  codex-stream-bootstrap-buffering: false # Hold Codex handshake events for overload failover.
 
 # Signature cache validation for thinking blocks (Antigravity/Claude).
 # When true (default), cached signatures are preferred and validated.
