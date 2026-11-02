@@ -2,7 +2,6 @@ package management
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -73,14 +72,11 @@ func (h *Handler) GetLobsterAIQuota(c *gin.Context) {
 	usage, errUsage := service.FetchUsage(ctx, accessToken)
 	if errUsage != nil {
 		log.WithError(errUsage).Debug("lobsterai quota request failed")
-		status := http.StatusBadGateway
-		var upstreamErr *lobsterauth.Error
-		if errors.As(errUsage, &upstreamErr) && upstreamErr.SessionExpired() {
-			// Surface an expired credential as such so the panel can prompt a re-login
-			// instead of reporting a generic upstream failure.
-			status = http.StatusUnauthorized
-		}
-		c.JSON(status, gin.H{"error": "lobsterai quota request failed: " + errUsage.Error()})
+		// Report as a gateway failure, never with the upstream's own status. A 401
+		// from the management API means "management key invalid" and makes the
+		// panel log out, but this failure only concerns one credential file. The
+		// upstream's status and business code stay visible in the error text.
+		c.JSON(http.StatusBadGateway, gin.H{"error": "lobsterai quota request failed: " + errUsage.Error()})
 		return
 	}
 

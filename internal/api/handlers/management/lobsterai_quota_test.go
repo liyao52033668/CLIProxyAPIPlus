@@ -196,36 +196,58 @@ func TestGetLobsterAIQuotaFetchesUsage(t *testing.T) {
 	}
 }
 
-// TestGetLobsterAIQuotaSurfacesExpiredCredential pins the status mapping for a
-// rejected token so the panel can prompt a re-login.
-func TestGetLobsterAIQuotaSurfacesExpiredCredential(t *testing.T) {
-	allowLobsterAIQuotaLoopbackForTest(t)
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(`{"code":40100,"message":"登录已过期，请重新登录","data":null}`))
-	}))
-	defer server.Close()
-
-	auth := &coreauth.Auth{
-		ID:       "lobsterai-expired.json",
-		Provider: lobsterAIProvider,
-		Metadata: map[string]any{
-			"access_token": strings.Join([]string{"fixture", "expired"}, "-"),
-			"base_url":     server.URL,
-		},
+// TestGetLobsterAIQuotaNeverForwardsUpstreamStatus pins that the upstream's own
+// status is never reused as the management API's status. A 401 there means
+// "management key invalid" and makes the panel log out, but the upstream status
+// describes a third-party system and must only be shown as error text.
+func TestGetLobsterAIQuotaNeverForwardsUpstreamStatus(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "expired token", status: http.StatusUnauthorized, body: `{"code":40100,"message":"登录已过期，请重新登录","data":null}`},
+		{name: "rejected token", status: http.StatusForbidden, body: `{"code":40300,"message":"forbidden","data":null}`},
+		{name: "quota denied", status: http.StatusPaymentRequired, body: `{"code":40200,"message":"额度不足","data":null}`},
 	}
-	handler := newLobsterAIQuotaHandler(t, auth)
 
-	recorder := httptest.NewRecorder()
-	ctx, _ := gin.CreateTestContext(recorder)
-	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/lobsterai-quota", nil)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			allowLobsterAIQuotaLoopbackForTest(t)
 
-	handler.GetLobsterAIQuota(ctx)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
 
-	if recorder.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401 (body %s)", recorder.Code, recorder.Body.String())
+			auth := &coreauth.Auth{
+				ID:       "lobsterai-status.json",
+				Provider: lobsterAIProvider,
+				Metadata: map[string]any{
+					"access_token": strings.Join([]string{"fixture", "status"}, "-"),
+					"base_url":     server.URL,
+				},
+			}
+			handler := newLobsterAIQuotaHandler(t, auth)
+
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/lobsterai-quota", nil)
+
+			handler.GetLobsterAIQuota(ctx)
+
+			if recorder.Code == http.StatusUnauthorized {
+				t.Fatalf("status = 401, want any other status: the panel logs out on 401 (body %s)", recorder.Body.String())
+			}
+			if recorder.Code != http.StatusBadGateway {
+				t.Fatalf("status = %d, want 502 (body %s)", recorder.Code, recorder.Body.String())
+			}
+			if !strings.Contains(recorder.Body.String(), "lobsterai quota request failed") {
+				t.Fatalf("body = %s, want the upstream error surfaced", recorder.Body.String())
+			}
+		})
 	}
 }
 
