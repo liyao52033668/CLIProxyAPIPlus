@@ -370,6 +370,8 @@ func (s *RequestStatistics) RecordEvent(record coreusage.Record) {
 		Source:          record.Source,
 		AuthIndex:       record.AuthIndex,
 		Failed:          record.Failed,
+		FailStatusCode:  int64(record.Fail.StatusCode),
+		ErrorMessage:    recordFailureMessage(record),
 		LatencyMS:       record.Latency.Milliseconds(),
 		FirstTokenMS:    record.TTFT.Milliseconds(),
 		InputTokens:     record.Detail.InputTokens,
@@ -748,8 +750,17 @@ func updateUsageBucketHealth(health *servicedto.UsageOverviewHealth, timestamp t
 
 func estimateUsageEventBytes(event servicedto.UsageEventRecord) int64 {
 	return usageEventBaseSize + int64(
-		len(event.APIGroupKey)+len(event.Model)+len(event.AuthType)+len(event.Provider)+len(event.Source)+len(event.AuthIndex),
-	)
+		len(event.APIGroupKey)+len(event.Model)+len(event.AuthType)+len(event.Provider)+len(event.Source)+len(event.AuthIndex)+len(event.ErrorMessage),
+	) + 8 // FailStatusCode int64
+}
+
+// recordFailureMessage returns the bounded upstream failure text stored with a
+// failed event; successful records never carry stale error text.
+func recordFailureMessage(record coreusage.Record) string {
+	if !record.Failed {
+		return ""
+	}
+	return service.TruncateErrorMessage(record.Fail.Body)
 }
 
 func normalizeUsageEventPagination(filter servicedto.UsageFilter) (page, pageSize, offset int) {
@@ -840,6 +851,12 @@ func normalizeUsageEvent(event servicedto.UsageEventRecord) servicedto.UsageEven
 	event.Provider = strings.Clone(strings.TrimSpace(event.Provider))
 	event.Source = strings.Clone(strings.TrimSpace(event.Source))
 	event.AuthIndex = strings.Clone(strings.TrimSpace(event.AuthIndex))
+	if !event.Failed {
+		event.FailStatusCode = 0
+		event.ErrorMessage = ""
+	} else {
+		event.ErrorMessage = strings.Clone(service.TruncateErrorMessage(event.ErrorMessage))
+	}
 	return event
 }
 

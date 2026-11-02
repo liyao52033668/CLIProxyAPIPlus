@@ -79,6 +79,8 @@ type RequestDetail struct {
 	SourceType    string     `json:"source_type,omitempty"`
 	AuthIndex     string     `json:"auth_index"`
 	Failed        bool       `json:"failed"`
+	FailStatus    int64      `json:"fail_status_code,omitempty"`
+	ErrorMessage  string     `json:"error_message,omitempty"`
 	Tokens        TokenStats `json:"tokens"`
 }
 

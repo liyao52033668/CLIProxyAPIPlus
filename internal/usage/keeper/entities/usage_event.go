@@ -17,6 +17,8 @@ type UsageEvent struct {
 	Source          string    `gorm:"index:idx_usage_events_trim_source,expression:TRIM(source);index:idx_usage_events_auth_type_source_id,priority:2"`
 	AuthIndex       string    `gorm:"index:idx_usage_events_trim_auth_index,expression:TRIM(auth_index);index:idx_usage_events_auth_type_auth_index_id,priority:2"`
 	Failed          bool      `gorm:"index:idx_usage_events_failed"`
+	FailStatusCode  int64     `gorm:"column:fail_status_code;notNull;default:0"`
+	ErrorMessage    string    `gorm:"column:error_message;notNull;default:''"`
 	LatencyMS       int64
 	FirstTokenMS    int64
 	InputTokens     int64

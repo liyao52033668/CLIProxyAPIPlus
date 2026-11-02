@@ -29,6 +29,7 @@ const (
 	migrationCreateUsageArchives                    = "20260714_create_usage_archives"
 	migrationNormalizeUsageEventTimestamps          = "20260714_normalize_usage_event_timestamps"
 	migrationAddUsageEventFirstToken                = "20260730_add_usage_event_first_token"
+	migrationAddUsageEventFailDetail                = "20261102_add_usage_event_fail_detail"
 )
 
 type schemaMigration struct {
@@ -116,6 +117,7 @@ func orderedMigrations() []databaseMigration {
 		{version: migrationCreateUsageArchives, run: createUsageArchivesMigration},
 		{version: migrationNormalizeUsageEventTimestamps, run: normalizeUsageEventTimestampsMigration},
 		{version: migrationAddUsageEventFirstToken, run: addUsageEventFirstTokenMigration},
+		{version: migrationAddUsageEventFailDetail, run: addUsageEventFailDetailMigration},
 	}
 }
 

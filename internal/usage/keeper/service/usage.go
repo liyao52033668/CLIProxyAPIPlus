@@ -262,6 +262,8 @@ func (s *usageService) ListUsageEvents(_ context.Context, filter servicedto.Usag
 			Source:          row.Source,
 			AuthIndex:       row.AuthIndex,
 			Failed:          row.Failed,
+			FailStatusCode:  row.FailStatusCode,
+			ErrorMessage:    row.ErrorMessage,
 			LatencyMS:       row.LatencyMS,
 			FirstTokenMS:    row.FirstTokenMS,
 			InputTokens:     row.InputTokens,
@@ -561,11 +563,13 @@ func (s *usageService) ExportUsageSnapshot(ctx context.Context, output io.Writer
 		}
 		firstDetail = false
 		writer.writeJSON(repodto.RequestDetail{
-			Timestamp: event.Timestamp.UTC(),
-			LatencyMS: event.LatencyMS,
-			Source:    strings.TrimSpace(event.Source),
-			AuthIndex: strings.TrimSpace(event.AuthIndex),
-			Failed:    event.Failed,
+			Timestamp:    event.Timestamp.UTC(),
+			LatencyMS:    event.LatencyMS,
+			Source:       strings.TrimSpace(event.Source),
+			AuthIndex:    strings.TrimSpace(event.AuthIndex),
+			Failed:       event.Failed,
+			FailStatus:   event.FailStatusCode,
+			ErrorMessage: strings.TrimSpace(event.ErrorMessage),
 			Tokens: repodto.TokenStats{
 				InputTokens:     event.InputTokens,
 				OutputTokens:    event.OutputTokens,
@@ -1106,6 +1110,8 @@ func usageEventFromImportDetail(apiGroupKey, modelName string, detail repodto.Re
 		Source:          strings.TrimSpace(detail.Source),
 		AuthIndex:       strings.TrimSpace(detail.AuthIndex),
 		Failed:          detail.Failed,
+		FailStatusCode:  detail.FailStatus,
+		ErrorMessage:    TruncateErrorMessage(detail.ErrorMessage),
 		LatencyMS:       detail.LatencyMS,
 		InputTokens:     tokens.InputTokens,
 		OutputTokens:    tokens.OutputTokens,
@@ -1121,4 +1127,16 @@ func usageSnapshotDimension(value string) string {
 		return "unknown"
 	}
 	return trimmed
+}
+
+// TruncateErrorMessage bounds the stored upstream failure text so a single
+// event cannot bloat the usage_events table.
+const MaxUsageEventErrorMessage = 4096
+
+func TruncateErrorMessage(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if len(trimmed) <= MaxUsageEventErrorMessage {
+		return trimmed
+	}
+	return trimmed[:MaxUsageEventErrorMessage]
 }

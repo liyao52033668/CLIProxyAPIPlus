@@ -68,6 +68,8 @@ func ListUsageEventsWithFilter(db *gorm.DB, filter dto.UsageQueryFilter) (*dto.U
 			Source:          strings.TrimSpace(event.Source),
 			AuthIndex:       strings.TrimSpace(event.AuthIndex),
 			Failed:          event.Failed,
+			FailStatusCode:  event.FailStatusCode,
+			ErrorMessage:    strings.TrimSpace(event.ErrorMessage),
 			LatencyMS:       event.LatencyMS,
 			FirstTokenMS:    event.FirstTokenMS,
 			InputTokens:     event.InputTokens,
@@ -121,6 +123,8 @@ var usageEventListSelectColumns = []string{
 	"source",
 	"auth_index",
 	"failed",
+	"fail_status_code",
+	"error_message",
 	"latency_ms",
 	"first_token_ms",
 	"input_tokens",
@@ -677,11 +681,13 @@ func applyUsageEventToSnapshot(snapshot *dto.StatisticsSnapshot, event entities.
 	modelSnapshot := apiSnapshot.Models[modelName]
 	if includeDetails {
 		detail := dto.RequestDetail{
-			Timestamp: event.Timestamp.UTC(),
-			LatencyMS: event.LatencyMS,
-			Source:    strings.TrimSpace(event.Source),
-			AuthIndex: strings.TrimSpace(event.AuthIndex),
-			Failed:    event.Failed,
+			Timestamp:    event.Timestamp.UTC(),
+			LatencyMS:    event.LatencyMS,
+			Source:       strings.TrimSpace(event.Source),
+			AuthIndex:    strings.TrimSpace(event.AuthIndex),
+			Failed:       event.Failed,
+			FailStatus:   event.FailStatusCode,
+			ErrorMessage: strings.TrimSpace(event.ErrorMessage),
 			Tokens: dto.TokenStats{
 				InputTokens:     event.InputTokens,
 				OutputTokens:    event.OutputTokens,

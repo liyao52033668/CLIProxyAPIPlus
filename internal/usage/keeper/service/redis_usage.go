@@ -31,6 +31,7 @@ type queuedUsageDetail struct {
 	AuthIndex string         `json:"auth_index"`
 	Tokens    dto.TokenStats `json:"tokens"`
 	Failed    bool           `json:"failed"`
+	Fail      queuedFail     `json:"fail"`
 	Provider  string         `json:"provider"`
 	Model     string         `json:"model"`
 	Alias     *string        `json:"alias"`
@@ -38,6 +39,12 @@ type queuedUsageDetail struct {
 	AuthType  string         `json:"auth_type"`
 	APIKey    string         `json:"api_key"`
 	RequestID string         `json:"request_id"`
+}
+
+// queuedFail mirrors the failure block written by the CPA Redis usage queue.
+type queuedFail struct {
+	StatusCode int    `json:"status_code"`
+	Body       string `json:"body"`
 }
 
 func normalizeRedisAuthType(value string) string {
@@ -73,6 +80,12 @@ func (d queuedUsageDetail) toUsageEvent(fetchedAt time.Time) entities.UsageEvent
 	if eventKey == "" {
 		eventKey = BuildEventKey(apiGroupKey, model, timestamp, source, authIndex, d.Failed, tokens)
 	}
+	errorMessage := ""
+	failStatusCode := int64(0)
+	if d.Failed {
+		errorMessage = TruncateErrorMessage(d.Fail.Body)
+		failStatusCode = int64(d.Fail.StatusCode)
+	}
 	return entities.UsageEvent{
 		EventKey:        eventKey,
 		APIGroupKey:     apiGroupKey,
@@ -86,6 +99,8 @@ func (d queuedUsageDetail) toUsageEvent(fetchedAt time.Time) entities.UsageEvent
 		Source:          source,
 		AuthIndex:       authIndex,
 		Failed:          d.Failed,
+		FailStatusCode:  failStatusCode,
+		ErrorMessage:    errorMessage,
 		LatencyMS:       max(d.LatencyMS, 0),
 		InputTokens:     tokens.InputTokens,
 		OutputTokens:    tokens.OutputTokens,

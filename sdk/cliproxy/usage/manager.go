@@ -557,6 +557,8 @@ func (p *databasePlugin) HandleUsage(ctx context.Context, record Record) {
 		Source:          record.Source,
 		Timestamp:       timestamp,
 		Failed:          record.Failed,
+		FailStatusCode:  int64(record.Fail.StatusCode),
+		ErrorMessage:    failureMessage(record),
 		LatencyMS:       record.Latency.Milliseconds(),
 		FirstTokenMS:    record.TTFT.Milliseconds(),
 		InputTokens:     record.Detail.InputTokens,
@@ -655,6 +657,25 @@ func buildEventKey(record Record, timestamp time.Time) string {
 		tokens.TotalTokens = tokens.InputTokens + tokens.OutputTokens + tokens.ReasoningTokens + tokens.CachedTokens
 	}
 	return service.BuildEventKey(record.APIKey, record.Model, timestamp, record.Source, record.AuthIndex, record.Failed, tokens)
+}
+
+// maxEventErrorMessage bounds the stored upstream failure text so a single
+// event cannot bloat the usage_events table.
+const maxEventErrorMessage = 4096
+
+// failureMessage returns the trimmed upstream failure body recorded for a
+// failed attempt. Successful records never carry failure text so the stored
+// events stay free of stale errors. strings.Clone detaches the result from
+// the original body so the larger buffer can be garbage-collected.
+func failureMessage(record Record) string {
+	if !record.Failed {
+		return ""
+	}
+	trimmed := strings.TrimSpace(record.Fail.Body)
+	if len(trimmed) > maxEventErrorMessage {
+		return strings.Clone(trimmed[:maxEventErrorMessage])
+	}
+	return strings.Clone(trimmed)
 }
 
 var defaultManager = NewManager(512)
