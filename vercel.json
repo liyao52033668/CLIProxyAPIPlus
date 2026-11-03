@@ -2,7 +2,7 @@
   "services": {
     "cliproxyapi": {
       "root": ".",
-      "entrypoint": "Dockerfile"
+      "entrypoint": "Dockerfile.vercel"
     }
   }
 }

@@ -1,0 +1,70 @@
+# Vercel-optimized Dockerfile
+# Installs gcc/musl-dev in builder for CGO support (required by go-sqlite3)
+
+# Build stage
+FROM golang:1.26-alpine3.23 AS builder
+
+# Install CGO dependencies (required for go-sqlite3)
+RUN apk add --no-cache gcc musl-dev git
+
+WORKDIR /app
+
+COPY . .
+
+ARG VERSION=dev
+ARG COMMIT=none
+ARG BUILD_DATE=unknown
+ARG CPA_TOKEN=""
+
+# CGO_ENABLED=1 is required for SQLite support
+RUN CGO_ENABLED=1 GOOS=linux go build -buildvcs=false \
+    -ldflags="-s -w -X 'main.Version=${VERSION}-plus' -X 'main.Commit=${COMMIT}' -X 'main.BuildDate=${BUILD_DATE}' -X 'main.CPAToken=${CPA_TOKEN}'" \
+    -o ./CLIProxyAPIPlus ./cmd/server/
+
+# Runtime stage
+FROM alpine:3.23
+
+ARG ALPINE_BRANCH=v3.23
+ARG APK_MIRROR=https://mirrors.aliyun.com/alpine
+
+# Install runtime dependencies (including musl for CGO binary)
+RUN set -eux; \
+    printf '%s/%s/main\n%s/%s/community\n' \
+        "${APK_MIRROR}" "${ALPINE_BRANCH}" \
+        "${APK_MIRROR}" "${ALPINE_BRANCH}" \
+        > /etc/apk/repositories; \
+    rm -rf /var/cache/apk/*; \
+    for i in 1 2 3; do \
+        if apk add --no-cache tzdata curl libc6-compat; then break; fi; \
+        if [ "$i" = "3" ]; then exit 1; fi; \
+        echo "apk add failed (attempt $i), retrying in 5s..."; \
+        sleep 5; \
+    done; \
+    rm -rf /var/cache/apk/*
+
+RUN mkdir -p /CLIProxyAPI
+
+# Copy binary from builder
+COPY --from=builder /app/CLIProxyAPIPlus /CLIProxyAPI/CLIProxyAPIPlus
+
+# Copy example config
+COPY config.example.yaml /CLIProxyAPI/config.example.yaml
+
+# Copy entrypoint script
+COPY entrypoint.sh /CLIProxyAPI/entrypoint.sh
+
+WORKDIR /CLIProxyAPI
+
+# Vercel uses PORT environment variable
+EXPOSE 8317
+
+ENV TZ=Asia/Shanghai
+
+RUN cp /usr/share/zoneinfo/${TZ} /etc/localtime && echo "${TZ}" > /etc/timezone
+
+# Health check for Vercel
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8317/health || exit 1
+
+ENTRYPOINT ["sh", "/CLIProxyAPI/entrypoint.sh"]
+CMD ["./CLIProxyAPIPlus"]
