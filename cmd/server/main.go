@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -747,6 +748,21 @@ func main() {
 		cfg.IgnoredAuthJSONPaths = append(cfg.IgnoredAuthJSONPaths, authfiles.ParseAuxiliaryJSONPathsEnv(value)...)
 	}
 	authfiles.SetIgnoredAuxiliaryJSONPaths(cfg.IgnoredAuthJSONPaths)
+
+	// Override port and host from environment variables if set.
+	// Environment variables take precedence over config file values.
+	if value, ok := lookupEnv("PORT"); ok {
+		if port, err := strconv.Atoi(value); err == nil && port > 0 && port <= 65535 {
+			cfg.Port = port
+			log.Infof("Port overridden by environment variable PORT=%d", port)
+		} else {
+			log.Warnf("Invalid PORT environment variable value %q, using config value %d", value, cfg.Port)
+		}
+	}
+	if value, ok := lookupEnv("HOST"); ok {
+		cfg.Host = value
+		log.Infof("Host overridden by environment variable HOST=%s", value)
+	}
 
 	// In cloud deploy mode, check if we have a valid configuration
 	var configFileExists bool
