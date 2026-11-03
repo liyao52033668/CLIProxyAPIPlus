@@ -527,6 +527,45 @@ func main() {
 		isCloudDeploy = true
 	}
 
+	// Early-bind the TCP port before any heavy initialization (database migration,
+	// auth loading, etc.) when EARLY_BIND is set. This satisfies PaaS startup
+	// timeouts (e.g., Vercel's ~28s limit).
+	// Port priority: PORT env var > config file.
+	if _, earlyBindEnabled := lookupEnv("EARLY_BIND"); earlyBindEnabled {
+		earlyPort := 0
+		// First try PORT env var.
+		if portStr, ok := lookupEnv("PORT"); ok {
+			if port, err := strconv.Atoi(portStr); err == nil && port > 0 && port <= 65535 {
+				earlyPort = port
+			}
+		}
+		// Fallback to config file.
+		if earlyPort == 0 {
+			earlyConfigPath := configPath
+			if strings.TrimSpace(earlyConfigPath) == "" {
+				earlyConfigPath = filepath.Join(wd, "config.yaml")
+			}
+			if earlyCfg, errEarly := config.LoadConfigOptional(earlyConfigPath, false); errEarly == nil && earlyCfg != nil {
+				earlyPort = earlyCfg.Port
+			}
+		}
+		if earlyPort <= 0 || earlyPort > 65535 {
+			log.Info("EARLY_BIND is set but no valid port found (PORT env or config file), skipping early bind")
+		} else {
+			host := ""
+			if hostStr, okHost := lookupEnv("HOST"); okHost {
+				host = hostStr
+			}
+			addr := fmt.Sprintf("%s:%d", host, earlyPort)
+			if listener, errListen := net.Listen("tcp", addr); errListen != nil {
+				log.Warnf("failed to early-bind port %s: %v (continuing without early bind)", addr, errListen)
+			} else {
+				earlyBoundListener = listener
+				log.Infof("Early-bound TCP listener on %s (EARLY_BIND enabled)", addr)
+			}
+		}
+	}
+
 	// Determine and load the configuration file.
 	// Prefer the Postgres store when configured, otherwise fallback to git or local files.
 	var configFilePath string
@@ -588,25 +627,6 @@ func main() {
 		useObjectStore = false
 		useGitStore = false
 	} else if usePostgresStore {
-		// Early-bind the TCP port before database migration (Bootstrap) to satisfy
-		// PaaS startup timeouts (e.g., Vercel's ~28s limit). The port is read from
-		// the PORT environment variable; if not set, skip early binding.
-		if portStr, ok := lookupEnv("PORT"); ok {
-			if port, errPort := strconv.Atoi(portStr); errPort == nil && port > 0 && port <= 65535 {
-				host := ""
-				if hostStr, okHost := lookupEnv("HOST"); okHost {
-					host = hostStr
-				}
-				addr := fmt.Sprintf("%s:%d", host, port)
-				if listener, errListen := net.Listen("tcp", addr); errListen != nil {
-					log.Warnf("failed to early-bind port %s: %v (continuing without early bind)", addr, errListen)
-				} else {
-					earlyBoundListener = listener
-					log.Infof("Early-bound TCP listener on %s (before database migration)", addr)
-				}
-			}
-		}
-
 		if pgStoreLocalPath == "" {
 			pgStoreLocalPath = wd
 		}
