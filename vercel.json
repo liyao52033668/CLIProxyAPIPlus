@@ -1,0 +1,8 @@
+{
+  "services": {
+    "cliproxyapi": {
+      "root": ".",
+      "entrypoint": "Dockerfile"
+    }
+  }
+}
