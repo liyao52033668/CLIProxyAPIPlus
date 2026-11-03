@@ -52,10 +52,10 @@ COPY config.example.yaml /CLIProxyAPI/config.example.yaml
 
 WORKDIR /CLIProxyAPI
 
-# Vercel dynamically assigns PORT via environment variable
-# Default to 8317 if not set
+# Application listens on port 8317 (configured in database)
+# Set PORT environment variable to tell Vercel to route traffic to 8317
 ENV PORT=8317
-EXPOSE ${PORT}
+EXPOSE 8317
 
 ENV TZ=Asia/Shanghai
 
