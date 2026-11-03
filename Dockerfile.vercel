@@ -61,31 +61,4 @@ ENV TZ=Asia/Shanghai
 
 RUN cp /usr/share/zoneinfo/${TZ} /etc/localtime && echo "${TZ}" > /etc/timezone
 
-# Create a startup script that handles dynamic PORT configuration
-RUN cat > /CLIProxyAPI/start.sh <<'EOF'
-#!/bin/sh
-RUN cat > /CLIProxyAPI/start.sh <<'EOF'
-#!/bin/sh
-set -eu
-
-echo "========== STARTUP =========="
-echo "PORT=${PORT}"
-
-cp /CLIProxyAPI/config.example.yaml /tmp/config.yaml
-sed -i "s/^port:.*/port: ${PORT}/" /tmp/config.yaml
-
-cd /tmp
-cp /tmp/config.yaml ./config.yaml
-
-echo "========== CONFIG =========="
-grep -E '^(host|port):' config.yaml
-
-echo "========== START SERVER =========="
-exec /CLIProxyAPI/CLIProxyAPIPlus
-EOF
-
-RUN chmod +x /CLIProxyAPI/start.sh
-
-CMD ["/CLIProxyAPI/start.sh"]
-
-
+CMD ["./CLIProxyAPIPlus"]
