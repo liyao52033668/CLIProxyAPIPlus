@@ -168,6 +168,9 @@ type Server struct {
 	// listenerMu guards the mux listener fields against concurrent stop/serve access.
 	listenerMu sync.Mutex
 
+	// earlyListener stores a pre-created listener from BindEarly() for StartWithReady() to reuse.
+	earlyListener net.Listener
+
 	// muxBaseListener is the shared TCP listener used to serve both HTTP and Redis protocol traffic.
 	muxBaseListener net.Listener
 
@@ -1894,16 +1897,19 @@ func (s *Server) Start() error {
 	return s.StartWithReady(nil)
 }
 
-// StartWithReady begins serving requests and closes ready after the listener is prepared.
-func (s *Server) StartWithReady(ready chan<- struct{}) error {
+// BindEarly creates and binds the TCP listener before the server is fully initialized.
+// This is useful for PaaS deployments (e.g., Vercel) where the platform expects the port
+// to be bound quickly. The pre-created listener is stored and reused by StartWithReady().
+// Returns the listener address for logging purposes.
+func (s *Server) BindEarly() (string, error) {
 	if s == nil || s.server == nil {
-		return fmt.Errorf("failed to start HTTP server: server not initialized")
+		return "", fmt.Errorf("server not initialized")
 	}
 
 	addr := s.server.Addr
 	listener, errListen := net.Listen("tcp", addr)
 	if errListen != nil {
-		return fmt.Errorf("failed to start HTTP server: %v", errListen)
+		return "", fmt.Errorf("early bind failed: %v", errListen)
 	}
 
 	cfg := s.getConfig()
@@ -1912,17 +1918,13 @@ func (s *Server) StartWithReady(ready chan<- struct{}) error {
 		certPath := strings.TrimSpace(cfg.TLS.Cert)
 		keyPath := strings.TrimSpace(cfg.TLS.Key)
 		if certPath == "" || keyPath == "" {
-			if errClose := listener.Close(); errClose != nil {
-				log.Errorf("failed to close listener after TLS validation failure: %v", errClose)
-			}
-			return fmt.Errorf("failed to start HTTPS server: tls.cert or tls.key is empty")
+			_ = listener.Close()
+			return "", fmt.Errorf("early bind failed: tls.cert or tls.key is empty")
 		}
 		certPair, errLoad := tls.LoadX509KeyPair(certPath, keyPath)
 		if errLoad != nil {
-			if errClose := listener.Close(); errClose != nil {
-				log.Errorf("failed to close listener after TLS key pair load failure: %v", errClose)
-			}
-			return fmt.Errorf("failed to start HTTPS server: %v", errLoad)
+			_ = listener.Close()
+			return "", fmt.Errorf("early bind failed: %v", errLoad)
 		}
 
 		tlsConfig := &tls.Config{
@@ -1931,12 +1933,86 @@ func (s *Server) StartWithReady(ready chan<- struct{}) error {
 		}
 		s.server.TLSConfig = tlsConfig
 		if errHTTP2 := http2.ConfigureServer(s.server, &http2.Server{}); errHTTP2 != nil {
-			log.Warnf("failed to configure HTTP/2: %v", errHTTP2)
+			log.Warnf("failed to configure HTTP/2 during early bind: %v", errHTTP2)
 		}
 		listener = tls.NewListener(listener, tlsConfig)
-		log.Debugf("Starting API server on %s with TLS", addr)
+	}
+
+	s.listenerMu.Lock()
+	s.earlyListener = listener
+	s.listenerMu.Unlock()
+
+	return addr, nil
+}
+
+// SetEarlyListener accepts a pre-bound TCP listener created externally (e.g., in main.go
+// before heavy initialization). This listener will be reused by StartWithReady().
+func (s *Server) SetEarlyListener(listener net.Listener) {
+	if s == nil {
+		return
+	}
+	s.listenerMu.Lock()
+	s.earlyListener = listener
+	s.listenerMu.Unlock()
+}
+
+// StartWithReady begins serving requests and closes ready after the listener is prepared.
+func (s *Server) StartWithReady(ready chan<- struct{}) error {
+	if s == nil || s.server == nil {
+		return fmt.Errorf("failed to start HTTP server: server not initialized")
+	}
+
+	addr := s.server.Addr
+
+	// Check if BindEarly() already created a listener.
+	s.listenerMu.Lock()
+	listener := s.earlyListener
+	s.earlyListener = nil // Clear so it's not reused
+	s.listenerMu.Unlock()
+
+	if listener == nil {
+		// No early listener; create one now with full TLS setup.
+		var errListen error
+		listener, errListen = net.Listen("tcp", addr)
+		if errListen != nil {
+			return fmt.Errorf("failed to start HTTP server: %v", errListen)
+		}
+
+		cfg := s.getConfig()
+		useTLS := cfg != nil && cfg.TLS.Enable
+		if useTLS {
+			certPath := strings.TrimSpace(cfg.TLS.Cert)
+			keyPath := strings.TrimSpace(cfg.TLS.Key)
+			if certPath == "" || keyPath == "" {
+				if errClose := listener.Close(); errClose != nil {
+					log.Errorf("failed to close listener after TLS validation failure: %v", errClose)
+				}
+				return fmt.Errorf("failed to start HTTPS server: tls.cert or tls.key is empty")
+			}
+			certPair, errLoad := tls.LoadX509KeyPair(certPath, keyPath)
+			if errLoad != nil {
+				if errClose := listener.Close(); errClose != nil {
+					log.Errorf("failed to close listener after TLS key pair load failure: %v", errClose)
+				}
+				return fmt.Errorf("failed to start HTTPS server: %v", errLoad)
+			}
+
+			tlsConfig := &tls.Config{
+				Certificates: []tls.Certificate{certPair},
+				NextProtos:   []string{"h2", "http/1.1"},
+			}
+			s.server.TLSConfig = tlsConfig
+			if errHTTP2 := http2.ConfigureServer(s.server, &http2.Server{}); errHTTP2 != nil {
+				log.Warnf("failed to configure HTTP/2: %v", errHTTP2)
+			}
+			listener = tls.NewListener(listener, tlsConfig)
+			log.Debugf("Starting API server on %s with TLS", addr)
+		} else {
+			log.Debugf("Starting API server on %s", addr)
+		}
 	} else {
-		log.Debugf("Starting API server on %s", addr)
+		// Early listener was already set up (TLS configured in BindEarly).
+		log.Debugf("Reusing early-bound listener on %s", addr)
 	}
 
 	httpListener := newMuxListener(listener.Addr(), 1024)

@@ -6,6 +6,7 @@ package cmd
 import (
 	"context"
 	"errors"
+	"net"
 	"os/signal"
 	"syscall"
 	"time"
@@ -24,11 +25,16 @@ import (
 //   - cfg: The application configuration
 //   - configPath: The path to the configuration file
 //   - localPassword: Optional password accepted for local management requests
-func StartService(cfg *config.Config, configPath string, localPassword string) {
+//   - earlyListener: Optional pre-bound TCP listener for PaaS startup timeout avoidance
+func StartService(cfg *config.Config, configPath string, localPassword string, earlyListener net.Listener) {
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(configPath).
 		WithLocalManagementPassword(localPassword)
+
+	if earlyListener != nil {
+		builder = builder.WithEarlyListener(earlyListener)
+	}
 
 	ctxSignal, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -57,11 +63,15 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 
 // StartServiceBackground starts the proxy service in a background goroutine
 // and returns a cancel function for shutdown and a done channel.
-func StartServiceBackground(cfg *config.Config, configPath string, localPassword string) (cancel func(), done <-chan struct{}) {
+func StartServiceBackground(cfg *config.Config, configPath string, localPassword string, earlyListener net.Listener) (cancel func(), done <-chan struct{}) {
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(configPath).
 		WithLocalManagementPassword(localPassword)
+
+	if earlyListener != nil {
+		builder = builder.WithEarlyListener(earlyListener)
+	}
 
 	ctx, cancelFn := context.WithCancel(context.Background())
 	doneCh := make(chan struct{})

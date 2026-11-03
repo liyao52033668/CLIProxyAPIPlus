@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -52,6 +53,11 @@ var (
 	BuildDate         = "unknown"
 	CPAToken          = ""
 	DefaultConfigPath = ""
+
+	// earlyBoundListener holds a pre-bound TCP listener created before heavy initialization
+	// (e.g., database migration). This allows PaaS platforms like Vercel to detect the port
+	// as open within their startup timeout. The listener is consumed by the server during startup.
+	earlyBoundListener net.Listener
 
 	resolveRuntimeAuthDir = util.ResolveAuthDir
 
@@ -582,6 +588,25 @@ func main() {
 		useObjectStore = false
 		useGitStore = false
 	} else if usePostgresStore {
+		// Early-bind the TCP port before database migration (Bootstrap) to satisfy
+		// PaaS startup timeouts (e.g., Vercel's ~28s limit). The port is read from
+		// the PORT environment variable; if not set, skip early binding.
+		if portStr, ok := lookupEnv("PORT"); ok {
+			if port, errPort := strconv.Atoi(portStr); errPort == nil && port > 0 && port <= 65535 {
+				host := ""
+				if hostStr, okHost := lookupEnv("HOST"); okHost {
+					host = hostStr
+				}
+				addr := fmt.Sprintf("%s:%d", host, port)
+				if listener, errListen := net.Listen("tcp", addr); errListen != nil {
+					log.Warnf("failed to early-bind port %s: %v (continuing without early bind)", addr, errListen)
+				} else {
+					earlyBoundListener = listener
+					log.Infof("Early-bound TCP listener on %s (before database migration)", addr)
+				}
+			}
+		}
+
 		if pgStoreLocalPath == "" {
 			pgStoreLocalPath = wd
 		}
@@ -979,7 +1004,7 @@ func main() {
 					password = localMgmtPassword
 				}
 
-				cancel, done := cmd.StartServiceBackground(cfg, configFilePath, password)
+				cancel, done := cmd.StartServiceBackground(cfg, configFilePath, password, earlyBoundListener)
 
 				client := tui.NewClient(cfg.Port, password)
 				ready := false
@@ -1052,7 +1077,7 @@ func main() {
 				}()
 			}
 
-			cmd.StartService(cfg, configFilePath, password)
+			cmd.StartService(cfg, configFilePath, password, earlyBoundListener)
 
 			if homeClient != nil {
 				// The bootstrap client is not owned by the runtime service. Close it after

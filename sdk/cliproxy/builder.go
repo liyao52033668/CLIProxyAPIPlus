@@ -5,6 +5,7 @@ package cliproxy
 
 import (
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -53,6 +54,10 @@ type Builder struct {
 
 	// serverOptions contains additional server configuration options.
 	serverOptions []api.ServerOption
+
+	// earlyListener is a pre-bound TCP listener created before heavy initialization.
+	// It is passed to the server to avoid PaaS startup timeouts.
+	earlyListener net.Listener
 }
 
 // Hooks allows callers to plug into service lifecycle stages.
@@ -168,6 +173,14 @@ func (b *Builder) WithPostAuthHook(hook coreauth.PostAuthHook) *Builder {
 	return b
 }
 
+// WithEarlyListener sets a pre-bound TCP listener that was created before heavy
+// initialization (e.g., database migration). This allows PaaS platforms like Vercel
+// to detect the port as open within their startup timeout.
+func (b *Builder) WithEarlyListener(listener net.Listener) *Builder {
+	b.earlyListener = listener
+	return b
+}
+
 // Build validates inputs, applies defaults, and returns a ready-to-run service.
 func (b *Builder) Build() (*Service, error) {
 	if b.cfg == nil {
@@ -270,6 +283,7 @@ func (b *Builder) Build() (*Service, error) {
 		accessManager:  accessManager,
 		coreManager:    coreManager,
 		serverOptions:  append([]api.ServerOption(nil), b.serverOptions...),
+		earlyListener:  b.earlyListener,
 	}
 	if b.cfg != nil {
 		clauderesponses.SetClientToolSearchEnabled(b.cfg.Claude.ToolSearch)

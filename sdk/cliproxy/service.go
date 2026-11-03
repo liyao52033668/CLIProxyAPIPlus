@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"sync"
@@ -71,6 +72,10 @@ type Service struct {
 
 	// serverOptions contains additional server configuration options.
 	serverOptions []api.ServerOption
+
+	// earlyListener is a pre-bound TCP listener created before heavy initialization.
+	// It is passed to the server to avoid PaaS startup timeouts.
+	earlyListener net.Listener
 
 	// server is the HTTP API server instance.
 	server *api.Server
@@ -1050,6 +1055,17 @@ func (s *Service) Run(ctx context.Context) error {
 		}
 	}()
 
+	// Create the server early. If a pre-bound listener exists (from main.go, created
+	// before database migration for PaaS platforms like Vercel), attach it so the
+	// port is already open. Otherwise, keep original behavior: port binds after
+	// initialization completes in StartWithReady().
+	s.server = api.NewServer(s.cfg, s.coreManager, s.accessManager, s.configPath, s.serverOptions...)
+
+	if s.earlyListener != nil {
+		s.server.SetEarlyListener(s.earlyListener)
+		log.Info("Using pre-bound TCP listener (port open before database migration)")
+	}
+
 	if !homeEnabled {
 		if errEnsureAuthDir := s.ensureAuthDir(); errEnsureAuthDir != nil {
 			return errEnsureAuthDir
@@ -1085,7 +1101,7 @@ func (s *Service) Run(ctx context.Context) error {
 	// legacy clients removed; no caches to refresh
 
 	// handlers no longer depend on legacy clients; pass nil slice initially
-	s.server = api.NewServer(s.cfg, s.coreManager, s.accessManager, s.configPath, s.serverOptions...)
+	// NOTE: s.server was already created early (before heavy init) for BindEarly().
 	// Set callback to refresh model registrations when OAuthModelAlias is updated
 	s.server.SetOnOAuthModelAliasUpdated(s.RefreshAllModelRegistrations)
 	// OAuthSettings overrides also change registered model information
