@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -131,6 +133,89 @@ func ExpandResponsesCompactionCapsules(req *cliproxyexecutor.Request, opts *clip
 		}
 	}
 	return nil
+}
+
+// ExpandRecognizedResponsesCompactionCapsules expands only compaction capsules
+// this proxy recognized, without dropping foreign items. Compact endpoints use it
+// so a capsule round-trip survives while unrecognized items pass through.
+func ExpandRecognizedResponsesCompactionCapsules(req *cliproxyexecutor.Request, opts *cliproxyexecutor.Options) error {
+	sameOriginal := req != nil && opts != nil && len(opts.OriginalRequest) > 0 && bytes.Equal(req.Payload, opts.OriginalRequest)
+	if req != nil && HasRecognizedResponsesCompactionItem(req.Payload) {
+		expanded, errExpand := ExpandRecognizedAntigravityCompactionCapsules(req.Payload)
+		if errExpand != nil {
+			return errExpand
+		}
+		req.Payload = expanded
+	}
+	if opts != nil && len(opts.OriginalRequest) > 0 {
+		if sameOriginal {
+			if req != nil {
+				opts.OriginalRequest = req.Payload
+			}
+			return nil
+		}
+		if HasRecognizedResponsesCompactionItem(opts.OriginalRequest) {
+			expanded, errExpand := ExpandRecognizedAntigravityCompactionCapsules(opts.OriginalRequest)
+			if errExpand != nil {
+				return errExpand
+			}
+			opts.OriginalRequest = expanded
+		}
+	}
+	return nil
+}
+
+// HasRecognizedResponsesCompactionItem reports whether the payload carries at least
+// one compaction item this proxy sealed itself.
+func HasRecognizedResponsesCompactionItem(payload []byte) bool {
+	items := util.GetGJSONBytesNoCopy(payload, "input")
+	if !items.IsArray() {
+		return false
+	}
+	found := false
+	items.ForEach(func(_, item gjson.Result) bool {
+		if item.Get("type").String() != "compaction" {
+			return true
+		}
+		if RecognizedAntigravityCompactionCapsule(item.Get("encrypted_content").String()) {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+// ExpandRecognizedAntigravityCompactionCapsules expands only capsules this proxy
+// recognizes, leaving every other item untouched.
+func ExpandRecognizedAntigravityCompactionCapsules(payload []byte) ([]byte, error) {
+	items := util.GetGJSONBytesNoCopy(payload, "input")
+	if !items.IsArray() {
+		return payload, nil
+	}
+	var expandedItems [][]byte
+	changed := false
+	items.ForEach(func(_, item gjson.Result) bool {
+		if item.Get("type").String() == "compaction" {
+			encrypted := item.Get("encrypted_content").String()
+			if RecognizedAntigravityCompactionCapsule(encrypted) {
+				summary, errUnseal := UnsealAntigravityCompaction(encrypted)
+				if errUnseal == nil {
+					message := []byte(`{"type":"message","role":"developer","content":[{"type":"input_text","text":""}]}`)
+					message, _ = sjson.SetBytes(message, "content.0.text", summary)
+					expandedItems = append(expandedItems, message)
+					changed = true
+					return true
+				}
+			}
+		}
+		expandedItems = append(expandedItems, []byte(item.Raw))
+		return true
+	})
+	if !changed {
+		return payload, nil
+	}
+	return sjson.SetRawBytes(payload, "input", translatorcommon.JoinRawArray(expandedItems))
 }
 
 // PrepareAntigravityCompactionSummaryPayload prepares a payload for non-stream Antigravity summary generation.

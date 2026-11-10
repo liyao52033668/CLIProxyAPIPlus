@@ -1400,9 +1400,11 @@ func (h *OpenAIAPIHandler) streamOpenAICompatImages(c *gin.Context, compatReq []
 
 			setSSEHeaders()
 			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+			trailingNewlines := handlers.AdvanceSSENewlineCount(2, chunk)
 			_, _ = c.Writer.Write(chunk)
 			flusher.Flush()
 			h.ForwardStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, handlers.StreamForwardOptions{
+				InitialTrailingNewlines: trailingNewlines,
 				WriteChunk: func(next []byte) {
 					_, _ = c.Writer.Write(next)
 				},

@@ -160,6 +160,13 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 
 			if partsResult.IsArray() {
 				partResults := partsResult.Array()
+				// A single chunk can carry several parts. Accumulate them so a later
+				// part (including an empty-text thoughtSignature carrier) cannot
+				// overwrite the deltas produced by an earlier one.
+				var textContent strings.Builder
+				var reasoningContent strings.Builder
+				hasTextContent := false
+				hasReasoningContent := false
 				for i := 0; i < len(partResults); i++ {
 					partResult := partResults[i]
 					partTextResult := partResult.Get("text")
@@ -181,7 +188,8 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 					}
 
 					hasThoughtSignature := thoughtSignatureResult.Exists() && thoughtSignatureResult.String() != ""
-					hasContentPayload := partTextResult.Exists() || functionCallResult.Exists() || inlineDataResult.Exists()
+					hasTextPayload := partTextResult.Exists() && partTextResult.String() != ""
+					hasContentPayload := hasTextPayload || functionCallResult.Exists() || inlineDataResult.Exists()
 
 					// Skip pure thoughtSignature parts but keep any actual payload in the same part.
 					if hasThoughtSignature && !hasContentPayload {
@@ -193,9 +201,11 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 						setAssistantRole()
 						// Handle text content, distinguishing between regular content and reasoning/thoughts.
 						if partResult.Get("thought").Bool() {
-							template, _ = sjson.SetBytes(template, "choices.0.delta.reasoning_content", text)
+							hasReasoningContent = true
+							reasoningContent.WriteString(text)
 						} else {
-							template, _ = sjson.SetBytes(template, "choices.0.delta.content", text)
+							hasTextContent = true
+							textContent.WriteString(text)
 						}
 					} else if functionCallResult.Exists() {
 						// Handle function call content.
@@ -248,6 +258,12 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 						setAssistantRole()
 						template, _ = sjson.SetRawBytes(template, "choices.0.delta.images.-1", imagePayload)
 					}
+				}
+				if hasTextContent {
+					template, _ = sjson.SetBytes(template, "choices.0.delta.content", textContent.String())
+				}
+				if hasReasoningContent {
+					template, _ = sjson.SetBytes(template, "choices.0.delta.reasoning_content", reasoningContent.String())
 				}
 			}
 
@@ -383,6 +399,17 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 					audioTranscriptionResult := partResult.Get("audioTranscription")
 					if audioTranscriptionResult.Exists() && !partTextResult.Exists() {
 						partTextResult = audioTranscriptionResult.Get("text")
+					}
+
+					thoughtSignatureResult := partResult.Get("thoughtSignature")
+					if !thoughtSignatureResult.Exists() {
+						thoughtSignatureResult = partResult.Get("thought_signature")
+					}
+					hasThoughtSignature := thoughtSignatureResult.Exists() && thoughtSignatureResult.String() != ""
+					hasTextPayload := partTextResult.Exists() && partTextResult.String() != ""
+					if hasThoughtSignature && !hasTextPayload && !functionCallResult.Exists() && !inlineDataResult.Exists() {
+						// Pure thoughtSignature carriers must not emit empty strings.
+						continue
 					}
 
 					if partTextResult.Exists() {

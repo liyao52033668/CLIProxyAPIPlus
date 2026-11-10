@@ -1007,7 +1007,7 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 }
 
 // applyClaudeHeaders applies the Claude Code transport headers, assembling the
-// Anthropic-Beta baseline dynamically to match Claude Code 2.1.258.
+// Anthropic-Beta baseline dynamically to match Claude Code 2.1.321.
 func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, cfg *config.Config, incomingHeaders http.Header, body []byte) {
 	applyClaudeHeadersWithBaseline(r, auth, apiKey, stream, extraBetas, cfg, incomingHeaders, body, "")
 }
@@ -1075,7 +1075,7 @@ func applyClaudeHeadersWithBaseline(r *http.Request, auth *cliproxyauth.Auth, ap
 
 	baseBetas := baseline
 	if baseBetas == "" {
-		// Dynamic per-request assembly matching Claude Code 2.1.258.
+		// Dynamic per-request assembly matching Claude Code 2.1.321.
 		baseBetas = claudeCodeCLIBetas(body, requested, isClaudeOAuthToken(apiKey))
 		// Forward unmanaged caller betas: newer-client features the pinned
 		// profile predates keep working (#5738). Managed betas stay governed
@@ -1161,7 +1161,7 @@ func applyClaudeHeadersWithBaseline(r *http.Request, auth *cliproxyauth.Auth, ap
 		misc.EnsureHeader(r.Header, incomingHeaders, "Anthropic-Dangerous-Direct-Browser-Access", "true")
 	}
 	misc.EnsureHeader(r.Header, incomingHeaders, "X-App", "cli")
-	// Values below match Claude Code 2.1.258 / @anthropic-ai/sdk 0.112.1.
+	// Values below match Claude Code 2.1.321 / @anthropic-ai/sdk 0.128.0.
 	misc.EnsureHeader(r.Header, incomingHeaders, "X-Stainless-Retry-Count", "0")
 	misc.EnsureHeader(r.Header, incomingHeaders, "X-Stainless-Runtime", "node")
 	misc.EnsureHeader(r.Header, incomingHeaders, "X-Stainless-Lang", "js")
@@ -1187,7 +1187,9 @@ func applyClaudeHeadersWithBaseline(r *http.Request, auth *cliproxyauth.Auth, ap
 	// to the configured baseline while still allowing newer official
 	// User-Agent/package/runtime tuples to upgrade the software fingerprint.
 	if stabilizeDeviceProfile {
-		helps.ApplyClaudeDeviceProfileHeaders(r, deviceProfile)
+		// A confirmed native caller's UA extensions belong to this request only;
+		// the stored device profile keeps just the stable identity fields.
+		helps.ApplyClaudeDeviceProfileHeaders(r, deviceProfile, helps.HeaderValueCaseInsensitive(incomingHeaders, "User-Agent"))
 	} else {
 		helps.ApplyClaudeLegacyDeviceHeaders(r, incomingHeaders, cfg)
 	}
@@ -1224,7 +1226,7 @@ func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 }
 
 func checkSystemInstructions(payload []byte) []byte {
-	return checkSystemInstructionsWithSigningMode(payload, false, false, false, "2.1.258", "", "")
+	return checkSystemInstructionsWithSigningMode(payload, false, false, false, helps.DefaultClaudeVersion(nil), "", "")
 }
 
 func isClaudeOAuthToken(apiKey string) bool {
@@ -1797,7 +1799,7 @@ func generateBillingHeader(payload []byte, experimentalCCHSigning bool, version,
 }
 
 func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
-	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, false, "2.1.258", "", "")
+	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, false, helps.DefaultClaudeVersion(nil), "", "")
 }
 
 // checkSystemInstructionsWithSigningMode injects Claude Code-style system blocks:

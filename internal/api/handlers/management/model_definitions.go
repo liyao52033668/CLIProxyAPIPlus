@@ -37,6 +37,8 @@ func (h *Handler) GetStaticModelDefinitions(c *gin.Context) {
 		return
 	}
 
+	models = preferUpstreamModelIDs(models)
+
 	if len(models) > 1 {
 		sort.Slice(models, func(i, j int) bool {
 			if models[i] == nil {
@@ -53,4 +55,51 @@ func (h *Handler) GetStaticModelDefinitions(c *gin.Context) {
 		"channel": strings.ToLower(strings.TrimSpace(channel)),
 		"models":  models,
 	})
+}
+
+// preferUpstreamModelIDs restores the upstream model ID for entries that were
+// rewritten by OAuth model aliasing at registration time. Aliased clones carry
+// the real upstream ID in MetadataModelID (which is never serialized), so the
+// management UI would otherwise only offer the already-aliased name when
+// editing oauth-model-alias entries.
+func preferUpstreamModelIDs(models []*registry.ModelInfo) []*registry.ModelInfo {
+	needsRestore := false
+	for _, model := range models {
+		if model != nil && strings.TrimSpace(model.MetadataModelID) != "" {
+			needsRestore = true
+			break
+		}
+	}
+	if !needsRestore {
+		return models
+	}
+
+	out := make([]*registry.ModelInfo, 0, len(models))
+	indexByID := make(map[string]int, len(models))
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		clone := *model
+		aliased := strings.TrimSpace(clone.MetadataModelID) != ""
+		if aliased {
+			clone.ID = strings.TrimSpace(clone.MetadataModelID)
+		}
+		key := strings.ToLower(strings.TrimSpace(clone.ID))
+		if key == "" {
+			continue
+		}
+		if idx, exists := indexByID[key]; exists {
+			// Keep the pristine entry when both the original and its alias
+			// clone resolve to the same upstream ID (fork=true aliases).
+			if aliased {
+				continue
+			}
+			out[idx] = &clone
+			continue
+		}
+		indexByID[key] = len(out)
+		out = append(out, &clone)
+	}
+	return out
 }

@@ -31,6 +31,11 @@ type StreamForwardOptions struct {
 	// WriteKeepAlive optionally writes a keep-alive heartbeat. It should not flush.
 	// When nil, a standard SSE comment heartbeat is used.
 	WriteKeepAlive func()
+
+	// InitialTrailingNewlines seeds the SSE boundary tracker when the caller has
+	// already written bytes before handing the stream to ForwardStream. Zero is
+	// treated as "at a clean boundary" (2).
+	InitialTrailingNewlines int
 }
 
 func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, opts StreamForwardOptions) {
@@ -57,52 +62,80 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 	if opts.KeepAliveInterval != nil {
 		keepAliveInterval = *opts.KeepAliveInterval
 	}
-	var keepAlive *time.Ticker
 	var keepAliveC <-chan time.Time
+	stopKeepAlive := func() {}
+	resetKeepAlive := func() {}
 	if keepAliveInterval > 0 {
-		keepAlive = time.NewTicker(keepAliveInterval)
-		defer keepAlive.Stop()
-		keepAliveC = keepAlive.C
+		keepAliveC, stopKeepAlive, resetKeepAlive = NewStreamingKeepAliveTickerWithReset(keepAliveInterval)
+	}
+	defer stopKeepAlive()
+
+	// trailingNewlines tracks how far the downstream stream is from a clean SSE
+	// event boundary (two newlines). A keep-alive comment written inside a
+	// partially delivered event corrupts the client parser, so heartbeats are
+	// suppressed until the stream is back at a boundary.
+	trailingNewlines := opts.InitialTrailingNewlines
+	if trailingNewlines <= 0 {
+		trailingNewlines = 2
 	}
 
 	var terminalErr *interfaces.ErrorMessage
+	writeTerminalError := func(errMsg *interfaces.ErrorMessage) {
+		if opts.WriteTerminalError == nil {
+			return
+		}
+		trailingNewlines = ensureSSEEventBoundary(c.Writer, trailingNewlines)
+		opts.WriteTerminalError(errMsg)
+	}
+
+	handleChunk := func(chunk []byte, ok bool) bool {
+		if !ok {
+			// Prefer surfacing a terminal error if one is pending.
+			if terminalErr == nil {
+				select {
+				case errMsg, ok := <-errs:
+					if ok && errMsg != nil {
+						terminalErr = errMsg
+					}
+				default:
+				}
+			}
+			if terminalErr == nil && opts.CloseError != nil {
+				terminalErr = opts.CloseError()
+			}
+			if terminalErr != nil {
+				writeTerminalError(terminalErr)
+				flusher.Flush()
+				cancel(terminalErr.Error)
+				return true
+			}
+			if opts.WriteDone != nil {
+				opts.WriteDone()
+			}
+			flusher.Flush()
+			cancel(nil)
+			return true
+		}
+		beforeSize := c.Writer.Size()
+		writeChunk(chunk)
+		trailingNewlines = AdvanceSSENewlineCount(trailingNewlines, chunk)
+		if c.Writer.Size() != beforeSize {
+			// Real bytes restarted the idle clock, so a heartbeat is not due yet.
+			resetKeepAlive()
+		}
+		flusher.Flush()
+		return false
+	}
+
 	for {
 		select {
 		case <-c.Request.Context().Done():
 			cancel(c.Request.Context().Err())
 			return
 		case chunk, ok := <-data:
-			if !ok {
-				// Prefer surfacing a terminal error if one is pending.
-				if terminalErr == nil {
-					select {
-					case errMsg, ok := <-errs:
-						if ok && errMsg != nil {
-							terminalErr = errMsg
-						}
-					default:
-					}
-				}
-				if terminalErr == nil && opts.CloseError != nil {
-					terminalErr = opts.CloseError()
-				}
-				if terminalErr != nil {
-					if opts.WriteTerminalError != nil {
-						opts.WriteTerminalError(terminalErr)
-					}
-					flusher.Flush()
-					cancel(terminalErr.Error)
-					return
-				}
-				if opts.WriteDone != nil {
-					opts.WriteDone()
-				}
-				flusher.Flush()
-				cancel(nil)
+			if handleChunk(chunk, ok) {
 				return
 			}
-			writeChunk(chunk)
-			flusher.Flush()
 		case errMsg, ok := <-errs:
 			if !ok {
 				continue
@@ -110,7 +143,7 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 			if errMsg != nil {
 				terminalErr = errMsg
 				if opts.WriteTerminalError != nil {
-					opts.WriteTerminalError(errMsg)
+					writeTerminalError(errMsg)
 					flusher.Flush()
 				}
 			}
@@ -121,8 +154,47 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 			cancel(execErr)
 			return
 		case <-keepAliveC:
+			if trailingNewlines < 2 {
+				// Mid-event: emitting now would split the event the client is parsing.
+				continue
+			}
 			writeKeepAlive()
 			flusher.Flush()
 		}
 	}
+}
+
+// AdvanceSSENewlineCount tracks the number of consecutive newlines at the end of
+// the streamed bytes, capped at 2 (an SSE event boundary). Carriage returns are
+// ignored so CRLF and LF framing are treated identically.
+func AdvanceSSENewlineCount(prev int, chunk []byte) int {
+	count := prev
+	for _, b := range chunk {
+		switch b {
+		case '\r':
+			continue
+		case '\n':
+			if count < 2 {
+				count++
+			}
+		default:
+			count = 0
+		}
+	}
+	return count
+}
+
+// ensureSSEEventBoundary pads the stream with the newlines needed to start a new
+// SSE event, returning the resulting trailing-newline count (always 2).
+func ensureSSEEventBoundary(w http.ResponseWriter, trailingNewlines int) int {
+	if w == nil {
+		return 2
+	}
+	switch trailingNewlines {
+	case 0:
+		_, _ = w.Write([]byte("\n\n"))
+	case 1:
+		_, _ = w.Write([]byte("\n"))
+	}
+	return 2
 }

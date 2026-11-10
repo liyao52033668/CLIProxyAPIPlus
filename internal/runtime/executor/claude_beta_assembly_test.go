@@ -10,12 +10,13 @@ import (
 )
 
 // TestClaudeCodeCLIBetas_MatchesObservedClientMatrix pins the dynamic
-// Anthropic-Beta assembly against the measured Claude Code 2.1.258 wire order.
+// Anthropic-Beta assembly against the measured Claude Code 2.1.321 wire order.
 // The mid-conversation-system beta and the probe/helper gating of the upstream
 // matrix are omitted: this fork has no mid-conversation system splicing or
 // Haiku helper transport subsystems.
 func TestClaudeCodeCLIBetas_MatchesObservedClientMatrix(t *testing.T) {
-	const constants = "claude-code-20250219,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05"
+	const constantsWithoutThinkingTokenCount = "claude-code-20250219,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05"
+	const constants = constantsWithoutThinkingTokenCount + ",thinking-token-count-2026-05-13"
 
 	tests := []struct {
 		name      string
@@ -35,8 +36,8 @@ func TestClaudeCodeCLIBetas_MatchesObservedClientMatrix(t *testing.T) {
 			requested: map[string]bool{claudeContext1MBeta: true},
 			want: "claude-code-20250219,context-1m-2025-08-07," +
 				"interleaved-thinking-2025-05-14,redact-thinking-2026-02-12," +
-				"thinking-token-count-2026-05-13,context-management-2025-06-27," +
-				"prompt-caching-scope-2026-01-05,effort-2025-11-24",
+				"context-management-2025-06-27," +
+				"prompt-caching-scope-2026-01-05,thinking-token-count-2026-05-13,effort-2025-11-24",
 		},
 		{
 			name: "opus-5 1m variant reproduces the full observed order",
@@ -48,9 +49,9 @@ func TestClaudeCodeCLIBetas_MatchesObservedClientMatrix(t *testing.T) {
 			},
 			want: "claude-code-20250219,context-1m-2025-08-07," +
 				"interleaved-thinking-2025-05-14,redact-thinking-2026-02-12," +
-				"thinking-token-count-2026-05-13,context-management-2025-06-27," +
+				"context-management-2025-06-27," +
 				"prompt-caching-scope-2026-01-05," +
-				"advanced-tool-use-2025-11-20,effort-2025-11-24," +
+				"thinking-token-count-2026-05-13,advanced-tool-use-2025-11-20,effort-2025-11-24," +
 				"server-side-fallback-2026-06-01,fallback-credit-2026-06-01",
 		},
 		{
@@ -59,9 +60,9 @@ func TestClaudeCodeCLIBetas_MatchesObservedClientMatrix(t *testing.T) {
 			oauth: true,
 			want: "claude-code-20250219,oauth-2025-04-20," +
 				"interleaved-thinking-2025-05-14,redact-thinking-2026-02-12," +
-				"thinking-token-count-2026-05-13,context-management-2025-06-27," +
-				"prompt-caching-scope-2026-01-05,advanced-tool-use-2025-11-20," +
-				"effort-2025-11-24,fallback-credit-2026-06-01," +
+				"context-management-2025-06-27," +
+				"prompt-caching-scope-2026-01-05,thinking-token-count-2026-05-13," +
+				"advanced-tool-use-2025-11-20,effort-2025-11-24,fallback-credit-2026-06-01," +
 				"extended-cache-ttl-2025-04-11",
 		},
 		{
@@ -114,8 +115,8 @@ func TestClaudeCodeCLIBetas_MatchesObservedClientMatrix(t *testing.T) {
 			name: "thinking display summarized drops redact-thinking",
 			body: `{"model":"claude-opus-5","thinking":{"type":"adaptive","display":"summarized"}}`,
 			want: "claude-code-20250219,interleaved-thinking-2025-05-14," +
-				"thinking-token-count-2026-05-13,context-management-2025-06-27," +
-				"prompt-caching-scope-2026-01-05,effort-2025-11-24",
+				"context-management-2025-06-27," +
+				"prompt-caching-scope-2026-01-05,thinking-token-count-2026-05-13,effort-2025-11-24",
 		},
 		{
 			name: "thinking without display keeps redact-thinking",
@@ -126,12 +127,12 @@ func TestClaudeCodeCLIBetas_MatchesObservedClientMatrix(t *testing.T) {
 			name:      "advisor tool beta requested is placed before advanced-tool-use",
 			body:      `{"model":"claude-opus-5","tools":[{"name":"Read","defer_loading":true}]}`,
 			requested: map[string]bool{"advisor-tool-2026-03-01": true},
-			want:      constants + ",advisor-tool-2026-03-01,advanced-tool-use-2025-11-20,effort-2025-11-24",
+			want:      constantsWithoutThinkingTokenCount + ",advisor-tool-2026-03-01,thinking-token-count-2026-05-13,advanced-tool-use-2025-11-20,effort-2025-11-24",
 		},
 		{
 			name: "body with advisor server tool automatically adds advisor-tool beta",
 			body: `{"model":"claude-opus-5","tools":[{"type":"advisor_20260301","name":"advisor"}]}`,
-			want: constants + ",advisor-tool-2026-03-01,effort-2025-11-24",
+			want: constantsWithoutThinkingTokenCount + ",advisor-tool-2026-03-01,thinking-token-count-2026-05-13,effort-2025-11-24",
 		},
 		{
 			// Captured 2026-09-02 from Claude Code 2.1.258 (cli entrypoint, OAuth,
@@ -146,9 +147,10 @@ func TestClaudeCodeCLIBetas_MatchesObservedClientMatrix(t *testing.T) {
 			},
 			want: "claude-code-20250219,oauth-2025-04-20," +
 				"interleaved-thinking-2025-05-14,redact-thinking-2026-02-12," +
-				"thinking-token-count-2026-05-13,context-management-2025-06-27," +
+				"context-management-2025-06-27," +
 				"prompt-caching-scope-2026-01-05,advisor-tool-2026-03-01," +
-				"effort-2025-11-24,fallback-credit-2026-06-01," +
+				"thinking-token-count-2026-05-13,effort-2025-11-24," +
+				"fallback-credit-2026-06-01," +
 				"afk-mode-2026-01-31,extended-cache-ttl-2025-04-11",
 		},
 		{
@@ -158,9 +160,9 @@ func TestClaudeCodeCLIBetas_MatchesObservedClientMatrix(t *testing.T) {
 			requested: map[string]bool{claudeAFKModeBeta: true},
 			want: "claude-code-20250219,oauth-2025-04-20," +
 				"interleaved-thinking-2025-05-14,redact-thinking-2026-02-12," +
-				"thinking-token-count-2026-05-13,context-management-2025-06-27," +
-				"prompt-caching-scope-2026-01-05,effort-2025-11-24," +
-				"fallback-credit-2026-06-01,fast-mode-2026-02-01," +
+				"context-management-2025-06-27," +
+				"prompt-caching-scope-2026-01-05,thinking-token-count-2026-05-13," +
+				"effort-2025-11-24,fallback-credit-2026-06-01,fast-mode-2026-02-01," +
 				"afk-mode-2026-01-31,extended-cache-ttl-2025-04-11",
 		},
 		{
@@ -169,18 +171,18 @@ func TestClaudeCodeCLIBetas_MatchesObservedClientMatrix(t *testing.T) {
 			oauth: true,
 			want: "claude-code-20250219,oauth-2025-04-20," +
 				"interleaved-thinking-2025-05-14,redact-thinking-2026-02-12," +
-				"thinking-token-count-2026-05-13,context-management-2025-06-27," +
-				"prompt-caching-scope-2026-01-05,effort-2025-11-24," +
-				"fallback-credit-2026-06-01,extended-cache-ttl-2025-04-11",
+				"context-management-2025-06-27," +
+				"prompt-caching-scope-2026-01-05,thinking-token-count-2026-05-13," +
+				"effort-2025-11-24,fallback-credit-2026-06-01,extended-cache-ttl-2025-04-11",
 		},
 		{
 			name:      "thinking display updates emits thinking-display-updates beta and drops redact-thinking",
 			body:      `{"model":"claude-opus-5","thinking":{"type":"adaptive","display":"updates"}}`,
 			requested: map[string]bool{claudeThinkingDisplayUpdatesBeta: true},
 			want: "claude-code-20250219,interleaved-thinking-2025-05-14," +
-				"thinking-token-count-2026-05-13,context-management-2025-06-27," +
-				"prompt-caching-scope-2026-01-05,effort-2025-11-24," +
-				"thinking-display-updates-2026-08-18",
+				"context-management-2025-06-27," +
+				"prompt-caching-scope-2026-01-05,thinking-token-count-2026-05-13," +
+				"effort-2025-11-24,thinking-display-updates-2026-08-18",
 		},
 		{
 			name: "structured outputs and server side fallback follow requested",

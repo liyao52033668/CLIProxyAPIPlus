@@ -130,6 +130,8 @@ func cooldownErrorReason(err *Error) string {
 		return "model_not_supported"
 	case isCloudflareChallengeResultError(err):
 		return "cloudflare_challenge"
+	case isCreditBalanceTooLowResultError(err):
+		return "payment_required"
 	case isInvalidGrantResultError(err):
 		return "invalid_grant"
 	}

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -23,6 +24,7 @@ import (
 
 type metaPreparedRequest struct {
 	baseModel       string
+	effectiveModel  string
 	from            sdktranslator.Format
 	responseFormat  sdktranslator.Format
 	to              sdktranslator.Format
@@ -66,8 +68,16 @@ func (e *MetaExecutor) prepareResponsesRequest(ctx context.Context, auth *clipro
 	body = helps.SanitizeMetaWebSearchTools(body)
 	body = helps.NormalizeCodexToolIntegerTypes(body, opts.Headers)
 
+	// Payload rules can rewrite the model, so capture the effective upstream model
+	// after they ran; the contributor header depends on it.
+	effectiveModel := strings.TrimSpace(gjson.GetBytes(body, "model").String())
+	if effectiveModel == "" {
+		effectiveModel = baseModel
+	}
+
 	return &metaPreparedRequest{
 		baseModel:       baseModel,
+		effectiveModel:  effectiveModel,
 		from:            from,
 		responseFormat:  responseFormat,
 		to:              to,
@@ -112,7 +122,7 @@ func (e *MetaExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	if errRequest != nil {
 		return resp, errRequest
 	}
-	applyMetaAPIHeaders(httpReq, enriched, token, true, opts.Headers)
+	applyMetaAPIHeaders(httpReq, enriched, token, true, opts.Headers, prepared.effectiveModel)
 	e.recordMetaRequest(ctx, enriched, url, httpReq.Header.Clone(), prepared.body)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, enriched, 0)
@@ -268,15 +278,50 @@ func (e *MetaExecutor) recordMetaRequest(ctx context.Context, auth *cliproxyauth
 	})
 }
 
-func applyMetaAPIHeaders(req *http.Request, auth *cliproxyauth.Auth, token string, stream bool, clientHeaders http.Header) {
+// applyMetaClientIdentity stamps the headers Muse Code 1.4.14 sends on
+// /v1/responses. Subscription keys reject older muse-build fingerprints with
+// client_attestation_denied. Session ids are a fresh UUID-7 per request so proxy
+// traffic does not reuse one Muse session across unrelated clients.
+func applyMetaClientIdentity(req *http.Request) {
+	if req == nil {
+		return
+	}
+	req.Header.Set("User-Agent", metaUserAgent())
+	req.Header.Set("X-Client-Id", metaClientSurface)
+	if strings.TrimSpace(req.Header.Get("X-Tbh-Session-Id")) != "" {
+		return
+	}
+	sessionID := uuid.Must(uuid.NewV7()).String()
+	req.Header.Set("X-Tbh-Session-Id", sessionID)
+	req.Header.Set("X-Meta-Ai-Gateway-Session-Id", sessionID)
+	req.Header.Set("X-Tbh-Thread-Id", sessionID)
+	req.Header.Set("X-Tbh-Root-Session-Id", sessionID)
+	req.Header.Set("X-Tbh-Agent-Role", "main")
+}
+
+// isMetaContributorModel reports whether the effective upstream model opted into
+// contributor (training) mode.
+func isMetaContributorModel(model string) bool {
+	base := strings.TrimSpace(thinking.ParseSuffix(strings.TrimSpace(model)).ModelName)
+	return strings.HasSuffix(strings.ToLower(base), "-contributor")
+}
+
+func applyMetaAPIHeaders(req *http.Request, auth *cliproxyauth.Auth, token string, stream bool, clientHeaders http.Header, model ...string) {
 	req.Header.Set("Content-Type", "application/json")
 	if strings.TrimSpace(token) != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	} else {
 		req.Header.Del("Authorization")
 	}
-	req.Header.Set("User-Agent", metaUserAgent)
-	req.Header.Set("X-Client-Id", "tbh:tui")
+	applyMetaClientIdentity(req)
+	// The contributor flag is a training opt-in signal: only send it when the
+	// effective model actually asks for it.
+	for _, m := range model {
+		if isMetaContributorModel(m) {
+			req.Header.Set("X-Tbh-Contributor-Mode", "1")
+			break
+		}
+	}
 	if stream {
 		req.Header.Set("Accept", "text/event-stream")
 		req.Header.Set("Cache-Control", "no-cache")

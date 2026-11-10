@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
@@ -350,6 +351,8 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		return resp, err
 	}
 
+	// Raise below-minimum budgets before payload rules so user overrides stay final.
+	body = normalizeCodexOutputBudget(body)
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequestForExecutor(e.cfg, e.Identifier(), baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
@@ -488,6 +491,8 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 		return resp, err
 	}
 
+	// Raise below-minimum budgets before payload rules so user overrides stay final.
+	body = normalizeCodexOutputBudget(body)
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequestForExecutor(e.cfg, e.Identifier(), baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
@@ -565,6 +570,8 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		return nil, err
 	}
 
+	// Raise below-minimum budgets before payload rules so user overrides stay final.
+	body = normalizeCodexOutputBudget(body)
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequestForExecutor(e.cfg, e.Identifier(), baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
@@ -776,6 +783,36 @@ func translateCodexRequestPair(from, to sdktranslator.Format, model string, orig
 	}
 	originalTranslated := sdktranslator.TranslateRequest(from, to, model, originalPayload, stream)
 	return originalTranslated, translated
+}
+
+// codexMinOutputTokens is the smallest integer max_output_tokens value the ChatGPT
+// Codex backend accepts; smaller integers are rejected with invalid_request_error.
+const codexMinOutputTokens = 16
+
+// normalizeCodexOutputBudget raises small positive integer output budgets to the
+// Codex minimum. It judges the translated payload (max_output_tokens) rather than
+// the client payload so every source format and budget field (max_tokens,
+// max_completion_tokens, generation_config, ...) is covered uniformly. Budgets that
+// are missing, non-numeric, non-integral, or <= 0 are left untouched for the
+// upstream to reject. Callers run this before user payload rules so overrides and
+// filters stay final.
+func normalizeCodexOutputBudget(body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	translated := gjson.GetBytes(body, "max_output_tokens")
+	if translated.Type != gjson.Number {
+		return body
+	}
+	tokens, errParse := strconv.ParseFloat(translated.Raw, 64)
+	if errParse != nil || tokens < 1 || tokens >= codexMinOutputTokens || tokens != math.Trunc(tokens) {
+		return body
+	}
+	updated, errSet := sjson.SetBytes(body, "max_output_tokens", codexMinOutputTokens)
+	if errSet != nil {
+		return body
+	}
+	return updated
 }
 
 func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {

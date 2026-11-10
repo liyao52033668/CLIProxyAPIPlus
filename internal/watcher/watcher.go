@@ -12,6 +12,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"gopkg.in/yaml.v3"
 
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
@@ -33,6 +34,9 @@ type authDirProvider interface {
 type Watcher struct {
 	configPath         string
 	authDir            string
+	watchMu            sync.Mutex
+	started            bool
+	watchedAuthDir     string
 	config             *config.Config
 	clientsMutex       sync.RWMutex
 	configReloadMu     sync.Mutex
@@ -167,9 +171,62 @@ func (w *Watcher) Stop() error {
 // SetConfig updates the current configuration
 func (w *Watcher) SetConfig(cfg *config.Config) {
 	w.clientsMutex.Lock()
-	defer w.clientsMutex.Unlock()
+	if cfg != nil {
+		// Track a runtime auth-dir change so snapshots and file events stop
+		// reading the directory the watcher started with.
+		if trimmedAuthDir := strings.TrimSpace(cfg.AuthDir); trimmedAuthDir != "" {
+			if resolvedAuthDir, errResolveAuthDir := util.ResolveAuthDir(trimmedAuthDir); errResolveAuthDir == nil && resolvedAuthDir != "" {
+				w.authDir = resolvedAuthDir
+			} else {
+				w.authDir = trimmedAuthDir
+			}
+		}
+	}
 	w.config = cfg
 	w.oldConfigYaml, _ = yaml.Marshal(cfg)
+	w.clientsMutex.Unlock()
+	w.syncAuthDirWatch()
+}
+
+// syncAuthDirWatch rebinds the fsnotify directory watch after a runtime auth-dir
+// change. It is a no-op until the watcher has started.
+func (w *Watcher) syncAuthDirWatch() {
+	if w == nil {
+		return
+	}
+	w.watchMu.Lock()
+	defer w.watchMu.Unlock()
+	if !w.started || w.watcher == nil {
+		return
+	}
+	w.clientsMutex.RLock()
+	authDir := w.authDir
+	w.clientsMutex.RUnlock()
+	if authDir == "" || authDir == w.watchedAuthDir {
+		return
+	}
+	if w.watchedAuthDir != "" {
+		if errRemove := w.watcher.Remove(w.watchedAuthDir); errRemove != nil {
+			log.Debugf("failed to unwatch previous auth directory %s: %v", w.watchedAuthDir, errRemove)
+		}
+	}
+	if errAdd := w.watcher.Add(authDir); errAdd != nil {
+		log.Errorf("failed to watch auth directory %s: %v", authDir, errAdd)
+		return
+	}
+	w.watchedAuthDir = authDir
+	log.Infof("auth directory watch updated: %s", authDir)
+}
+
+// currentAuthDir returns the auth directory currently in effect.
+func (w *Watcher) currentAuthDir() string {
+	if w == nil {
+		return ""
+	}
+	w.clientsMutex.RLock()
+	authDir := w.authDir
+	w.clientsMutex.RUnlock()
+	return authDir
 }
 
 // SyncConfig updates the watcher configuration and waits until generated auth changes are applied.

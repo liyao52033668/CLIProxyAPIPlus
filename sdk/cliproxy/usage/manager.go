@@ -464,6 +464,9 @@ func (m *Manager) run(ctx context.Context) {
 			return
 		}
 		item := m.queue[0]
+		// Zero the consumed slot before reslicing so the backing array does not
+		// retain request contexts and usage records while the manager is idle.
+		m.queue[0] = queueItem{}
 		m.queue = m.queue[1:]
 		m.mu.Unlock()
 		m.dispatch(item)

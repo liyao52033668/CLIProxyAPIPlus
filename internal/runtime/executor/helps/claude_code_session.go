@@ -19,6 +19,17 @@ const (
 
 var claudeCodeSessionSuffixPattern = regexp.MustCompile(`_session_([a-f0-9-]+)$`)
 
+// HeaderValueCaseInsensitive returns the value of name ignoring header key
+// casing. Ambiguous repeats yield an empty string so callers never forward a
+// value the caller did not mean to send.
+func HeaderValueCaseInsensitive(headers http.Header, name string) string {
+	value, ok := singleHeaderValueCaseInsensitive(headers, name)
+	if !ok {
+		return ""
+	}
+	return value
+}
+
 // ExtractClaudeCodeSessionID resolves a Claude Code session ID, preferring
 // X-Claude-Code-Session-Id over payload metadata.
 func ExtractClaudeCodeSessionID(ctx context.Context, payload []byte, headers http.Header) string {

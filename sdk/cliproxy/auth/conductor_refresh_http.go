@@ -125,6 +125,12 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 	if !a.NextRefreshAfter.IsZero() && now.Before(a.NextRefreshAfter) {
 		return false
 	}
+	if authHasUnchangedRejectedRefreshToken(a) {
+		if a.HasValidAccessToken(now) {
+			return false
+		}
+		return !a.Disabled && a.Status != StatusDisabled
+	}
 	if next, due := devinQuotaRevalidateAt(a, now); due {
 		return !next.After(now)
 	}
@@ -484,6 +490,13 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) (*Auth, error) {
 				return nil, err
 			}
 			current.LastError = refreshErrorFromError(err)
+			if invalidGrant {
+				// Remember which refresh token the upstream rejected so the
+				// auto-refresh loop stops retrying an unrecoverable credential.
+				if rejectedRT := authRefreshToken(current); rejectedRT != "" {
+					current.RejectedRefreshToken = rejectedRT
+				}
+			}
 			hasValidAccessToken := current.HasValidAccessToken(now)
 			hasExpiredAccessToken := !hasValidAccessToken && current.HasExpiredAccessToken(now)
 			// The rejected marker is recorded by MarkResult when upstream 401s
@@ -608,6 +621,7 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) (*Auth, error) {
 	}
 	updated.LastError = nil
 	updated.RejectedAccessToken = ""
+	updated.RejectedRefreshToken = ""
 	updated.UpdatedAt = now
 	// The refresh recovered the credential, so any prior failure streak no
 	// longer applies to the next invalid_grant backoff computation.

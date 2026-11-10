@@ -60,8 +60,28 @@ func MergeAdjacentGeminiContents(contents [][]byte) [][]byte {
 
 // ContentHasGeminiFunctionResponse reports whether a Gemini content turn contains any functionResponse part.
 func ContentHasGeminiFunctionResponse(content []byte) bool {
+	return GeminiPartsHaveFunctionResponse(gjson.GetBytes(content, "parts"))
+}
+
+// GeminiPartsHaveFunctionCall reports whether a parsed Gemini parts array contains
+// any functionCall part, accepting both camelCase and snake_case spellings.
+func GeminiPartsHaveFunctionCall(parts gjson.Result) bool {
+	hasFC := false
+	parts.ForEach(func(_, part gjson.Result) bool {
+		if part.Get("functionCall").Exists() || part.Get("function_call").Exists() {
+			hasFC = true
+			return false
+		}
+		return true
+	})
+	return hasFC
+}
+
+// GeminiPartsHaveFunctionResponse reports whether a parsed Gemini parts array contains
+// any functionResponse part, accepting both camelCase and snake_case spellings.
+func GeminiPartsHaveFunctionResponse(parts gjson.Result) bool {
 	hasFR := false
-	gjson.GetBytes(content, "parts").ForEach(func(_, part gjson.Result) bool {
+	parts.ForEach(func(_, part gjson.Result) bool {
 		if part.Get("functionResponse").Exists() || part.Get("function_response").Exists() {
 			hasFR = true
 			return false
@@ -69,6 +89,45 @@ func ContentHasGeminiFunctionResponse(content []byte) bool {
 		return true
 	})
 	return hasFR
+}
+
+// GeminiPartFunctionCall returns the functionCall or snake_case function_call object from a Gemini part.
+func GeminiPartFunctionCall(part gjson.Result) gjson.Result {
+	if fc := part.Get("functionCall"); fc.Exists() {
+		return fc
+	}
+	return part.Get("function_call")
+}
+
+// GeminiPartFunctionResponse returns the functionResponse or snake_case function_response object from a Gemini part.
+func GeminiPartFunctionResponse(part gjson.Result) gjson.Result {
+	if fr := part.Get("functionResponse"); fr.Exists() {
+		return fr
+	}
+	return part.Get("function_response")
+}
+
+// NormalizeGeminiTurnRole maps a Gemini content role to "user" or "assistant",
+// inferring missing or unrecognized roles from functionCall/functionResponse parts
+// or alternating from previousRole.
+func NormalizeGeminiTurnRole(rawRole string, parts gjson.Result, previousRole string) string {
+	switch strings.ToLower(strings.TrimSpace(rawRole)) {
+	case "model", "assistant":
+		return "assistant"
+	case "user", "function", "tool":
+		return "user"
+	default:
+		if GeminiPartsHaveFunctionCall(parts) {
+			return "assistant"
+		}
+		if GeminiPartsHaveFunctionResponse(parts) {
+			return "user"
+		}
+		if previousRole == "user" {
+			return "assistant"
+		}
+		return "user"
+	}
 }
 
 // ReorderGeminiUserParts reorders parts within a Gemini user turn so that

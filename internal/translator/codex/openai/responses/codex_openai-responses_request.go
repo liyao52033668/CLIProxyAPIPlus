@@ -28,9 +28,17 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 		rawJSON, _ = sjson.SetBytes(rawJSON, "parallel_tool_calls", true)
 	}
 	rawJSON = setCodexRequiredInclude(rawJSON)
-	// Codex Responses rejects token limit fields, so strip them out before forwarding.
-	rawJSON, _ = sjson.DeleteBytes(rawJSON, "max_output_tokens")
+	// Preserve max_output_tokens and fill it from legacy token limits when unset.
+	if maxOutputTokens := gjson.GetBytes(rawJSON, "max_output_tokens"); !maxOutputTokens.Exists() || maxOutputTokens.Type == gjson.Null {
+		for _, path := range []string{"max_completion_tokens", "max_tokens"} {
+			if v := gjson.GetBytes(rawJSON, path); v.Type == gjson.Number {
+				rawJSON, _ = sjson.SetBytes(rawJSON, "max_output_tokens", v.Int())
+				break
+			}
+		}
+	}
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "max_completion_tokens")
+	rawJSON, _ = sjson.DeleteBytes(rawJSON, "max_tokens")
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "temperature")
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "top_p")
 	if v := gjson.GetBytes(rawJSON, "service_tier"); v.Exists() {
@@ -62,6 +70,9 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	rawJSON = convertSystemRoleToDeveloper(rawJSON)
 	rawJSON = normalizeCodexBuiltinTools(rawJSON)
 	rawJSON = normalizeEmptyFunctionCallArguments(rawJSON)
+	// Rewrite standalone tool outputs without call_id into user messages; strict
+	// Responses upstreams reject them with HTTP 400.
+	rawJSON, _ = translatorcommon.SanitizeOrphanResponsesToolOutputsDoc(rawJSON)
 	rawJSON = stripCodexResponsesCacheBreakpoints(rawJSON)
 
 	return rawJSON

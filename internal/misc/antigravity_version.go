@@ -20,7 +20,7 @@ const (
 	// manifest has not been fetched yet or cannot be reached. Cloud Code rejects
 	// newer models for clients below 2.23.0, so this floor must stay at or above
 	// that version.
-	antigravityFallbackVersion     = "2.24.0"
+	antigravityFallbackVersion     = "2.29.0"
 	antigravityHubPlatform         = "os_type=darwin; arch=arm64"
 	antigravityVersionCacheTTL     = 6 * time.Hour
 	defaultAntigravityFetchTimeout = 10 * time.Second
@@ -41,12 +41,13 @@ func SetAntigravityFetchTimeout(d time.Duration) {
 }
 
 // Changelists belong to specific Hub releases, not to the latest manifest in
-// general. Update the fallback release and its entry together. The 2.24.0 value
+// general. Update the fallback release and its entry together. The 2.29.0 value
 // was verified in the official darwin-arm archive's webm_encoder build metadata.
 // Unknown releases keep their online version without claiming another build's CL.
 var antigravityHubChangelists = map[string]string{
 	"2.23.0": "998057262",
 	"2.24.0": "1000335682",
+	"2.29.0": "1013060670",
 }
 
 type antigravityHubUpdaterManifest struct {

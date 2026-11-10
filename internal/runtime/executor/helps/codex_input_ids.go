@@ -130,6 +130,16 @@ func SanitizeCodexInputItemIDs(body []byte) []byte {
 }
 
 func normalizeCodexInputItemID(item gjson.Result, id string) string {
+	normalized := normalizeCodexInputItemIDPrefix(item, id)
+	if len([]rune(normalized)) > codexInputItemIDLimit {
+		// Overlong IDs keep their raw characters here so the collision hash below
+		// still distinguishes IDs that differ only by invalid characters.
+		return normalized
+	}
+	return sanitizeCodexInputItemIDChars(normalized)
+}
+
+func normalizeCodexInputItemIDPrefix(item gjson.Result, id string) string {
 	var prefix string
 	switch item.Get("type").String() {
 	case "message":
@@ -149,6 +159,25 @@ func normalizeCodexInputItemID(item gjson.Result, id string) string {
 		return id
 	}
 	return prefix + "_" + id
+}
+
+// sanitizeCodexInputItemIDChars replaces characters outside [a-zA-Z0-9_-] with
+// underscores so the Codex backend accepts the item ID. IDs that are already
+// portable tool call IDs are returned unchanged.
+func sanitizeCodexInputItemIDChars(id string) string {
+	if id == "" || isPortableToolCallID(id) {
+		return id
+	}
+	var b strings.Builder
+	b.Grow(len(id))
+	for _, r := range id {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
 }
 
 func shouldDropCodexEncryptedReasoningItem(item gjson.Result) bool {

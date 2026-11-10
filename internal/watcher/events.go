@@ -39,6 +39,10 @@ func (w *Watcher) start(ctx context.Context) error {
 		return errAddAuthDir
 	}
 	log.Debugf("watching auth directory: %s", w.authDir)
+	w.watchMu.Lock()
+	w.started = true
+	w.watchedAuthDir = w.authDir
+	w.watchMu.Unlock()
 
 	w.watchKiroIDETokenFile()
 

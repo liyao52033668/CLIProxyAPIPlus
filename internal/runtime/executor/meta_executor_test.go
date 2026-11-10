@@ -69,8 +69,8 @@ func TestMetaExecutor_PrepareRequest_ClientIdHeader_Issue6117(t *testing.T) {
 	if errPrepare := exec.PrepareRequest(req, auth); errPrepare != nil {
 		t.Fatal(errPrepare)
 	}
-	if got := req.Header.Get("X-Client-Id"); got != "tbh:tui" {
-		t.Errorf("X-Client-Id = %q, want %q", got, "tbh:tui")
+	if got := req.Header.Get("X-Client-Id"); got != "tbh:exec" {
+		t.Errorf("X-Client-Id = %q, want %q", got, "tbh:exec")
 	}
 	if _, exists := req.Header["X-Client-Id:"]; exists {
 		t.Errorf("X-Client-Id: with trailing colon must not exist in headers")
@@ -89,8 +89,8 @@ func TestMetaExecutor_ApplyMetaAPIHeaders_ClientIdHeader_Issue6117(t *testing.T)
 		},
 	}
 	applyMetaAPIHeaders(req, auth, "test-key", true, nil)
-	if got := req.Header.Get("X-Client-Id"); got != "tbh:tui" {
-		t.Errorf("applyMetaAPIHeaders: X-Client-Id = %q, want %q", got, "tbh:tui")
+	if got := req.Header.Get("X-Client-Id"); got != "tbh:exec" {
+		t.Errorf("applyMetaAPIHeaders: X-Client-Id = %q, want %q", got, "tbh:exec")
 	}
 }
 
@@ -119,8 +119,8 @@ func TestMetaExecutor_Execute_SendsClientIdHeader_Issue6117(t *testing.T) {
 	if errExec != nil {
 		t.Fatalf("Execute() error = %v", errExec)
 	}
-	if capturedClientId != "tbh:tui" {
-		t.Errorf("Execute: captured X-Client-Id = %q, want %q", capturedClientId, "tbh:tui")
+	if capturedClientId != "tbh:exec" {
+		t.Errorf("Execute: captured X-Client-Id = %q, want %q", capturedClientId, "tbh:exec")
 	}
 }
 

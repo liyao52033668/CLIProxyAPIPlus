@@ -7,7 +7,7 @@ import (
 )
 
 // Claude beta constants shared by the dynamic Anthropic-Beta assembly. The
-// values match the wire names observed on Claude Code 2.1.258 traffic.
+// values match the wire names observed on Claude Code 2.1.321 traffic.
 const (
 	claudeTokenCountingBeta          = "token-counting-2024-11-01"
 	claudeFastModeBeta               = "fast-mode-2026-02-01"
@@ -25,6 +25,8 @@ const (
 	claudeCacheDiagnosisBeta         = "cache-diagnosis-2026-04-07"
 	claudeRedactThinkingBeta         = "redact-thinking-2026-02-12"
 	claudeAFKModeBeta                = "afk-mode-2026-01-31"
+	claudeThinkingTokenCountBeta     = "thinking-token-count-2026-05-13"
+	claudeMessageThreadsBeta         = "message-threads-2026-08-12"
 )
 
 // claudeCodeCLIConstantBetas are the betas Claude Code sends on every
@@ -34,10 +36,12 @@ const (
 // redact-thinking-2026-02-12 belongs here because cloaked requests always claim
 // cc_entrypoint=cli; the "sdk-cli" entrypoint omits it. It is still dropped for
 // requests that carry thinking.display, see claudeThinkingDisplaySet.
+//
+// Claude Code 2.1.321 moved thinking-token-count behind advisor-tool, so it is
+// no longer part of this constant prefix.
 var claudeCodeCLIConstantBetas = []string{
 	"interleaved-thinking-2025-05-14",
 	claudeRedactThinkingBeta,
-	"thinking-token-count-2026-05-13",
 	"context-management-2025-06-27",
 	"prompt-caching-scope-2026-01-05",
 }
@@ -57,11 +61,11 @@ var claudeCodeTrailingBetas = []string{
 const claudeLegacyBaseBetas = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,structured-outputs-2025-12-15,fast-mode-2026-02-01,redact-thinking-2026-02-12,token-efficient-tools-2026-03-28"
 
 // claudeCodeCLIBetas assembles the Anthropic-Beta baseline the way Claude Code
-// 2.1.258 does: the list is per-request, not a fixed string. requested holds the
+// 2.1.321 does: the list is per-request, not a fixed string. requested holds the
 // betas the caller asked for (from the request body "betas" array and the
 // incoming Anthropic-Beta header), which decide the capability flags below.
 //
-// Verified against api.anthropic.com with native 2.1.258 captures on interactive,
+// Verified against api.anthropic.com with native 2.1.321 captures on interactive,
 // non-interactive, subagent, and multi-model paths (Sonnet, Opus, Fable, Haiku).
 // The full observed order is:
 //
@@ -70,10 +74,10 @@ const claudeLegacyBaseBetas = "claude-code-20250219,oauth-2025-04-20,interleaved
 //	 3 context-1m-2025-08-07             [1m] model variants only
 //	 4 interleaved-thinking-2025-05-14
 //	 5 redact-thinking-2026-02-12        cli entrypoint, no thinking.display
-//	 6 thinking-token-count-2026-05-13
-//	 7 context-management-2025-06-27
-//	 8 prompt-caching-scope-2026-01-05
-//	 9 advisor-tool-2026-03-01             requests declaring advisor tools or requesting advisor beta
+//	 6 context-management-2025-06-27
+//	 7 prompt-caching-scope-2026-01-05
+//	 8 advisor-tool-2026-03-01             requests declaring advisor tools or requesting advisor beta
+//	 9 thinking-token-count-2026-05-13     every request (2.1.321 moved it behind advisor-tool)
 //	10 advanced-tool-use-2025-11-20       requests using tool search or another advanced tool-use feature
 //	11 effort-2025-11-24                  effort-supporting models with active thinking
 //	12 server-side-fallback-2026-06-01    requests with fallbacks or requested
@@ -84,6 +88,7 @@ const claudeLegacyBaseBetas = "claude-code-20250219,oauth-2025-04-20,interleaved
 //	17 afk-mode-2026-01-31                forwarded when the caller sends it
 //	18 extended-cache-ttl-2025-04-11      OAuth credentials
 //	19 cache-diagnosis-2026-04-07         requests with diagnostics only
+//	20 message-threads-2026-08-12         requests with a thread object, or requested
 //
 // The mid-conversation-system and probe/helper gating of the upstream assembly
 // are omitted: this fork has no mid-conversation system splicing or Haiku helper
@@ -107,9 +112,14 @@ func claudeCodeCLIBetas(body []byte, requested map[string]bool, oauthToken bool)
 	if requested[claudeAdvisorToolBeta] || claudeBodyHasAdvisorTool(body) {
 		betas = append(betas, claudeAdvisorToolBeta)
 	}
+	// Claude Code 2.1.321 sends thinking-token-count after advisor-tool on every
+	// inference request.
+	betas = append(betas, claudeThinkingTokenCountBeta)
 	if requested[claudeAdvancedToolUseBeta] || claudeBodyUsesAdvancedToolUse(body) {
 		betas = append(betas, claudeAdvancedToolUseBeta)
 	}
+	// 2.1.321 puts effort ahead of dangerous-tool-use. This fork does not assemble
+	// dangerous-tool-use, so effort keeps its position relative to the trailing set.
 	if claudeRequestSupportsEffort(body, requested) {
 		betas = append(betas, claudeEffortBeta)
 	}
@@ -143,6 +153,10 @@ func claudeCodeCLIBetas(body []byte, requested map[string]bool, oauthToken bool)
 	if diagnostics := gjson.GetBytes(body, "diagnostics"); diagnostics.IsObject() {
 		betas = append(betas, claudeCacheDiagnosisBeta)
 	}
+	// Claude Code 2.1.321 adds message-threads for bodies carrying a thread object.
+	if requested[claudeMessageThreadsBeta] || gjson.GetBytes(body, "thread").IsObject() {
+		betas = append(betas, claudeMessageThreadsBeta)
+	}
 	return strings.Join(betas, ",")
 }
 
@@ -170,7 +184,7 @@ func claudeThinkingDisplayUpdates(body []byte) bool {
 }
 
 // claudeBodyUsesAdvancedToolUse reports whether the request needs
-// advanced-tool-use-2025-11-20. Claude Code 2.1.258 adds the beta only while
+// advanced-tool-use-2025-11-20. Claude Code adds the beta only while
 // tool search is active, which puts a tool_search_tool_* server tool and
 // defer_loading tools on the wire; plain tool declarations no longer carry it
 // (measured 2026-09-02: 158 inline tools, no beta). Tool use examples
@@ -244,6 +258,8 @@ var claudeManagedBetaSet = func() map[string]bool {
 		claudeCacheDiagnosisBeta,
 		claudeRedactThinkingBeta,
 		claudeAFKModeBeta,
+		claudeThinkingTokenCountBeta,
+		claudeMessageThreadsBeta,
 		// Fork-specific baseline beta; callers may keep requesting it.
 		"token-efficient-tools-2026-03-28",
 	}

@@ -64,39 +64,45 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	// Stream
 	out, _ = sjson.SetBytes(out, "stream", stream)
 
-	// Thinking: Convert Claude thinking.budget_tokens to OpenAI reasoning_effort
-	if thinkingConfig := root.Get("thinking"); thinkingConfig.Exists() && thinkingConfig.IsObject() {
+	// Thinking: Convert Claude thinking.budget_tokens and output_config.effort to OpenAI reasoning_effort
+	effort := thinking.ClaudeOutputEffort(inputRawJSON)
+	thinkingConfig := root.Get("thinking")
+	if thinkingConfig.Exists() && thinkingConfig.IsObject() {
 		if thinkingType := thinkingConfig.Get("type"); thinkingType.Exists() {
 			switch thinkingType.String() {
 			case "enabled":
 				// Honor output_config.effort if present (Claude 4.6 adaptive format).
-				if effort := thinking.ClaudeOutputEffort(inputRawJSON); effort != "" {
+				if effort != "" {
 					out, _ = sjson.SetBytes(out, "reasoning_effort", effort)
 				} else if budgetTokens := thinkingConfig.Get("budget_tokens"); budgetTokens.Exists() {
 					budget := int(budgetTokens.Int())
-					if effort, ok := thinking.ConvertBudgetToLevel(budget); ok && effort != "" {
-						out, _ = sjson.SetBytes(out, "reasoning_effort", effort)
+					if mappedEffort, ok := thinking.ConvertBudgetToLevel(budget); ok && mappedEffort != "" {
+						out, _ = sjson.SetBytes(out, "reasoning_effort", mappedEffort)
 					}
 				} else {
 					// No budget_tokens or effort specified, default to "auto" for enabled thinking
-					if effort, ok := thinking.ConvertBudgetToLevel(-1); ok && effort != "" {
-						out, _ = sjson.SetBytes(out, "reasoning_effort", effort)
+					if mappedEffort, ok := thinking.ConvertBudgetToLevel(-1); ok && mappedEffort != "" {
+						out, _ = sjson.SetBytes(out, "reasoning_effort", mappedEffort)
 					}
 				}
 			case "adaptive", "auto":
 				// Adaptive thinking can carry an explicit effort in output_config.effort (Claude 4.6).
 				// Pass through directly; ApplyThinking handles clamping to target model's levels.
-				if effort := thinking.ClaudeOutputEffort(inputRawJSON); effort != "" {
+				if effort != "" {
 					out, _ = sjson.SetBytes(out, "reasoning_effort", effort)
 				} else {
 					out, _ = sjson.SetBytes(out, "reasoning_effort", string(thinking.LevelXHigh))
 				}
 			case "disabled":
-				if effort, ok := thinking.ConvertBudgetToLevel(0); ok && effort != "" {
-					out, _ = sjson.SetBytes(out, "reasoning_effort", effort)
+				if mappedEffort, ok := thinking.ConvertBudgetToLevel(0); ok && mappedEffort != "" {
+					out, _ = sjson.SetBytes(out, "reasoning_effort", mappedEffort)
 				}
 			}
 		}
+	} else if !thinkingConfig.Exists() && effort != "" {
+		// Some Claude-compatible clients send only output_config.effort without a
+		// thinking object; preserve that explicit level instead of dropping it.
+		out, _ = sjson.SetBytes(out, "reasoning_effort", effort)
 	}
 
 	// Process messages and system

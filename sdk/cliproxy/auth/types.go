@@ -101,6 +101,10 @@ type Auth struct {
 	// RejectedAccessToken tracks the access token rejected by upstream 401 until a refresh succeeds.
 	RejectedAccessToken string `json:"-"`
 
+	// RejectedRefreshToken tracks the refresh token an upstream rejected so the
+	// auto-refresh loop stops retrying a credential that cannot renew itself.
+	RejectedRefreshToken string `json:"-"`
+
 	// Runtime carries non-serialisable data used during execution (in-memory only).
 	// Success counts the total number of successful requests routed through this auth.
 	Success int64 `json:"-"`

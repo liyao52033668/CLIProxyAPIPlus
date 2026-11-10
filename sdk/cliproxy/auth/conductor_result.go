@@ -445,6 +445,17 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						}
 						suspendReason = "model_not_supported"
 						shouldSuspendModel = true
+					} else if isCreditBalanceTooLowResultError(result.Error) {
+						// Anthropic reports an exhausted credit balance as 400, but the
+						// credential is unusable: cool it down like payment_required so
+						// traffic fails over to a funded credential.
+						if disableCooling {
+							state.NextRetryAfter = time.Time{}
+						} else {
+							state.NextRetryAfter = now.Add(30 * time.Minute)
+						}
+						suspendReason = "payment_required"
+						shouldSuspendModel = true
 					} else {
 						switch statusCode {
 						case 401:
@@ -749,12 +760,40 @@ func isAuthActiveCooldown(auth *Auth, now time.Time) bool {
 	return false
 }
 
+// canonicalModelLookupKey normalizes a model key for case-insensitive comparison.
+// The stored key casing is preserved; only lookups fold case so the same model
+// spelled differently shares one cooldown entry.
+func canonicalModelLookupKey(model string) string {
+	return strings.ToLower(canonicalModelKey(model))
+}
+
+// sameCanonicalModelKey reports whether two model spellings resolve to the same
+// model once case and thinking suffixes are folded.
+func sameCanonicalModelKey(a, b string) bool {
+	keyA := canonicalModelLookupKey(a)
+	return keyA != "" && keyA == canonicalModelLookupKey(b)
+}
+
 func existingModelState(auth *Auth, model string) *ModelState {
 	model = canonicalModelKey(model)
-	if auth == nil || model == "" {
+	if auth == nil || model == "" || len(auth.ModelStates) == 0 {
 		return nil
 	}
-	return auth.ModelStates[model]
+	if state, ok := auth.ModelStates[model]; ok && state != nil {
+		return state
+	}
+	// Fall back to a case-insensitive match so cooldowns recorded under a
+	// different spelling of the same model are not lost.
+	lookupKey := canonicalModelLookupKey(model)
+	if lookupKey == "" {
+		return nil
+	}
+	for stateModel, state := range auth.ModelStates {
+		if state != nil && canonicalModelLookupKey(stateModel) == lookupKey {
+			return state
+		}
+	}
+	return nil
 }
 
 func ensureModelState(auth *Auth, model string) *ModelState {
@@ -767,6 +806,14 @@ func ensureModelState(auth *Auth, model string) *ModelState {
 	}
 	if state, ok := auth.ModelStates[model]; ok && state != nil {
 		return state
+	}
+	// Reuse an existing entry that only differs by casing instead of creating a
+	// second cooldown entry for the same model.
+	lookupKey := canonicalModelLookupKey(model)
+	for stateModel, state := range auth.ModelStates {
+		if canonicalModelLookupKey(stateModel) == lookupKey && state != nil {
+			return state
+		}
 	}
 	state := &ModelState{Status: StatusActive}
 	auth.ModelStates[model] = state
@@ -999,6 +1046,21 @@ func HasUnauthorizedAuthFailure(auth *Auth) bool {
 	return hasUnauthorizedAuthFailure(auth)
 }
 
+// authHasUnchangedRejectedRefreshToken reports whether the credential still holds
+// the refresh token an upstream already rejected, so retrying cannot succeed
+// until the operator re-authenticates. Credentials without any refresh token are
+// excluded: those are API-key style credentials that never renew.
+func authHasUnchangedRejectedRefreshToken(auth *Auth) bool {
+	if auth == nil {
+		return false
+	}
+	outerRT := authRefreshToken(auth)
+	if outerRT == "" {
+		return false
+	}
+	return auth.RejectedRefreshToken == outerRT
+}
+
 func hasDisabledInvalidGrantFailure(auth *Auth) bool {
 	if auth == nil {
 		return false
@@ -1229,6 +1291,40 @@ func isInvalidGrantErrorMessage(message string) bool {
 	return strings.Contains(strings.ToLower(message), "invalid_grant")
 }
 
+// isCountTokensEndpointNotFoundError reports whether a count_tokens failure means
+// the upstream simply has no such endpoint or capability. Those responses must
+// stay availability-neutral so repeated probes never suspend inference.
+func isCountTokensEndpointNotFoundError(err error, requestedModel string) bool {
+	if err == nil {
+		return false
+	}
+	if isExplicitModelNotFoundError(err) {
+		return false
+	}
+	status := statusCodeFromError(err)
+	if status == http.StatusNotFound {
+		return true
+	}
+	if isCredentialScopedError(err) || isInvalidGrantError(err) || isCreditBalanceTooLowError(err) || isModelSupportErrorMessage(err.Error()) {
+		return false
+	}
+	switch status {
+	case http.StatusNotImplemented:
+		return true
+	default:
+		return false
+	}
+}
+
+// isCreditBalanceTooLowError reports the Anthropic 400 raised when a credential's
+// API credit is exhausted.
+func isCreditBalanceTooLowError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return clienterror.IsCreditBalanceTooLow(statusCodeFromError(err), err)
+}
+
 func isInvalidGrantError(err error) bool {
 	if err == nil {
 		return false
@@ -1253,6 +1349,23 @@ func isInvalidGrantResultError(err *Error) bool {
 	status := statusCodeFromResult(err)
 	if status == http.StatusBadRequest || status == http.StatusUnauthorized || status == 0 {
 		return true
+	}
+	return false
+}
+
+// isCreditBalanceTooLowResultError reports the Anthropic 400 raised when a
+// credential's API credit is exhausted, so it is treated as payment_required
+// instead of a caller request fault.
+func isCreditBalanceTooLowResultError(err *Error) bool {
+	if err == nil {
+		return false
+	}
+	status := statusCodeFromResult(err)
+	if clienterror.IsCreditBalanceTooLow(status, err) {
+		return true
+	}
+	if err.Message != "" {
+		return clienterror.IsCreditBalanceTooLow(status, errors.New(err.Message))
 	}
 	return false
 }

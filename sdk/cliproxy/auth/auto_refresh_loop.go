@@ -369,6 +369,22 @@ func nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time
 		return auth.NextRefreshAfter, true
 	}
 
+	// A credential whose refresh token the upstream already rejected cannot renew
+	// itself. Fall back to access token expiry, and stop scheduling entirely when
+	// the credential is disabled: retrying would spin the loop forever.
+	if authHasUnchangedRejectedRefreshToken(auth) {
+		if auth.HasValidAccessToken(now) {
+			if exp, ok := auth.AccessTokenExpirationTime(); ok && !exp.IsZero() && exp.After(now) {
+				return exp, true
+			}
+			return time.Time{}, false
+		}
+		if auth.Disabled || auth.Status == StatusDisabled {
+			return time.Time{}, false
+		}
+		return now, true
+	}
+
 	// Quota-exhausted Devin credentials revalidate upstream status so early
 	// restoration can be detected (issue #6690); their tokens never expire,
 	// so the generic expiry/lead schedule below would drop them entirely.

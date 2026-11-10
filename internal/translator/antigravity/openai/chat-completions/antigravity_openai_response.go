@@ -141,6 +141,13 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 	partsResult := gjson.GetBytes(rawJSON, "response.candidates.0.content.parts")
 	if partsResult.IsArray() {
 		partResults := partsResult.Array()
+		// A single chunk can carry several parts. Accumulate them so a later part
+		// (including an empty-text thoughtSignature carrier) cannot overwrite the
+		// deltas produced by an earlier one.
+		var textContent strings.Builder
+		var reasoningContent strings.Builder
+		hasTextContent := false
+		hasReasoningContent := false
 		for i := 0; i < len(partResults); i++ {
 			partResult := partResults[i]
 			partTextResult := partResult.Get("text")
@@ -155,7 +162,8 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 			}
 
 			hasThoughtSignature := thoughtSignatureResult.Exists() && thoughtSignatureResult.String() != ""
-			hasContentPayload := partTextResult.Exists() || functionCallResult.Exists() || inlineDataResult.Exists()
+			hasTextPayload := partTextResult.Exists() && partTextResult.String() != ""
+			hasContentPayload := hasTextPayload || functionCallResult.Exists() || inlineDataResult.Exists()
 
 			// Ignore encrypted thoughtSignature but keep any actual content in the same part.
 			if hasThoughtSignature && !hasContentPayload {
@@ -163,13 +171,15 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 			}
 
 			if partTextResult.Exists() {
-				textContent := partTextResult.String()
+				text := partTextResult.String()
 
 				// Handle text content, distinguishing between regular content and reasoning/thoughts.
 				if partResult.Get("thought").Bool() {
-					template, _ = sjson.SetBytes(template, "choices.0.delta.reasoning_content", textContent)
+					hasReasoningContent = true
+					reasoningContent.WriteString(text)
 				} else {
-					template, _ = sjson.SetBytes(template, "choices.0.delta.content", textContent)
+					hasTextContent = true
+					textContent.WriteString(text)
 				}
 				template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
 			} else if functionCallResult.Exists() {
@@ -220,6 +230,12 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 				template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
 				template, _ = sjson.SetRawBytes(template, "choices.0.delta.images.-1", imagePayload)
 			}
+		}
+		if hasTextContent {
+			template, _ = sjson.SetBytes(template, "choices.0.delta.content", textContent.String())
+		}
+		if hasReasoningContent {
+			template, _ = sjson.SetBytes(template, "choices.0.delta.reasoning_content", reasoningContent.String())
 		}
 	}
 

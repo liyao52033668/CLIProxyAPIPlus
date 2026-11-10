@@ -183,13 +183,15 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 						} else {
 							part, _ = sjson.SetBytes(part, "functionResponse.response.result", toolResult.Result)
 						}
-						partItems = append(partItems, part)
+						// Gemini expects tool result images nested under
+						// functionResponse.parts as inlineData, not as sibling parts.
 						for _, img := range toolResult.Images {
-							imagePart := []byte(`{"inline_data":{"mime_type":"","data":""}}`)
-							imagePart, _ = sjson.SetBytes(imagePart, "inline_data.mime_type", img.MimeType)
-							imagePart, _ = sjson.SetBytes(imagePart, "inline_data.data", img.Data)
-							partItems = append(partItems, imagePart)
+							imagePart := []byte(`{"inlineData":{"mimeType":"","data":""}}`)
+							imagePart, _ = sjson.SetBytes(imagePart, "inlineData.mimeType", img.MimeType)
+							imagePart, _ = sjson.SetBytes(imagePart, "inlineData.data", img.Data)
+							part, _ = sjson.SetRawBytes(part, "functionResponse.parts.-1", imagePart)
 						}
+						partItems = append(partItems, part)
 
 					case "image", "document":
 						source := contentResult.Get("source")

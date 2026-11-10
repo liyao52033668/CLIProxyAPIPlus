@@ -47,13 +47,14 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 	// 	out, _ = sjson.SetBytes(out, "top_k", v.Value())
 	// }
 
-	// Map token limits
-	// if v := gjson.GetBytes(rawJSON, "max_tokens"); v.Exists() {
-	// 	out, _ = sjson.SetBytes(out, "max_output_tokens", v.Value())
-	// }
-	// if v := gjson.GetBytes(rawJSON, "max_completion_tokens"); v.Exists() {
-	// 	out, _ = sjson.SetBytes(out, "max_output_tokens", v.Value())
-	// }
+	// Map token limits: Codex reads a single max_output_tokens budget, so the
+	// first field the client supplied wins in precedence order.
+	for _, path := range []string{"max_completion_tokens", "max_tokens", "max_output_tokens"} {
+		if v := gjson.GetBytes(rawJSON, path); v.Type == gjson.Number {
+			out, _ = sjson.SetBytes(out, "max_output_tokens", v.Int())
+			break
+		}
+	}
 
 	// Map reasoning effort
 	if v := gjson.GetBytes(rawJSON, "reasoning_effort"); v.Exists() {

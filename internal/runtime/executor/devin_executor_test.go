@@ -3146,8 +3146,9 @@ func TestRegressionIssue5910_UsageStatsCacheWriteTokensInResponses(t *testing.T)
 	}
 
 	root := gjson.ParseBytes(interactionsJSON)
-	if root.Get("usage.total_input_tokens").Int() != 53 {
-		t.Errorf("usage.total_input_tokens = %d, want 53", root.Get("usage.total_input_tokens").Int())
+	// total input = uncached 3 + cache read 50 + cache write 14361
+	if root.Get("usage.total_input_tokens").Int() != 14414 {
+		t.Errorf("usage.total_input_tokens = %d, want 14414", root.Get("usage.total_input_tokens").Int())
 	}
 	if root.Get("usage.cache_write_tokens").Int() != 14361 {
 		t.Errorf("usage.cache_write_tokens = %d, want 14361", root.Get("usage.cache_write_tokens").Int())
@@ -3156,8 +3157,8 @@ func TestRegressionIssue5910_UsageStatsCacheWriteTokensInResponses(t *testing.T)
 	if detail.CacheCreationTokens != 14361 {
 		t.Errorf("ParseInteractionsUsage CacheCreationTokens = %d, want 14361", detail.CacheCreationTokens)
 	}
-	if detail.InputTokens != 53 {
-		t.Errorf("ParseInteractionsUsage InputTokens = %d, want 53", detail.InputTokens)
+	if detail.InputTokens != 14414 {
+		t.Errorf("ParseInteractionsUsage InputTokens = %d, want 14414", detail.InputTokens)
 	}
 
 	// 2. Streaming test
@@ -3215,8 +3216,8 @@ func TestRegressionIssue5910_UsageStatsCacheWriteTokensInResponses(t *testing.T)
 	if sDetail.CacheCreationTokens != 14361 {
 		t.Errorf("ParseInteractionsStreamUsage CacheCreationTokens = %d, want 14361", sDetail.CacheCreationTokens)
 	}
-	if sDetail.InputTokens != 53 {
-		t.Errorf("ParseInteractionsStreamUsage InputTokens = %d, want 53", sDetail.InputTokens)
+	if sDetail.InputTokens != 14414 {
+		t.Errorf("ParseInteractionsStreamUsage InputTokens = %d, want 14414", sDetail.InputTokens)
 	}
 }
 

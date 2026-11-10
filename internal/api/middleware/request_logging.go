@@ -52,7 +52,11 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 		}
 
 		loggerEnabled := logger.IsEnabled()
-		captureBody := shouldCaptureRequestBody(loggerEnabled, c.Request)
+		// Gin leaves FullPath empty when no route matched. High-frequency probes of
+		// unrouted paths would otherwise fill the error-log ring and evict useful
+		// diagnostics, so skip body capture and stream log setup for them.
+		hasMatchedRoute := c.FullPath() != ""
+		captureBody := hasMatchedRoute && shouldCaptureRequestBody(loggerEnabled, c.Request)
 
 		// Capture request metadata before authentication without reading the request body.
 		requestInfo, err := captureRequestInfo(c, false)
@@ -69,7 +73,10 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 			wrapper.logOnErrorOnly = true
 		}
 		c.Writer = wrapper
-		deferredCapture := attachDeferredRequestBodyCapture(c.Request, logger, requestInfo, false, false)
+		var deferredCapture *deferredRequestBodyCapture
+		if hasMatchedRoute {
+			deferredCapture = attachDeferredRequestBodyCapture(c.Request, logger, requestInfo, loggerEnabled, false)
+		}
 		if deferredCapture != nil {
 			defer deferredCapture.Cleanup()
 		}
@@ -91,15 +98,36 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 			})
 		}
 
+		// Finalize logging after request processing, even when a downstream handler
+		// panics and unwinds to an outer recovery middleware.
+		defer func() {
+			recovered := recover()
+			if recovered != nil && !isAbortHandlerPanic(recovered) {
+				wrapper.panicked = true
+				if !wrapper.ResponseWriter.Written() {
+					wrapper.statusCode = http.StatusInternalServerError
+					if wrapper.streamWriter != nil {
+						_ = wrapper.streamWriter.WriteStatus(http.StatusInternalServerError, wrapper.headers)
+					}
+				}
+			}
+			if errFinalize := wrapper.Finalize(c); errFinalize != nil {
+				// Log error but don't interrupt the response
+				// In a real implementation, you might want to use a proper logger here
+			}
+			if recovered != nil {
+				panic(recovered)
+			}
+		}()
+
 		// Process the request
 		c.Next()
-
-		// Finalize logging after request processing
-		if err = wrapper.Finalize(c); err != nil {
-			// Log error but don't interrupt the response
-			// In a real implementation, you might want to use a proper logger here
-		}
 	}
+}
+
+func isAbortHandlerPanic(recovered any) bool {
+	err, ok := recovered.(error)
+	return ok && errors.Is(err, http.ErrAbortHandler)
 }
 
 type fileBodySourceFactory interface {

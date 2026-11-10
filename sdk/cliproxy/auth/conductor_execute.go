@@ -934,6 +934,13 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				if errCtx := execCtx.Err(); errCtx != nil {
 					return cliproxyexecutor.Response{}, errCtx
 				}
+				// An upstream without a count_tokens endpoint must not lose
+				// availability, so the attempt is recorded without penalizing
+				// the credential.
+				if isCountTokensEndpointNotFoundError(errExec, req.Model) {
+					authErr = errExec
+					continue
+				}
 				result.Error = newErrorFromExecution(errExec)
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra

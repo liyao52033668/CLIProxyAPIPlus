@@ -352,10 +352,18 @@ func TestConvertClaudeRequestToGemini_StructuredToolResult(t *testing.T) {
 	if got := fr.Get("response.result.text").String(); got != "alpha" {
 		t.Fatalf("expected structured result text 'alpha', got result=%s", fr.Get("response.result").Raw)
 	}
-	// The image block must be emitted as a separate inline_data part, not embedded in result.
-	img := gjson.GetBytes(output, "contents.1.parts.1.inline_data")
-	if got := img.Get("mime_type").String(); got != "image/png" {
-		t.Fatalf("expected image mime type 'image/png', got '%s'", got)
+	// The image block must be nested under functionResponse.parts as inlineData,
+	// not emitted as a sibling part.
+	parts := gjson.GetBytes(output, "contents.1.parts").Array()
+	if len(parts) != 1 {
+		t.Fatalf("expected 1 part (functionResponse with nested inlineData), got %d: %s", len(parts), gjson.GetBytes(output, "contents.1").Raw)
+	}
+	img := fr.Get("parts.0.inlineData")
+	if !img.Exists() {
+		t.Fatalf("expected functionResponse.parts.0.inlineData to exist, got %s", fr.Raw)
+	}
+	if got := img.Get("mimeType").String(); got != "image/png" {
+		t.Fatalf("expected image mimeType 'image/png', got '%s'", got)
 	}
 	if got := img.Get("data").String(); got != "aGVsbG8=" {
 		t.Fatalf("expected image data 'aGVsbG8=', got '%s'", got)

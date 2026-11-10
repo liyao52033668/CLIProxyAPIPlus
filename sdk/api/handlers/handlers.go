@@ -242,9 +242,21 @@ func StreamingKeepAliveInterval(cfg *config.SDKConfig) time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
-var streamingKeepAliveTickerFactory = func(interval time.Duration) (<-chan time.Time, func()) {
+var streamingKeepAliveTickerFactory func(interval time.Duration) (<-chan time.Time, func())
+var streamingKeepAliveTickerWithResetFactory func(interval time.Duration) (<-chan time.Time, func(), func())
+
+func defaultStreamingKeepAliveTickerWithReset(interval time.Duration) (<-chan time.Time, func(), func()) {
 	ticker := time.NewTicker(interval)
-	return ticker.C, ticker.Stop
+	reset := func() {
+		ticker.Reset(interval)
+		// Drop a tick that fired while bytes were being written, so a keep-alive
+		// never follows immediately on the heels of real data.
+		select {
+		case <-ticker.C:
+		default:
+		}
+	}
+	return ticker.C, ticker.Stop, reset
 }
 
 // StreamingSendKeepAliveBeforeFT returns whether SSE keep-alives should be sent before the first token arrives.
@@ -253,13 +265,27 @@ func StreamingSendKeepAliveBeforeFT(cfg *config.SDKConfig) bool {
 	return cfg != nil && cfg.Streaming.SendKeepAliveBeforeFT && StreamingKeepAliveInterval(cfg) > 0
 }
 
+// NewStreamingKeepAliveTickerWithReset returns a ticker channel, a stop function, and a reset function
+// for streaming keep-alives. When interval <= 0, it returns a nil channel and no-op functions.
+func NewStreamingKeepAliveTickerWithReset(interval time.Duration) (<-chan time.Time, func(), func()) {
+	if interval <= 0 {
+		return nil, func() {}, func() {}
+	}
+	if streamingKeepAliveTickerWithResetFactory != nil {
+		return streamingKeepAliveTickerWithResetFactory(interval)
+	}
+	if streamingKeepAliveTickerFactory != nil {
+		keepAliveC, stop := streamingKeepAliveTickerFactory(interval)
+		return keepAliveC, stop, func() {}
+	}
+	return defaultStreamingKeepAliveTickerWithReset(interval)
+}
+
 // NewStreamingKeepAliveTicker returns a ticker channel and a stop function for streaming keep-alives.
 // When interval <= 0, it returns a nil channel and a no-op stop function.
 func NewStreamingKeepAliveTicker(interval time.Duration) (<-chan time.Time, func()) {
-	if interval <= 0 {
-		return nil, func() {}
-	}
-	return streamingKeepAliveTickerFactory(interval)
+	keepAliveC, stop, _ := NewStreamingKeepAliveTickerWithReset(interval)
+	return keepAliveC, stop
 }
 
 // NewPreFirstTokenKeepAliveTicker returns a ticker channel and a stop function for pre-first-token SSE keep-alives.
@@ -280,6 +306,18 @@ func SetStreamingKeepAliveTickerFactoryForTest(factory func(interval time.Durati
 	}
 	return func() {
 		streamingKeepAliveTickerFactory = prev
+	}
+}
+
+// SetStreamingKeepAliveTickerWithResetFactoryForTest overrides the keep-alive ticker-with-reset factory
+// for deterministic tests and returns a restore function.
+func SetStreamingKeepAliveTickerWithResetFactoryForTest(factory func(interval time.Duration) (<-chan time.Time, func(), func())) func() {
+	prev := streamingKeepAliveTickerWithResetFactory
+	if factory != nil {
+		streamingKeepAliveTickerWithResetFactory = factory
+	}
+	return func() {
+		streamingKeepAliveTickerWithResetFactory = prev
 	}
 }
 

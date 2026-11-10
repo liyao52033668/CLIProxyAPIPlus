@@ -47,6 +47,8 @@ type ResponseWriterWrapper struct {
 	statusCode          int                        // statusCode stores the HTTP status code of the response.
 	headers             map[string][]string        // headers stores the response headers.
 	logOnErrorOnly      bool                       // logOnErrorOnly enables logging only when an error response is detected.
+	panicked            bool                       // panicked reports that the handler panicked before the response was written.
+	finalized           bool                       // finalized reports that Finalize already ran, so it is not run twice.
 	hijacked            bool                       // hijacked reports whether the underlying connection was hijacked.
 	firstChunkTimestamp time.Time                  // firstChunkTimestamp captures TTFB for streaming responses.
 	firstChunkNano      atomic.Int64               // firstChunkNano mirrors firstChunkTimestamp for cross-goroutine reads.
@@ -239,7 +241,7 @@ func (w *ResponseWriterWrapper) WriteHeader(statusCode int) {
 			w.streamDone = doneChan
 
 			// Start async chunk processor
-			go w.processStreamingChunks(doneChan)
+			go w.processStreamingChunks(doneChan, streamWriter, w.chunkChannel)
 
 			// Write status immediately
 			_ = streamWriter.WriteStatus(statusCode, w.headers)
@@ -326,19 +328,21 @@ func (w *ResponseWriterWrapper) currentCapturedRequestBody() []byte {
 
 // processStreamingChunks runs in a separate goroutine to process response chunks from the chunkChannel.
 // It asynchronously writes each chunk to the streaming log writer.
-func (w *ResponseWriterWrapper) processStreamingChunks(done chan struct{}) {
+// The writer and channel are passed by value so Finalize can clear the wrapper
+// fields concurrently without racing this goroutine.
+func (w *ResponseWriterWrapper) processStreamingChunks(done chan struct{}, streamWriter logging.StreamingLogWriter, chunkChannel chan []byte) {
 	if done == nil {
 		return
 	}
 
 	defer close(done)
 
-	if w.streamWriter == nil || w.chunkChannel == nil {
+	if streamWriter == nil || chunkChannel == nil {
 		return
 	}
 
-	for chunk := range w.chunkChannel {
-		w.streamWriter.WriteChunkAsync(chunk)
+	for chunk := range chunkChannel {
+		streamWriter.WriteChunkAsync(chunk)
 	}
 }
 
@@ -347,6 +351,10 @@ func (w *ResponseWriterWrapper) processStreamingChunks(done chan struct{}) {
 // For non-streaming responses, it logs the complete request and response details,
 // including any API-specific request/response data stored in the Gin context.
 func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
+	if w.finalized {
+		return nil
+	}
+	w.finalized = true
 	if w.requestInfo != nil && w.requestInfo.deferredBodyCapture != nil {
 		defer w.requestInfo.deferredBodyCapture.Cleanup()
 	}
