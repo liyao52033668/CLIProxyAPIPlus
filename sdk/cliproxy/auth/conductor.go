@@ -178,10 +178,35 @@ func newErrorFromExecution(err error) *Error {
 	if e.Message == "" {
 		e.Message = "unknown error"
 	}
+	if isTOSViolationError(err) {
+		// A terms-of-service rejection is terminal for the credential: it must be
+		// deactivated rather than cooled down, because the token keeps working
+		// while inference stays refused.
+		e.Code = tosViolationErrorCode
+		e.Retryable = false
+		return e
+	}
 	if isRequestScopedError(err) || isRequestInvalidError(err) {
 		e.Code = requestScopedErrorCode
 	}
 	return e
+}
+
+// tosViolationErrorCode marks a credential deactivated by a provider
+// terms-of-service rejection.
+const tosViolationErrorCode = "tos_violation"
+
+// isTOSViolationError reports whether the execution error marks the credential as
+// rejected for a terms-of-service violation.
+func isTOSViolationError(err error) bool {
+	if err == nil {
+		return false
+	}
+	type tosViolationProvider interface {
+		IsTOSViolation() bool
+	}
+	var tvp tosViolationProvider
+	return errors.As(err, &tvp) && tvp != nil && tvp.IsTOSViolation()
 }
 
 // Selector chooses an auth candidate for execution.
@@ -229,13 +254,14 @@ var currentHomeDispatcher = func() homeAuthDispatcher {
 
 // Manager orchestrates auth lifecycle, selection, execution, and persistence.
 type Manager struct {
-	store     Store
-	executors map[string]ProviderExecutor
-	selector  Selector
-	hook      Hook
-	mu        sync.RWMutex
-	auths     map[string]*Auth
-	scheduler *authScheduler
+	inFlightTracker *inFlightTracker
+	store           Store
+	executors       map[string]ProviderExecutor
+	selector        Selector
+	hook            Hook
+	mu              sync.RWMutex
+	auths           map[string]*Auth
+	scheduler       *authScheduler
 	// syncSchedulerMu serializes scheduler sync checks so concurrent pick retries
 	// do not rebuild the scheduler redundantly.
 	syncSchedulerMu sync.Mutex
@@ -307,6 +333,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		hook = NoopHook{}
 	}
 	manager := &Manager{
+		inFlightTracker:  newInFlightTracker(),
 		store:            store,
 		executors:        make(map[string]ProviderExecutor),
 		selector:         selector,

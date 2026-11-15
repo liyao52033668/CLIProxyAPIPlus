@@ -23,6 +23,14 @@ port: 8317
 # Maximum size (in bytes) of incoming HTTP request bodies. Values <= 0 disable the limit (default).
 # max-request-body-bytes: 0
 
+# Graceful shutdown drain budget, in seconds. When the process receives SIGINT/SIGTERM,
+# in-flight HTTP requests are allowed to finish for up to this many seconds before
+# remaining connections are forcibly closed. Shutdown never hangs longer than this budget.
+# Default 0 keeps the legacy behavior: close immediately without draining.
+# Note: hijacked connections (WebSocket sessions) are not drained; they are
+# released by their own connection managers after the drain window.
+# shutdown-timeout: 0
+
 # IP addresses or CIDRs of proxies allowed to supply forwarded client IP headers.
 # An empty list (the default) does not trust forwarded headers. Restart after changing this setting.
 trusted-proxies: []
@@ -265,6 +273,8 @@ ws-auth: true
 #   sensitive-words:             # optional: words to obfuscate with zero-width characters in system instructions and prompts
 #     - "API"
 #     - "proxy"
+#   sensitive-words-replace:     # optional: literal phrase replacements applied before obfuscation
+#     "Claude Code": "Claude"
 
 # CodeBuddy AI (www.codebuddy.ai) provider behavior.
 # A built-in list of 27 security-related words (e.g. "security testing", "CTF",
@@ -406,6 +416,8 @@ streaming:
 #       sensitive-words:             # optional: words to obfuscate with zero-width characters
 #         - "API"
 #         - "proxy"
+#       sensitive-words-replace:     # optional: literal phrase replacements applied before obfuscation
+#         "Claude Code": "Claude"
 #       cache-user-id: true          # optional: default is false; set true to reuse cached user_id per API key instead of generating a random one each request
 #     experimental-cch-signing: false # optional: default is false; when true, sign the final /v1/messages body using the current Claude Code cch algorithm
 #                                     # keep this disabled unless you explicitly need the behavior, so upstream seed changes fall back to legacy proxy behavior

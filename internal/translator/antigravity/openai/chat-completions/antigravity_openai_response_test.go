@@ -77,10 +77,14 @@ func TestFinishReasonMaxTokens(t *testing.T) {
 	chunk2 := []byte(`{"response":{"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":100,"totalTokenCount":110}}}`)
 	result2 := ConvertAntigravityResponseToOpenAI(ctx, "model", nil, nil, chunk2, &param)
 
-	// Verify finish_reason is "max_tokens"
+	// "max_tokens" is not a valid OpenAI finish_reason, so MAX_TOKENS reports
+	// the documented "length" while native_finish_reason keeps the upstream value.
 	fr := gjson.GetBytes(result2[0], "choices.0.finish_reason").String()
-	if fr != "max_tokens" {
-		t.Errorf("Expected finish_reason 'max_tokens', got: %s", fr)
+	if fr != "length" {
+		t.Errorf("Expected finish_reason 'length', got: %s", fr)
+	}
+	if native := gjson.GetBytes(result2[0], "choices.0.native_finish_reason").String(); native != "max_tokens" {
+		t.Errorf("Expected native_finish_reason 'max_tokens', got: %s", native)
 	}
 }
 

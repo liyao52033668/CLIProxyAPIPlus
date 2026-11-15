@@ -298,6 +298,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	shouldResumeModel := false
 	shouldSuspendModel := false
 	suspendReason := ""
+	// suspendUntil carries the bounded auto-recovery deadline for suspension
+	// reasons that expire on their own. Terminal reasons (unauthorized,
+	// model_not_supported, payment_required) stay open-ended.
+	var suspendUntil time.Time
 	clearModelQuota := false
 	setModelQuota := false
 	scheduleUnauthorizedRefresh := false
@@ -624,6 +628,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								suspendReason = "quota"
 								shouldSuspendModel = true
 								setModelQuota = true
+								// Quota cooldowns expire within the model quota
+								// window, so the model listing must come back
+								// without waiting for a later successful request.
+								if !state.NextRetryAfter.IsZero() {
+									suspendUntil = state.NextRetryAfter
+								} else {
+									suspendUntil = now.Add(quotaSuspendWindow)
+								}
 							}
 						case 408, 500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526:
 							state.NextRetryAfter = recoverableFailureRetryAfterWithHint(now, result.RetryAfter, disableCooling)
@@ -706,7 +718,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	if shouldResumeModel {
 		registry.GetGlobalRegistry().ResumeClientModel(result.AuthID, result.Model)
 	} else if shouldSuspendModel {
-		registry.GetGlobalRegistry().SuspendClientModel(result.AuthID, result.Model, suspendReason)
+		if suspendUntil.IsZero() {
+			registry.GetGlobalRegistry().SuspendClientModel(result.AuthID, result.Model, suspendReason)
+		} else {
+			registry.GetGlobalRegistry().SuspendClientModelUntil(result.AuthID, result.Model, suspendReason, suspendUntil)
+		}
 	}
 
 	if result.IsAuto && result.Model != "" {
@@ -721,6 +737,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	m.publishErrorEvent(result, authSnapshot)
 	m.hook.OnResult(ctx, result)
 }
+
+// quotaSuspendWindow mirrors the registry's model quota recovery window so a
+// quota suspension expires no later than the quota mark itself.
+const quotaSuspendWindow = 5 * time.Minute
 
 // nextExecutionSeq stamps a new upstream dispatch with the next monotonic
 // execution sequence. The stamp travels on the execution's Result so that
@@ -1528,6 +1548,18 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		if resultErr.Message != "" {
 			auth.StatusMessage = resultErr.Message
 		}
+	}
+	if resultErr != nil && resultErr.Code == tosViolationErrorCode {
+		// Terminal: the provider refused inference for this credential's
+		// account. Disable it so traffic fails over permanently instead of
+		// retrying a cooldown that will never clear.
+		auth.Status = StatusDisabled
+		auth.Unavailable = true
+		auth.Disabled = true
+		auth.NextRetryAfter = time.Time{}
+		auth.StatusMessage = "tos_violation"
+		auth.UpdatedAt = now
+		return
 	}
 	statusCode := statusCodeFromResult(resultErr)
 	switch statusCode {

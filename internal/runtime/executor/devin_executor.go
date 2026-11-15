@@ -998,6 +998,20 @@ func (e *DevinExecutor) streamDevinFrames(
 		return
 	}
 
+	// 4b. A cleanly terminated turn with no text and no tool call is a transient
+	// upstream failure, not an empty successful answer. Surface it as a
+	// response.failed so the client can retry or the conductor can fail over.
+	hasGeneratedOutput := toolCallCount > 0 || accumulatedContent.Len() > 0
+	if isDevinEmptyCompletion(hasGeneratedOutput, lastStopReason, finalUsage) {
+		emptyErr := newDevinEmptyCompletionError()
+		helps.RecordAPIResponseError(ctx, e.cfg, emptyErr)
+		reporter.PublishFailure(ctx, emptyErr)
+		failedEvent, _ := sjson.SetBytes([]byte(`{"event_type":"response.failed","error":{"message":"","code":"empty_completion"}}`), "error.message", emptyErr.Error())
+		_ = emitInteractionsEvent(failedEvent)
+		emitStreamError(emptyErr)
+		return
+	}
+
 	// 5. Emit interaction.completed with final usage
 	completionStatus := "completed"
 	var completionFinishReason string
@@ -1328,6 +1342,39 @@ func consumeDevinFramesToInteractionsForAuth(body io.Reader, model, chatModelUID
 			UnknownFields: unknownFields,
 		}
 		return nil, respLog, truncErr
+	}
+
+	hasGeneratedOutput := len(toolCalls) > 0
+	if !hasGeneratedOutput {
+		for _, part := range preToolTextParts {
+			if strings.TrimSpace(part) != "" {
+				hasGeneratedOutput = true
+				break
+			}
+		}
+	}
+	if !hasGeneratedOutput {
+		for _, part := range postToolTextParts {
+			if strings.TrimSpace(part) != "" {
+				hasGeneratedOutput = true
+				break
+			}
+		}
+	}
+	if isDevinEmptyCompletion(hasGeneratedOutput, lastStopReason, finalUsage) {
+		emptyErr := newDevinEmptyCompletionError()
+		respLog := &helps.DevinUpstreamResponseLog{
+			Status:        "empty_completion",
+			FramesCount:   framesCount,
+			Content:       getAllContentText(),
+			Thinking:      strings.Join(thinkingParts, ""),
+			Signature:     string(accumulatedSignature),
+			SignatureType: signatureType,
+			ToolCalls:     toolCalls,
+			Usage:         finalUsage,
+			UnknownFields: unknownFields,
+		}
+		return nil, respLog, emptyErr
 	}
 
 	completionStatus := "completed"
@@ -2415,15 +2462,23 @@ func (e *DevinExecutor) getSensitiveWords() []string {
 	return nil
 }
 
+func (e *DevinExecutor) getSensitiveWordReplacements() map[string]string {
+	if e != nil && e.cfg != nil && len(e.cfg.Devin.SensitiveWordsReplace) > 0 {
+		return e.cfg.Devin.SensitiveWordsReplace
+	}
+	return nil
+}
+
 func (e *DevinExecutor) getSensitiveWordMatcher() *helps.SensitiveWordMatcher {
 	if e == nil {
 		return nil
 	}
 	words := e.getSensitiveWords()
-	if len(words) == 0 {
+	replacements := e.getSensitiveWordReplacements()
+	if len(words) == 0 && len(replacements) == 0 {
 		return nil
 	}
-	key := strings.Join(words, "\x00")
+	key := sensitiveWordConfigKey(words, replacements)
 	e.matcherMu.RLock()
 	if e.lastWordsKey == key {
 		m := e.cachedMatcher
@@ -2438,8 +2493,30 @@ func (e *DevinExecutor) getSensitiveWordMatcher() *helps.SensitiveWordMatcher {
 		return e.cachedMatcher
 	}
 	e.lastWordsKey = key
-	e.cachedMatcher = helps.BuildSensitiveWordMatcher(words)
+	e.cachedMatcher = helps.BuildSensitiveWordMatcherWithReplacements(words, replacements)
 	return e.cachedMatcher
+}
+
+// isDevinEmptyCompletion reports whether a cleanly terminated Devin turn
+// produced no generated output. Such a turn is a transient upstream failure
+// (retrying another credential usually works) rather than a successful empty
+// answer. stopReason 11 is CONTENT_FILTER, which legitimately returns no text.
+func isDevinEmptyCompletion(hasGeneratedOutput bool, stopReason uint64, u *helps.DevinUsage) bool {
+	if hasGeneratedOutput || stopReason == 11 {
+		return false
+	}
+	return u == nil || u.CompletionTokens == 0
+}
+
+// newDevinEmptyCompletionError marks an empty Devin completion as a transient
+// gateway failure so the conductor fails over instead of surfacing an empty
+// successful response.
+func newDevinEmptyCompletionError() statusErr {
+	return statusErr{
+		code:               http.StatusBadGateway,
+		msg:                "devin upstream returned an empty completion (0 output tokens)",
+		transientRateLimit: true,
+	}
 }
 
 func newDevinStatusError(code int, headers http.Header, body []byte) statusErr {

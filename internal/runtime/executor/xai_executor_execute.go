@@ -69,38 +69,142 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 	outputItemsByIndex := make(map[int64][]byte)
 	var outputItemsFallback [][]byte
 	responseFilter := newXAIInternalXSearchResponseFilter(prepared.filterInternalXSearch, prepared.clientDeclaredTools)
-	for _, line := range bytes.Split(data, []byte("\n")) {
-		if !bytes.HasPrefix(line, xaiDataTag) {
-			continue
+	var upstreamUsage helps.StreamUsageBuffer
+	sawSSEData := false
+	var pendingEventName string
+	var pendingData []byte
+	hasPendingData := false
+
+	// dispatchSSEEvent handles one complete SSE event. done reports that the
+	// response is final, either successfully or with a terminal upstream error.
+	dispatchSSEEvent := func(eventName string, rawEventData []byte) (cliproxyexecutor.Response, bool) {
+		rawEventData = bytes.TrimSpace(rawEventData)
+		if len(rawEventData) == 0 || bytes.Equal(rawEventData, []byte("[DONE]")) {
+			return cliproxyexecutor.Response{}, false
 		}
-		eventData := xaiNormalizeReasoningSummaryData(bytes.TrimSpace(line[len(xaiDataTag):]))
-		eventData = restoreXAINamespaceToolCalls(eventData, prepared.namespaceTools)
+		sawSSEData = true
+		if !gjson.ValidBytes(rawEventData) {
+			// A non-JSON terminal error event still carries the upstream cause.
+			if errTerminal, ok := xaiTerminalFailureErr(eventName, rawEventData); ok {
+				err = recordXAIStreamError(errTerminal, reporter, ctx, e, &upstreamUsage)
+				return resp, true
+			}
+			return cliproxyexecutor.Response{}, false
+		}
+		eventData := xaiNormalizeReasoningSummaryData(rawEventData)
+		upstreamUsage.ObserveOpenAIStream(append([]byte("data: "), eventData...))
+		reporter.ObserveResponseModel(eventData)
+		// Surface upstream terminal failures instead of reporting a timeout.
+		if errTerminal, ok := xaiTerminalFailureErr(eventName, eventData); ok {
+			err = recordXAIStreamError(errTerminal, reporter, ctx, e, &upstreamUsage)
+			return resp, true
+		}
 		if prepared.webSearchAlias != "" {
 			eventData = restoreXAIClientWebSearchName(eventData, prepared.webSearchAlias)
 		}
+		eventData = restoreXAINamespaceToolCalls(eventData, prepared.namespaceTools)
 		eventData = responseFilter.apply(eventData)
 		if len(eventData) == 0 {
-			continue
+			return cliproxyexecutor.Response{}, false
 		}
-		reporter.ObserveResponseModel(eventData)
 		switch gjson.GetBytes(eventData, "type").String() {
 		case "response.output_item.done":
 			xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
-		case "response.completed":
-			if detail, ok := helps.ParseCodexUsage(eventData); ok {
-				reporter.Publish(ctx, detail)
-			}
-			reporter.EnsurePublished(ctx)
+		case "response.completed", "response.incomplete":
 			completedData := xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
 			completedData = xaiNormalizeReasoningSummaryData(completedData)
 			cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, completedData)
+			if !upstreamUsage.Publish(ctx, reporter) {
+				if detail, ok := helps.ParseCodexUsage(completedData); ok {
+					reporter.Publish(ctx, detail)
+				}
+			}
+			reporter.EnsurePublished(ctx)
 			var param any
 			out := sdktranslator.TranslateNonStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, completedData, &param)
-			return cliproxyexecutor.Response{Payload: out, Headers: respHeaders}, nil
+			if prepared.responseFormat == sdktranslator.FormatOpenAIResponse {
+				out = helps.EnsureResponsesUsageDetails(out)
+			}
+			return cliproxyexecutor.Response{Payload: out, Headers: respHeaders}, true
 		}
+		return cliproxyexecutor.Response{}, false
 	}
 
-	return resp, statusErr{code: http.StatusRequestTimeout, msg: "xai stream error: stream disconnected before response.completed"}
+	flushPendingEvent := func() (cliproxyexecutor.Response, bool) {
+		if !hasPendingData {
+			pendingEventName = ""
+			pendingData = nil
+			return cliproxyexecutor.Response{}, false
+		}
+		eventName := pendingEventName
+		eventPayload := pendingData
+		pendingEventName = ""
+		pendingData = nil
+		hasPendingData = false
+		return dispatchSSEEvent(eventName, eventPayload)
+	}
+
+	for _, rawLine := range bytes.Split(data, []byte("\n")) {
+		line := bytes.TrimRight(rawLine, "\r")
+		if len(bytes.TrimSpace(line)) == 0 {
+			if outResp, done := flushPendingEvent(); done {
+				return outResp, err
+			}
+			continue
+		}
+		if bytes.HasPrefix(line, xaiEventTag) {
+			nextEventName := strings.TrimSpace(string(line[len(xaiEventTag):]))
+			if hasPendingData && pendingEventName != "" {
+				if outResp, done := flushPendingEvent(); done {
+					return outResp, err
+				}
+			}
+			pendingEventName = nextEventName
+			continue
+		}
+		if !bytes.HasPrefix(line, xaiDataTag) {
+			continue
+		}
+		rawEventData := bytes.TrimSpace(line[len(xaiDataTag):])
+		if hasPendingData {
+			if gjson.ValidBytes(pendingData) || bytes.Equal(pendingData, []byte("[DONE]")) {
+				if outResp, done := flushPendingEvent(); done {
+					return outResp, err
+				}
+			} else {
+				// Multi-line data field: the JSON document is split across lines.
+				pendingData = append(append(pendingData, '\n'), rawEventData...)
+				continue
+			}
+		}
+		pendingData = bytes.Clone(rawEventData)
+		hasPendingData = true
+	}
+	if outResp, done := flushPendingEvent(); done {
+		return outResp, err
+	}
+
+	// A non-SSE JSON body can still be a terminal failure payload.
+	if !sawSSEData {
+		if trimmed := bytes.TrimSpace(data); len(trimmed) > 0 {
+			if errTerminal, ok := xaiTerminalFailureErr("", trimmed); ok {
+				return resp, recordXAIStreamError(errTerminal, reporter, ctx, e, &upstreamUsage)
+			}
+		}
+		return resp, recordXAIStreamError(statusErr(newXAIEmptyStreamError().statusErr), reporter, ctx, e, &upstreamUsage)
+	}
+	return resp, recordXAIStreamError(statusErr(newXAIIncompleteStreamError().statusErr), reporter, ctx, e, &upstreamUsage)
+}
+
+// recordXAIStreamError records a terminal upstream error and publishes failure
+// usage before the error travels back to the caller.
+func recordXAIStreamError(errTerminal statusErr, reporter *helps.UsageReporter, ctx context.Context, e *XAIExecutor, upstreamUsage *helps.StreamUsageBuffer) error {
+	helps.RecordAPIResponseError(ctx, e.cfg, errTerminal)
+	if upstreamUsage != nil && upstreamUsage.PublishFailure(ctx, reporter, errTerminal) {
+		return errTerminal
+	}
+	reporter.PublishFailure(ctx, errTerminal)
+	return errTerminal
 }
 
 func (e *XAIExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {

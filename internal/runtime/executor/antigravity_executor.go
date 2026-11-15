@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
@@ -50,7 +51,10 @@ const (
 
 // AntigravityExecutor proxies requests to the antigravity upstream.
 type AntigravityExecutor struct {
-	cfg *config.Config
+	cfg           *config.Config
+	matcherMu     sync.RWMutex
+	lastWordsKey  string
+	cachedMatcher *helps.SensitiveWordMatcher
 }
 
 // NewAntigravityExecutor creates a new Antigravity executor instance.
@@ -64,11 +68,44 @@ func NewAntigravityExecutor(cfg *config.Config) *AntigravityExecutor {
 	return &AntigravityExecutor{cfg: cfg}
 }
 
+// getSensitiveWordMatcher returns a cached matcher for the configured word list.
+// Compiling the regex on every request is measurable overhead, so the matcher
+// is rebuilt only when the effective configuration changes.
+func (e *AntigravityExecutor) getSensitiveWordMatcher() *helps.SensitiveWordMatcher {
+	if e == nil || e.cfg == nil {
+		return nil
+	}
+	words := e.cfg.Antigravity.SensitiveWords
+	replacements := e.cfg.Antigravity.SensitiveWordsReplace
+	if len(words) == 0 && len(replacements) == 0 {
+		return nil
+	}
+	key := sensitiveWordConfigKey(words, replacements)
+	e.matcherMu.RLock()
+	if e.lastWordsKey == key {
+		matcher := e.cachedMatcher
+		e.matcherMu.RUnlock()
+		return matcher
+	}
+	e.matcherMu.RUnlock()
+
+	e.matcherMu.Lock()
+	defer e.matcherMu.Unlock()
+	if e.lastWordsKey == key {
+		return e.cachedMatcher
+	}
+	e.lastWordsKey = key
+	// Antigravity rejects U+200B obfuscation in system instructions, so this
+	// provider uses the U+034F (CGJ) matcher instead of the default one.
+	e.cachedMatcher = helps.BuildAntigravitySensitiveWordMatcherWithReplacements(words, replacements)
+	return e.cachedMatcher
+}
+
 func (e *AntigravityExecutor) obfuscateSensitiveWords(payload []byte) []byte {
-	if e == nil || e.cfg == nil || len(e.cfg.Antigravity.SensitiveWords) == 0 {
+	matcher := e.getSensitiveWordMatcher()
+	if matcher == nil {
 		return payload
 	}
-	matcher := helps.BuildSensitiveWordMatcher(e.cfg.Antigravity.SensitiveWords)
 	return helps.ObfuscateSensitiveWordsInSystemInstruction(payload, matcher)
 }
 

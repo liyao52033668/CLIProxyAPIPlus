@@ -345,6 +345,15 @@ func newAntigravityStatusErr(statusCode int, body []byte) statusErr {
 		if retryAfter, parseErr := helps.ParseRetryDelay(body); parseErr == nil && retryAfter != nil {
 			err.retryAfter = retryAfter
 		}
+	} else if statusCode == http.StatusForbidden {
+		// A TOS_VIOLATION is service-scoped and terminal: the token still works
+		// while inference is refused, so the credential must be deactivated
+		// rather than cooled down.
+		if violation := helps.ParseAntigravityTOSViolation(body); violation != nil {
+			err.tosViolation = true
+			err.credentialScoped = true
+			log.Warnf("antigravity executor: credential suspended for TOS_VIOLATION (appeal: %s %s)", violation.AppealURL, violation.AppealURLText)
+		}
 	}
 	return err
 }

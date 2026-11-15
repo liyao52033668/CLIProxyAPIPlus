@@ -289,8 +289,10 @@ func resolveOpenAIFinishReason(params *convertCliResponseToOpenAIChatParams) (fi
 	switch {
 	case params.SawToolCall:
 		finishReason = "tool_calls"
-	case params.UpstreamFinishReason == "MAX_TOKENS":
-		finishReason = "max_tokens"
+	case strings.EqualFold(strings.TrimSpace(params.UpstreamFinishReason), "MAX_TOKENS"):
+		// "max_tokens" is not a valid OpenAI finish_reason; strict clients
+		// reject it, so report the documented "length".
+		finishReason = "length"
 	case isAntigravityContentFilterFinishReason(params.UpstreamFinishReason):
 		finishReason = "content_filter"
 	default:
@@ -305,7 +307,7 @@ func resolveOpenAIFinishReason(params *convertCliResponseToOpenAIChatParams) (fi
 
 func isAntigravityContentFilterFinishReason(reason string) bool {
 	switch strings.ToUpper(strings.TrimSpace(reason)) {
-	case "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY":
+	case "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY", "MALFORMED_RESPONSE", "MALFORMED_FUNCTION_CALL":
 		return true
 	default:
 		return false

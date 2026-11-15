@@ -785,8 +785,20 @@ func (c *Client) StartConfigSubscriber(ctx context.Context, onConfig func([]byte
 		c.resetReconnectFailures()
 		c.heartbeatOK.Store(true)
 
+		// The heartbeat deadline is absolute: only an empty-payload PONG renews it.
+		// Ordinary config or cluster traffic must not mask a stalled heartbeat,
+		// otherwise a wedged upstream never trips the timeout.
+		lastHeartbeat := time.Now()
 		for {
-			event, errMsg := pubsub.ReceiveTimeout(ctx, subTimeout)
+			remaining := time.Until(lastHeartbeat.Add(subTimeout))
+			if remaining <= 0 {
+				_ = pubsub.Close()
+				c.heartbeatOK.Store(false)
+				c.markSubscriptionTimeout()
+				sleepWithContext(ctx, homeReconnectInterval)
+				break
+			}
+			event, errMsg := pubsub.ReceiveTimeout(ctx, remaining)
 			if errMsg != nil {
 				_ = pubsub.Close()
 				c.heartbeatOK.Store(false)
@@ -795,6 +807,14 @@ func (c *Client) StartConfigSubscriber(ctx context.Context, onConfig func([]byte
 				} else {
 					c.markReconnectFailure("subscription")
 				}
+				sleepWithContext(ctx, homeReconnectInterval)
+				break
+			}
+			if !time.Now().Before(lastHeartbeat.Add(subTimeout)) {
+				// A message that arrives after the deadline is a timeout, not liveness.
+				_ = pubsub.Close()
+				c.heartbeatOK.Store(false)
+				c.markSubscriptionTimeout()
 				sleepWithContext(ctx, homeReconnectInterval)
 				break
 			}
@@ -811,7 +831,12 @@ func (c *Client) StartConfigSubscriber(ctx context.Context, onConfig func([]byte
 					}
 				}
 			case *redis.Pong:
-				c.resetReconnectFailures()
+				// Only the persisted heartbeat PONG (empty payload) renews liveness
+				// and clears reconnect failures.
+				if msg != nil && msg.Payload == "" {
+					lastHeartbeat = time.Now()
+					c.resetReconnectFailures()
+				}
 			case *redis.Subscription:
 				continue
 			default:

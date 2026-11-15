@@ -273,16 +273,9 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 			isFinalChunk := upstreamFinishReason != "" && usageExists
 
 			if isFinalChunk {
-				var finishReason string
-				if sawToolCall {
-					finishReason = "tool_calls"
-				} else if upstreamFinishReason == "MAX_TOKENS" {
-					finishReason = "max_tokens"
-				} else {
-					finishReason = "stop"
-				}
+				finishReason, nativeFinishReason := resolveGeminiOpenAIFinishReason(upstreamFinishReason, sawToolCall)
 				template, _ = sjson.SetBytes(template, "choices.0.finish_reason", finishReason)
-				template, _ = sjson.SetBytes(template, "choices.0.native_finish_reason", strings.ToLower(upstreamFinishReason))
+				template, _ = sjson.SetBytes(template, "choices.0.native_finish_reason", nativeFinishReason)
 			}
 
 			responseStrings = append(responseStrings, template)
@@ -370,8 +363,18 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 
 			// Set finish reason.
 			if finishReasonResult := candidate.Get("finishReason"); finishReasonResult.Exists() {
-				choiceTemplate, _ = sjson.SetBytes(choiceTemplate, "finish_reason", strings.ToLower(finishReasonResult.String()))
-				choiceTemplate, _ = sjson.SetBytes(choiceTemplate, "native_finish_reason", strings.ToLower(finishReasonResult.String()))
+				rawFinishReason := finishReasonResult.String()
+				finishReason := strings.ToLower(rawFinishReason)
+				switch {
+				case strings.EqualFold(strings.TrimSpace(rawFinishReason), "MAX_TOKENS"):
+					// "max_tokens" is not a valid OpenAI finish_reason; strict
+					// clients reject it, so report the documented "length".
+					finishReason = "length"
+				case isGeminiContentFilterFinishReason(rawFinishReason):
+					finishReason = "content_filter"
+				}
+				choiceTemplate, _ = sjson.SetBytes(choiceTemplate, "finish_reason", finishReason)
+				choiceTemplate, _ = sjson.SetBytes(choiceTemplate, "native_finish_reason", strings.ToLower(rawFinishReason))
 			}
 
 			partsResult := candidate.Get("content.parts")
@@ -484,4 +487,36 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 	}
 
 	return template
+}
+
+// resolveGeminiOpenAIFinishReason maps the upstream Gemini finishReason to the
+// OpenAI finish_reason/native_finish_reason pair. "max_tokens" is not a valid
+// OpenAI finish_reason, so MAX_TOKENS reports "length" instead.
+func resolveGeminiOpenAIFinishReason(upstreamFinishReason string, sawToolCall bool) (finishReason, nativeFinishReason string) {
+	switch {
+	case sawToolCall:
+		finishReason = "tool_calls"
+	case strings.EqualFold(strings.TrimSpace(upstreamFinishReason), "MAX_TOKENS"):
+		finishReason = "length"
+	case isGeminiContentFilterFinishReason(upstreamFinishReason):
+		finishReason = "content_filter"
+	default:
+		finishReason = "stop"
+	}
+	nativeFinishReason = "stop"
+	if upstreamFinishReason != "" {
+		nativeFinishReason = strings.ToLower(upstreamFinishReason)
+	}
+	return finishReason, nativeFinishReason
+}
+
+// isGeminiContentFilterFinishReason reports whether an upstream Gemini
+// finishReason denotes content filtering rather than a natural stop.
+func isGeminiContentFilterFinishReason(reason string) bool {
+	switch strings.ToUpper(strings.TrimSpace(reason)) {
+	case "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY", "MALFORMED_RESPONSE", "MALFORMED_FUNCTION_CALL":
+		return true
+	default:
+		return false
+	}
 }

@@ -49,11 +49,7 @@ func ConvertGeminiRequestToInteractions(modelName string, inputRawJSON []byte, s
 	out := []byte(`{"model":"","input":[]}`)
 	out, _ = sjson.SetBytes(out, "model", modelName)
 	out = copyGeminiSystemInstructionToInteractions(out, root)
-	if root.Get("generationConfig").Exists() {
-		converted := convertCamelCaseKeysToSnakeCase([]byte(root.Get("generationConfig").Raw))
-		out, _ = sjson.SetRawBytes(out, "generation_config", converted)
-		out = normalizeGeminiThinkingConfigForInteractions(out)
-	}
+	out = copyGeminiGenerationConfigToInteractions(out, root)
 	out = copyGeminiToolsToInteractions(out, root)
 	inputItems := translatorcommon.NewRawArrayItems(root.Get("contents.#").Int())
 	root.Get("contents").ForEach(func(_, content gjson.Result) bool {
@@ -191,6 +187,124 @@ func firstExistingPath(root gjson.Result, paths []string) gjson.Result {
 	return gjson.Result{}
 }
 
+func copyGeminiGenerationConfigToInteractions(out []byte, root gjson.Result) []byte {
+	genCfg := root.Get("generationConfig")
+	if !genCfg.Exists() {
+		genCfg = root.Get("generation_config")
+	}
+	if !genCfg.Exists() {
+		return out
+	}
+	converted := convertCamelCaseKeysToSnakeCase([]byte(genCfg.Raw))
+	out, _ = sjson.SetRawBytes(out, "generation_config", converted)
+	out = normalizeGeminiThinkingConfigForInteractions(out)
+	out = normalizeGeminiResponseFormatForInteractions(out, genCfg)
+	return out
+}
+
+// normalizeGeminiResponseFormatForInteractions maps Gemini's modality, mime
+// type, and response schema settings to the Interactions response_format field
+// so the model still answers in the requested shape.
+func normalizeGeminiResponseFormatForInteractions(out []byte, genCfg gjson.Result) []byte {
+	if !genCfg.Exists() {
+		return out
+	}
+
+	var modalities []string
+	seenModalities := make(map[string]bool)
+	if mods := firstExistingPath(genCfg, []string{"responseModalities", "response_modalities"}); mods.Exists() && mods.IsArray() {
+		mods.ForEach(func(_, mod gjson.Result) bool {
+			normalized := strings.ToLower(strings.TrimSpace(mod.String()))
+			if normalized == "" || seenModalities[normalized] {
+				return true
+			}
+			seenModalities[normalized] = true
+			modalities = append(modalities, normalized)
+			return true
+		})
+	}
+
+	imageCfg := firstExistingPath(genCfg, []string{"imageConfig", "image_config"})
+	hasImageCfg := imageCfg.Exists() && imageCfg.IsObject()
+	mimeType := strings.TrimSpace(firstExistingPath(genCfg, []string{"responseMimeType", "response_mime_type"}).String())
+	schema := firstExistingPath(genCfg, []string{"responseJsonSchema", "response_json_schema", "responseSchema", "response_schema"})
+	hasTextFormat := mimeType != "" || schema.Exists()
+
+	if len(modalities) == 0 && !hasImageCfg && !hasTextFormat {
+		return out
+	}
+
+	buildImageEntry := func() []byte {
+		entry := []byte(`{"type":"image"}`)
+		if hasImageCfg && len(imageCfg.Map()) > 0 {
+			converted := convertCamelCaseKeysToSnakeCase([]byte(imageCfg.Raw))
+			gjson.ParseBytes(converted).ForEach(func(key, value gjson.Result) bool {
+				k := strings.TrimSpace(key.String())
+				if k == "" || k == "type" {
+					return true
+				}
+				entry, _ = sjson.SetRawBytes(entry, k, []byte(value.Raw))
+				return true
+			})
+		}
+		return entry
+	}
+
+	buildTextEntry := func() []byte {
+		entry := []byte(`{"type":"text"}`)
+		if mimeType != "" {
+			entry, _ = sjson.SetBytes(entry, "mime_type", mimeType)
+		}
+		if schema.Exists() {
+			entry, _ = sjson.SetRawBytes(entry, "schema", []byte(schema.Raw))
+		}
+		return entry
+	}
+
+	var entries [][]byte
+	addedImage := false
+	addedText := false
+	for _, mod := range modalities {
+		switch mod {
+		case "image":
+			entries = append(entries, buildImageEntry())
+			addedImage = true
+		case "text":
+			entries = append(entries, buildTextEntry())
+			addedText = true
+		default:
+			entry := []byte(`{"type":""}`)
+			entry, _ = sjson.SetBytes(entry, "type", mod)
+			entries = append(entries, entry)
+		}
+	}
+	if hasTextFormat && !addedText {
+		entries = append(entries, buildTextEntry())
+	}
+	if hasImageCfg && !addedImage {
+		entries = append(entries, buildImageEntry())
+	}
+	if len(entries) == 1 {
+		out, _ = sjson.SetRawBytes(out, "response_format", entries[0])
+	} else if len(entries) > 1 {
+		out = translatorcommon.SetRawArrayItems(out, "response_format", entries)
+	}
+
+	for _, path := range []string{
+		"generation_config.response_modalities",
+		"generation_config.image_config",
+		"generation_config.response_mime_type",
+		"generation_config.response_schema",
+		"generation_config.response_json_schema",
+	} {
+		out, _ = sjson.DeleteBytes(out, path)
+	}
+	if genNode := gjson.GetBytes(out, "generation_config"); genNode.Exists() && genNode.IsObject() && len(genNode.Map()) == 0 {
+		out, _ = sjson.DeleteBytes(out, "generation_config")
+	}
+	return out
+}
+
 func copyGeminiToolsToInteractions(out []byte, root gjson.Result) []byte {
 	tools := root.Get("tools")
 	if !tools.Exists() {
@@ -202,6 +316,17 @@ func copyGeminiToolsToInteractions(out []byte, root gjson.Result) []byte {
 	}
 	normalized := make([]map[string]any, 0)
 	tools.ForEach(func(_, tool gjson.Result) bool {
+		// Built-in Gemini tools have no function name; map them to their
+		// Interactions counterparts instead of dropping them.
+		if uc := firstExistingPath(tool, []string{"urlContext", "url_context"}); uc.Exists() {
+			normalized = append(normalized, geminiBuiltinToolToInteractionsEntry("url_context", uc))
+		}
+		if ce := firstExistingPath(tool, []string{"codeExecution", "code_execution"}); ce.Exists() {
+			normalized = append(normalized, geminiBuiltinToolToInteractionsEntry("code_execution", ce))
+		}
+		if gs := firstExistingPath(tool, []string{"googleSearch", "google_search"}); gs.Exists() {
+			normalized = append(normalized, geminiBuiltinToolToInteractionsEntry("google_search", gs))
+		}
 		if name := tool.Get("name"); name.Exists() {
 			entry := map[string]any{
 				"type": "function",
@@ -252,6 +377,76 @@ func copyGeminiToolsToInteractions(out []byte, root gjson.Result) []byte {
 		return out
 	}
 	out, _ = sjson.SetRawBytes(out, "tools", raw)
+	return out
+}
+
+func geminiBuiltinToolToInteractionsEntry(toolType string, cfg gjson.Result) map[string]any {
+	entry := map[string]any{"type": toolType}
+	if !cfg.IsObject() || len(cfg.Map()) == 0 {
+		return entry
+	}
+	cfg.ForEach(func(key, value gjson.Result) bool {
+		snakeKey := toSnakeCase(strings.TrimSpace(key.String()))
+		if snakeKey == "" || snakeKey == "type" {
+			return true
+		}
+		if toolType == "google_search" && snakeKey == "search_types" {
+			if searchTypes := geminiSearchTypesToInteractions(value); len(searchTypes) > 0 {
+				entry["search_types"] = searchTypes
+			}
+			return true
+		}
+		if value.IsObject() || value.IsArray() {
+			entry[snakeKey] = json.RawMessage(convertCamelCaseKeysToSnakeCase([]byte(value.Raw)))
+			return true
+		}
+		if value.Type == gjson.String {
+			entry[snakeKey] = value.String()
+			return true
+		}
+		if value.Type == gjson.Number {
+			entry[snakeKey] = value.Num
+			return true
+		}
+		if value.Type == gjson.True || value.Type == gjson.False {
+			entry[snakeKey] = value.Bool()
+		}
+		return true
+	})
+	return entry
+}
+
+// geminiSearchTypesToInteractions flattens the Gemini searchTypes object into
+// the string list Interactions expects (e.g. [web_search, image_search]).
+func geminiSearchTypesToInteractions(value gjson.Result) []string {
+	if !value.Exists() {
+		return nil
+	}
+	if value.Type == gjson.String {
+		if trimmed := strings.TrimSpace(value.String()); trimmed != "" {
+			return []string{toSnakeCase(trimmed)}
+		}
+		return nil
+	}
+	if value.IsArray() {
+		var out []string
+		value.ForEach(func(_, item gjson.Result) bool {
+			out = append(out, geminiSearchTypesToInteractions(item)...)
+			return true
+		})
+		return out
+	}
+	if !value.IsObject() {
+		return nil
+	}
+	var out []string
+	value.ForEach(func(key, _ gjson.Result) bool {
+		name := toSnakeCase(strings.TrimSpace(key.String()))
+		if name != "" {
+			out = append(out, name)
+		}
+		return true
+	})
 	return out
 }
 

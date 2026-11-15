@@ -185,6 +185,18 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		reporter.EnsurePublished(ctx)
 		return cliproxyexecutor.Response{}, err
 	}
+	if action != "countTokens" {
+		// An abnormal termination (malformed function call / malformed response)
+		// with no visible output is a retryable upstream failure, not an empty
+		// successful answer.
+		if _, zeroErrMsg, zeroOutput := helps.CheckGeminiZeroOutputNonStream(from, data, false); zeroOutput {
+			err = statusErr{code: http.StatusBadGateway, msg: zeroErrMsg}
+			helps.RecordAPIResponseError(ctx, e.cfg, err)
+			reporter.PublishFailureWithDetail(ctx, helps.ParseGeminiUsage(data), err)
+			reporter.EnsurePublished(ctx)
+			return cliproxyexecutor.Response{}, err
+		}
+	}
 	reporter.Publish(ctx, helps.ParseGeminiUsage(data))
 	reporter.EnsurePublished(ctx)
 	var param any
@@ -278,6 +290,64 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		scanner.Buffer(make([]byte, 0, 64*1024), streamScannerBuffer)
 		var param any
 		var sawFinishReason bool
+		// zeroOutputGuard withholds leading contentless frames and converts an
+		// abnormal zero-output termination into a retryable 502 before the
+		// downstream response is committed.
+		zeroOutputGuard := helps.NewGeminiZeroOutputStreamGuard(false, from)
+		failZeroOutput := func(finishReason string) bool {
+			zeroErr := statusErr{code: http.StatusBadGateway, msg: helps.GeminiZeroOutputErrorMessage(from, finishReason)}
+			helps.RecordAPIResponseError(ctx, e.cfg, zeroErr)
+			if !streamUsage.PublishFailure(ctx, reporter, zeroErr) {
+				reporter.PublishFailure(ctx, zeroErr)
+			}
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: zeroErr}:
+			case <-ctx.Done():
+			}
+			return false
+		}
+		emitTranslatedPayload := func(payload []byte) bool {
+			lines := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(payload), &param)
+			for i := range lines {
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}:
+					if len(lines[i]) > 0 {
+						zeroOutputGuard.MarkEmitted()
+					}
+					if helps.IsGeminiTerminalStreamChunk(lines[i]) {
+						terminalDelivered = true
+					}
+				case <-ctx.Done():
+					return false
+				}
+			}
+			return true
+		}
+		guardAndEmitPayload := func(raw []byte) bool {
+			shells, action, finishReason := zeroOutputGuard.Observe(raw)
+			switch action {
+			case helps.GeminiZeroOutputContinue:
+				return true
+			case helps.GeminiZeroOutputFailNow:
+				return failZeroOutput(finishReason)
+			case helps.GeminiZeroOutputEmitErrorThenFail:
+				errFrame := zeroOutputGuard.AbnormalFrame()
+				if len(errFrame) == 0 {
+					errFrame = raw
+				}
+				if !emitTranslatedPayload(errFrame) {
+					return false
+				}
+				return failZeroOutput(finishReason)
+			default:
+				for _, shell := range shells {
+					if !emitTranslatedPayload(shell) {
+						return false
+					}
+				}
+				return emitTranslatedPayload(raw)
+			}
+		}
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
@@ -305,16 +375,8 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			if len(payload) == 0 {
 				continue
 			}
-			lines := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(payload), &param)
-			for i := range lines {
-				select {
-				case out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}:
-					if helps.IsGeminiTerminalStreamChunk(lines[i]) {
-						terminalDelivered = true
-					}
-				case <-ctx.Done():
-					return
-				}
+			if !guardAndEmitPayload(payload) {
+				return
 			}
 		}
 		if errScan := scanner.Err(); errScan != nil {
@@ -334,6 +396,22 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		if ctx.Err() != nil {
 			return
 		}
+		// A latched abnormal zero-output termination must fail even when the
+		// upstream closed cleanly, so check it before announcing completion.
+		if zeroOutputGuard.HasAbnormalFinish() {
+			_, action, finishReason := zeroOutputGuard.Finalize()
+			if action == helps.GeminiZeroOutputEmitErrorThenFail {
+				errFrame := zeroOutputGuard.AbnormalFrame()
+				if len(errFrame) == 0 {
+					errFrame = []byte("[DONE]")
+				}
+				if !emitTranslatedPayload(errFrame) {
+					return
+				}
+			}
+			failZeroOutput(finishReason)
+			return
+		}
 		// Formats that require explicit termination signals should error on truncation
 		// rather than silently completing with incomplete data.
 		if (from == sdktranslator.FormatClaude || from == sdktranslator.FormatOpenAI || from == sdktranslator.FormatOpenAIResponse) && !sawFinishReason {
@@ -347,6 +425,14 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			case <-ctx.Done():
 			}
 			return
+		}
+		// Flush any shell frames the guard withheld while waiting for content.
+		if shells, action, _ := zeroOutputGuard.Finalize(); action == helps.GeminiZeroOutputEmit {
+			for _, shell := range shells {
+				if !emitTranslatedPayload(shell) {
+					return
+				}
+			}
 		}
 		lines := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param)
 		for i := range lines {

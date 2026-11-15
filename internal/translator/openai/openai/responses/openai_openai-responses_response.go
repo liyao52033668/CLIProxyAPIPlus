@@ -78,22 +78,80 @@ func incompleteByFinishReason(reason string) ([]byte, bool) {
 }
 
 func chatCompletionContentText(content gjson.Result) string {
+	_, text := chatCompletionContentSegments(content)
+	return text
+}
+
+// chatCompletionContentSegments splits an OpenAI Chat Completions message
+// content value into reasoning text and visible text. Compatible upstreams and
+// OpenRouter-style gateways send typed content-part arrays that mix
+// "thinking"/"reasoning" parts with "text" parts; those reasoning parts must
+// become reasoning output instead of being dropped or dumped verbatim into the
+// visible message.
+func chatCompletionContentSegments(content gjson.Result) (reasoning, text string) {
 	if !content.Exists() || content.Type == gjson.Null {
-		return ""
+		return "", ""
 	}
 	if !content.IsArray() {
-		return content.String()
+		return "", content.String()
 	}
 
-	var builder strings.Builder
+	var reasoningBuilder strings.Builder
+	var textBuilder strings.Builder
 	content.ForEach(func(_, part gjson.Result) bool {
+		if part.Type == gjson.String {
+			textBuilder.WriteString(part.String())
+			return true
+		}
 		switch part.Get("type").String() {
+		case "thinking", "reasoning", "thought", "reasoning.text", "reasoning_text":
+			reasoningBuilder.WriteString(openAIContentPartThinkingText(part))
 		case "text", "output_text":
-			builder.WriteString(part.Get("text").String())
+			textBuilder.WriteString(part.Get("text").String())
+		case "refusal":
+			refusalText := part.Get("refusal").String()
+			if refusalText == "" {
+				refusalText = part.Get("text").String()
+			}
+			textBuilder.WriteString(refusalText)
 		}
 		return true
 	})
-	return builder.String()
+	return reasoningBuilder.String(), textBuilder.String()
+}
+
+// openAIContentPartThinkingText extracts the reasoning text carried by one typed
+// content part, tolerating the field names different upstreams use.
+func openAIContentPartThinkingText(part gjson.Result) string {
+	for _, field := range []string{"thinking", "reasoning", "reasoning_content", "text"} {
+		if text := openAIContentReasoningTexts(part.Get(field)); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+func openAIContentReasoningTexts(node gjson.Result) string {
+	if !node.Exists() {
+		return ""
+	}
+	if node.IsArray() {
+		var builder strings.Builder
+		node.ForEach(func(_, value gjson.Result) bool {
+			builder.WriteString(openAIContentReasoningTexts(value))
+			return true
+		})
+		return builder.String()
+	}
+	if node.Type == gjson.String {
+		return node.String()
+	}
+	if node.IsObject() {
+		if text := node.Get("text").String(); text != "" {
+			return text
+		}
+	}
+	return ""
 }
 
 func buildResponsesCompletedEvent(st *oaiToResponsesState, requestRawJSON []byte, nextSeq func() int) []byte {
@@ -526,12 +584,44 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 				}
 
 				if c := delta.Get("content"); c.Exists() {
+					// Typed thinking content parts in a streaming delta carry
+					// reasoning, not visible text. Split them out before the text
+					// buffer decodes the remaining parts.
+					deltaContent := c
+					if c.IsArray() {
+						if typedReasoning, typedText := chatCompletionContentSegments(c); typedReasoning != "" {
+							if reasoningText := st.ReasoningBuffer.Text(gjson.Result{Type: gjson.String, Str: typedReasoning}); reasoningText != "" {
+								if st.ReasoningID == "" {
+									st.ReasoningID = fmt.Sprintf("rs_%s_%d", st.ResponseID, idx)
+									st.ReasoningIndex = allocOutputIndex()
+									item := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"reasoning","status":"in_progress","summary":[]}}`)
+									item, _ = sjson.SetBytes(item, "sequence_number", nextSeq())
+									item, _ = sjson.SetBytes(item, "output_index", st.ReasoningIndex)
+									item, _ = sjson.SetBytes(item, "item.id", st.ReasoningID)
+									out = append(out, emitRespEvent("response.output_item.added", item))
+									part := []byte(`{"type":"response.reasoning_summary_part.added","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":""}}`)
+									part, _ = sjson.SetBytes(part, "sequence_number", nextSeq())
+									part, _ = sjson.SetBytes(part, "item_id", st.ReasoningID)
+									part, _ = sjson.SetBytes(part, "output_index", st.ReasoningIndex)
+									out = append(out, emitRespEvent("response.reasoning_summary_part.added", part))
+								}
+								st.ReasoningBuf.WriteString(reasoningText)
+								msg := []byte(`{"type":"response.reasoning_summary_text.delta","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"delta":""}`)
+								msg, _ = sjson.SetBytes(msg, "sequence_number", nextSeq())
+								msg, _ = sjson.SetBytes(msg, "item_id", st.ReasoningID)
+								msg, _ = sjson.SetBytes(msg, "output_index", st.ReasoningIndex)
+								msg, _ = sjson.SetBytes(msg, "delta", reasoningText)
+								out = append(out, emitRespEvent("response.reasoning_summary_text.delta", msg))
+							}
+							deltaContent = gjson.Result{Type: gjson.String, Str: typedText}
+						}
+					}
 					textBuffer := st.MsgTextBuffers[idx]
 					if textBuffer == nil {
 						textBuffer = &translatorcommon.ContentBlockTextBuffer{}
 						st.MsgTextBuffers[idx] = textBuffer
 					}
-					contentText := textBuffer.Text(c)
+					contentText := textBuffer.Text(deltaContent)
 					if contentText != "" {
 						// Ensure the message item and its first content part are announced before any text deltas
 						if st.ReasoningID != "" {
@@ -929,8 +1019,16 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 
 	// Build output list from choices[...]
 	outputsWrapper := []byte(`{"arr":[]}`)
-	// Detect and capture reasoning content if present
+	// Detect and capture reasoning content if present. Typed thinking content
+	// parts are an alternative carrier when no reasoning_content field exists.
 	rcText := gjson.GetBytes(rawJSON, "choices.0.message.reasoning_content").String()
+	if rcText == "" {
+		if c := gjson.GetBytes(rawJSON, "choices.0.message.content"); c.Exists() && c.IsArray() {
+			if typedReasoning, _ := chatCompletionContentSegments(c); typedReasoning != "" {
+				rcText = typedReasoning
+			}
+		}
+	}
 	includeReasoning := rcText != ""
 	if !includeReasoning && len(requestRawJSON) > 0 {
 		includeReasoning = gjson.GetBytes(requestRawJSON, "reasoning").Exists()

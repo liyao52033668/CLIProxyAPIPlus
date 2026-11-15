@@ -267,7 +267,24 @@ func setKiroIncognitoMode(cfg *config.Config, useIncognito, noIncognito bool) {
 // main is the entry point of the application.
 // It parses command-line flags, loads configuration, and starts the appropriate
 // service based on the provided flags (login, codex-login, or server mode).
+//
+// run performs the work and reports the process exit status so deferred cleanup
+// runs before the process exits.
 func main() {
+	os.Exit(run())
+}
+
+// logStartupErrorf writes a startup failure to stderr as well as the logger so
+// the message survives when file-backed logging is not configured yet.
+func logStartupErrorf(format string, args ...any) {
+	if log.StandardLogger().Out != os.Stderr {
+		_, _ = fmt.Fprintf(os.Stderr, format+"\n", args...)
+	}
+	log.Errorf(format, args...)
+}
+
+// run executes the CLI and returns the process exit status.
+func run() (exitStatus int) {
 	fmt.Printf("CLIProxyAPI Version: %s, Commit: %s, BuiltAt: %s\n", buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate)
 
 	// Command-line flags to control the application's behavior.
@@ -438,8 +455,8 @@ func main() {
 
 	wd, err := os.Getwd()
 	if err != nil {
-		log.Errorf("failed to get working directory: %v", err)
-		return
+		logStartupErrorf("failed to get working directory: %v", err)
+		return 1
 	}
 
 	// Load environment variables from .env if present.
@@ -575,8 +592,8 @@ func main() {
 		homeCfg, errHomeCfg := home.ConfigFromJWT(ctxHome, homeJWT)
 		cancelHome()
 		if errHomeCfg != nil {
-			log.Errorf("invalid -home-jwt: %v", errHomeCfg)
-			return
+			logStartupErrorf("invalid -home-jwt: %v", errHomeCfg)
+			return 1
 		}
 		if homeDisableClusterDiscovery {
 			homeCfg.DisableClusterDiscovery = true
@@ -588,15 +605,15 @@ func main() {
 		cancelHomeConfig()
 		if errGetConfig != nil {
 			tempHomeClient.Close()
-			log.Errorf("failed to fetch config from home: %v", errGetConfig)
-			return
+			logStartupErrorf("failed to fetch config from home: %v", errGetConfig)
+			return 1
 		}
 
 		parsed, errParseConfig := config.ParseConfigBytes(raw)
 		if errParseConfig != nil {
 			tempHomeClient.Close()
-			log.Errorf("failed to parse config payload from home: %v", errParseConfig)
-			return
+			logStartupErrorf("failed to parse config payload from home: %v", errParseConfig)
+			return 1
 		}
 		if parsed == nil {
 			parsed = &config.Config{}
@@ -639,15 +656,15 @@ func main() {
 		})
 		cancel()
 		if err != nil {
-			log.Errorf("failed to initialize postgres token store: %v", err)
-			return
+			logStartupErrorf("failed to initialize postgres token store: %v", err)
+			return 1
 		}
 		examplePath := filepath.Join(wd, "config.example.yaml")
 		ctx, cancel = context.WithTimeout(context.Background(), bootstrapTimeout)
 		if errBootstrap := pgStoreInst.Bootstrap(ctx, examplePath); errBootstrap != nil {
 			cancel()
-			log.Errorf("failed to bootstrap postgres-backed config: %v", errBootstrap)
-			return
+			logStartupErrorf("failed to bootstrap postgres-backed config: %v", errBootstrap)
+			return 1
 		}
 		cancel()
 		configFilePath = pgStoreInst.ConfigPath()
@@ -670,8 +687,8 @@ func main() {
 		if strings.Contains(resolvedEndpoint, "://") {
 			parsed, errParse := url.Parse(resolvedEndpoint)
 			if errParse != nil {
-				log.Errorf("failed to parse object store endpoint %q: %v", objectStoreEndpoint, errParse)
-				return
+				logStartupErrorf("failed to parse object store endpoint %q: %v", objectStoreEndpoint, errParse)
+				return 1
 			}
 			switch strings.ToLower(parsed.Scheme) {
 			case "http":
@@ -679,12 +696,12 @@ func main() {
 			case "https":
 				useSSL = true
 			default:
-				log.Errorf("unsupported object store scheme %q (only http and https are allowed)", parsed.Scheme)
-				return
+				logStartupErrorf("unsupported object store scheme %q (only http and https are allowed)", parsed.Scheme)
+				return 1
 			}
 			if parsed.Host == "" {
-				log.Errorf("object store endpoint %q is missing host information", objectStoreEndpoint)
-				return
+				logStartupErrorf("object store endpoint %q is missing host information", objectStoreEndpoint)
+				return 1
 			}
 			resolvedEndpoint = parsed.Host
 			if parsed.Path != "" && parsed.Path != "/" {
@@ -703,16 +720,16 @@ func main() {
 		}
 		objectStoreInst, err = store.NewObjectTokenStore(objCfg)
 		if err != nil {
-			log.Errorf("failed to initialize object token store: %v", err)
-			return
+			logStartupErrorf("failed to initialize object token store: %v", err)
+			return 1
 		}
 		examplePath := filepath.Join(wd, "config.example.yaml")
 		log.Infof("Starting object store bootstrap (timeout: 5 minutes)...")
 		ctx, cancel := context.WithTimeout(context.Background(), objectStoreBootstrapTimeout)
 		if errBootstrap := objectStoreInst.Bootstrap(ctx, examplePath); errBootstrap != nil {
 			cancel()
-			log.Errorf("failed to bootstrap object-backed config: %v", errBootstrap)
-			return
+			logStartupErrorf("failed to bootstrap object-backed config: %v", errBootstrap)
+			return 1
 		}
 		cancel()
 		log.Infof("Object store bootstrap completed successfully")
@@ -739,8 +756,8 @@ func main() {
 		gitStoreInst = store.NewGitTokenStore(gitStoreRemoteURL, gitStoreUser, gitStorePassword, gitStoreBranch)
 		gitStoreInst.SetBaseDir(authDir)
 		if errRepo := gitStoreInst.EnsureRepository(); errRepo != nil {
-			log.Errorf("failed to prepare git token store: %v", errRepo)
-			return
+			logStartupErrorf("failed to prepare git token store: %v", errRepo)
+			return 1
 		}
 		configFilePath = gitStoreInst.ConfigPath()
 		if configFilePath == "" {
@@ -749,21 +766,21 @@ func main() {
 		if _, statErr := os.Stat(configFilePath); errors.Is(statErr, fs.ErrNotExist) {
 			examplePath := filepath.Join(wd, "config.example.yaml")
 			if _, errExample := os.Stat(examplePath); errExample != nil {
-				log.Errorf("failed to find template config file: %v", errExample)
-				return
+				logStartupErrorf("failed to find template config file: %v", errExample)
+				return 1
 			}
 			if errCopy := misc.CopyConfigTemplate(examplePath, configFilePath); errCopy != nil {
-				log.Errorf("failed to bootstrap git-backed config: %v", errCopy)
-				return
+				logStartupErrorf("failed to bootstrap git-backed config: %v", errCopy)
+				return 1
 			}
 			if errCommit := gitStoreInst.PersistConfig(context.Background()); errCommit != nil {
-				log.Errorf("failed to commit initial git-backed config: %v", errCommit)
-				return
+				logStartupErrorf("failed to commit initial git-backed config: %v", errCommit)
+				return 1
 			}
 			log.Infof("git-backed config initialized from template: %s", configFilePath)
 		} else if statErr != nil {
-			log.Errorf("failed to inspect git-backed config: %v", statErr)
-			return
+			logStartupErrorf("failed to inspect git-backed config: %v", statErr)
+			return 1
 		}
 		cfg, err = config.LoadConfigOptional(configFilePath, isCloudDeploy)
 		if err == nil {
@@ -776,15 +793,15 @@ func main() {
 	} else {
 		wd, err = os.Getwd()
 		if err != nil {
-			log.Errorf("failed to get working directory: %v", err)
-			return
+			logStartupErrorf("failed to get working directory: %v", err)
+			return 1
 		}
 		configFilePath = filepath.Join(wd, "config.yaml")
 		cfg, err = config.LoadConfigOptional(configFilePath, isCloudDeploy)
 	}
 	if err != nil {
-		log.Errorf("failed to load config: %v", err)
-		return
+		logStartupErrorf("failed to load config: %v", err)
+		return 1
 	}
 	if cfg == nil {
 		cfg = &config.Config{}
@@ -839,8 +856,8 @@ func main() {
 		if authDirResolved {
 			log.WithError(errUsage).Error("failed to init usage database")
 		} else {
-			log.Errorf("failed to resolve auth directory: %v", errUsage)
-			return
+			logStartupErrorf("failed to resolve auth directory: %v", errUsage)
+			return 1
 		}
 	} else if cfg.UsageStatisticsEnabled && usageDB != nil {
 		usage.SetStatisticsEnabled(cfg.UsageStatisticsEnabled)
@@ -859,8 +876,8 @@ func main() {
 	coreauth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 
 	if err = logging.ConfigureLogOutput(cfg); err != nil {
-		log.Errorf("failed to configure log output: %v", err)
-		return
+		logStartupErrorf("failed to configure log output: %v", err)
+		return 1
 	}
 
 	log.Infof("CLIProxyAPI Version: %s, Commit: %s, BuiltAt: %s", buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate)
@@ -981,7 +998,7 @@ func main() {
 		if isCloudDeploy && !configFileExists {
 			// No config file available, just wait for shutdown
 			cmd.WaitForCloudDeploy()
-			return
+			return 0
 		}
 		if localModel && (!tuiMode || standalone) {
 			log.Info("Local model mode: using embedded catalogs unless an explicit catalog source is configured")
@@ -1045,23 +1062,29 @@ func main() {
 					cancel()
 					<-done
 					fmt.Fprintf(os.Stderr, "TUI error: embedded server is not ready\n")
-					return
+					return 1
 				}
 
+				var errTUI error
 				if errRun := tui.Run(cfg.Port, password, hook, origStdout); errRun != nil {
 					restoreIO()
 					fmt.Fprintf(os.Stderr, "TUI error: %v\n", errRun)
+					errTUI = errRun
 				} else {
 					restoreIO()
 				}
 
 				cancel()
 				<-done
+				if errTUI != nil {
+					return 1
+				}
 			} else {
 				// Default TUI mode: pure management client.
 				// The proxy server must already be running.
 				if errRun := tui.Run(cfg.Port, password, nil, os.Stdout); errRun != nil {
 					fmt.Fprintf(os.Stderr, "TUI error: %v\n", errRun)
+					return 1
 				}
 			}
 		} else {
@@ -1097,7 +1120,10 @@ func main() {
 				}()
 			}
 
-			cmd.StartService(cfg, configFilePath, password, earlyBoundListener)
+			if errStart := cmd.StartService(cfg, configFilePath, password, earlyBoundListener); errStart != nil {
+				logStartupErrorf("proxy service error: %v", errStart)
+				return 1
+			}
 
 			if homeClient != nil {
 				// The bootstrap client is not owned by the runtime service. Close it after
@@ -1107,6 +1133,7 @@ func main() {
 			}
 		}
 	}
+	return 0
 }
 
 // modelCatalogUpdaterPlan decides which remote model catalogs should refresh.

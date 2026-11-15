@@ -1015,6 +1015,8 @@ func (s *Server) registerManagementRoutes() {
 	secretExport := s.mgmt.SecretExportMiddleware()
 	{
 		mgmt.GET("/usage", s.mgmt.GetUsageStatistics)
+		// Read-only observability: counts only, no request bodies or credentials.
+		mgmt.GET("/observability/requests/in-flight", s.mgmt.GetInFlightRequests)
 		mgmt.GET("/usage/export", s.mgmt.ExportUsageStatistics)
 		mgmt.POST("/usage/import", s.mgmt.ImportUsageStatistics)
 		mgmt.GET("/usage/db", s.mgmt.GetDBUsageStatistics)
@@ -2148,16 +2150,50 @@ func (s *Server) Stop(ctx context.Context) error {
 		}
 	}
 
-	// Close the HTTP server immediately without graceful draining.
+	// Close the HTTP server. With a positive server.shutdown-timeout, drain
+	// in-flight requests for up to that many seconds first; otherwise close
+	// immediately without graceful draining.
 	var errCloseServer error
+	var drainTimedOut bool
 	if s.server != nil {
-		errCloseServer = s.server.Close()
-		if errors.Is(errCloseServer, http.ErrServerClosed) || errors.Is(errCloseServer, net.ErrClosed) {
-			errCloseServer = nil
+		drainTimeout := 0
+		if cfg := s.getConfig(); cfg != nil {
+			drainTimeout = cfg.ShutdownTimeoutSeconds
+		}
+		if drainTimeout > 0 {
+			// Bound the drain by the configured budget so shutdown can never hang
+			// longer than the operator chose. A tighter caller deadline still wins.
+			drainCtx, cancelDrain := context.WithTimeout(ctx, time.Duration(drainTimeout)*time.Second)
+			log.Debugf("draining HTTP connections for up to %ds", drainTimeout)
+			errShutdown := s.server.Shutdown(drainCtx)
+			cancelDrain()
+			if errShutdown != nil {
+				if errors.Is(errShutdown, context.DeadlineExceeded) {
+					// Drain budget exhausted; in-flight requests were truncated.
+					drainTimedOut = true
+					log.Warnf("HTTP server drain timeout exceeded (%ds); some connections were force-closed", drainTimeout)
+				} else if errors.Is(errShutdown, context.Canceled) {
+					// Caller's context was canceled; log at debug level as this is expected during shutdown.
+					log.Debugf("HTTP server shutdown canceled by caller context")
+				} else {
+					errCloseServer = errShutdown
+				}
+			}
+		}
+		// Always force-close afterwards: this terminates anything that outlived the
+		// drain budget and is a no-op when Shutdown already returned cleanly.
+		// Hijacked connections (WebSocket sessions) are not tracked by the HTTP
+		// server; they are released by their own managers.
+		errClose := s.server.Close()
+		if errClose != nil && !errors.Is(errClose, http.ErrServerClosed) && !errors.Is(errClose, net.ErrClosed) && errCloseServer == nil {
+			errCloseServer = errClose
 		}
 	}
 	if errCloseServer != nil {
 		return fmt.Errorf("failed to shutdown HTTP server: %v", errCloseServer)
+	}
+	if drainTimedOut {
+		return fmt.Errorf("HTTP server shutdown: drain timeout exceeded, some connections were force-closed")
 	}
 
 	log.Debug("API server stopped")

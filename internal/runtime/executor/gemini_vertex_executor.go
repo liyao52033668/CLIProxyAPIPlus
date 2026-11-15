@@ -418,6 +418,15 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini")
 	var param any
+	// An abnormal termination with no visible output is a retryable upstream
+	// failure, not an empty successful answer.
+	if _, zeroErrMsg, zeroOutput := helps.CheckGeminiZeroOutputNonStream(from, data, false); zeroOutput {
+		zeroErr := statusErr{code: http.StatusBadGateway, msg: zeroErrMsg}
+		helps.RecordAPIResponseError(ctx, e.cfg, zeroErr)
+		reporter.PublishFailureWithDetail(ctx, helps.ParseGeminiUsage(data), zeroErr)
+		reporter.EnsurePublished(ctx)
+		return cliproxyexecutor.Response{}, zeroErr
+	}
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, body, data, &param)
 	resp = cliproxyexecutor.Response{Payload: out, Headers: respHeaders}
 	return resp, nil
@@ -517,6 +526,15 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(ctx context.Context, auth *clip
 	reporter.Publish(ctx, helps.ParseGeminiUsage(data))
 	reporter.EnsurePublished(ctx)
 	var param any
+	// An abnormal termination with no visible output is a retryable upstream
+	// failure, not an empty successful answer.
+	if _, zeroErrMsg, zeroOutput := helps.CheckGeminiZeroOutputNonStream(from, data, false); zeroOutput {
+		zeroErr := statusErr{code: http.StatusBadGateway, msg: zeroErrMsg}
+		helps.RecordAPIResponseError(ctx, e.cfg, zeroErr)
+		reporter.PublishFailureWithDetail(ctx, helps.ParseGeminiUsage(data), zeroErr)
+		reporter.EnsurePublished(ctx)
+		return cliproxyexecutor.Response{}, zeroErr
+	}
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, body, data, &param)
 	resp = cliproxyexecutor.Response{Payload: out, Headers: respHeaders}
 	return resp, nil

@@ -191,7 +191,15 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "reload_failed", "message": err.Error()})
 		return
 	}
+	prevSecretHash := ""
+	if h.cfg != nil {
+		prevSecretHash = h.cfg.RemoteManagement.SecretKey
+	}
 	h.cfg = newCfg
+	if prevSecretHash != newCfg.RemoteManagement.SecretKey {
+		// A rotated management secret must take effect immediately.
+		h.authCache.invalidate()
+	}
 	c.JSON(http.StatusOK, gin.H{"ok": true, "changed": []string{"config"}})
 }
 

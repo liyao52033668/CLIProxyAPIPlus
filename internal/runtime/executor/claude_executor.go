@@ -300,6 +300,10 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
+	// Claude rejects input_schema property keys outside ^[a-zA-Z0-9_.-]{1,64}$.
+	// Embed such schemas in the tool description before payload rules run so
+	// the model still sees every original parameter name.
+	body = helps.NormalizeClaudeToolPropertyNames(body)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body = ensureModelMaxTokens(body, baseModel)
 
@@ -447,6 +451,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
+	// Claude rejects input_schema property keys outside ^[a-zA-Z0-9_.-]{1,64}$.
+	// Embed such schemas in the tool description before payload rules run so
+	// the model still sees every original parameter name.
+	body = helps.NormalizeClaudeToolPropertyNames(body)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body = ensureModelMaxTokens(body, baseModel)
 
@@ -726,6 +734,9 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	stream := from != to
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, stream)
 	body, _ = sjson.SetBytes(body, "model", upstreamModel)
+	// count_tokens rejects the same input_schema property keys as messages, so
+	// apply the same description fallback before the body is sent.
+	body = helps.NormalizeClaudeToolPropertyNames(body)
 
 	if !strings.HasPrefix(baseModel, "claude-3-5-haiku") {
 		body = checkSystemInstructions(body)
@@ -1705,7 +1716,7 @@ func getWorkloadFromContext(ctx context.Context) string {
 }
 
 // getCloakConfigFromAuth extracts cloak configuration from auth attributes.
-// Returns (cloakMode, strictMode, sensitiveWords, cacheUserID).
+// Returns (cloakMode, strictMode, sensitiveWords, sensitiveWordReplacements, cacheUserID).
 func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (string, bool, []string, bool) {
 	if auth == nil || auth.Attributes == nil {
 		return "auto", false, nil, false
@@ -2103,6 +2114,7 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 	cloakMode := attrMode
 	strictMode := attrStrict
 	sensitiveWords := attrWords
+	var sensitiveWordReplacements map[string]string
 	cacheUserID := attrCache
 
 	if cloakCfg != nil {
@@ -2114,6 +2126,9 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 		}
 		if len(cloakCfg.SensitiveWords) > 0 {
 			sensitiveWords = cloakCfg.SensitiveWords
+		}
+		if len(cloakCfg.SensitiveWordsReplace) > 0 {
+			sensitiveWordReplacements = cloakCfg.SensitiveWordsReplace
 		}
 		if cloakCfg.CacheUserID != nil {
 			cacheUserID = *cloakCfg.CacheUserID
@@ -2144,9 +2159,9 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 	// Inject fake user ID
 	payload = injectFakeUserID(payload, apiKey, cacheUserID)
 
-	// Apply sensitive word obfuscation
-	if len(sensitiveWords) > 0 {
-		matcher := helps.BuildSensitiveWordMatcher(sensitiveWords)
+	// Apply sensitive word obfuscation, honoring configured literal replacements.
+	if len(sensitiveWords) > 0 || len(sensitiveWordReplacements) > 0 {
+		matcher := helps.BuildSensitiveWordMatcherWithReplacements(sensitiveWords, sensitiveWordReplacements)
 		payload = helps.ObfuscateSensitiveWords(payload, matcher)
 	}
 

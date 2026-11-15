@@ -47,6 +47,11 @@ type Config struct {
 	// Values <= 0 disable the limit (default).
 	MaxRequestBodyBytes int64 `yaml:"max-request-body-bytes" json:"max-request-body-bytes"`
 
+	// ShutdownTimeoutSeconds controls how long the API server waits for
+	// in-flight requests to finish during shutdown before forcibly closing
+	// connections. 0 (the default) closes immediately without draining.
+	ShutdownTimeoutSeconds int `yaml:"shutdown-timeout" json:"shutdown-timeout"`
+
 	// TrustedProxies lists the IPs or CIDRs allowed to provide forwarded client IP headers.
 	// The server applies this list at startup; changing it requires a restart.
 	TrustedProxies []string `yaml:"trusted-proxies" json:"trusted-proxies"`
@@ -286,6 +291,10 @@ type AntigravityConfig struct {
 	// SensitiveWords is a list of words to obfuscate with zero-width characters in system instructions.
 	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
 
+	// SensitiveWordsReplace maps a literal phrase to its replacement in system
+	// instructions. Replacements are applied before obfuscation.
+	SensitiveWordsReplace map[string]string `yaml:"sensitive-words-replace,omitempty" json:"sensitive-words-replace,omitempty"`
+
 	// ConnectionPool configures upstream HTTP connection pooling behavior for Antigravity.
 	ConnectionPool AntigravityConnectionPoolConfig `yaml:"connection-pool,omitempty" json:"connection-pool,omitempty"`
 }
@@ -294,6 +303,10 @@ type AntigravityConfig struct {
 type DevinConfig struct {
 	// SensitiveWords is a list of words to obfuscate with zero-width characters in system prompts and messages.
 	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
+
+	// SensitiveWordsReplace maps a literal phrase to its replacement in system
+	// prompts and messages. Replacements are applied before obfuscation.
+	SensitiveWordsReplace map[string]string `yaml:"sensitive-words-replace,omitempty" json:"sensitive-words-replace,omitempty"`
 }
 
 // CodeBuddyAIConfig configures provider-wide CodeBuddy AI (www.codebuddy.ai) request behavior.
@@ -680,6 +693,10 @@ type CloakConfig struct {
 	// SensitiveWords is a list of words to obfuscate with zero-width characters.
 	// This can help bypass certain content filters.
 	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
+
+	// SensitiveWordsReplace maps a literal phrase to its replacement in system
+	// prompts. Replacements are applied before obfuscation.
+	SensitiveWordsReplace map[string]string `yaml:"sensitive-words-replace,omitempty" json:"sensitive-words-replace,omitempty"`
 
 	// CacheUserID controls whether Claude user_id values are cached per API key.
 	// When false, a fresh random user_id is generated for every request.
@@ -1524,7 +1541,29 @@ func NormalizeCloakConfig(cloak *CloakConfig) *CloakConfig {
 	} else {
 		cloak.SensitiveWords = nil
 	}
+	cloak.SensitiveWordsReplace = normalizeSensitiveReplacements(cloak.SensitiveWordsReplace)
 	return cloak
+}
+
+// normalizeSensitiveReplacements trims keys and values and drops entries with an
+// empty phrase or replacement.
+func normalizeSensitiveReplacements(replacements map[string]string) map[string]string {
+	if len(replacements) == 0 {
+		return nil
+	}
+	normalized := make(map[string]string, len(replacements))
+	for phrase, replacement := range replacements {
+		trimmedPhrase := strings.TrimSpace(phrase)
+		trimmedReplacement := strings.TrimSpace(replacement)
+		if trimmedPhrase == "" || trimmedReplacement == "" {
+			continue
+		}
+		normalized[trimmedPhrase] = trimmedReplacement
+	}
+	if len(normalized) == 0 {
+		return nil
+	}
+	return normalized
 }
 
 // SanitizeClaudeKeys normalizes headers for Claude credentials.

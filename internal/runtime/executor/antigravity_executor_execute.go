@@ -187,6 +187,16 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	if useCredits {
 		clearAntigravityCreditsFailureState(auth)
 	}
+	// An abnormal termination (malformed function call / malformed response)
+	// with no visible output is a retryable upstream failure, not an empty
+	// successful answer.
+	if _, zeroErrMsg, zeroOutput := helps.CheckGeminiZeroOutputNonStream(responseFormat, bodyBytes, true); zeroOutput {
+		err = newAntigravityStatusErr(http.StatusBadGateway, []byte(zeroErrMsg))
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		reporter.PublishFailureWithDetail(ctx, helps.ParseAntigravityUsage(bodyBytes), err)
+		reporter.EnsurePublished(ctx)
+		return cliproxyexecutor.Response{}, err
+	}
 	cacheAntigravityReasoningReplayFromResponse(ctx, replayScope, requestPayload, bodyBytes)
 	bodyBytes = e.resolveWebSearchGroundingURLs(ctx, auth, from, originalPayload, translated, bodyBytes)
 	reporter.ObserveResponseModel(bodyBytes)

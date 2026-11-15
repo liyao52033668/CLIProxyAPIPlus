@@ -227,8 +227,8 @@ func PrepareAntigravityCompactionSummaryPayload(payload []byte, modelName string
 	if input.IsArray() {
 		var filtered []string
 		for _, item := range input.Array() {
-			itemType := item.Get("type").String()
-			if itemType == "compaction_trigger" {
+			switch strings.TrimSpace(item.Get("type").String()) {
+			case "compaction_trigger", "configuration_update":
 				continue
 			}
 			filtered = append(filtered, item.Raw)
@@ -256,6 +256,9 @@ func PrepareAntigravityCompactionSummaryPayload(payload []byte, modelName string
 		"additional_tools",
 		"truncation",
 		"metadata",
+		// Structured output constraints would override the summary prompt and
+		// force the model to answer in the caller's JSON schema.
+		"text",
 	} {
 		out, _ = sjson.DeleteBytes(out, field)
 	}

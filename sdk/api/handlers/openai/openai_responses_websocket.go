@@ -121,16 +121,74 @@ type responsesWebsocketWriter struct {
 }
 
 // writePing sends a WebSocket Ping control frame to the downstream connection.
+// It never blocks behind an active data writer: a ping is best-effort, and
+// waiting on writeMu here would stall the keep-alive loop (and every later
+// tick) behind a slow downstream write.
 func (w *responsesWebsocketWriter) writePing() error {
 	if w == nil || w.conn == nil {
 		return errors.New("responses websocket: writer is nil")
 	}
-	w.writeMu.Lock()
+	if w.closing.Load() {
+		return websocket.ErrCloseSent
+	}
+	if !w.writeMu.TryLock() {
+		if w.closing.Load() {
+			return websocket.ErrCloseSent
+		}
+		return nil
+	}
 	defer w.writeMu.Unlock()
 	if w.closing.Load() {
 		return websocket.ErrCloseSent
 	}
 	return w.conn.WriteControl(websocket.PingMessage, nil, time.Time{})
+}
+
+// runResponsesWebsocketKeepAlive drives periodic pings, reconfiguring the
+// ticker whenever the caller publishes a new interval. A non-positive interval
+// suspends pinging without ending the loop.
+func runResponsesWebsocketKeepAlive(ctx context.Context, intervals <-chan time.Duration, ping func() error) error {
+	var ticker *time.Ticker
+	var ticks <-chan time.Time
+	defer func() {
+		if ticker != nil {
+			ticker.Stop()
+		}
+	}()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case interval := <-intervals:
+			if interval <= 0 {
+				if ticker != nil {
+					ticker.Stop()
+				}
+				ticks = nil
+				continue
+			}
+			if ticker == nil {
+				ticker = time.NewTicker(interval)
+			} else {
+				ticker.Reset(interval)
+			}
+			ticks = ticker.C
+		case <-ticks:
+			if errPing := ping(); errPing != nil {
+				return errPing
+			}
+		}
+	}
+}
+
+// queueResponsesWebsocketKeepAliveInterval replaces any pending interval
+// without blocking the caller, so a config reload never waits for a ping write.
+func queueResponsesWebsocketKeepAliveInterval(intervals chan time.Duration, interval time.Duration) {
+	select {
+	case <-intervals:
+	default:
+	}
+	intervals <- interval
 }
 
 func newResponsesWebsocketWriter(conn *websocket.Conn) *responsesWebsocketWriter {
@@ -236,6 +294,24 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	retainResponsesWebsocketToolCaches(downstreamSessionKey)
 	clientIP := websocketClientAddress(c)
 	log.Infof("responses websocket: client connected id=%s remote=%s", passthroughSessionID, clientIP)
+
+	// Start downstream Ping before the first upstream turn. Opening an upstream
+	// stream (credential selection, retries) can block for a long time, and a
+	// client behind an idle-timeout proxy would otherwise see the connection
+	// dropped before the first byte of the response arrives.
+	keepAliveIntervals := make(chan time.Duration, 1)
+	keepAliveCtx, cancelKeepAlive := context.WithCancel(context.Background())
+	defer cancelKeepAlive()
+	queueResponsesWebsocketKeepAliveInterval(keepAliveIntervals, h.responsesWebsocketKeepAliveInterval())
+	go func() {
+		if errPing := runResponsesWebsocketKeepAlive(keepAliveCtx, keepAliveIntervals, writer.writePing); errPing != nil {
+			log.Infof("responses websocket: keepalive stopped id=%s error=%v", passthroughSessionID, errPing)
+			// Closing the connection unblocks ReadMessage so the session tears down.
+			if errClose := conn.Close(); errClose != nil {
+				log.Warnf("responses websocket: close after keepalive failure error=%v", errClose)
+			}
+		}
+	}()
 
 	wsDone := make(chan struct{})
 	defer close(wsDone)
@@ -508,6 +584,15 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 		lastResponseOutput = completedOutput
 	}
+}
+
+// responsesWebsocketKeepAliveInterval reports the downstream Ping cadence for a
+// websocket session. A non-positive interval disables pinging.
+func (h *OpenAIResponsesAPIHandler) responsesWebsocketKeepAliveInterval() time.Duration {
+	if h == nil {
+		return 0
+	}
+	return handlers.StreamingKeepAliveInterval(h.CurrentConfig())
 }
 
 type responsesWebsocketPinnedAuthState struct {
@@ -1201,30 +1286,14 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 		downstreamSessionKey = websocketDownstreamSessionKey(c.Request)
 	}
 
-	// Periodic Ping control frames keep intermediaries from dropping the
-	// downstream connection during long quiet stretches of a turn.
-	var keepAliveTicker *time.Ticker
-	var keepAliveC <-chan time.Time
-	keepAliveInterval := time.Duration(0)
-	if h != nil {
-		keepAliveInterval = handlers.StreamingKeepAliveInterval(h.CurrentConfig())
-	}
-	if keepAliveInterval > 0 {
-		keepAliveTicker = time.NewTicker(keepAliveInterval)
-		defer keepAliveTicker.Stop()
-		keepAliveC = keepAliveTicker.C
-	}
-
+	// The session-level keep-alive goroutine already pings downstream, so this
+	// forwarding loop only needs to watch for client disconnects and upstream
+	// completion.
 	for {
 		select {
 		case <-c.Request.Context().Done():
 			cancel(c.Request.Context().Err())
 			return completedOutput, nil, c.Request.Context().Err()
-		case <-keepAliveC:
-			if errPing := writer.writePing(); errPing != nil {
-				cancel(errPing)
-				return completedOutput, nil, errPing
-			}
 		case errMsg, ok := <-errs:
 			if !ok {
 				errs = nil
@@ -1335,9 +1404,6 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					cancel(errWrite)
 					return completedOutput, nil, errWrite
 				}
-			}
-			if keepAliveTicker != nil {
-				keepAliveTicker.Reset(keepAliveInterval)
 			}
 		}
 	}

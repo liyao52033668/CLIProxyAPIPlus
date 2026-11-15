@@ -27,8 +27,54 @@ const (
 	apiWebsocketTimelineKey        = "API_WEBSOCKET_TIMELINE"
 	deferredAPIRequestBytesKey     = "DEFERRED_API_REQUEST_BYTES"
 	creditsUsedKey                 = "__antigravity_credits_used__"
+	errorOnlyCaptureKey            = "__API_ERROR_ONLY_CAPTURE__"
 	maxDeferredAPIRequestBodyBytes = 32 << 20
+
+	// Error-only capture bounds. When full request logging is disabled, upstream
+	// status, headers, response chunks, and errors are still retained so a
+	// failed request can be diagnosed from the error log. These limits keep a
+	// long streaming response from exhausting memory on every request.
+	maxErrorOnlyCaptureResponseBytes = 64 << 10
+	maxErrorOnlyCaptureChunkBytes    = 4 << 10
 )
+
+// errorOnlyCaptureDisabledKeyType marks a context whose upstream attempts must
+// not be captured for the error log.
+type errorOnlyCaptureDisabledKeyType struct{}
+
+var errorOnlyCaptureDisabledKey = errorOnlyCaptureDisabledKeyType{}
+
+// WithErrorOnlyCaptureDisabled disables error-only upstream capture for ctx and
+// its descendants. Full request logging is unaffected. Connection-scoped
+// contexts set it so asynchronous callbacks that outlive the handler cannot
+// write into a pooled and reused gin context.
+func WithErrorOnlyCaptureDisabled(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, errorOnlyCaptureDisabledKey, true)
+}
+
+// errorOnlyCaptureActive reports whether upstream attempts should be captured
+// for a request whose full request logging is disabled. The first successful
+// check marks the gin context so the aggregation can bound its retained body.
+func errorOnlyCaptureActive(ctx context.Context, cfg *config.Config) bool {
+	if cfg != nil && cfg.RequestLog {
+		return false
+	}
+	if ctx == nil {
+		return false
+	}
+	if disabled, ok := ctx.Value(errorOnlyCaptureDisabledKey).(bool); ok && disabled {
+		return false
+	}
+	ginCtx := ginContextFrom(ctx)
+	if ginCtx == nil {
+		return false
+	}
+	ginCtx.Set(errorOnlyCaptureKey, true)
+	return true
+}
 
 // UpstreamRequestLog captures the outbound upstream request details for logging.
 type UpstreamRequestLog struct {
@@ -162,7 +208,7 @@ func newAPIRequestLogBuilder(index int, info UpstreamRequestLog, timestamp time.
 // RecordAPIResponseMetadata captures upstream response status/header information for the latest attempt.
 func RecordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
 	logging.SetResponseHeaders(ctx, headers)
-	if cfg == nil || !cfg.RequestLog {
+	if cfg == nil || (!cfg.RequestLog && !errorOnlyCaptureActive(ctx, cfg)) {
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
@@ -188,7 +234,10 @@ func RecordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status i
 
 // RecordAPIResponseError adds an error entry for the latest attempt when no HTTP response is available.
 func RecordAPIResponseError(ctx context.Context, cfg *config.Config, err error) {
-	if cfg == nil || !cfg.RequestLog || err == nil {
+	if cfg == nil || err == nil {
+		return
+	}
+	if !cfg.RequestLog && !errorOnlyCaptureActive(ctx, cfg) {
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
@@ -213,12 +262,22 @@ func RecordAPIResponseError(ctx context.Context, cfg *config.Config, err error) 
 
 // AppendAPIResponseChunk appends an upstream response chunk to Gin context for request logging.
 func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byte) {
-	if cfg == nil || !cfg.RequestLog {
+	if cfg == nil {
 		return
+	}
+	errorOnly := false
+	if !cfg.RequestLog {
+		if !errorOnlyCaptureActive(ctx, cfg) {
+			return
+		}
+		errorOnly = true
 	}
 	data := bytes.TrimSpace(chunk)
 	if len(data) == 0 {
 		return
+	}
+	if errorOnly && len(data) > maxErrorOnlyCaptureChunkBytes {
+		data = data[:maxErrorOnlyCaptureChunkBytes]
 	}
 	ginCtx := ginContextFrom(ctx)
 	if ginCtx == nil {
@@ -482,6 +541,14 @@ func updateAggregatedResponse(ginCtx *gin.Context, attempts []*upstreamAttempt) 
 	if aggregation.hasResponse && aggregation.data[len(aggregation.data)-1] != '\n' {
 		aggregation.data = append(aggregation.data, '\n')
 		aggregation.syntheticTrailingNewline = true
+	}
+	if errorOnly, _ := ginCtx.Get(errorOnlyCaptureKey); errorOnly == true && len(aggregation.data) > maxErrorOnlyCaptureResponseBytes {
+		// Keep the head of the response: it usually carries the upstream error
+		// payload, and the tail is the least informative part of a long stream.
+		truncated := make([]byte, 0, maxErrorOnlyCaptureResponseBytes+48)
+		truncated = append(truncated, aggregation.data[:maxErrorOnlyCaptureResponseBytes]...)
+		truncated = append(truncated, []byte("\n[response truncated for error log]\n")...)
+		aggregation.data = truncated
 	}
 	ginCtx.Set(apiResponseKey, aggregation.data)
 }

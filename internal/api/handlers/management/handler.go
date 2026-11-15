@@ -25,7 +25,6 @@ import (
 	internalwatcher "github.com/router-for-me/CLIProxyAPI/v7/internal/watcher"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"golang.org/x/crypto/bcrypt"
 )
 
 type attemptInfo struct {
@@ -73,6 +72,7 @@ type Handler struct {
 	onOAuthModelAliasUpdated func()
 	onOAuthSettingsUpdated   func()
 	onCodexConfigUpdated     func() error
+	authCache                managementAuthCache
 }
 
 // NewHandler creates a new management handler instance.
@@ -222,8 +222,21 @@ func (h *Handler) SetConfig(cfg *config.Config) {
 		return
 	}
 	h.mu.Lock()
+	prevSecretHash := ""
+	if h.cfg != nil {
+		prevSecretHash = h.cfg.RemoteManagement.SecretKey
+	}
 	h.cfg = cfg
 	h.mu.Unlock()
+
+	nextSecretHash := ""
+	if cfg != nil {
+		nextSecretHash = cfg.RemoteManagement.SecretKey
+	}
+	if prevSecretHash != nextSecretHash {
+		// A rotated management secret must take effect immediately.
+		h.authCache.invalidate()
+	}
 }
 
 // configSnapshot reads h.cfg under h.mu, for code that runs outside the request holding it.
@@ -468,7 +481,7 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 		return true, 0, ""
 	}
 
-	if secretHash == "" || bcrypt.CompareHashAndPassword([]byte(secretHash), []byte(provided)) != nil {
+	if secretHash == "" || !h.authCache.verify(secretHash, provided) {
 		fail()
 		return false, http.StatusUnauthorized, "invalid management key"
 	}

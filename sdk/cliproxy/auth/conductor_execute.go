@@ -396,7 +396,10 @@ func (m *Manager) handleExecutionError(lastErr error) error {
 // Execute performs a non-streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	scope := m.beginInFlight("")
+	defer func() { scope.end() }()
 	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
+	ctx = contextWithInFlightScope(ctx, scope)
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
@@ -449,7 +452,10 @@ func (m *Manager) executeAutoWithModelFailover(ctx context.Context, providers []
 // ExecuteCount performs a non-streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	scope := m.beginInFlight("")
+	defer func() { scope.end() }()
 	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
+	ctx = contextWithInFlightScope(ctx, scope)
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
@@ -494,15 +500,28 @@ func (m *Manager) executeCountAutoWithModelFailover(ctx context.Context, provide
 // ExecuteStream performs a streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	// Keep the request counted as in-flight for the whole stream lifetime, not
+	// just until the first chunk arrives.
+	scope := m.beginInFlight("")
 	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
+	ctx = contextWithInFlightScope(ctx, scope)
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
+		scope.end()
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	var result *cliproxyexecutor.StreamResult
+	var err error
 	if !opts.IsAuto {
-		return m.executeStreamWithResolvedModel(ctx, normalized, req, opts)
+		result, err = m.executeStreamWithResolvedModel(ctx, normalized, req, opts)
+	} else {
+		result, err = m.executeStreamAutoWithModelFailover(ctx, normalized, req, opts)
 	}
-	return m.executeStreamAutoWithModelFailover(ctx, normalized, req, opts)
+	if err != nil {
+		scope.end()
+		return nil, err
+	}
+	return wrapInFlightStreamResult(result, scope, ctx), nil
 }
 
 func (m *Manager) executeStreamAutoWithModelFailover(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
@@ -799,6 +818,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			return cliproxyexecutor.Response{}, errPick
 		}
 
+		// Update the in-flight scope with the actual provider now that auth has been selected.
+		updateInFlightScopeProvider(ctx, provider)
+
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, req.Model)
 		publishSelectedAuthMetadata(opts.Metadata, auth)
@@ -897,6 +919,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			}
 			return cliproxyexecutor.Response{}, errPick
 		}
+
+		// Update the in-flight scope with the actual provider now that auth has been selected.
+		updateInFlightScopeProvider(ctx, provider)
 
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, req.Model)
@@ -1011,6 +1036,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			return nil, errPick
 		}
+
+		// Update the in-flight scope with the actual provider now that auth has been selected.
+		updateInFlightScopeProvider(ctx, provider)
 
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, req.Model)

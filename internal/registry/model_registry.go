@@ -159,6 +159,10 @@ type ModelRegistration struct {
 	Providers map[string]int
 	// SuspendedClients tracks temporarily disabled clients keyed by client ID
 	SuspendedClients map[string]string
+	// SuspendedClientDeadlines records optional expiry deadlines for suspended
+	// clients. Clients without an entry (or with a zero deadline) stay suspended
+	// until explicitly resumed.
+	SuspendedClientDeadlines map[string]time.Time
 	// SelectionCount tracks how many times this model has been selected
 	SelectionCount int64
 	// LastSelectedAt is the last time this model was chosen by auto selection.
@@ -714,6 +718,9 @@ func (r *ModelRegistry) removeModelRegistration(clientID, modelID, provider stri
 	}
 	if registration.SuspendedClients != nil {
 		delete(registration.SuspendedClients, clientID)
+		if registration.SuspendedClientDeadlines != nil {
+			delete(registration.SuspendedClientDeadlines, clientID)
+		}
 	}
 	if registration.Count < 0 {
 		registration.Count = 0
@@ -929,6 +936,51 @@ func (r *ModelRegistry) SuspendClientModel(clientID, modelID, reason string) {
 	}
 }
 
+// SuspendClientModelUntil marks a client's model as unavailable until the given
+// deadline. A zero deadline keeps the suspension open-ended. Once the deadline
+// passes the client counts toward availability again and the model listing is
+// restored automatically.
+// Parameters:
+//   - clientID: The client to suspend
+//   - modelID: The model affected by the suspension
+//   - reason: Optional description for observability
+//   - until: Optional auto-recovery deadline
+func (r *ModelRegistry) SuspendClientModelUntil(clientID, modelID, reason string, until time.Time) {
+	if clientID == "" || modelID == "" {
+		return
+	}
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	r.ensureAvailableModelsCacheLocked()
+
+	registration, exists := r.models[modelID]
+	if !exists || registration == nil {
+		return
+	}
+	if registration.SuspendedClients == nil {
+		registration.SuspendedClients = make(map[string]string)
+	}
+	prevReason, already := registration.SuspendedClients[clientID]
+	prevDeadline := registration.SuspendedClientDeadlines[clientID]
+	if already && prevReason == reason && until.Equal(prevDeadline) {
+		return
+	}
+	registration.SuspendedClients[clientID] = reason
+	if until.IsZero() {
+		if registration.SuspendedClientDeadlines != nil {
+			delete(registration.SuspendedClientDeadlines, clientID)
+		}
+	} else {
+		if registration.SuspendedClientDeadlines == nil {
+			registration.SuspendedClientDeadlines = make(map[string]time.Time)
+		}
+		registration.SuspendedClientDeadlines[clientID] = until
+	}
+	registration.LastUpdated = time.Now()
+	r.invalidateAvailableModelsCacheLocked()
+	log.Debugf("Suspended client %s for model %s until %v: %s", clientID, modelID, until, reason)
+}
+
 // ResumeClientModel clears a previous suspension so the client counts toward availability again.
 // Parameters:
 //   - clientID: The client to resume
@@ -1045,6 +1097,21 @@ func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.
 		quotaAndOtherSuspended := 0
 		if registration.SuspendedClients != nil {
 			for clientID, reason := range registration.SuspendedClients {
+				// A bounded suspension must expire on its own; otherwise the model
+				// stays missing from /v1/models until some later request happens to
+				// succeed on that credential. Expired entries are dropped here so
+				// the maps cannot grow without bound.
+				if deadline, hasDeadline := registration.SuspendedClientDeadlines[clientID]; hasDeadline && !deadline.IsZero() {
+					if !now.Before(deadline) {
+						delete(registration.SuspendedClients, clientID)
+						delete(registration.SuspendedClientDeadlines, clientID)
+						continue
+					}
+					// Make the listing refresh as soon as the deadline passes.
+					if expiresAt.IsZero() || deadline.Before(expiresAt) {
+						expiresAt = deadline
+					}
+				}
 				if strings.EqualFold(reason, "quota") {
 					cooldownSuspended++
 					continue

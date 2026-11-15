@@ -208,6 +208,31 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		var param any
 		var pendingJSON []byte
 		var terminalDelivered bool
+		zeroOutputGuard := helps.NewGeminiZeroOutputStreamGuard(true, responseFormat)
+		failZeroOutput := func(finishReason string) {
+			zeroErr := newAntigravityStatusErr(http.StatusBadGateway, []byte(helps.GeminiZeroOutputErrorMessage(responseFormat, finishReason)))
+			helps.RecordAPIResponseError(ctx, e.cfg, zeroErr)
+			reporter.PublishFailure(ctx, zeroErr)
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: zeroErr}:
+			case <-ctx.Done():
+			}
+		}
+		// emitGuardPayload translates one withheld frame and delivers it downstream.
+		emitGuardPayload := func(raw []byte) bool {
+			guardChunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, bytes.Clone(raw), &param, claudeInputTokens)
+			for i := range guardChunks {
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Payload: guardChunks[i]}:
+					if len(guardChunks[i]) > 0 {
+						zeroOutputGuard.MarkEmitted()
+					}
+				case <-ctx.Done():
+					return false
+				}
+			}
+			return true
+		}
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
@@ -270,6 +295,34 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 				reporter.Publish(ctx, detail)
 			}
 
+			// An abnormal termination (malformed function call / malformed
+			// response) with no visible output is a retryable upstream failure,
+			// not an empty successful answer. The guard withholds leading
+			// contentless frames so the failure is still reported before the
+			// downstream response is committed.
+			shells, zeroAction, zeroFinishReason := zeroOutputGuard.Observe(payload)
+			if zeroAction == helps.GeminiZeroOutputContinue {
+				continue
+			}
+			if zeroAction == helps.GeminiZeroOutputFailNow || zeroAction == helps.GeminiZeroOutputEmitErrorThenFail {
+				if zeroAction == helps.GeminiZeroOutputEmitErrorThenFail {
+					errFrame := zeroOutputGuard.AbnormalFrame()
+					if len(errFrame) == 0 {
+						errFrame = payload
+					}
+					if !emitGuardPayload(errFrame) {
+						return
+					}
+				}
+				failZeroOutput(zeroFinishReason)
+				return
+			}
+			for _, shell := range shells {
+				if !emitGuardPayload(shell) {
+					return
+				}
+			}
+
 			payload = e.resolveWebSearchGroundingURLs(ctx, auth, from, originalPayload, translated, payload)
 			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, bytes.Clone(payload), &param, claudeInputTokens)
 			var isTerminalChunk bool
@@ -313,6 +366,9 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			for i := range chunks {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+					if len(chunks[i]) > 0 {
+						zeroOutputGuard.MarkEmitted()
+					}
 				case <-ctx.Done():
 					return
 				}
@@ -337,6 +393,28 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			// stream as a successful completion. A clean EOF is a normal end
 			// even without finishReason: real Antigravity tool-call streams
 			// end that way (see antigravityNoFinishReasonSSE).
+			if ctx.Err() == nil && zeroOutputGuard.HasAbnormalFinish() {
+				_, zeroAction, zeroFinishReason := zeroOutputGuard.Finalize()
+				if zeroAction == helps.GeminiZeroOutputEmitErrorThenFail {
+					errFrame := zeroOutputGuard.AbnormalFrame()
+					if len(errFrame) == 0 {
+						errFrame = []byte("[DONE]")
+					}
+					if !emitGuardPayload(errFrame) {
+						return
+					}
+				}
+				failZeroOutput(zeroFinishReason)
+				return
+			}
+			// Flush frames the guard withheld while waiting for content.
+			if shells, zeroAction, _ := zeroOutputGuard.Finalize(); zeroAction == helps.GeminiZeroOutputEmit {
+				for _, shell := range shells {
+					if !emitGuardPayload(shell) {
+						return
+					}
+				}
+			}
 			tail := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, []byte("[DONE]"), &param, claudeInputTokens)
 			for i := range tail {
 				select {

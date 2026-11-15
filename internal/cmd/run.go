@@ -21,12 +21,15 @@ import (
 // It creates a new proxy service instance, sets up signal handling for graceful shutdown,
 // and starts the service with the provided configuration.
 //
+// Startup and runtime failures are returned so callers can exit non-zero; a
+// graceful cancellation is reported as nil.
+//
 // Parameters:
 //   - cfg: The application configuration
 //   - configPath: The path to the configuration file
 //   - localPassword: Optional password accepted for local management requests
 //   - earlyListener: Optional pre-bound TCP listener for PaaS startup timeout avoidance
-func StartService(cfg *config.Config, configPath string, localPassword string, earlyListener net.Listener) {
+func StartService(cfg *config.Config, configPath string, localPassword string, earlyListener net.Listener) error {
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(configPath).
@@ -52,13 +55,15 @@ func StartService(cfg *config.Config, configPath string, localPassword string, e
 	service, err := builder.Build()
 	if err != nil {
 		log.Errorf("failed to build proxy service: %v", err)
-		return
+		return err
 	}
 
 	err = service.Run(runCtx)
 	if err != nil && !errors.Is(err, context.Canceled) {
 		log.Errorf("proxy service exited with error: %v", err)
+		return err
 	}
+	return nil
 }
 
 // StartServiceBackground starts the proxy service in a background goroutine

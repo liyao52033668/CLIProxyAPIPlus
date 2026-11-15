@@ -22,6 +22,9 @@ type statusErr struct {
 	retryAfter         *time.Duration
 	credentialScoped   bool
 	transientRateLimit bool
+	// tosViolation marks a terminal terms-of-service rejection: the credential
+	// must be deactivated instead of cooled down.
+	tosViolation bool
 }
 
 func (e statusErr) Error() string {
@@ -41,6 +44,10 @@ func (e statusErr) IsCredentialScoped() bool { return e.credentialScoped }
 // IsTransientRateLimit marks a transient per-model capacity/admission 429
 // that must not be recorded as credential quota exhaustion.
 func (e statusErr) IsTransientRateLimit() bool { return e.transientRateLimit }
+
+// IsTOSViolation reports whether the upstream rejected the request because the
+// credential violated the provider's terms of service.
+func (e statusErr) IsTOSViolation() bool { return e.tosViolation }
 
 // parseRetryAfterHeader parses an HTTP Retry-After header in either the
 // delay-seconds or HTTP-date form. A present, valid value always yields a
