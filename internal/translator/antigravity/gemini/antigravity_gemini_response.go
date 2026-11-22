@@ -175,10 +175,22 @@ func ConvertAntigravityResponseToGemini(ctx context.Context, _ string, originalR
 			responseResult := gjson.ParseBytes(rawJSON)
 			if responseResult.IsArray() {
 				responseResultItems := responseResult.Array()
+				index := 0
 				for i := 0; i < len(responseResultItems); i++ {
 					responseResultItem := responseResultItems[i]
 					if responseResultItem.Get("response").Exists() {
 						chunkTemplate, _ = sjson.SetRawBytes(chunkTemplate, "-1", []byte(responseResultItem.Get("response").Raw))
+						// Restore usage and tool names inside this array element
+						// so every JSON array response carries them, not just the
+						// bare (alt=) response.
+						prefix := fmt.Sprintf("%d.", index)
+						elementPrefix := prefix + "usageMetadata"
+						if cpaUsage := gjson.GetBytes(chunkTemplate, prefix+"cpaUsageMetadata"); cpaUsage.Exists() {
+							chunkTemplate, _ = sjson.SetRawBytes(chunkTemplate, elementPrefix, []byte(cpaUsage.Raw))
+							chunkTemplate, _ = sjson.DeleteBytes(chunkTemplate, prefix+"cpaUsageMetadata")
+						}
+						chunkTemplate = restoreGeminiFunctionNamesWithPrefix(chunkTemplate, prefix, originalRequestRawJSON)
+						index++
 					}
 				}
 			}
@@ -224,11 +236,18 @@ func ConvertAntigravityResponseToGeminiNonStream(_ context.Context, _ string, or
 }
 
 func restoreGeminiFunctionNames(chunk, originalRequestRawJSON []byte) []byte {
+	return restoreGeminiFunctionNamesWithPrefix(chunk, "", originalRequestRawJSON)
+}
+
+// restoreGeminiFunctionNamesWithPrefix restores sanitized tool names inside a
+// chunk nested under prefix (empty for a bare response, or "<index>." for one
+// element of an alt=json array response).
+func restoreGeminiFunctionNamesWithPrefix(chunk []byte, prefix string, originalRequestRawJSON []byte) []byte {
 	nameMap := util.DisambiguatedToolNameMap(originalRequestRawJSON)
 	if len(nameMap) == 0 {
 		return chunk
 	}
-	candidates := gjson.GetBytes(chunk, "candidates")
+	candidates := gjson.GetBytes(chunk, prefix+"candidates")
 	for candidateIndex, candidate := range candidates.Array() {
 		for partIndex, part := range candidate.Get("content.parts").Array() {
 			for _, field := range []string{"functionCall", "functionResponse", "function_call", "function_response"} {
@@ -241,7 +260,7 @@ func restoreGeminiFunctionNames(chunk, originalRequestRawJSON []byte) []byte {
 				if nameResult.Type == gjson.String && restoredName == name {
 					continue
 				}
-				path := fmt.Sprintf("candidates.%d.content.parts.%d.%s.name", candidateIndex, partIndex, field)
+				path := fmt.Sprintf("%scandidates.%d.content.parts.%d.%s.name", prefix, candidateIndex, partIndex, field)
 				chunk, _ = sjson.SetBytes(chunk, path, restoredName)
 			}
 		}

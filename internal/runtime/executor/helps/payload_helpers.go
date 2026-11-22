@@ -69,7 +69,7 @@ func ApplyPayloadConfigWithRequestForExecutor(cfg *config.Config, targetExecutor
 	}
 
 	rules := cfg.Payload
-	hasPayloadRules := len(rules.Default) != 0 || len(rules.DefaultRaw) != 0 || len(rules.Override) != 0 || len(rules.OverrideRaw) != 0 || len(rules.Filter) != 0
+	hasPayloadRules := len(rules.Default) != 0 || len(rules.DefaultRaw) != 0 || len(rules.Override) != 0 || len(rules.OverrideRaw) != 0 || len(rules.Filter) != 0 || len(rules.Replace) != 0
 	if hasPayloadRules {
 		model = strings.TrimSpace(model)
 		requestedModel = strings.TrimSpace(requestedModel)
@@ -203,6 +203,15 @@ func ApplyPayloadConfigWithRequestForExecutor(cfg *config.Config, targetExecutor
 						out = updated
 					}
 				}
+			}
+			// Apply replace rules last: they rewrite existing text in the final
+			// upstream payload, after overrides and filters have settled it.
+			for i := range rules.Replace {
+				rule := &rules.Replace[i]
+				if !payloadModelRulesMatch(rule.Models, protocol, fromProtocol, headers, out, root, candidates) {
+					continue
+				}
+				out, _ = applyPayloadReplaceRule(out, protocol, root, rule, i)
 			}
 		}
 	}

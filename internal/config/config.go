@@ -637,6 +637,9 @@ type PayloadConfig struct {
 	OverrideRaw []PayloadRule `yaml:"override-raw" json:"override-raw"`
 	// Filter defines rules that remove parameters from the payload by JSON path.
 	Filter []PayloadFilterRule `yaml:"filter" json:"filter"`
+	// Replace defines rules that rewrite existing text in the final upstream
+	// payload, addressed by role/position or by JSON path.
+	Replace []PayloadReplaceRule `yaml:"replace,omitempty" json:"replace,omitempty"`
 }
 
 // PayloadFilterRule describes a rule to remove specific JSON paths from matching model payloads.
@@ -1284,6 +1287,7 @@ func (cfg *Config) SanitizePayloadRules() {
 	}
 	cfg.Payload.DefaultRaw = sanitizePayloadRawRules(cfg.Payload.DefaultRaw, "default-raw")
 	cfg.Payload.OverrideRaw = sanitizePayloadRawRules(cfg.Payload.OverrideRaw, "override-raw")
+	cfg.Payload.Replace = SanitizePayloadReplaceRules(cfg.Payload.Replace)
 }
 
 func sanitizePayloadRawRules(rules []PayloadRule, section string) []PayloadRule {

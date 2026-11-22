@@ -205,6 +205,22 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 								}
 								msg, _ = sjson.SetRawBytes(msg, "content.-1", part)
 							}
+						case "input_audio":
+							// Responses upstreams require the nested input_audio
+							// shape; a flattened data/format pair is rejected with
+							// "input_audio content part requires input_audio".
+							if role == "user" {
+								audioData := it.Get("input_audio.data").String()
+								audioFormat := it.Get("input_audio.format").String()
+								if audioData != "" {
+									part := []byte(`{"type":"input_audio","input_audio":{"data":"","format":""}}`)
+									part, _ = sjson.SetBytes(part, "input_audio.data", audioData)
+									if audioFormat != "" {
+										part, _ = sjson.SetBytes(part, "input_audio.format", audioFormat)
+									}
+									msg, _ = sjson.SetRawBytes(msg, "content.-1", part)
+								}
+							}
 						case "file":
 							if role == "user" {
 								fileData := it.Get("file.file_data").String()

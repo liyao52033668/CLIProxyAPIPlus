@@ -88,8 +88,9 @@ func (h *ClaudeCodeAPIHandler) Models() []map[string]any {
 // Parameters:
 //   - c: The Gin context for the request.
 func (h *ClaudeCodeAPIHandler) ClaudeMessages(c *gin.Context) {
-	// Extract raw JSON data from the incoming request
-	rawJSON, err := c.GetRawData()
+	// Extract raw JSON data from the incoming request, decoding any supported
+	// Content-Encoding (gzip, zstd) before handlers inspect JSON fields.
+	rawJSON, err := handlers.ReadRequestBody(c)
 	// If data retrieval fails, return a 400 Bad Request error.
 	if err != nil {
 		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
@@ -117,8 +118,9 @@ func (h *ClaudeCodeAPIHandler) ClaudeMessages(c *gin.Context) {
 // Parameters:
 //   - c: The Gin context for the request.
 func (h *ClaudeCodeAPIHandler) ClaudeCountTokens(c *gin.Context) {
-	// Extract raw JSON data from the incoming request
-	rawJSON, err := c.GetRawData()
+	// Extract raw JSON data from the incoming request, decoding any supported
+	// Content-Encoding (gzip, zstd) before handlers inspect JSON fields.
+	rawJSON, err := handlers.ReadRequestBody(c)
 	// If data retrieval fails, return a 400 Bad Request error.
 	if err != nil {
 		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{

@@ -56,19 +56,34 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	if errProject != nil {
 		return nil, errProject
 	}
-	payload = geminiToAntigravity(modelName, payload, projectID, derivedSessionIDs...)
+	payload = geminiToAntigravityForAuth(modelName, payload, projectID, antigravityAuthID(auth), derivedSessionIDs...)
+
+	// Model matching is case-insensitive: clients commonly send mixed-case IDs.
+	lowerModel := strings.ToLower(modelName)
 
 	// Cap maxOutputTokens to model's max_completion_tokens from registry
 	if maxOut := gjson.GetBytes(payload, "request.generationConfig.maxOutputTokens"); maxOut.Exists() && maxOut.Type == gjson.Number {
-		if modelInfo := registry.LookupModelInfo(modelName, "antigravity"); modelInfo != nil && modelInfo.MaxCompletionTokens > 0 {
+		modelInfo := registry.LookupModelInfo(modelName, "antigravity")
+		if modelInfo == nil && lowerModel != modelName {
+			modelInfo = registry.LookupModelInfo(lowerModel, "antigravity")
+		}
+		if modelInfo != nil && modelInfo.MaxCompletionTokens > 0 {
 			if int(maxOut.Int()) > modelInfo.MaxCompletionTokens {
 				payload, _ = sjson.SetBytes(payload, "request.generationConfig.maxOutputTokens", modelInfo.MaxCompletionTokens)
 			}
 		}
 	}
 
-	isClaudeModel := strings.Contains(modelName, "claude")
-	useAntigravitySchema := isClaudeModel || strings.Contains(modelName, "gemini-3-pro") || strings.Contains(modelName, "gemini-3.1-pro")
+	isClaudeModel := strings.Contains(lowerModel, "claude")
+	useAntigravitySchema := isClaudeModel || strings.Contains(lowerModel, "gemini-3-pro") || strings.Contains(lowerModel, "gemini-3.1-pro")
+	// Claude 5.5 rejects forced tool use, so a native response schema must be
+	// rewritten into prompt instructions before schema cleaning runs. The flag
+	// keeps the request from restoring VALIDATED tool mode afterwards.
+	promptStructuredOutput := false
+	if promptStructured, okStructured := helps.PrepareAntigravityClaudeStructuredOutput(modelName, payload); okStructured {
+		payload = promptStructured
+		promptStructuredOutput = true
+	}
 	var (
 		bodyReader io.Reader
 		payloadLog []byte
@@ -76,10 +91,10 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	if antigravityRequestNeedsSchemaSanitization(payload) {
 		payloadStr := sanitizeAntigravityRequestSchemasForModel(string(payload), useAntigravitySchema, isClaudeModel)
 
-		if strings.Contains(modelName, "claude") {
+		if isClaudeModel && !promptStructuredOutput {
 			updated, _ := sjson.SetBytes([]byte(payloadStr), "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
 			payloadStr = string(updated)
-		} else {
+		} else if !isClaudeModel {
 			payloadStr, _ = sjson.Delete(payloadStr, "request.generationConfig.maxOutputTokens")
 		}
 
@@ -89,9 +104,9 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 			payloadLog = append([]byte(nil), payloadStrBytes...)
 		}
 	} else {
-		if strings.Contains(modelName, "claude") {
+		if isClaudeModel && !promptStructuredOutput {
 			payload, _ = sjson.SetBytes(payload, "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
-		} else {
+		} else if !isClaudeModel {
 			payload, _ = sjson.DeleteBytes(payload, "request.generationConfig.maxOutputTokens")
 		}
 
@@ -484,11 +499,27 @@ func resolveCustomAntigravityBaseURL(auth *cliproxyauth.Auth) string {
 }
 
 func geminiToAntigravity(modelName string, payload []byte, projectID string, derivedSessionIDs ...string) []byte {
+	return geminiToAntigravityForAuth(modelName, payload, projectID, "", derivedSessionIDs...)
+}
+
+// antigravityAuthID returns the credential ID used to scope synthesized session IDs.
+func antigravityAuthID(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	return strings.TrimSpace(auth.ID)
+}
+
+func geminiToAntigravityForAuth(modelName string, payload []byte, projectID, authID string, derivedSessionIDs ...string) []byte {
 	template := bytes.Clone(payload)
 	template = helps.SetStringIfDifferent(template, "model", modelName)
 	template = helps.SetStringIfDifferent(template, "userAgent", "antigravity")
 
-	isImageModel := strings.Contains(modelName, "image")
+	// Match known image generation model patterns: names ending with "-image" or
+	// containing "-image-" (e.g., gemini-3-pro-image, gemini-3.1-flash-image).
+	// Avoid overly broad matching that would catch "image-analyzer" or similar.
+	lowerModelName := strings.ToLower(modelName)
+	isImageModel := strings.HasSuffix(lowerModelName, "-image") || strings.Contains(lowerModelName, "-image-")
 	reqType := strings.TrimSpace(gjson.GetBytes(template, "requestType").String())
 	if reqType == "" {
 		if isImageModel {
@@ -514,7 +545,7 @@ func geminiToAntigravity(modelName string, payload []byte, projectID string, der
 			sessionID = strings.TrimSpace(derivedSessionIDs[0])
 		}
 		if sessionID == "" {
-			sessionID = generateStableSessionID(payload)
+			sessionID = generateStableSessionIDForAuth(payload, authID)
 		}
 		template, _ = sjson.SetBytes(template, "request.sessionId", sessionID)
 	}
@@ -543,6 +574,13 @@ func generateSessionID() string {
 }
 
 func generateStableSessionID(payload []byte) string {
+	return generateStableSessionIDForAuth(payload, "")
+}
+
+// generateStableSessionIDForAuth derives the content-based fallback session ID.
+// Scoping the hash by credential makes a failover emit a fresh sessionId while
+// keeping it stable across models on the same credential.
+func generateStableSessionIDForAuth(payload []byte, authID string) string {
 	contents := util.GetGJSONBytesNoCopy(payload, "request.contents")
 	if !contents.IsArray() {
 		return generateSessionID()
@@ -553,11 +591,26 @@ func generateStableSessionID(payload []byte) string {
 		if content.Get("role").String() != "user" {
 			return true
 		}
-		text := content.Get("parts.0.text").String()
+		// Scan every part of the turn: a multimodal first turn often leads with an
+		// image, so reading only parts.0 would leave the turn without a stable ID.
+		text := ""
+		for _, part := range content.Get("parts").Array() {
+			if candidate := part.Get("text").String(); candidate != "" {
+				text = candidate
+				break
+			}
+		}
 		if text == "" {
 			return true
 		}
-		hash := sha256.Sum256([]byte(text))
+		var hashInput []byte
+		trimmedAuthID := strings.TrimSpace(authID)
+		if trimmedAuthID != "" {
+			hashInput = []byte(strings.Join([]string{"cli-proxy-api", "antigravity", "content-session", trimmedAuthID, text}, antigravitySessionHashSeparator))
+		} else {
+			hashInput = []byte(text)
+		}
+		hash := sha256.Sum256(hashInput)
 		value := int64(binary.BigEndian.Uint64(hash[:8])) & 0x7FFFFFFFFFFFFFFF
 		stableID = "-" + strconv.FormatInt(value, 10)
 		return false

@@ -28,7 +28,13 @@ const (
 	deferredAPIRequestBytesKey     = "DEFERRED_API_REQUEST_BYTES"
 	creditsUsedKey                 = "__antigravity_credits_used__"
 	errorOnlyCaptureKey            = "__API_ERROR_ONLY_CAPTURE__"
+	apiResponseDiagnosticsKey      = "__API_RESPONSE_DIAGNOSTICS__"
+	apiResponseCapturedKey         = "__API_RESPONSE_CAPTURED__"
 	maxDeferredAPIRequestBodyBytes = 32 << 20
+
+	// maxResponseDiagnosticBytes bounds a single local-failure note so a huge
+	// dial error cannot balloon the downstream log section.
+	maxResponseDiagnosticBytes = 4 << 10
 
 	// Error-only capture bounds. When full request logging is disabled, upstream
 	// status, headers, response chunks, and errors are still retained so a
@@ -53,6 +59,27 @@ func WithErrorOnlyCaptureDisabled(ctx context.Context) context.Context {
 		ctx = context.Background()
 	}
 	return context.WithValue(ctx, errorOnlyCaptureDisabledKey, true)
+}
+
+// APIResponseCapturedKey marks a gin context whose upstream response was already
+// captured by an executor. Handlers consult it so synthesized or translated
+// fallback payloads are never appended as if they came from upstream.
+const APIResponseCapturedKey = apiResponseCapturedKey
+
+// APIResponseDiagnostics returns the local-failure notes recorded for the
+// request so the logger can render them in the downstream section.
+func APIResponseDiagnostics(ginCtx *gin.Context) []string {
+	if ginCtx == nil {
+		return nil
+	}
+	existing, _ := ginCtx.Get(apiResponseDiagnosticsKey)
+	diagnostics, _ := existing.([]string)
+	if len(diagnostics) == 0 {
+		return nil
+	}
+	out := make([]string, len(diagnostics))
+	copy(out, diagnostics)
+	return out
 }
 
 // errorOnlyCaptureActive reports whether upstream attempts should be captured
@@ -100,7 +127,6 @@ type upstreamAttempt struct {
 	bodyStarted          bool
 	bodyHasContent       bool
 	prevWasSSEEvent      bool
-	errorWritten         bool
 }
 
 type apiResponseAggregation struct {
@@ -232,7 +258,9 @@ func RecordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status i
 	updateAggregatedResponse(ginCtx, attempts)
 }
 
-// RecordAPIResponseError adds an error entry for the latest attempt when no HTTP response is available.
+// RecordAPIResponseError retains a local failure for the downstream RESPONSE
+// log section. API response capture must contain upstream data only, so the
+// error text never lands inside an === API RESPONSE === block.
 func RecordAPIResponseError(ctx context.Context, cfg *config.Config, err error) {
 	if cfg == nil || err == nil {
 		return
@@ -244,20 +272,26 @@ func RecordAPIResponseError(ctx context.Context, cfg *config.Config, err error) 
 	if ginCtx == nil {
 		return
 	}
-	attempts, attempt := ensureAttempt(ginCtx)
-	ensureResponseIntro(attempt)
+	appendAPIResponseDiagnostic(ginCtx, err.Error())
+	// Mark that upstream capture exists so a handler fallback payload cannot be
+	// appended as if it were the upstream response.
+	ginCtx.Set(apiResponseCapturedKey, true)
+}
 
-	if attempt.bodyStarted && !attempt.bodyHasContent {
-		// Ensure body does not stay empty marker if error arrives first.
-		attempt.bodyStarted = false
+// appendAPIResponseDiagnostic appends one bounded local-failure note to the
+// diagnostic list rendered in the downstream RESPONSE section.
+func appendAPIResponseDiagnostic(ginCtx *gin.Context, message string) {
+	if ginCtx == nil || message == "" {
+		return
 	}
-	if attempt.errorWritten {
-		attempt.response.WriteString("\n")
+	trimmed := message
+	if len(trimmed) > maxResponseDiagnosticBytes {
+		trimmed = trimmed[:maxResponseDiagnosticBytes] + "\n[diagnostic truncated]"
 	}
-	attempt.response.WriteString(fmt.Sprintf("Error: %s\n", err.Error()))
-	attempt.errorWritten = true
-
-	updateAggregatedResponse(ginCtx, attempts)
+	existing, _ := ginCtx.Get(apiResponseDiagnosticsKey)
+	diagnostics, _ := existing.([]string)
+	diagnostics = append(diagnostics, trimmed)
+	ginCtx.Set(apiResponseDiagnosticsKey, diagnostics)
 }
 
 // AppendAPIResponseChunk appends an upstream response chunk to Gin context for request logging.

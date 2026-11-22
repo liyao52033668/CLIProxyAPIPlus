@@ -2,6 +2,7 @@ package helps
 
 import (
 	"fmt"
+	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
@@ -77,4 +78,46 @@ func ParseRetryDelay(errorBody []byte) (*time.Duration, error) {
 	}
 
 	return nil, fmt.Errorf("no RetryInfo found")
+}
+
+// ParseRetryDelayWithHeaders extracts the retry delay from a Google API 429
+// error response body (preserving explicit zero-delay hints used by
+// Antigravity), falling back to an HTTP Retry-After header (preserving explicit
+// 0-second hints) when the body carries no retry delay hint.
+func ParseRetryDelayWithHeaders(headers http.Header, errorBody []byte, now time.Time) (*time.Duration, error) {
+	if delay, errParse := ParseRetryDelay(errorBody); errParse == nil && delay != nil {
+		return delay, nil
+	}
+	if delay := parseRetryAfterHeaderDuration(headers, now, true); delay != nil {
+		return delay, nil
+	}
+	return nil, fmt.Errorf("no RetryInfo found")
+}
+
+// parseRetryAfterHeaderDuration reads the Retry-After header as either a
+// positive number of seconds or an HTTP date. When allowZeroSeconds is false a
+// non-positive delay is rejected, matching Gemini's positive-only semantics.
+func parseRetryAfterHeaderDuration(headers http.Header, now time.Time, allowZeroSeconds bool) *time.Duration {
+	if headers == nil {
+		return nil
+	}
+	raw := strings.TrimSpace(headers.Get("Retry-After"))
+	if raw == "" {
+		return nil
+	}
+	if seconds, errParse := strconv.ParseInt(raw, 10, 64); errParse == nil {
+		if seconds < 0 || (seconds == 0 && !allowZeroSeconds) {
+			return nil
+		}
+		d := time.Duration(seconds) * time.Second
+		return &d
+	}
+	if parsed, errHTTP := http.ParseTime(raw); errHTTP == nil {
+		if !parsed.After(now) {
+			return nil
+		}
+		d := parsed.Sub(now)
+		return &d
+	}
+	return nil
 }

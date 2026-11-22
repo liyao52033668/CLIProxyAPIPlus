@@ -18,6 +18,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -704,9 +705,15 @@ func (h *BaseAPIHandler) StartNonStreamingKeepAlive(c *gin.Context, ctx context0
 	}
 }
 
-// appendAPIResponse preserves any previously captured API response and appends new data.
+// appendAPIResponse records handler fallback data only when executor capture is unavailable.
 func appendAPIResponse(c *gin.Context, data []byte) {
 	if c == nil || len(data) == 0 {
+		return
+	}
+	// Handler payloads are translated or synthesized. When an executor already
+	// captured the upstream response, appending here would fabricate upstream
+	// data for an attempt that produced none.
+	if captured, _ := c.Get(helps.APIResponseCapturedKey); captured == true {
 		return
 	}
 

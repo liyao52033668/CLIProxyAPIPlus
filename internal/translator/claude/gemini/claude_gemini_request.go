@@ -422,13 +422,23 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	// Stream setting configuration
 	out, _ = sjson.SetBytes(out, "stream", stream)
 
-	// Convert tool parameter types to lowercase for Claude Code compatibility
+	// Convert tool parameter types to lowercase for Claude Code compatibility.
+	// Only string values are rewritten: a property named "type", boolean
+	// subschemas, array type keywords, and literal defaults must stay intact.
 	var pathsToLower []string
 	toolsResult := gjson.GetBytes(out, "tools")
-	util.Walk(toolsResult, "", "type", &pathsToLower)
+	util.WalkSchema(toolsResult, "", "type", &pathsToLower)
 	for _, p := range pathsToLower {
 		fullPath := fmt.Sprintf("tools.%s", p)
-		out, _ = sjson.SetBytes(out, fullPath, strings.ToLower(gjson.GetBytes(out, fullPath).String()))
+		typeResult := gjson.GetBytes(out, fullPath)
+		if !typeResult.Exists() || typeResult.Type != gjson.String {
+			continue
+		}
+		lowered := strings.ToLower(typeResult.String())
+		if lowered == typeResult.String() {
+			continue
+		}
+		out, _ = sjson.SetBytes(out, fullPath, lowered)
 	}
 
 	return out

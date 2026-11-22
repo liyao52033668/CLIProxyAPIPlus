@@ -188,8 +188,39 @@ func newErrorFromExecution(err error) *Error {
 	}
 	if isRequestScopedError(err) || isRequestInvalidError(err) {
 		e.Code = requestScopedErrorCode
+	} else if isTransientTransportExecutionError(err) {
+		// The credential is healthy but this attempt produced no usable output.
+		// Rotation and cross-provider failover stay enabled; only the cooldown
+		// is suppressed.
+		e.Code = transientTransportErrorCode
 	}
 	return e
+}
+
+// transientTransportErrorCode marks an attempt the selected credential did not
+// cause (for example a Gemini-family HTTP 200 with no generated output).
+const transientTransportErrorCode = "transient_transport"
+
+// isTransientTransportExecutionError reports whether err explicitly opts out of
+// credential cooldown without stopping credential rotation.
+func isTransientTransportExecutionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	type transientTransportProvider interface {
+		IsTransientTransport() bool
+	}
+	var provider transientTransportProvider
+	if errors.As(err, &provider) && provider != nil {
+		return provider.IsTransientTransport()
+	}
+	return false
+}
+
+// isTransientTransportResultError reports whether a classified result error
+// carries the transient-transport code.
+func isTransientTransportResultError(err *Error) bool {
+	return err != nil && err.Code == transientTransportErrorCode
 }
 
 // tosViolationErrorCode marks a credential deactivated by a provider

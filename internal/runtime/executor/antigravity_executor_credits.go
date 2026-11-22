@@ -214,12 +214,22 @@ func classifyAntigravity429(body []byte) antigravity429Category {
 }
 
 func decideAntigravity429(body []byte) antigravity429Decision {
+	return decideAntigravity429WithHeaders(nil, body)
+}
+
+// decideAntigravity429WithHeaders classifies a 429 using the response body first
+// and falls back to the HTTP Retry-After header when the body carries no delay
+// hint. Mid-stream SSE 429 frames have no HTTP response, so headers are nil.
+func decideAntigravity429WithHeaders(headers http.Header, body []byte) antigravity429Decision {
 	decision := antigravity429Decision{kind: antigravity429DecisionSoftRetry}
 	if len(body) == 0 {
+		if retryAfter, parseErr := helps.ParseRetryDelayWithHeaders(headers, nil, time.Now()); parseErr == nil && retryAfter != nil {
+			decision.retryAfter = retryAfter
+		}
 		return decision
 	}
 
-	if retryAfter, parseErr := helps.ParseRetryDelay(body); parseErr == nil && retryAfter != nil {
+	if retryAfter, parseErr := helps.ParseRetryDelayWithHeaders(headers, body, time.Now()); parseErr == nil && retryAfter != nil {
 		decision.retryAfter = retryAfter
 	}
 
@@ -340,9 +350,23 @@ func antigravityHasExplicitCreditsBalanceExhaustedReason(body []byte) bool {
 }
 
 func newAntigravityStatusErr(statusCode int, body []byte) statusErr {
+	return newAntigravityStatusErrWithHeaders(statusCode, nil, body)
+}
+
+// newAntigravityZeroOutputStatusErr builds the 502 returned when an Antigravity
+// upstream finishes with no generated output. The credential itself is
+// healthy, so the error is marked transient transport and skips cooldown.
+func newAntigravityZeroOutputStatusErr(msg string) statusErr {
+	return statusErr{code: http.StatusBadGateway, msg: msg, transientTransport: true}
+}
+
+// newAntigravityStatusErrWithHeaders builds a status error, using headers as the
+// Retry-After fallback when a 429 body carries no delay hint. Mid-stream SSE
+// frames have no HTTP response, so callers pass nil headers for those.
+func newAntigravityStatusErrWithHeaders(statusCode int, headers http.Header, body []byte) statusErr {
 	err := statusErr{code: statusCode, msg: string(body)}
 	if statusCode == http.StatusTooManyRequests {
-		if retryAfter, parseErr := helps.ParseRetryDelay(body); parseErr == nil && retryAfter != nil {
+		if retryAfter, parseErr := helps.ParseRetryDelayWithHeaders(headers, body, time.Now()); parseErr == nil && retryAfter != nil {
 			err.retryAfter = retryAfter
 		}
 	} else if statusCode == http.StatusForbidden {

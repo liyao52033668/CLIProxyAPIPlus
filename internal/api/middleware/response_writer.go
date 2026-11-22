@@ -15,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -377,6 +378,15 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 		if apiErrors, ok := apiResponseError.([]*interfaces.ErrorMessage); ok {
 			slicesAPIResponseError = apiErrors
 		}
+	}
+	// Local read, dial, and stream failures are carried as diagnostics so the
+	// logger can render them in the downstream RESPONSE section instead of
+	// inside the captured upstream API RESPONSE payload.
+	for _, diagnostic := range helps.APIResponseDiagnostics(c) {
+		slicesAPIResponseError = append(slicesAPIResponseError, &interfaces.ErrorMessage{
+			StatusCode: finalStatusCode,
+			Error:      interfaces.ResponseDiagnostic(diagnostic),
+		})
 	}
 
 	hasAPIError := len(slicesAPIResponseError) > 0 || finalStatusCode >= http.StatusBadRequest

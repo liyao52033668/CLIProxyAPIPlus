@@ -235,6 +235,11 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 						setAssistantRole()
 						template, _ = sjson.SetRawBytes(template, "choices.0.delta.tool_calls.-1", functionCallTemplate)
 					} else if inlineDataResult.Exists() {
+						// Thought draft images are intermediate generation steps,
+						// not deliverables, so they must not reach images[].
+						if partResult.Get("thought").Bool() {
+							continue
+						}
 						data := inlineDataResult.Get("data").String()
 						if data == "" {
 							continue
@@ -440,6 +445,9 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 						}
 						toolCalls = append(toolCalls, functionCallItemTemplate)
 					} else if inlineDataResult.Exists() {
+						if partResult.Get("thought").Bool() {
+							continue
+						}
 						data := inlineDataResult.Get("data").String()
 						if data != "" {
 							mimeType := inlineDataResult.Get("mimeType").String()

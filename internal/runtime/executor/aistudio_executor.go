@@ -170,7 +170,7 @@ func (e *AIStudioExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 	// An abnormal termination with no visible output is a retryable upstream
 	// failure, not an empty successful answer.
 	if _, zeroErrMsg, zeroOutput := helps.CheckGeminiZeroOutputNonStream(opts.SourceFormat, wsResp.Body, false); zeroOutput {
-		zeroErr := statusErr{code: http.StatusBadGateway, msg: zeroErrMsg}
+		zeroErr := newGeminiZeroOutputStatusErr(zeroErrMsg)
 		helps.RecordAPIResponseError(ctx, e.cfg, zeroErr)
 		reporter.PublishFailureWithDetail(ctx, helps.ParseGeminiUsage(wsResp.Body), zeroErr)
 		reporter.EnsurePublished(ctx)

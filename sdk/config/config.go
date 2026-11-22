@@ -22,6 +22,9 @@ type PayloadConfig = internalconfig.PayloadConfig
 type PayloadRule = internalconfig.PayloadRule
 type PayloadFilterRule = internalconfig.PayloadFilterRule
 type PayloadModelRule = internalconfig.PayloadModelRule
+type PayloadReplaceRule = internalconfig.PayloadReplaceRule
+type PayloadReplaceTarget = internalconfig.PayloadReplaceTarget
+type PayloadReplacement = internalconfig.PayloadReplacement
 
 type GeminiKey = internalconfig.GeminiKey
 type CodexKey = internalconfig.CodexKey

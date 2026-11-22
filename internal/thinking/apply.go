@@ -336,11 +336,11 @@ func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromForma
 		"level":    config.Level,
 	}).Debug("thinking: applying config for user-defined model (skip validation)")
 
-	config = normalizeUserDefinedConfig(config, fromFormat, toFormat)
+	config = normalizeUserDefinedConfig(config, modelInfo, fromFormat, toFormat)
 	return applier.Apply(body, config, modelInfo)
 }
 
-func normalizeUserDefinedConfig(config ThinkingConfig, fromFormat, toFormat string) ThinkingConfig {
+func normalizeUserDefinedConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFormat, toFormat string) ThinkingConfig {
 	if config.Mode != ModeLevel {
 		return config
 	}
@@ -350,6 +350,14 @@ func normalizeUserDefinedConfig(config ThinkingConfig, fromFormat, toFormat stri
 	}
 	if !isBudgetCapableProvider(toFormat) {
 		return config
+	}
+	// Preserve an explicit thinking level whenever the request or the registered
+	// model natively speaks levels; converting it to a budget would discard the
+	// caller's intent. "none" and "auto" still map to budgets.
+	if !strings.EqualFold(string(config.Level), string(LevelNone)) && !strings.EqualFold(string(config.Level), string(LevelAuto)) {
+		if isGeminiFamily(fromFormat) || fromFormat == "interactions" || (modelInfo != nil && modelInfo.Thinking != nil && len(modelInfo.Thinking.Levels) > 0) {
+			return config
+		}
 	}
 	budget, ok := ConvertLevelToBudget(string(config.Level))
 	if !ok {

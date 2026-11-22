@@ -833,6 +833,7 @@ func (l *FileRequestLogger) writeNonStreamingLog(
 	if requestTimestamp.IsZero() {
 		requestTimestamp = time.Now()
 	}
+	apiResponseErrors, diagnostics := splitResponseDiagnostics(apiResponseErrors)
 	isWebsocketTranscript := hasSectionPayload(websocketTimeline)
 	downstreamTransport := inferDownstreamTransport(requestHeaders, websocketTimeline)
 	upstreamTransport := inferUpstreamTransport(apiRequest, apiResponse, apiWebsocketTimeline, apiResponseErrors)
@@ -855,12 +856,13 @@ func (l *FileRequestLogger) writeNonStreamingLog(
 		return errWrite
 	}
 	if isWebsocketTranscript {
-		// Intentionally omit the generic downstream HTTP response section for websocket
-		// transcripts. The durable session exchange is captured in WEBSOCKET TIMELINE,
-		// and appending a one-off upgrade response snapshot would dilute that transcript.
-		return nil
+		// Keep websocket exchanges in their timelines; include only local diagnostics here.
+		if len(diagnostics) == 0 {
+			return nil
+		}
+		return writeResponseSection(w, 0, false, nil, nil, nil, true, diagnostics)
 	}
-	return writeResponseSection(w, statusCode, true, responseHeaders, bytes.NewReader(response), decompressErr, true)
+	return writeResponseSection(w, statusCode, true, responseHeaders, bytes.NewReader(response), decompressErr, true, diagnostics)
 }
 
 func writeRequestInfoWithBody(
@@ -1058,6 +1060,25 @@ func writeAPISection(w io.Writer, sectionHeader string, sectionPrefix string, pa
 	return nil
 }
 
+// splitResponseDiagnostics separates log-only local failures from API errors
+// without changing the logger interfaces or treating a recovered attempt as a
+// failed response.
+func splitResponseDiagnostics(entries []*interfaces.ErrorMessage) ([]*interfaces.ErrorMessage, []string) {
+	var apiErrors []*interfaces.ErrorMessage
+	var diagnostics []string
+	for _, entry := range entries {
+		if entry == nil {
+			continue
+		}
+		if diagnostic, ok := interfaces.IsResponseDiagnostic(entry.Error); ok {
+			diagnostics = append(diagnostics, diagnostic)
+		} else {
+			apiErrors = append(apiErrors, entry)
+		}
+	}
+	return apiErrors, diagnostics
+}
+
 func writeAPIErrorResponses(w io.Writer, apiResponseErrors []*interfaces.ErrorMessage) error {
 	for i := range apiResponseErrors {
 		if apiResponseErrors[i] == nil {
@@ -1086,12 +1107,20 @@ func writeAPIErrorResponses(w io.Writer, apiResponseErrors []*interfaces.ErrorMe
 	return nil
 }
 
-func writeResponseSection(w io.Writer, statusCode int, statusWritten bool, responseHeaders map[string][]string, responseReader io.Reader, decompressErr error, trailingNewline bool) error {
+func writeResponseSection(w io.Writer, statusCode int, statusWritten bool, responseHeaders map[string][]string, responseReader io.Reader, decompressErr error, trailingNewline bool, diagnostics []string) error {
 	if _, errWrite := io.WriteString(w, "=== RESPONSE ===\n"); errWrite != nil {
 		return errWrite
 	}
 	if statusWritten {
 		if _, errWrite := io.WriteString(w, fmt.Sprintf("Status: %d\n", statusCode)); errWrite != nil {
+			return errWrite
+		}
+	}
+
+	// Local failures are rendered here rather than inside the upstream API
+	// RESPONSE section, which must contain upstream data only.
+	for _, diagnostic := range diagnostics {
+		if _, errWrite := fmt.Fprintf(w, "Error: %s\n", diagnostic); errWrite != nil {
 			return errWrite
 		}
 	}
@@ -1705,7 +1734,7 @@ func (w *FileStreamingLogWriter) writeFinalLog(logFile *os.File) error {
 		}
 	}()
 
-	return writeResponseSection(logFile, w.responseStatus, w.statusWritten, w.responseHeaders, responseBodyFile, nil, false)
+	return writeResponseSection(logFile, w.responseStatus, w.statusWritten, w.responseHeaders, responseBodyFile, nil, false, nil)
 }
 
 func (w *FileStreamingLogWriter) cleanupTempFiles() {
@@ -1934,7 +1963,7 @@ func (w *homeStreamingLogWriter) Close() error {
 	if errWrite := writeAPISection(&buf, "=== API RESPONSE ===\n", "=== API RESPONSE", w.apiResponse, w.apiResponseTS); errWrite != nil {
 		return errWrite
 	}
-	if errWrite := writeResponseSection(&buf, w.responseStatus, w.statusWritten, w.responseHeaders, bytes.NewReader(responsePayload), nil, false); errWrite != nil {
+	if errWrite := writeResponseSection(&buf, w.responseStatus, w.statusWritten, w.responseHeaders, bytes.NewReader(responsePayload), nil, false, nil); errWrite != nil {
 		return errWrite
 	}
 

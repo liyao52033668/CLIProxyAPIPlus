@@ -16,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
 
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/openai/chat-completions"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -207,6 +208,9 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 				template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
 				template, _ = sjson.SetRawBytes(template, "choices.0.delta.tool_calls.-1", functionCallTemplate)
 			} else if inlineDataResult.Exists() {
+				if partResult.Get("thought").Bool() {
+					continue
+				}
 				data := inlineDataResult.Get("data").String()
 				if data == "" {
 					continue
@@ -263,23 +267,10 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 // `{}`, `{"response":{}}` or `{"response":{"candidates":[]}}` must not count as a
 // started stream, otherwise a keepalive or malformed event would be enough to
 // finalize a stream that produced nothing.
+// hasAntigravityResponsePayload delegates to the shared helper so every
+// Antigravity response translator agrees on what starts a stream.
 func hasAntigravityResponsePayload(rawJSON []byte) bool {
-	for _, path := range []string{"response.candidates", "candidates"} {
-		if candidates := gjson.GetBytes(rawJSON, path); candidates.IsArray() && len(candidates.Array()) > 0 {
-			return true
-		}
-	}
-	// FilterSSEUsageMetadata renames non-terminal usage to cpaUsageMetadata before
-	// the translator sees it, so both spellings must be accepted.
-	for _, path := range []string{
-		"response.usageMetadata", "response.cpaUsageMetadata",
-		"usageMetadata", "cpaUsageMetadata",
-	} {
-		if usage := gjson.GetBytes(rawJSON, path); usage.IsObject() && len(usage.Map()) > 0 {
-			return true
-		}
-	}
-	return false
+	return translatorcommon.HasAntigravityResponsePayload(rawJSON)
 }
 
 // resolveOpenAIFinishReason maps the cached upstream state to the OpenAI

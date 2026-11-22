@@ -53,8 +53,9 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 		}
 	}
 
-	isClaude := strings.Contains(strings.ToLower(baseModel), "claude")
-	if isClaude || strings.Contains(baseModel, "gemini-3-pro") || strings.Contains(baseModel, "gemini-3.1-flash-image") {
+	lowerModel := strings.ToLower(baseModel)
+	isClaude := strings.Contains(lowerModel, "claude")
+	if isClaude || strings.Contains(lowerModel, "gemini-3-pro") || strings.Contains(lowerModel, "gemini-3.1-flash-image") {
 		return e.executeClaudeNonStream(ctx, auth, req, opts)
 	}
 
@@ -124,7 +125,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	// configured overrides and filters always win over restored replay state.
 	requestPayload = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, "antigravity", from.String(), "request", requestPayload, originalTranslated, requestedModel, requestPath, opts.Headers)
 
-	httpReq, errReq := e.buildRequest(ctx, auth, token, baseModel, requestPayload, false, opts.Alt, baseURL, helps.DerivedAntigravitySessionID(opts.Metadata, req.Metadata))
+	httpReq, errReq := e.buildRequest(ctx, auth, token, baseModel, requestPayload, false, opts.Alt, baseURL, helps.AntigravitySessionIDForAuth(antigravityAuthID(auth), opts.Metadata, req.Metadata))
 	if errReq != nil {
 		err = errReq
 		return resp, err
@@ -153,7 +154,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	helps.AppendAPIResponseChunk(ctx, e.cfg, bodyBytes)
 
 	if httpResp.StatusCode == http.StatusTooManyRequests {
-		decision := decideAntigravity429(bodyBytes)
+		decision := decideAntigravity429WithHeaders(httpResp.Header, bodyBytes)
 		switch decision.kind {
 		case antigravity429DecisionShortCooldownSwitchAuth:
 			closeAntigravityAuthIdleTransports(auth)
@@ -179,7 +180,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 			// Report the upstream failure rather than the cleanup failure.
 			logAntigravityReasoningReplayDegraded(replayScope, "invalidate", errClear)
 		}
-		err = newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
+		err = newAntigravityStatusErrWithHeaders(httpResp.StatusCode, httpResp.Header, bodyBytes)
 		return resp, err
 	}
 
@@ -191,7 +192,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	// with no visible output is a retryable upstream failure, not an empty
 	// successful answer.
 	if _, zeroErrMsg, zeroOutput := helps.CheckGeminiZeroOutputNonStream(responseFormat, bodyBytes, true); zeroOutput {
-		err = newAntigravityStatusErr(http.StatusBadGateway, []byte(zeroErrMsg))
+		err = newAntigravityZeroOutputStatusErr(zeroErrMsg)
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		reporter.PublishFailureWithDetail(ctx, helps.ParseAntigravityUsage(bodyBytes), err)
 		reporter.EnsurePublished(ctx)
@@ -339,7 +340,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 		}
 	}
 	requestPayload = ensureAntigravityGeminiBoundaryUserContent(baseModel, requestPayload)
-	httpReq, errReq := e.buildRequest(ctx, auth, token, baseModel, requestPayload, true, opts.Alt, baseURL, helps.DerivedAntigravitySessionID(opts.Metadata, req.Metadata))
+	httpReq, errReq := e.buildRequest(ctx, auth, token, baseModel, requestPayload, true, opts.Alt, baseURL, helps.AntigravitySessionIDForAuth(antigravityAuthID(auth), opts.Metadata, req.Metadata))
 	if errReq != nil {
 		err = errReq
 		return resp, err
@@ -375,7 +376,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, bodyBytes)
 		if httpResp.StatusCode == http.StatusTooManyRequests {
-			decision := decideAntigravity429(bodyBytes)
+			decision := decideAntigravity429WithHeaders(httpResp.Header, bodyBytes)
 
 			switch decision.kind {
 			case antigravity429DecisionShortCooldownSwitchAuth:
@@ -400,7 +401,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 			// Report the upstream failure rather than the cleanup failure.
 			logAntigravityReasoningReplayDegraded(replayScope, "invalidate", errClear)
 		}
-		err = newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
+		err = newAntigravityStatusErrWithHeaders(httpResp.StatusCode, httpResp.Header, bodyBytes)
 		return resp, err
 	}
 
@@ -492,6 +493,7 @@ func (e *AntigravityExecutor) convertStreamToNonStream(stream []byte) []byte {
 	var pendingKind string
 	var pendingText strings.Builder
 	var pendingThoughtSig string
+	var pendingFromCurrentChunk bool
 
 	flushPending := func() {
 		if pendingKind == "" {
@@ -500,18 +502,26 @@ func (e *AntigravityExecutor) convertStreamToNonStream(stream []byte) []byte {
 		text := pendingText.String()
 		switch pendingKind {
 		case "text":
-			if strings.TrimSpace(text) == "" {
+			// An empty text with no signature carries nothing; an empty text with a
+			// signature is a detached signature carrier and must be kept.
+			if text == "" && pendingThoughtSig == "" {
 				pendingKind = ""
 				pendingText.Reset()
 				pendingThoughtSig = ""
+				pendingFromCurrentChunk = false
 				return
 			}
-			parts = append(parts, map[string]interface{}{"text": text})
+			part := map[string]interface{}{"text": text}
+			if pendingThoughtSig != "" {
+				part["thoughtSignature"] = pendingThoughtSig
+			}
+			parts = append(parts, part)
 		case "thought":
-			if strings.TrimSpace(text) == "" && pendingThoughtSig == "" {
+			if text == "" && pendingThoughtSig == "" {
 				pendingKind = ""
 				pendingText.Reset()
 				pendingThoughtSig = ""
+				pendingFromCurrentChunk = false
 				return
 			}
 			part := map[string]interface{}{"thought": true}
@@ -524,6 +534,7 @@ func (e *AntigravityExecutor) convertStreamToNonStream(stream []byte) []byte {
 		pendingKind = ""
 		pendingText.Reset()
 		pendingThoughtSig = ""
+		pendingFromCurrentChunk = false
 	}
 
 	normalizePart := func(partResult gjson.Result) map[string]interface{} {
@@ -589,6 +600,7 @@ func (e *AntigravityExecutor) convertStreamToNonStream(stream []byte) []byte {
 		}
 
 		if partsResult := responseNode.Get("candidates.0.content.parts"); partsResult.IsArray() {
+			pendingFromCurrentChunk = false
 			for _, part := range partsResult.Array() {
 				hasFunctionCall := part.Get("functionCall").Exists()
 				hasInlineData := part.Get("inlineData").Exists() || part.Get("inline_data").Exists()
@@ -606,18 +618,33 @@ func (e *AntigravityExecutor) convertStreamToNonStream(stream []byte) []byte {
 				}
 
 				if thought || part.Get("text").Exists() {
+					if text == "" && sig == "" {
+						continue
+					}
 					kind := "text"
 					if thought {
 						kind = "thought"
 					}
-					if pendingKind != "" && pendingKind != kind {
+					if !thought && text == "" && sig != "" {
+						// Preserve standalone empty-text signature carriers as distinct
+						// parts so downstream translators keep streaming/non-streaming
+						// parity and never overwrite consecutive detached signatures.
+						flushPending()
+						parts = append(parts, map[string]interface{}{"text": "", "thoughtSignature": sig})
+						continue
+					}
+					// A trailing signature on a thought part extends the pending thought
+					// segment; anything else starting in this chunk is a new boundary.
+					isThoughtTrailingSig := thought && text == "" && sig != "" && pendingKind == "thought" && pendingThoughtSig == ""
+					if pendingKind != "" && (pendingKind != kind || pendingThoughtSig != "" || (pendingFromCurrentChunk && !isThoughtTrailingSig)) {
 						flushPending()
 					}
 					pendingKind = kind
 					pendingText.WriteString(text)
-					if kind == "thought" && sig != "" {
+					if sig != "" {
 						pendingThoughtSig = sig
 					}
+					pendingFromCurrentChunk = true
 					continue
 				}
 

@@ -25,6 +25,10 @@ type statusErr struct {
 	// tosViolation marks a terminal terms-of-service rejection: the credential
 	// must be deactivated instead of cooled down.
 	tosViolation bool
+	// transientTransport marks a failure the selected credential did not cause,
+	// such as an upstream that returned HTTP 200 with no generated output. The
+	// conductor rotates the credential for this request but must not cool it.
+	transientTransport bool
 }
 
 func (e statusErr) Error() string {
@@ -36,6 +40,24 @@ func (e statusErr) Error() string {
 
 func (e statusErr) StatusCode() int            { return e.code }
 func (e statusErr) RetryAfter() *time.Duration { return e.retryAfter }
+
+// IsTransientTransport reports whether the failure must skip credential
+// cooldown while still allowing rotation and cross-provider failover.
+func (e statusErr) IsTransientTransport() bool { return e.transientTransport }
+
+// newGeminiZeroOutputStatusErr builds the 502 returned when a Gemini-family
+// upstream finishes with no generated output. The credential itself is healthy,
+// so the error is marked transient transport.
+func newGeminiZeroOutputStatusErr(msg string) statusErr {
+	return statusErr{code: http.StatusBadGateway, msg: msg, transientTransport: true}
+}
+
+// newGeminiTranslatedClaudeErrorStatusErr builds the 502 used when the
+// translated Claude view of a Gemini response reports a terminal error payload
+// (for example MALFORMED_FUNCTION_CALL).
+func newGeminiTranslatedClaudeErrorStatusErr(msg string) statusErr {
+	return statusErr{code: http.StatusBadGateway, msg: msg, transientTransport: true}
+}
 
 // IsCredentialScoped reports whether the error must cool down the entire
 // credential instead of a single model (e.g. Codex usage_limit_reached).

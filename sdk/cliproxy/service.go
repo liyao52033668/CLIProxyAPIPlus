@@ -17,6 +17,7 @@ import (
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
@@ -1038,6 +1039,19 @@ func (s *Service) Run(ctx context.Context) error {
 		proxyURL = s.cfg.ProxyURL
 	}
 	executor.StartXAIVersionUpdater(ctx, proxyURL)
+
+	// The Antigravity Hub manifest fetch follows the same egress path. The proxy
+	// provider is read per fetch so a hot-reloaded proxy-url takes effect without
+	// restarting the updater.
+	misc.SetAntigravityVersionProxyProvider(func() string {
+		s.cfgMu.Lock()
+		cfg := s.cfg
+		s.cfgMu.Unlock()
+		if cfg == nil {
+			return ""
+		}
+		return cfg.ProxyURL
+	})
 
 	homeEnabled := s.cfg != nil && s.cfg.Home.Enabled
 	if homeEnabled {

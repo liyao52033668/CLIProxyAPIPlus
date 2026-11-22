@@ -376,6 +376,9 @@ func appendPayloadConfigChanges(changes []string, oldPayload, newPayload config.
 	changes = appendPayloadRuleChanges(changes, "override", oldPayload.Override, newPayload.Override)
 	changes = appendPayloadRuleChanges(changes, "override-raw", oldPayload.OverrideRaw, newPayload.OverrideRaw)
 	changes = appendPayloadFilterRuleChanges(changes, "filter", oldPayload.Filter, newPayload.Filter)
+	if !reflect.DeepEqual(oldPayload.Replace, newPayload.Replace) {
+		changes = append(changes, fmt.Sprintf("payload.replace: updated (%d -> %d rules)", len(oldPayload.Replace), len(newPayload.Replace)))
+	}
 	return changes
 }
 

@@ -258,6 +258,16 @@ func (l *authAutoRefreshLoop) handleDueAuth(ctx context.Context, now time.Time, 
 	}
 
 	if !shouldRefresh {
+		// nextRefreshCheckAt can report an already-past deadline while
+		// shouldRefresh vetoes the refresh. Re-queueing that deadline would make
+		// the loop spin on this auth every tick, so back off by one interval.
+		if !next.After(now) {
+			delay := l.interval
+			if delay <= 0 {
+				delay = refreshCheckInterval
+			}
+			next = now.Add(delay)
+		}
 		l.upsert(authID, next)
 		return
 	}

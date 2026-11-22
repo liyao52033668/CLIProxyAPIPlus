@@ -810,19 +810,16 @@ func TestConvertOpenAIResponsesRequestToClaude_TextFormatStructuredOutput(t *tes
 			}
 		}`)
 		out := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-4-6", input, false)
-		system := gjson.GetBytes(out, "system")
-		if !system.Exists() || len(system.Array()) == 0 {
-			t.Fatalf("system blocks missing. Output: %s", string(out))
+		// A modern Claude model carries the schema natively; the prompt keeps no copy.
+		if got := gjson.GetBytes(out, "output_config.format.type").String(); got != "json_schema" {
+			t.Fatalf("output_config.format.type = %q. Output: %s", got, string(out))
 		}
-		found := false
-		for _, block := range system.Array() {
-			if strings.Contains(block.Get("text").String(), "facts") {
-				found = true
-				break
-			}
+		wantSchema := gjson.GetBytes(input, "text.format.schema").Raw
+		if got := gjson.GetBytes(out, "output_config.format.schema").Raw; got != wantSchema {
+			t.Fatalf("output_config.format.schema = %s, want %s", got, wantSchema)
 		}
-		if !found {
-			t.Fatalf("expected structured schema instruction in system prompt. Output: %s", string(out))
+		if system := gjson.GetBytes(out, "system"); system.Exists() {
+			t.Fatalf("expected no system instruction without a description. Output: %s", string(out))
 		}
 	})
 
@@ -883,7 +880,7 @@ func TestConvertOpenAIResponsesRequestToClaude_TextFormatStructuredOutput(t *tes
 			if strings.Contains(text, "Be concise.") {
 				hasInstructions = true
 			}
-			if strings.Contains(text, "winning_schema") && strings.Contains(text, "Primary facts") && strings.Contains(text, "item") {
+			if strings.Contains(text, "winning_schema") && strings.Contains(text, "Primary facts") {
 				hasWinningSchema = true
 			}
 			if strings.Contains(text, "valid JSON object") {

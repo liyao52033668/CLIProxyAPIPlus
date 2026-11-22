@@ -19,9 +19,19 @@ func ConvertInteractionsRequestToCodex(modelName string, inputRawJSON []byte, st
 	if stream || root.Get("stream").Bool() {
 		out, _ = sjson.SetBytes(out, "stream", true)
 	}
-	out = copyInteractionsSystemToCodex(out, root)
 	out = copyInteractionsGenerationConfigToCodex(out, root)
-	inputItems := translatorcommon.NewRawArrayItems(root.Get("input.#").Int())
+	// Interactions system instructions reach Codex as a leading developer
+	// message: forwarding them as `instructions` changes how upstream weighs
+	// them against Responses-format instructions.
+	systemText := interactionsCodexSystemText(root)
+	inputSize := root.Get("input.#").Int()
+	if systemText != "" {
+		inputSize++
+	}
+	inputItems := translatorcommon.NewRawArrayItems(inputSize)
+	if systemText != "" {
+		appendInteractionsTextToCodex(&inputItems, "developer", systemText)
+	}
 	appendInteractionsInputToCodex(&inputItems, root.Get("input"), signatureTargetModel)
 	out = translatorcommon.SetRawArrayItems(out, "input", inputItems)
 	out = copyInteractionsToolsToCodex(out, root)
@@ -30,21 +40,21 @@ func ConvertInteractionsRequestToCodex(modelName string, inputRawJSON []byte, st
 	return out
 }
 
-func copyInteractionsSystemToCodex(out []byte, root gjson.Result) []byte {
+// interactionsCodexSystemText flattens the Interactions system instruction into
+// plain text suitable for a developer message.
+func interactionsCodexSystemText(root gjson.Result) string {
 	systemInstruction := root.Get("system_instruction")
 	if !systemInstruction.Exists() {
 		systemInstruction = root.Get("systemInstruction")
 	}
 	if !systemInstruction.Exists() {
-		return out
+		return ""
 	}
 	if systemInstruction.Type == gjson.String {
-		out, _ = sjson.SetBytes(out, "instructions", systemInstruction.String())
-		return out
+		return systemInstruction.String()
 	}
 	if text := systemInstruction.Get("text"); text.Exists() && text.Type == gjson.String {
-		out, _ = sjson.SetBytes(out, "instructions", text.String())
-		return out
+		return text.String()
 	}
 	if parts := systemInstruction.Get("parts"); parts.Exists() && parts.IsArray() {
 		var builder strings.Builder
@@ -59,11 +69,9 @@ func copyInteractionsSystemToCodex(out []byte, root gjson.Result) []byte {
 			builder.WriteString(text)
 			return true
 		})
-		if builder.Len() > 0 {
-			out, _ = sjson.SetBytes(out, "instructions", builder.String())
-		}
+		return builder.String()
 	}
-	return out
+	return ""
 }
 
 func copyInteractionsGenerationConfigToCodex(out []byte, root gjson.Result) []byte {

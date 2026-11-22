@@ -1216,6 +1216,22 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 	}
 }
 
+// LookupStaticModelInfoByChannel resolves one static model definition scoped to
+// a channel, so a provider-specific catalog entry cannot be shadowed by another
+// channel's definition of the same model ID.
+func LookupStaticModelInfoByChannel(modelID, channel string) *ModelInfo {
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return nil
+	}
+	for _, model := range GetStaticModelDefinitionsByChannel(channel) {
+		if model != nil && model.ID == modelID {
+			return model
+		}
+	}
+	return nil
+}
+
 // GetBTModels returns the BaoTa (BT Panel) model definitions.
 // Models are dynamically fetched at runtime via FetchBTModels; these static
 // entries provide fallback metadata for model listing and alias configuration.

@@ -125,7 +125,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	// Payload rules stay final: replay restoration happens above, so
 	// configured overrides and filters always win over restored replay state.
 	requestPayload = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, "antigravity", from.String(), "request", requestPayload, originalTranslated, requestedModel, requestPath, opts.Headers)
-	httpReq, errReq := e.buildRequest(ctx, auth, token, baseModel, requestPayload, true, opts.Alt, baseURL, helps.DerivedAntigravitySessionID(opts.Metadata, req.Metadata))
+	httpReq, errReq := e.buildRequest(ctx, auth, token, baseModel, requestPayload, true, opts.Alt, baseURL, helps.AntigravitySessionIDForAuth(antigravityAuthID(auth), opts.Metadata, req.Metadata))
 	if errReq != nil {
 		err = errReq
 		return nil, err
@@ -160,7 +160,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, bodyBytes)
 		if httpResp.StatusCode == http.StatusTooManyRequests {
-			decision := decideAntigravity429(bodyBytes)
+			decision := decideAntigravity429WithHeaders(httpResp.Header, bodyBytes)
 
 			switch decision.kind {
 			case antigravity429DecisionShortCooldownSwitchAuth:
@@ -185,7 +185,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			// Report the upstream failure rather than the cleanup failure.
 			logAntigravityReasoningReplayDegraded(replayScope, "invalidate", errClear)
 		}
-		err = newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
+		err = newAntigravityStatusErrWithHeaders(httpResp.StatusCode, httpResp.Header, bodyBytes)
 		return nil, err
 	}
 
@@ -210,7 +210,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		var terminalDelivered bool
 		zeroOutputGuard := helps.NewGeminiZeroOutputStreamGuard(true, responseFormat)
 		failZeroOutput := func(finishReason string) {
-			zeroErr := newAntigravityStatusErr(http.StatusBadGateway, []byte(helps.GeminiZeroOutputErrorMessage(responseFormat, finishReason)))
+			zeroErr := newAntigravityZeroOutputStatusErr(helps.GeminiZeroOutputErrorMessage(responseFormat, finishReason))
 			helps.RecordAPIResponseError(ctx, e.cfg, zeroErr)
 			reporter.PublishFailure(ctx, zeroErr)
 			select {

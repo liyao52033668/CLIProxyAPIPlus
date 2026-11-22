@@ -456,6 +456,9 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) (*Auth, error) {
 	if err != nil {
 		unauthorized := isUnauthorizedError(err)
 		invalidGrant := isInvalidGrantError(err)
+		// An expired or revoked refresh token cannot recover by retrying:
+		// terminate the credential instead of backing off indefinitely.
+		terminalRefresh := invalidGrant && isTerminalRefreshGrantMessage(err.Error())
 		shouldReschedule := false
 		shouldUnschedule := false
 		var failedAuth *Auth
@@ -531,6 +534,25 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) (*Auth, error) {
 				current.NextRetryAfter = time.Time{}
 				current.RefreshFailures = 0
 				current.LastError = &Error{Code: "unauthorized", Message: err.Error(), HTTPStatus: http.StatusUnauthorized}
+				current.StatusMessage = "unauthorized (refresh token invalid)"
+				shouldUnschedule = true
+			} else if terminalRefresh && (accessTokenRejected || hasExpiredAccessToken || unauthorized) {
+				// A terminal grant (expired or revoked refresh token) cannot
+				// recover without a new sign-in. Stop selecting and scheduling the
+				// credential instead of backing off forever.
+				current.Unavailable = true
+				current.Status = StatusError
+				current.NextRefreshAfter = time.Time{}
+				current.NextRetryAfter = time.Time{}
+				current.RefreshFailures = 0
+				if rejectedRT := authRefreshToken(current); rejectedRT != "" {
+					current.RejectedRefreshToken = rejectedRT
+				}
+				current.LastError = &Error{
+					Code:       terminalRefreshErrorCode(err.Error(), statusCodeFromError(err)),
+					Message:    err.Error(),
+					HTTPStatus: http.StatusUnauthorized,
+				}
 				current.StatusMessage = "unauthorized (refresh token invalid)"
 				shouldUnschedule = true
 			} else if unauthorized || hasExpiredAccessToken || accessTokenRejected {

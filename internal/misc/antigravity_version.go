@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 )
@@ -20,7 +22,7 @@ const (
 	// manifest has not been fetched yet or cannot be reached. Cloud Code rejects
 	// newer models for clients below 2.23.0, so this floor must stay at or above
 	// that version.
-	antigravityFallbackVersion     = "2.29.0"
+	antigravityFallbackVersion     = "2.34.0"
 	antigravityHubPlatform         = "os_type=darwin; arch=arm64"
 	antigravityVersionCacheTTL     = 6 * time.Hour
 	defaultAntigravityFetchTimeout = 10 * time.Second
@@ -41,13 +43,18 @@ func SetAntigravityFetchTimeout(d time.Duration) {
 }
 
 // Changelists belong to specific Hub releases, not to the latest manifest in
-// general. Update the fallback release and its entry together. The 2.29.0 value
-// was verified in the official darwin-arm archive's webm_encoder build metadata.
-// Unknown releases keep their online version without claiming another build's CL.
+// general. Update the fallback release and its entry together. Newer entries are
+// verified from official language_server --stamp build metadata. Unmapped
+// releases fall back to the highest mapped (version, cl) pair so the User-Agent
+// never omits cl= or pairs a newer version with an older build's CL.
 var antigravityHubChangelists = map[string]string{
 	"2.23.0": "998057262",
 	"2.24.0": "1000335682",
 	"2.29.0": "1013060670",
+	"2.32.1": "1021296516",
+	"2.32.2": "1022991777",
+	"2.33.0": "1023160026",
+	"2.34.0": "1026637980",
 }
 
 type antigravityHubUpdaterManifest struct {
@@ -130,11 +137,85 @@ func AntigravityLatestVersion() string {
 	return antigravityFallbackVersion
 }
 
+// resolveAntigravityHubVersionAndChangelist maps a manifest version to a
+// verified (version, changelist) pair. Unmapped versions pin to the highest
+// semantically mapped release so the User-Agent never omits cl= and never
+// pairs a newer version with an older build's changelist.
+func resolveAntigravityHubVersionAndChangelist(version string) (string, string) {
+	if changelist := antigravityHubChangelists[version]; changelist != "" {
+		return version, changelist
+	}
+
+	var (
+		bestVersion string
+		bestCL      string
+		bestSemver  [3]int
+		hasBest     bool
+	)
+	for candidateVersion, candidateCL := range antigravityHubChangelists {
+		if candidateCL == "" {
+			continue
+		}
+		parsed, ok := parseAntigravitySemVersion(candidateVersion)
+		if !ok {
+			continue
+		}
+		if !hasBest || compareAntigravitySemVersion(parsed, bestSemver) > 0 {
+			bestVersion = candidateVersion
+			bestCL = candidateCL
+			bestSemver = parsed
+			hasBest = true
+		}
+	}
+	if hasBest {
+		return bestVersion, bestCL
+	}
+	return antigravityFallbackVersion, antigravityHubChangelists[antigravityFallbackVersion]
+}
+
+// parseAntigravitySemVersion parses a strict "major.minor.patch" numeric version.
+func parseAntigravitySemVersion(version string) ([3]int, bool) {
+	var parsed [3]int
+	parts := strings.Split(version, ".")
+	if len(parts) != 3 {
+		return parsed, false
+	}
+	for i, part := range parts {
+		if part == "" {
+			return parsed, false
+		}
+		for _, ch := range part {
+			if ch < '0' || ch > '9' {
+				return parsed, false
+			}
+		}
+		value, errParse := strconv.Atoi(part)
+		if errParse != nil {
+			return parsed, false
+		}
+		parsed[i] = value
+	}
+	return parsed, true
+}
+
+// compareAntigravitySemVersion reports ordering between two parsed versions.
+func compareAntigravitySemVersion(a, b [3]int) int {
+	for i := range a {
+		if a[i] < b[i] {
+			return -1
+		}
+		if a[i] > b[i] {
+			return 1
+		}
+	}
+	return 0
+}
+
 // AntigravityUserAgent returns the User-Agent string used by the Antigravity Hub family.
 func AntigravityUserAgent() string {
-	version := AntigravityLatestVersion()
+	version, changelist := resolveAntigravityHubVersionAndChangelist(AntigravityLatestVersion())
 	metadata := "aidev_client; " + antigravityHubPlatform
-	if changelist := antigravityHubChangelists[version]; changelist != "" {
+	if changelist != "" {
 		metadata += "; cl=" + changelist
 	}
 	return fmt.Sprintf("antigravity/hub/%s (%s)", version, metadata)
@@ -227,7 +308,54 @@ func fetchAntigravityLatestVersion(ctx context.Context) (string, error) {
 	}
 
 	client := &http.Client{Timeout: antigravityFetchTimeout}
+	if transport, errTransport := antigravityVersionTransport(); errTransport != nil {
+		return "", errTransport
+	} else if transport != nil {
+		client.Transport = transport
+		// Never leak the per-fetch pool: a stale idle connection would keep the
+		// process pinned to the previous proxy configuration.
+		defer func() {
+			if closer, ok := transport.(interface{ CloseIdleConnections() }); ok {
+				closer.CloseIdleConnections()
+			}
+		}()
+	}
 	return fetchAntigravityHubLatestManifestVersion(ctx, client)
+}
+
+// antigravityVersionProxyURL supplies the proxy setting used for version
+// manifest fetches. It returns "" to inherit the process environment.
+var antigravityVersionProxyURL = func() string { return "" }
+
+// SetAntigravityVersionProxyProvider installs a hot-reloadable proxy provider
+// for version manifest fetches. A nil provider restores environment inheritance.
+func SetAntigravityVersionProxyProvider(provider func() string) {
+	if provider == nil {
+		antigravityVersionProxyURL = func() string { return "" }
+		return
+	}
+	antigravityVersionProxyURL = provider
+}
+
+// antigravityVersionTransport builds the transport for a manifest fetch. An
+// invalid proxy setting is an error rather than a silent direct fallback, so a
+// deployment cannot accidentally bypass its configured egress proxy.
+func antigravityVersionTransport() (http.RoundTripper, error) {
+	raw := ""
+	if antigravityVersionProxyURL != nil {
+		raw = strings.TrimSpace(antigravityVersionProxyURL())
+	}
+	if raw == "" {
+		return nil, nil
+	}
+	transport, _, errBuild := proxyutil.BuildHTTPTransport(raw)
+	if errBuild != nil {
+		return nil, fmt.Errorf("build antigravity version transport: %w", errBuild)
+	}
+	if transport == nil {
+		return nil, nil
+	}
+	return transport, nil
 }
 
 func fetchAntigravityHubLatestManifestVersion(ctx context.Context, client *http.Client) (string, error) {

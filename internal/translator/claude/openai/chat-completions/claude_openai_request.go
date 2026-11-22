@@ -324,9 +324,17 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 		}
 	}
 
-	// Structured output: Claude has no native response_format support, so the
-	// requested JSON format is injected as explicit system instructions.
-	if formatInstruction := common.BuildClaudeStructuredOutputInstruction(root.Get("response_format")); formatInstruction != "" {
+	// Structured output: modern Claude models accept the schema natively through
+	// output_config.format; older models keep the system-instruction fallback.
+	responseFormat := root.Get("response_format")
+	formatInstruction := common.BuildClaudeStructuredOutputInstruction(responseFormat)
+	if schema, okSchema := common.ClaudeOutputFormatSchema(modelName, responseFormat); okSchema {
+		out, _ = sjson.SetBytes(out, "output_config.format.type", "json_schema")
+		out, _ = sjson.SetRawBytes(out, "output_config.format.schema", []byte(schema.Raw))
+		// With the schema carried natively, only name and description stay in the prompt.
+		formatInstruction = common.BuildClaudeOutputFormatDescription(responseFormat)
+	}
+	if formatInstruction != "" {
 		systemBlock := []byte(`{"type":"text","text":""}`)
 		systemBlock, _ = sjson.SetBytes(systemBlock, "text", formatInstruction)
 		out, _ = sjson.SetRawBytes(out, "system.-1", systemBlock)

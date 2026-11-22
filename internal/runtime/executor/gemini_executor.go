@@ -190,7 +190,7 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		// with no visible output is a retryable upstream failure, not an empty
 		// successful answer.
 		if _, zeroErrMsg, zeroOutput := helps.CheckGeminiZeroOutputNonStream(from, data, false); zeroOutput {
-			err = statusErr{code: http.StatusBadGateway, msg: zeroErrMsg}
+			err = newGeminiZeroOutputStatusErr(zeroErrMsg)
 			helps.RecordAPIResponseError(ctx, e.cfg, err)
 			reporter.PublishFailureWithDetail(ctx, helps.ParseGeminiUsage(data), err)
 			reporter.EnsurePublished(ctx)

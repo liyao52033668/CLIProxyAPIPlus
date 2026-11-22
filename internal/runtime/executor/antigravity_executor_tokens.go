@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
@@ -143,7 +144,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	sErr := statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
 	if httpResp.StatusCode == http.StatusTooManyRequests {
 		closeAntigravityAuthIdleTransports(auth)
-		if retryAfter, parseErr := helps.ParseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
+		if retryAfter, parseErr := helps.ParseRetryDelayWithHeaders(httpResp.Header, bodyBytes, time.Now()); parseErr == nil && retryAfter != nil {
 			sErr.retryAfter = retryAfter
 		}
 	}

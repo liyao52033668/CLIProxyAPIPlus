@@ -12,22 +12,30 @@ import (
 
 func TestConvertInteractionsRequestToCodexWithToolMessagesDirect(t *testing.T) {
 	out := ConvertInteractionsRequestToCodex("codex-test", []byte(`{"model":"codex-test","system_instruction":"be brief","input":[{"type":"user_input","content":[{"type":"text","text":"hi"}]},{"type":"thought","content":[{"type":"text","text":"thinking"}]},{"type":"function_call","name":"lookup","call_id":"call_1","arguments":{"q":"x"}},{"type":"function_result","name":"lookup","call_id":"call_1","result":{"ok":true}}],"tools":[{"type":"function","name":"lookup","parameters":{"type":"object","properties":{"q":{"type":"string"}}}}]}`), false)
-	if got := gjson.GetBytes(out, "instructions").String(); got != "be brief" {
-		t.Fatalf("instructions = %q, want be brief. Output: %s", got, string(out))
+	// Interactions system instructions reach Codex as a leading developer
+	// message rather than the Responses "instructions" field.
+	if gjson.GetBytes(out, "instructions").String() != "" {
+		t.Fatalf("instructions must stay empty. Output: %s", string(out))
 	}
-	if got := gjson.GetBytes(out, "input.0.content.0.text").String(); got != "hi" {
-		t.Fatalf("input.0.content.0.text = %q, want hi. Output: %s", got, string(out))
+	if got := gjson.GetBytes(out, "input.0.role").String(); got != "developer" {
+		t.Fatalf("input.0.role = %q, want developer. Output: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "input.0.content.0.text").String(); got != "be brief" {
+		t.Fatalf("input.0.content.0.text = %q, want be brief. Output: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "input.1.content.0.text").String(); got != "hi" {
+		t.Fatalf("input.1.content.0.text = %q, want hi. Output: %s", got, string(out))
 	}
 	// The signatureless thought step is dropped entirely: a reasoning item
 	// without replayable encrypted_content is rejected by both upstreams.
-	if got := gjson.GetBytes(out, "input.1.type").String(); got != "function_call" {
-		t.Fatalf("input.1.type = %q, want function_call. Output: %s", got, string(out))
+	if got := gjson.GetBytes(out, "input.2.type").String(); got != "function_call" {
+		t.Fatalf("input.2.type = %q, want function_call. Output: %s", got, string(out))
 	}
-	if got := gjson.GetBytes(out, "input.1.call_id").String(); got != "call_1" {
+	if got := gjson.GetBytes(out, "input.2.call_id").String(); got != "call_1" {
 		t.Fatalf("function_call call_id = %q, want call_1. Output: %s", got, string(out))
 	}
-	if got := gjson.GetBytes(out, "input.2.type").String(); got != "function_call_output" {
-		t.Fatalf("input.2.type = %q, want function_call_output. Output: %s", got, string(out))
+	if got := gjson.GetBytes(out, "input.3.type").String(); got != "function_call_output" {
+		t.Fatalf("input.3.type = %q, want function_call_output. Output: %s", got, string(out))
 	}
 	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "lookup" {
 		t.Fatalf("tools.0.name = %q, want lookup. Output: %s", got, string(out))

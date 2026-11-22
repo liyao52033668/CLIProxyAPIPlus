@@ -17,13 +17,17 @@ import (
 // checking both dynamic registry capability (SupportsWebSearch) and models.json
 // static definitions (native_capabilities.web_search). Explicit false wins as a veto.
 func ModelSupportsWebSearch(modelID string) bool {
-	// LookupModelInfo with "antigravity" provider returns antigravity-specific
-	// info when present, otherwise falls back to the global static table — one
-	// lookup covers both scopes.
-	info := registry.LookupModelInfo(modelID, "antigravity")
+	// Provider-scoped lookups no longer fall back to the global registration, so
+	// both scopes are queried explicitly: the global entry for client-registered
+	// models and the antigravity entry for provider-specific static definitions.
+	info := registry.LookupModelInfo(modelID)
+	infoAG := registry.LookupModelInfo(modelID, "antigravity")
 
 	// 1. Explicit false in static definitions acts as an absolute veto.
 	if info != nil && info.NativeCapabilities != nil && info.NativeCapabilities.WebSearch != nil && !*info.NativeCapabilities.WebSearch {
+		return false
+	}
+	if infoAG != nil && infoAG.NativeCapabilities != nil && infoAG.NativeCapabilities.WebSearch != nil && !*infoAG.NativeCapabilities.WebSearch {
 		return false
 	}
 
@@ -31,12 +35,15 @@ func ModelSupportsWebSearch(modelID string) bool {
 	if info != nil && info.NativeCapabilities != nil && info.NativeCapabilities.WebSearch != nil && *info.NativeCapabilities.WebSearch {
 		return true
 	}
+	if infoAG != nil && infoAG.NativeCapabilities != nil && infoAG.NativeCapabilities.WebSearch != nil && *infoAG.NativeCapabilities.WebSearch {
+		return true
+	}
 
 	// 3. Dynamic capability checks via Antigravity probes and registry flags.
 	if registry.AntigravityWebSearchModelFor(modelID) != "" {
 		return true
 	}
-	if info != nil && info.SupportsWebSearch {
+	if (info != nil && info.SupportsWebSearch) || (infoAG != nil && infoAG.SupportsWebSearch) {
 		return true
 	}
 	return false

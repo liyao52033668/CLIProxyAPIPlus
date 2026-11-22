@@ -421,7 +421,7 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 	// An abnormal termination with no visible output is a retryable upstream
 	// failure, not an empty successful answer.
 	if _, zeroErrMsg, zeroOutput := helps.CheckGeminiZeroOutputNonStream(from, data, false); zeroOutput {
-		zeroErr := statusErr{code: http.StatusBadGateway, msg: zeroErrMsg}
+		zeroErr := newGeminiZeroOutputStatusErr(zeroErrMsg)
 		helps.RecordAPIResponseError(ctx, e.cfg, zeroErr)
 		reporter.PublishFailureWithDetail(ctx, helps.ParseGeminiUsage(data), zeroErr)
 		reporter.EnsurePublished(ctx)
@@ -529,7 +529,7 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(ctx context.Context, auth *clip
 	// An abnormal termination with no visible output is a retryable upstream
 	// failure, not an empty successful answer.
 	if _, zeroErrMsg, zeroOutput := helps.CheckGeminiZeroOutputNonStream(from, data, false); zeroOutput {
-		zeroErr := statusErr{code: http.StatusBadGateway, msg: zeroErrMsg}
+		zeroErr := newGeminiZeroOutputStatusErr(zeroErrMsg)
 		helps.RecordAPIResponseError(ctx, e.cfg, zeroErr)
 		reporter.PublishFailureWithDetail(ctx, helps.ParseGeminiUsage(data), zeroErr)
 		reporter.EnsurePublished(ctx)

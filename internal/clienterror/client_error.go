@@ -11,15 +11,20 @@ import (
 )
 
 var requestFaultCodes = map[string]struct{}{
-	"cyber_policy":                {},
-	"context_length_exceeded":     {},
-	"message_too_big":             {},
-	"string_above_max_length":     {},
-	"invalid_prompt":              {},
-	"invalid_value":               {},
-	"unsupported_value":           {},
-	"invalid_request_error":       {},
-	"previous_response_not_found": {},
+	"cyber_policy":                   {},
+	"cyber_policy_violation":         {},
+	"bio_policy":                     {},
+	"misalignment_policy_violation":  {},
+	"content_policy_violation":       {},
+	"image_content_policy_violation": {},
+	"context_length_exceeded":        {},
+	"message_too_big":                {},
+	"string_above_max_length":        {},
+	"invalid_prompt":                 {},
+	"invalid_value":                  {},
+	"unsupported_value":              {},
+	"invalid_request_error":          {},
+	"previous_response_not_found":    {},
 }
 
 var requestFaultTypes = map[string]struct{}{

@@ -708,6 +708,19 @@ streaming:
 #       params: # JSON paths (gjson/sjson syntax) to remove from the payload
 #         - "generationConfig.thinkingConfig.thinkingBudget"
 #         - "generationConfig.responseJsonSchema"
+#   replace: # Replace rules rewrite existing text in the final upstream payload.
+#     # Select messages by role and one-based position, or target JSON paths directly.
+#     - models:
+#         - name: "gpt-*"
+#           protocol: "codex"
+#       target:
+#         role: "user" # user, system, or developer
+#         positions: [1] # or: all: true
+#         # paths: ["input.0.content.0.text"] # mutually exclusive with role/positions/all
+#       replacements:
+#         - "old phrase": "new phrase" # literal replacement, applied in order
+#         # - pattern: "TODO\(\d+\)" # Go RE2 pattern with capture expansion
+#         #   replacement: "item-$1"
 
 # JoyCode (JD JoyCode AI) configuration
 # Login via: ./cli-proxy-api --joycode-login

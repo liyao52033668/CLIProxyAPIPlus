@@ -14,18 +14,8 @@ func addUsageEventFailDetailMigration(tx *gorm.DB) error {
 	if !tx.Migrator().HasTable(&entities.UsageEvent{}) {
 		return nil
 	}
-	// Check if fail_status_code column exists using raw query to avoid Gorm's cache
-	var hasColumn bool
-	if err := tx.Raw(`
-		SELECT EXISTS (
-			SELECT 1 FROM information_schema.columns
-			WHERE table_name = 'usage_events'
-			AND column_name = 'fail_status_code'
-		)
-	`).Scan(&hasColumn).Error; err != nil {
-		return fmt.Errorf("check fail_status_code column existence: %w", err)
-	}
-	if !hasColumn {
+	// Check if fail_status_code column exists using GORM's HasColumn (compatible with all databases)
+	if !tx.Migrator().HasColumn(&entities.UsageEvent{}, "fail_status_code") {
 		if err := tx.Migrator().AddColumn(&entities.UsageEvent{}, "fail_status_code"); err != nil {
 			// Ignore error if column already exists (race condition)
 			if !isColumnAlreadyExistsError(err) {
@@ -33,18 +23,8 @@ func addUsageEventFailDetailMigration(tx *gorm.DB) error {
 			}
 		}
 	}
-	// Check if error_message column exists using raw query to avoid Gorm's cache
-	var hasErrorMessage bool
-	if err := tx.Raw(`
-		SELECT EXISTS (
-			SELECT 1 FROM information_schema.columns
-			WHERE table_name = 'usage_events'
-			AND column_name = 'error_message'
-		)
-	`).Scan(&hasErrorMessage).Error; err != nil {
-		return fmt.Errorf("check error_message column existence: %w", err)
-	}
-	if !hasErrorMessage {
+	// Check if error_message column exists using GORM's HasColumn (compatible with all databases)
+	if !tx.Migrator().HasColumn(&entities.UsageEvent{}, "error_message") {
 		if err := tx.Migrator().AddColumn(&entities.UsageEvent{}, "error_message"); err != nil {
 			// Ignore error if column already exists (race condition)
 			if !isColumnAlreadyExistsError(err) {

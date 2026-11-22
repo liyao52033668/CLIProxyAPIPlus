@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,10 +13,16 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/klauspost/compress/zstd"
+	log "github.com/sirupsen/logrus"
 )
 
 // MaxRequestBodyBytesContextKey stores the configured request body size limit (in bytes) on the Gin context.
 const MaxRequestBodyBytesContextKey = "maxRequestBodyBytes"
+
+// OriginalContentEncodingContextKey preserves the original Content-Encoding header
+// value before it is removed after decoding, so downstream middleware and handlers
+// can access it for logging or debugging purposes.
+const OriginalContentEncodingContextKey = "originalContentEncoding"
 
 // ReadRequestBody reads the incoming request body and decodes supported
 // Content-Encoding values before handlers inspect JSON fields.
@@ -48,6 +55,15 @@ func ReadRequestBody(c *gin.Context) ([]byte, error) {
 		}
 		return nil, err
 	}
+	// The body is now plaintext: preserve the original encoding in context for
+	// downstream logging/debugging, then drop Content-Encoding so nothing
+	// (executors, header passthrough) decodes or forwards it again.
+	if c != nil && c.Request != nil {
+		if encoding != "" {
+			c.Set(OriginalContentEncodingContextKey, encoding)
+		}
+		c.Request.Header.Del("Content-Encoding")
+	}
 	return decoded, nil
 }
 
@@ -61,6 +77,12 @@ func decodeRequestBody(raw []byte, encoding string, maxBytes int64) ([]byte, err
 			continue
 		case "zstd":
 			decoded, err := decodeZstdRequestBody(body, maxBytes)
+			if err != nil {
+				return nil, err
+			}
+			body = decoded
+		case "gzip", "x-gzip":
+			decoded, err := decodeGzipRequestBody(body, maxBytes)
 			if err != nil {
 				return nil, err
 			}
@@ -86,6 +108,31 @@ func decodeZstdRequestBody(raw []byte, maxBytes int64) ([]byte, error) {
 	decoded, err := io.ReadAll(reader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode zstd request body: %w", err)
+	}
+	if maxBytes > 0 && int64(len(decoded)) > maxBytes {
+		return nil, &http.MaxBytesError{Limit: maxBytes}
+	}
+	return decoded, nil
+}
+
+func decodeGzipRequestBody(raw []byte, maxBytes int64) ([]byte, error) {
+	gzReader, err := gzip.NewReader(bytes.NewReader(raw))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create gzip request decoder: %w", err)
+	}
+	defer func() {
+		if errClose := gzReader.Close(); errClose != nil {
+			log.Debugf("gzip request decoder close error: %v", errClose)
+		}
+	}()
+
+	var reader io.Reader = gzReader
+	if maxBytes > 0 && maxBytes < math.MaxInt64 {
+		reader = io.LimitReader(gzReader, maxBytes+1)
+	}
+	decoded, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode gzip request body: %w", err)
 	}
 	if maxBytes > 0 && int64(len(decoded)) > maxBytes {
 		return nil, &http.MaxBytesError{Limit: maxBytes}

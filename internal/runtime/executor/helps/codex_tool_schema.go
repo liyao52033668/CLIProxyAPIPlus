@@ -590,7 +590,8 @@ func stripIncompatiblePatternsFromJSON(raw []byte) ([]byte, bool) {
 	// Patterns arrive JSON-escaped, so a literal backslash before '0' is `\\0` in the raw bytes.
 	// "inimum" and "aximum" match minimum, maximum, exclusiveMinimum, and exclusiveMaximum.
 	if !strings.Contains(rawStr, `\p{`) && !strings.Contains(rawStr, `\P{`) && !strings.Contains(rawStr, `\u`) &&
-		!strings.Contains(rawStr, `\\0`) && !strings.Contains(rawStr, "inimum") && !strings.Contains(rawStr, "aximum") {
+		!strings.Contains(rawStr, `\\0`) && !strings.Contains(rawStr, "inimum") && !strings.Contains(rawStr, "aximum") &&
+		!strings.Contains(rawStr, `"uniqueItems"`) {
 		return raw, false
 	}
 	var root any
@@ -629,6 +630,10 @@ func stripIncompatiblePatterns(v any) bool {
 				delete(schema, boundKey)
 				changed = true
 			}
+		}
+		if _, exists := schema["uniqueItems"]; exists {
+			delete(schema, "uniqueItems")
+			changed = true
 		}
 
 		// Inspect regex keys under patternProperties

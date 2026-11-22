@@ -385,7 +385,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 			requestScopedResult := result.Model != "" && isRequestScopedResultError(result.Error)
 			if result.Model != "" {
-				if !requestScopedResult {
+				if !requestScopedResult && !isTransientTransportResultError(result.Error) {
 					disableCooling := quotaCooldownDisabledForAuth(auth)
 					state := ensureModelState(auth, result.Model)
 					modelState = state
@@ -1309,6 +1309,41 @@ func isModelSupportResultError(err *Error) bool {
 
 func isInvalidGrantErrorMessage(message string) bool {
 	return strings.Contains(strings.ToLower(message), "invalid_grant")
+}
+
+// isTerminalRefreshGrantMessage reports refresh failures that cannot recover
+// without a new sign-in. Anthropic reports an expired refresh token as
+// {"error": "invalid_grant", "error_description": "Refresh token expired"},
+// which must stop the retry schedule instead of backing off forever.
+func isTerminalRefreshGrantMessage(message string) bool {
+	lower := strings.ToLower(message)
+	for _, token := range []string{
+		"refresh_outcome_unknown",
+		"refresh_token_reused",
+		"refresh_token_expired",
+		"refresh token expired",
+		"refresh_token_invalidated",
+		"token_revoked",
+		"invalid_client",
+	} {
+		if strings.Contains(lower, token) {
+			return true
+		}
+	}
+	return false
+}
+
+// terminalRefreshErrorCode normalizes a terminal refresh failure to a stable
+// machine-readable code.
+func terminalRefreshErrorCode(message string, statusCode int) string {
+	lower := strings.ToLower(message)
+	if strings.Contains(lower, "refresh token expired") {
+		return "refresh_token_expired"
+	}
+	if statusCode > 0 && isInvalidGrantErrorMessage(lower) {
+		return "invalid_grant"
+	}
+	return "unauthorized"
 }
 
 // isCountTokensEndpointNotFoundError reports whether a count_tokens failure means

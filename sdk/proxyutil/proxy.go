@@ -131,8 +131,19 @@ func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
 			}
 			transport := cloneDefaultTransport()
 			transport.Proxy = nil
-			transport.DialContext = func(_ context.Context, network, addr string) (net.Conn, error) {
-				return dialer.Dial(network, addr)
+			if contextDialer, ok := dialer.(proxy.ContextDialer); ok {
+				// Delegating through ContextDialer lets caller deadlines and
+				// cancellation abort stalled dials and SOCKS5 handshakes.
+				transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+					if ctx == nil {
+						ctx = context.Background()
+					}
+					return contextDialer.DialContext(ctx, network, addr)
+				}
+			} else {
+				transport.DialContext = func(_ context.Context, network, addr string) (net.Conn, error) {
+					return dialer.Dial(network, addr)
+				}
 			}
 			return transport, setting.Mode, nil
 		}

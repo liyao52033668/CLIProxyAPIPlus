@@ -57,6 +57,54 @@ func Walk(value gjson.Result, path, field string, paths *[]string) {
 	}
 }
 
+// WalkSchema is Walk for JSON Schema documents: it records the field wherever a
+// schema keyword may appear, but does not descend into literal values (default,
+// example, examples, const, enum), whose contents are client data rather than
+// subschemas. The literal keyword itself is still recorded when it is the
+// searched field, and under a property-name map a key spelled like one is a
+// property name whose subschema is still walked.
+func WalkSchema(value gjson.Result, path, field string, paths *[]string) {
+	walkSchema(value, path, field, paths)
+}
+
+func walkSchema(value gjson.Result, path, field string, paths *[]string) {
+	switch value.Type {
+	case gjson.JSON:
+		value.ForEach(func(key, val gjson.Result) bool {
+			var childPath string
+			keyStr := key.String()
+			safeKey := escapeGJSONPathKey(keyStr)
+
+			if path == "" {
+				childPath = safeKey
+			} else {
+				childPath = path + "." + safeKey
+			}
+			if keyStr == field {
+				*paths = append(*paths, childPath)
+			}
+			if _, literal := literalSchemaValueKeywords[keyStr]; literal && !isPropertyDefinition(path) {
+				return true
+			}
+			walkSchema(val, childPath, field, paths)
+			return true
+		})
+	case gjson.String, gjson.Number, gjson.True, gjson.False, gjson.Null:
+		// Terminal types - no further traversal needed
+	}
+}
+
+// literalSchemaValueKeywords carry client data rather than subschemas. Walking
+// their contents would treat data keys that happen to look like schema keywords
+// as schemas, so traversal stops at them unless they are themselves the target.
+var literalSchemaValueKeywords = map[string]struct{}{
+	"default":  {},
+	"example":  {},
+	"examples": {},
+	"const":    {},
+	"enum":     {},
+}
+
 // RenameKey renames a key in a JSON string by moving its value to a new key path
 // and then deleting the old key path.
 //
