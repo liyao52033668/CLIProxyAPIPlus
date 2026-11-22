@@ -82,3 +82,4 @@ cpa-usage-keeper-main/.env.example
 /.zcode/plans
 /.zcodeignore
 /CODEBUDDY_AI_FRONTEND_IMPLEMENTATION.md
+/.tmp-scan.sh

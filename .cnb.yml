@@ -195,6 +195,17 @@ main:
             git push github main --tags --force
 
             echo "✅ Sync to GitHub completed"
+        - name: ssh update
+          imports: https://cnb.cool/liyao52033/envs/-/blob/main/ssh.yml
+          image: cnbcool/ssh
+          settings:
+            host: $host
+            port: $port
+            username: $username
+            password: $password
+            script: |
+              cd /usr/local/cpa
+              sh start.sh 
   
    
   pull_request:
